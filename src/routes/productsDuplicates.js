@@ -5,8 +5,14 @@
 // ============================================================
 const router = require('express').Router({ mergeParams: true });
 const db     = require('../config/database');
+// 23/09/2026 (QA producao): /duplicate-groups passou a usar a MESMA chave
+// de dedup do import por planilha -- nome + unidade + marca, normalizados
+// (services/productDedupKey.js). Ver comentario da rota abaixo.
+const { chaveProdutoImport } = require('../services/productDedupKey');
 
-// Normaliza nome pra comparacao: trim + lowercase + colapsar espacos
+// Normaliza nome pra comparacao: trim + lowercase + colapsar espacos.
+// Usada so em /check-duplicate (Fase A -- aviso no cadastro, propositalmente
+// so por nome; /duplicate-groups abaixo usa a chave nome+unidade+marca).
 function normalizeName(name) {
   return String(name || '').trim().toLowerCase().replace(/\s+/g, ' ');
 }
@@ -57,57 +63,59 @@ router.get('/check-duplicate', async (req, res) => {
 
 // ============================================================
 // GET /products/duplicate-groups
-// Fase B: lista todos os grupos com 2+ produtos de mesmo nome
+// Fase B: lista todos os grupos com 2+ produtos de mesmo nome + unidade
+// + marca (nao so nome -- ver fix 23/09/2026 abaixo).
+//
+// FIX (23/09/2026, QA producao): agrupava so por NOME (LOWER(TRIM(...)),
+// sem remover acento, sem olhar unidade nem marca). "MANTA ALUMINIZADA
+// 10CM" cadastrada em METRO e em ROLO, ou "CIMENTO" das marcas Nassau e
+// Mizu, entravam como "duplicata" e o banner do Estoque empurrava a loja
+// a unificar como VARIANTE (cor/tamanho) produtos que sao DIFERENTES.
+// Agora usa chaveProdutoImport (services/productDedupKey.js) -- a MESMA
+// chave nome+unidade+marca que o import por planilha ja usa (PR #739) --
+// e so entram no is_active=true (produto filho de variante ja unificada
+// nao reaparece como duplicata fantasma).
 // ============================================================
 router.get('/duplicate-groups', async (req, res) => {
   const cid = req.params.id;
   try {
-    // Passo 1: detectar nomes normalizados com count >= 2
-    const { rows: groups } = await db.query(
-      `SELECT LOWER(TRIM(REGEXP_REPLACE(name, '\\s+', ' ', 'g'))) AS normalized_name,
-              MAX(name) AS display_name,
-              COUNT(*) AS product_count
+    const { rows: products } = await db.query(
+      `SELECT id, name, sku, barcode, color, size, price, cost_price, stock_qty,
+              created_at, unit, brand
        FROM products
-       WHERE company_id = $1
-       GROUP BY normalized_name
-       HAVING COUNT(*) >= 2
-       ORDER BY product_count DESC, display_name ASC`,
+       WHERE company_id = $1 AND is_active = true`,
       [cid]
     );
 
-    if (groups.length === 0) return res.json({ groups: [], total: 0 });
-
-    // Passo 2: buscar produtos de cada grupo
-    const normalizedNames = groups.map(g => g.normalized_name);
-    const { rows: products } = await db.query(
-      `SELECT id, name, sku, barcode, color, size, price, cost_price, stock_qty, created_at,
-              LOWER(TRIM(REGEXP_REPLACE(name, '\\s+', ' ', 'g'))) AS normalized_name
-       FROM products
-       WHERE company_id = $1
-         AND LOWER(TRIM(REGEXP_REPLACE(name, '\\s+', ' ', 'g'))) = ANY($2)
-       ORDER BY name, created_at ASC`,
-      [cid, normalizedNames]
-    );
-
-    // Passo 3: agrupar
-    const byName = new Map();
+    // Agrupa em JS (nao SQL): chaveProdutoImport tira acento e normaliza a
+    // unidade pela tabela de grafias do deposito (mesma logica do import).
+    const byKey = new Map();
     for (const p of products) {
-      if (!byName.has(p.normalized_name)) byName.set(p.normalized_name, []);
-      byName.get(p.normalized_name).push({
-        id: p.id, name: p.name, sku: p.sku || '', barcode: p.barcode || '',
-        color: p.color || '', size: p.size || '',
-        price: parseFloat(p.price) || 0, cost_price: parseFloat(p.cost_price) || 0,
-        stock_qty: parseInt(p.stock_qty) || 0,
-        created_at: p.created_at,
-      });
+      const key = chaveProdutoImport(p.name, p.unit, p.brand);
+      if (!byKey.has(key)) byKey.set(key, []);
+      byKey.get(key).push(p);
     }
 
-    const groupsResponse = groups.map(g => ({
-      name: g.display_name,
-      normalized_name: g.normalized_name,
-      count: parseInt(g.product_count),
-      products: byName.get(g.normalized_name) || [],
-    }));
+    const groupsResponse = [];
+    for (const [key, list] of byKey) {
+      if (list.length < 2) continue;
+      groupsResponse.push({
+        name: list[0].name,
+        normalized_name: key,
+        unit: list[0].unit || null,
+        brand: list[0].brand || null,
+        count: list.length,
+        products: list.map(p => ({
+          id: p.id, name: p.name, sku: p.sku || '', barcode: p.barcode || '',
+          color: p.color || '', size: p.size || '',
+          price: parseFloat(p.price) || 0, cost_price: parseFloat(p.cost_price) || 0,
+          stock_qty: parseInt(p.stock_qty) || 0,
+          created_at: p.created_at,
+          unit: p.unit || 'un', brand: p.brand || '',
+        })),
+      });
+    }
+    groupsResponse.sort((a, b) => b.count - a.count || String(a.name).localeCompare(String(b.name)));
 
     res.json({ groups: groupsResponse, total: groupsResponse.length });
   } catch (err) {

@@ -186,72 +186,24 @@ function parseQuantidade(value) {
   return Math.round((m[1] ? -n : n) * 1000) / 1000;
 }
 
-// Minusculas, sem acento, espacos colapsados — so para COMPARAR.
-function chaveTexto(v) {
-  return String(v === null || v === undefined ? '' : v)
-    .normalize('NFD').replace(/\p{Mn}/gu, '')
-    .toLowerCase().replace(/\s+/g, ' ').trim();
-}
-
-// ─── Unidade (22/09/2026, Matcon) ───────────────────────────
-// Planilha de deposito escreve a unidade do jeito dela ("MT", "RL", "PÇ",
-// "UM"). O Caixa decide fracionar pela unidade (m, m², kg, L...), entao
-// "MT" gravado como veio vendia metro no stepper inteiro. Chave = sem
-// acento, minuscula, sem ponto final; valor = grafia canonica do app
-// (utils/matconUnits.ts e UNITS do estoque no front).
-const UNIDADES_IMPORT = {};
-for (const [canonica, grafias] of Object.entries({
-  'un':      ['un', 'und', 'unid', 'unidade', 'unidades', 'um', 'u', 'uni'],
-  'm':       ['m', 'mt', 'mts', 'metro', 'metros'],
-  'm²':      ['m2', 'm²', 'mt2', 'mts2', 'metro quadrado', 'metros quadrados'],
-  'm³':      ['m3', 'm³', 'mt3', 'mts3', 'metro cubico', 'metros cubicos'],
-  'rolo':    ['rl', 'rolo', 'rolos'],
-  'pç':      ['pc', 'pca', 'peca', 'pecas', 'pcs'],
-  'kg':      ['kg', 'kgs', 'quilo', 'quilos', 'kilo', 'quilograma'],
-  'g':       ['g', 'gr', 'grs', 'grama', 'gramas'],
-  'L':       ['l', 'lt', 'lts', 'litro', 'litros'],
-  'ml':      ['ml'],
-  'pct':     ['pct', 'pcte', 'pacote', 'pacotes'],
-  'cx':      ['cx', 'caixa', 'caixas'],
-  'sc':      ['sc', 'saco', 'sacos'],
-  'br':      ['br', 'barra', 'barras'],
-  'dz':      ['dz', 'duzia', 'duzias'],
-  'cartela': ['cart', 'cartela', 'cartelas'],
-  'mlh':     ['mlh', 'milheiro', 'milheiros', 'mil'],
-  'ton':     ['ton', 't', 'tonelada', 'toneladas'],
-  'par':     ['par', 'pr', 'pares'],
-  'kit':     ['kit', 'kits', 'jg', 'jogo', 'jogos'],
-  'lata':    ['lata', 'latas'],
-  'balde':   ['balde', 'baldes', 'bd'],
-  'gl':      ['gl', 'galao', 'galoes'],
-})) {
-  for (const g of grafias) UNIDADES_IMPORT[chaveTexto(g)] = canonica;
-}
-
-// { unit, conhecida }: vazia vira 'un' (como antes); desconhecida e
-// gravada em minusculas como veio — nunca recusa a linha.
-function resolverUnidadeImport(raw) {
-  const bruto = String(raw === null || raw === undefined ? '' : raw).trim();
-  if (!bruto) return { unit: 'un', conhecida: true };
-  const chave = chaveTexto(bruto).replace(/\.+$/, '').trim();
-  if (UNIDADES_IMPORT[chave]) return { unit: UNIDADES_IMPORT[chave], conhecida: true };
-  return { unit: bruto.toLowerCase(), conhecida: false };
-}
-
-function normalizarUnidadeImport(raw) {
-  return resolverUnidadeImport(raw).unit;
-}
+// 23/09/2026 (QA producao): chaveTexto/UNIDADES_IMPORT/resolverUnidadeImport/
+// normalizarUnidadeImport/chaveProdutoImport mudaram para
+// services/productDedupKey.js -- GET /products/duplicate-groups (banner do
+// Estoque) passou a usar a MESMA chave nome+unidade+marca que o import ja
+// usava, entao a normalizacao virou codigo compartilhado. Reexportados
+// abaixo (mesmos nomes) para nao quebrar quem ja importa daqui.
+const {
+  chaveTexto,
+  UNIDADES_IMPORT,
+  resolverUnidadeImport,
+  normalizarUnidadeImport,
+  chaveProdutoImport,
+} = require('../services/productDedupKey');
 
 // Mesmo tratamento de products.js (sanitizeBrand): trim, null se vazio,
 // corte em 120.
 function sanitizarMarcaImport(v) {
   return v && String(v).trim() ? String(v).trim().slice(0, 120) : null;
-}
-
-// Duplicata = mesmo nome + unidade + marca. Deposito tem o mesmo nome em
-// marcas diferentes e em "pacote x unidade" / "metro x rolo".
-function chaveProdutoImport(name, unit, brand) {
-  return [chaveTexto(name), chaveTexto(normalizarUnidadeImport(unit)), chaveTexto(brand)].join('|');
 }
 
 function parseDate(value) {
