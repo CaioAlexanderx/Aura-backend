@@ -8,6 +8,21 @@ const router  = require('express').Router({ mergeParams: true });
 const db      = require('../config/database');
 const { requireAuth } = require('../middleware/auth');
 
+// 22/09/2026 — preco no cartao (migration 351). O Caixa precisa de
+// products.card_price junto do preco pra decidir o unit_price quando a
+// forma e debito/credito. `rodar(col)` monta o SQL com a coluna; base
+// atras da 351 da 42703 e a mesma consulta roda sem ela (o produto volta
+// sem card_price e o Caixa usa o % da loja). O backend sobe antes da
+// migration (CLAUDE.md, armadilha 1) — bipar nao pode cair por isso.
+async function comCardPrice(rodar) {
+  try {
+    return await rodar(', p.card_price');
+  } catch (e) {
+    if (e.code !== '42703') throw e;
+    return rodar('');
+  }
+}
+
 // GET /companies/:id/pdv/scan/:code
 // Lookup chamado pelo PDV ao receber código escaneado (jsQR / leitor USB)
 router.get('/scan/:code', requireAuth, async (req, res) => {
@@ -17,10 +32,10 @@ router.get('/scan/:code', requireAuth, async (req, res) => {
 
   try {
     // 1. Match exato por barcode
-    let { rows } = await db.query(
+    let { rows } = await comCardPrice((cp) => db.query(
       `SELECT p.id, p.name, p.description, p.price, p.cost_price,
               p.stock_qty, p.barcode, p.barcode_format, p.category,
-              p.sku, p.is_active, p.unit,
+              p.sku, p.is_active, p.unit${cp},
               COALESCE(json_agg(
                 json_build_object(
                   'id', pv.id, 'sku_suffix', pv.sku_suffix,
@@ -38,13 +53,13 @@ router.get('/scan/:code', requireAuth, async (req, res) => {
        GROUP BY p.id
        LIMIT 1`,
       [company_id, cleanCode]
-    );
+    ));
     if (rows.length) return res.json({ match: 'exact', source: 'barcode', product: rows[0] });
 
     // 2. Match por barcode de variante
-    const { rows: varRows } = await db.query(
+    const { rows: varRows } = await comCardPrice((cp) => db.query(
       `SELECT p.id, p.name, p.price, p.cost_price, p.stock_qty,
-              p.barcode, p.category, p.sku, p.is_active, p.unit,
+              p.barcode, p.category, p.sku, p.is_active, p.unit${cp},
               pv.id AS variant_id, pv.sku_suffix, pv.price_override,
               pv.stock_qty AS variant_stock
        FROM product_variants pv
@@ -52,7 +67,7 @@ router.get('/scan/:code', requireAuth, async (req, res) => {
        WHERE p.company_id=$1 AND pv.barcode=$2 AND pv.is_active=TRUE AND p.is_active=TRUE
        LIMIT 1`,
       [company_id, cleanCode]
-    );
+    ));
     if (varRows.length) {
       return res.json({
         match: 'exact', source: 'variant_barcode',
@@ -63,24 +78,24 @@ router.get('/scan/:code', requireAuth, async (req, res) => {
     }
 
     // 3. Match por SKU
-    ({ rows } = await db.query(
+    ({ rows } = await comCardPrice((cp) => db.query(
       `SELECT p.id, p.name, p.price, p.cost_price, p.stock_qty,
-              p.barcode, p.category, p.sku, p.is_active, p.unit
+              p.barcode, p.category, p.sku, p.is_active, p.unit${cp}
        FROM products p
        WHERE p.company_id=$1 AND p.sku=$2 AND p.is_active=TRUE LIMIT 1`,
       [company_id, cleanCode]
-    ));
+    )));
     if (rows.length) return res.json({ match: 'exact', source: 'sku', product: rows[0] });
 
     // 4. Busca textual por nome/SKU (retorna até 8 sugestões)
-    ({ rows } = await db.query(
-      `SELECT id, name, price, stock_qty, barcode, sku, category, unit
-       FROM products
-       WHERE company_id=$1 AND is_active=TRUE
-         AND (name ILIKE $2 OR sku ILIKE $2)
-       ORDER BY name LIMIT 8`,
+    ({ rows } = await comCardPrice((cp) => db.query(
+      `SELECT p.id, p.name, p.price, p.stock_qty, p.barcode, p.sku, p.category, p.unit${cp}
+       FROM products p
+       WHERE p.company_id=$1 AND p.is_active=TRUE
+         AND (p.name ILIKE $2 OR p.sku ILIKE $2)
+       ORDER BY p.name LIMIT 8`,
       [company_id, `%${cleanCode}%`]
-    ));
+    )));
     if (rows.length) {
       return res.status(207).json({
         match: 'partial',
@@ -103,13 +118,13 @@ router.post('/scan/batch', requireAuth, async (req, res) => {
   const { codes } = req.body;
   if (!codes?.length) return res.status(400).json({ error: 'codes obrigatório' });
   try {
-    const { rows } = await db.query(
-      `SELECT id, name, price, cost_price, stock_qty, barcode, sku, category, unit
-       FROM products
-       WHERE company_id=$1 AND is_active=TRUE
-         AND (barcode=ANY($2) OR sku=ANY($2))`,
+    const { rows } = await comCardPrice((cp) => db.query(
+      `SELECT p.id, p.name, p.price, p.cost_price, p.stock_qty, p.barcode, p.sku, p.category, p.unit${cp}
+       FROM products p
+       WHERE p.company_id=$1 AND p.is_active=TRUE
+         AND (p.barcode=ANY($2) OR p.sku=ANY($2))`,
       [req.params.id, codes]
-    );
+    ));
     const byCode = {};
     rows.forEach(p => {
       if (p.barcode) byCode[p.barcode] = p;

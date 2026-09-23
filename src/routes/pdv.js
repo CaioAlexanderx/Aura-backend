@@ -272,6 +272,27 @@ async function fetchCustomerPhone(customerId) {
 }
 
 // ===== GET /scan/:code =====
+// ATENCAO: em private.js o router de scanner.js e montado ANTES deste em
+// /pdv, e o /scan/:code dele sempre responde (inclusive 404) — esta rota
+// hoje nao e alcancada. Mantida alinhada (card_price incluso) para o dia
+// em que a ordem mudar.
+//
+// 22/09/2026 — preco no cartao (migration 351): card_price vai junto do
+// preco; base atras da 351 (42703) repete a consulta sem a coluna.
+async function scanComCardPrice(rodar) {
+  try {
+    return await rodar(', p.card_price');
+  } catch (e) {
+    if (e.code !== '42703') throw e;
+    return rodar('');
+  }
+}
+function cardPriceOut(v) {
+  if (v === null || v === undefined) return null;
+  const n = parseFloat(v);
+  return Number.isFinite(n) ? n : null;
+}
+
 router.get('/scan/:code', async (req, res) => {
   const raw = decodeURIComponent(req.params.code || '').trim();
   if (!raw) return res.status(400).json({ error: 'code obrigatorio', match: 'none' });
@@ -280,36 +301,38 @@ router.get('/scan/:code', async (req, res) => {
   if (/^\d{13}$/.test(raw) && raw.startsWith('0')) candidates.add(raw.slice(1));
   const alts = [...candidates];
   try {
-    const { rows: prods } = await db.query(
+    const { rows: prods } = await scanComCardPrice((cp) => db.query(
       `SELECT p.id, p.name, p.price, p.cost_price, p.barcode, p.stock_qty, p.has_variants,
-              p.category, p.image_url, p.sku, p.company_id AS stock_company_id
+              p.category, p.image_url, p.sku, p.company_id AS stock_company_id${cp}
        FROM products p JOIN companies c ON c.id=$1
        WHERE (p.company_id=$1 OR (p.company_id=c.billing_owner_company_id AND p.is_group_shared=true))
          AND p.barcode=ANY($2::text[]) AND p.is_active=true LIMIT 1`,
       [req.params.id, alts]
-    );
+    ));
     if (prods.length) {
       const p = prods[0];
       return res.json({ match: 'exact', source: 'barcode',
         product: { id: p.id, name: p.name, price: parseFloat(p.price)||0,
           cost_price: parseFloat(p.cost_price)||0, barcode: p.barcode,
           stock_qty: parseInt(p.stock_qty)||0, has_variants: p.has_variants||false,
-          category: p.category, image_url: p.image_url, sku: p.sku, stock_company_id: p.stock_company_id } });
+          category: p.category, image_url: p.image_url, sku: p.sku, stock_company_id: p.stock_company_id,
+          card_price: cardPriceOut(p.card_price) } });
     }
-    const { rows: vars } = await db.query(
+    const { rows: vars } = await scanComCardPrice((cp) => db.query(
       `SELECT pv.id AS variant_id, pv.price_override, pv.sku_suffix, pv.stock_qty AS variant_stock,
-              p.id, p.name, p.price, p.barcode, p.image_url, p.company_id AS stock_company_id
+              p.id, p.name, p.price, p.barcode, p.image_url, p.company_id AS stock_company_id${cp}
        FROM product_variants pv JOIN products p ON p.id=pv.product_id
        JOIN companies c ON c.id=$1
        WHERE (p.company_id=$1 OR (p.company_id=c.billing_owner_company_id AND p.is_group_shared=true))
          AND pv.barcode=ANY($2::text[]) AND pv.is_active=true AND p.is_active=true LIMIT 1`,
       [req.params.id, alts]
-    );
+    ));
     if (vars.length) {
       const v = vars[0];
       return res.json({ match: 'exact', source: 'variant_barcode',
         product: { id: v.id, name: v.name, price: parseFloat(v.price)||0,
-          barcode: v.barcode, image_url: v.image_url, sku_suffix: v.sku_suffix, stock_company_id: v.stock_company_id },
+          barcode: v.barcode, image_url: v.image_url, sku_suffix: v.sku_suffix, stock_company_id: v.stock_company_id,
+          card_price: cardPriceOut(v.card_price) },
         variant_id: v.variant_id, effective_price: parseFloat(v.price_override)||parseFloat(v.price)||0 });
     }
     return res.json({ match: 'none', message: 'Nenhum produto encontrado' });

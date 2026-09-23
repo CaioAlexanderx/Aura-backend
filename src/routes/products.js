@@ -108,6 +108,34 @@ function sanitizeBrand(v) {
   return v && String(v).trim() ? String(v).trim().slice(0, 120) : null;
 }
 
+// ─── card_price (migration 351) ──────────────────────────
+//
+// Preco no cartao (debito/credito), opcional. Vazio = segue o acrescimo
+// padrao da loja (pdv_settings.card_price_pct), por isso null e nao 0:
+// preco zero no cartao nao existe, e gravar 0 faria o Caixa cobrar nada.
+// Aceita numero ou texto com virgula ("12,50" / "1.234,56"), arredonda a
+// 2 casas (a coluna e NUMERIC(10,2)). Negativo ou lixo e erro — virar
+// null em silencio esconderia o engano da lojista.
+//
+// @returns {{value: number|null} | {error: string}}
+function sanitizeCardPrice(raw) {
+  let bruto = typeof raw === 'string' ? raw.replace(/R\$/g, '').trim() : raw;
+  if (bruto === null || bruto === undefined || bruto === '') return { value: null };
+  if (typeof bruto === 'boolean') return { error: 'card_price deve ser um valor maior que zero ou vazio' };
+  if (typeof bruto === 'string' && bruto.includes(',')) bruto = bruto.replace(/\./g, '').replace(',', '.');
+  const n = Number(bruto);
+  if (!Number.isFinite(n) || n < 0) return { error: 'card_price deve ser um valor maior que zero ou vazio' };
+  const arredondado = Math.round(n * 100) / 100;
+  return { value: arredondado > 0 ? arredondado : null };
+}
+
+/** NUMERIC chega do pg como string; null/ausente (base sem a 351) vira null. */
+function cardPriceOut(v) {
+  if (v === null || v === undefined) return null;
+  const n = parseFloat(v);
+  return Number.isFinite(n) ? n : null;
+}
+
 // ─── duration_minutes (migration 323) ────────────────────
 //
 // O app escrevia "Duracao: 45 min" no FIM DA DESCRICAO. Descricao e texto
@@ -244,13 +272,14 @@ router.get('/', async (req, res) => {
     // Migration 305 — ficha tecnica. Tentar-e-cair em vez de consultar o
     // information_schema: uma query a mais desloca a sequencia de mocks
     // dos testes de integracao, e no caminho feliz ela e pura perda.
-    const dataRes = await comFallbackDeFicha((colsFicha, colDuracao, colsMatcon) => db.query(
+    const dataRes = await comFallbackDeFicha((colsFicha, colDuracao, colsMatcon, colCartao) => db.query(
       `SELECT id, name, sku, barcode, category, description, price, cost_price,
               stock_qty, stock_min, stock_max, unit, color, size, image_url, ncm,
               -- brand (migration 261) e mais antiga que a 305/342/350 acima,
               -- entao fica direto aqui, sem degrau de fallback 42703.
               brand,
               ${colsMatcon}
+              ${colCartao}
               ${colsFicha}
               ${colDuracao}
               is_active, is_group_shared, company_id, created_at,
@@ -298,6 +327,9 @@ router.get('/', async (req, res) => {
       cest: r.cest || null,
       origem: r.origem === null || r.origem === undefined ? null : parseInt(r.origem, 10),
       icms_st_paid: r.icms_st_paid === null || r.icms_st_paid === undefined ? null : r.icms_st_paid === true,
+      // Migration 351 — preco no cartao. null = segue o % da loja (e tambem
+      // o valor quando a base ainda nao tem a coluna).
+      card_price: cardPriceOut(r.card_price),
       color: r.color || '', size: r.size || '',
       image_url: r.image_url || '',
       ncm: r.ncm || '',
@@ -397,6 +429,10 @@ router.post('/', async (req, res) => {
   // "45 min" que vira NULL em silencio e o bug que a coluna veio resolver.
   const duracao = sanitizeDurationMinutes(req.body.duration_minutes);
   if (duracao.error) return res.status(400).json({ error: duracao.error });
+
+  // Migration 351 — preco no cartao. Mesmo motivo: validar antes de criar.
+  const cartao = sanitizeCardPrice(req.body.card_price);
+  if (cartao.error) return res.status(400).json({ error: cartao.error });
 
   const isGroupShared = req.body.is_group_shared !== undefined
     ? !!req.body.is_group_shared
@@ -540,10 +576,28 @@ router.post('/', async (req, res) => {
       if (upd.rows[0]) result.rows[0] = upd.rows[0];
     }
 
+    // 22/09/2026 (preco no cartao, migration 351): UPDATE separado pelo
+    // mesmo motivo do Matcon acima (INSERT posicional), e so quando veio
+    // valor — loja sem a opcao nunca passa aqui. Base atras da 351 (42703):
+    // o produto JA foi criado, entao devolver 500 levaria a lojista a
+    // cadastrar de novo e duplicar. Segue sem o preco no cartao e loga.
+    if (cartao.value !== null) {
+      try {
+        const upd = await db.query(
+          `UPDATE products SET card_price = $2 WHERE id = $1 RETURNING *`,
+          [result.rows[0].id, cartao.value]
+        );
+        if (upd.rows[0]) result.rows[0] = upd.rows[0];
+      } catch (e) {
+        if (e.code !== '42703') throw e;
+        console.warn('[products] card_price ignorado: base sem a migration 351');
+      }
+    }
+
     const supplierOut = supplierFields.supplier_id
       ? { id: supplierFields.supplier_id, name: supplierFields.supplier_name, cnpj: supplierFields.supplier_cnpj }
       : null;
-    res.status(201).json({ ...result.rows[0], supplier: supplierOut, merge_suggestion });
+    res.status(201).json({ ...result.rows[0], card_price: cardPriceOut(result.rows[0].card_price), supplier: supplierOut, merge_suggestion });
   } catch (err) { console.error('[products] create error:', err.message); res.status(500).json({ error: 'Erro ao criar produto' }); }
 });
 
@@ -568,16 +622,20 @@ async function comFallbackDeFicha(rodar) {
   // antes da migration ser aplicada (CLAUDE.md, armadilha 1); sem isto a
   // listagem inteira cairia com 42703 ate alguem rodar a 350.
   const MATCON = 'purchase_unit, purchase_factor, weight_kg, cest, origem, icms_st_paid,';
+  // 22/09/2026 (preco no cartao, migration 351): quarto degrau, o mais
+  // interno — e a migration mais nova, entao e a que mais provavelmente
+  // falta: base so sem a 351 custa UMA query extra, nao dezesseis.
+  const CARTAO = 'card_price,';
   const degraus = [];
   for (const matcon of [MATCON, '']) {
     for (const [ficha, duracao] of [[FICHA, DURACAO], [FICHA, ''], ['', DURACAO], ['', '']]) {
-      degraus.push([ficha, duracao, matcon]);
+      for (const cartao of [CARTAO, '']) degraus.push([ficha, duracao, matcon, cartao]);
     }
   }
   let ultimo = null;
-  for (const [ficha, duracao, matcon] of degraus) {
+  for (const [ficha, duracao, matcon, cartao] of degraus) {
     try {
-      return await rodar(ficha, duracao, matcon);
+      return await rodar(ficha, duracao, matcon, cartao);
     } catch (e) {
       if (e.code !== '42703') throw e;
       ultimo = e;
@@ -627,6 +685,17 @@ router.patch('/:pid', async (req, res) => {
     duracao = d;
   }
 
+  // Migration 351 — preco no cartao. Fora do fieldMap pelos mesmos motivos
+  // da duracao: validacao propria (> 0 ou null, sem parseFloat silencioso)
+  // e degrau quando a base ainda nao tem a coluna. null/'' limpa (volta a
+  // seguir o % da loja).
+  let cartao = null;
+  if (req.body.card_price !== undefined) {
+    const c = sanitizeCardPrice(req.body.card_price);
+    if (c.error) return res.status(400).json({ error: c.error });
+    cartao = c;
+  }
+
   // Fase 1 fornecedores (16/09/2026). Fora do fieldMap porque precisa de
   // uma consulta ao banco pra validar visibilidade (mesma razao de
   // duracao/galeria acima terem saido do fieldMap). undefined = nao
@@ -657,7 +726,7 @@ router.patch('/:pid', async (req, res) => {
   // Numericos que aceitam null (limpar a conversao/peso/origem).
   const nullableNumFields = ['purchase_factor','weight_kg','origem'];
 
-  function montarUpdate(comDuracao) {
+  function montarUpdate(comDuracao, comCartao) {
     const updates = [], values = []; let idx = 1;
     for (const [bodyKey, dbCol] of Object.entries(fieldMap)) {
       if (req.body[bodyKey] !== undefined) {
@@ -678,6 +747,10 @@ router.patch('/:pid', async (req, res) => {
     if (comDuracao && duracao) {
       updates.push(`duration_minutes = $${idx}`);
       values.push(duracao.value); idx++;
+    }
+    if (comCartao && cartao) {
+      updates.push(`card_price = $${idx}`);
+      values.push(cartao.value); idx++;
     }
     if (galeria) {
       updates.push(`gallery_urls = $${idx}::jsonb`);
@@ -705,25 +778,37 @@ router.patch('/:pid', async (req, res) => {
     );
   }
 
-  const montado = montarUpdate(true);
+  const montado = montarUpdate(true, true);
   if (montado.updates.length === 0) return res.status(400).json({ error: 'Nenhum campo para atualizar' });
   try {
+    // 42703 com duration_minutes (323) ou card_price (351) no SET = base
+    // atras da migration. Degraus da mais completa pra mais pobre; a 351 sai
+    // primeiro por ser a mais nova. Sem nenhuma das duas no body, o 42703
+    // e de outra coluna e sobe como antes.
+    const degraus = [[true, false], [false, true], [false, false]]
+      .filter(([d, c]) => (d || duracao) && (c || cartao));
     let result;
     try {
       result = await rodarUpdate(montado);
     } catch (e) {
-      // 42703 com duration_minutes no SET = base atras da 323.
-      if (e.code !== '42703' || !duracao) throw e;
-      const semDuracao = montarUpdate(false);
-      if (semDuracao.updates.length === 0) throw e;
-      result = await rodarUpdate(semDuracao);
+      if (e.code !== '42703' || (!duracao && !cartao)) throw e;
+      let ultimo = e;
+      for (const [d, c] of degraus) {
+        const m = montarUpdate(d, c);
+        if (m.updates.length === 0) continue;
+        try { result = await rodarUpdate(m); break; } catch (e2) {
+          if (e2.code !== '42703') throw e2;
+          ultimo = e2;
+        }
+      }
+      if (!result) throw ultimo;
     }
     if (!result.rows.length) return res.status(404).json({ error: 'Produto nao encontrado' });
     const row = result.rows[0];
     const supplierOut = row.supplier_id
       ? { id: row.supplier_id, name: row.supplier_name, cnpj: row.supplier_cnpj }
       : null;
-    res.json({ ...row, supplier: supplierOut });
+    res.json({ ...row, card_price: cardPriceOut(row.card_price), supplier: supplierOut });
   } catch (err) { console.error('[products] update error:', err.message); res.status(500).json({ error: 'Erro ao atualizar produto' }); }
 });
 
