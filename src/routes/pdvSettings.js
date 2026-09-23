@@ -10,10 +10,11 @@
 //         cash_tender_modal_enabled, studio_enabled, studio_kds_enabled,
 //         studio_gallery_enabled, studio_approval_enabled, food_mode_enabled,
 //         food_nfce_manual_enabled, food_comanda_print_enabled,
-//         card_fee_enabled, os_enabled, otica_enabled
+//         card_fee_enabled, os_enabled, otica_enabled, card_price_enabled
 //   STRING (enum): studio_approval_mode (wa_me | whatsapp_business)
 //   NUMBER: service_fee_pct, food_service_fee_pct,
 //           card_fee_credit_pct, card_fee_debit_pct
+//   NUMBER OU NULL (percentual 0-100): card_price_pct
 //
 // 26/05/2026: ampliada whitelist pra desbloquear UI Studio/Food. Antes,
 // app/studio/(estudio)/configuracoes.tsx tentava salvar studio_approval_*
@@ -42,6 +43,10 @@ const ALLOWED_BOOL_KEYS = [
   'food_comanda_print_enabled',
   // 17/08/2026 — taxa da maquininha (Negocio + Studio)
   'card_fee_enabled',
+  // 22/09/2026 — preco no cartao: a loja cobra mais no debito/credito.
+  // Todos os planos, desligado por padrao. O % padrao fica em
+  // card_price_pct; o preco por produto em products.card_price (351).
+  'card_price_enabled',
   // 31/08/2026 — Ordem de Servico. Opt-in: nem toda loja emite OS, e pra
   // quem nao emite o modulo inteiro fica invisivel (menu, botao de imprimir
   // na tela pos-venda, rotas). Ver migration 313.
@@ -86,6 +91,12 @@ const ALLOWED_NUMBER_KEYS = [
   'card_fee_debit_pct',
 ];
 
+// 22/09/2026 — preco no cartao: acrescimo padrao em % (10 = 10%). Aceita
+// null ("ainda nao definido"), que e o default: com number, um null salvo
+// viraria 0 no proximo PUT (Number(null) === 0) e a loja passaria a ter
+// um acrescimo de zero que ela nunca digitou.
+const ALLOWED_NULLABLE_PCT_KEYS = ['card_price_pct'];
+
 // Percentuais que nao fazem sentido acima de 100% — sem teto, um dedo
 // escorregado (500 em vez de 5) viraria despesa maior que a venda.
 const PCT_KEYS = ['card_fee_credit_pct', 'card_fee_debit_pct', 'matcon_default_waste_pct'];
@@ -116,6 +127,9 @@ const DEFAULT_SETTINGS = {
   card_fee_enabled:          false,
   card_fee_credit_pct:       0,
   card_fee_debit_pct:        0,
+  // 22/09/2026 — preco no cartao. Desligado = zero impacto no Caixa.
+  card_price_enabled:        false,
+  card_price_pct:            null,
   os_enabled:                false,
   otica_enabled:             false,
   // 22/09/2026 — Matcon. Defaults espelham aura-app/constants/matcon.ts.
@@ -189,6 +203,19 @@ function validateSettings(settings) {
         throw new AppError(key + ' deve ser numero >= 0', 400);
       }
       if (PCT_KEYS.includes(key) && num > 100) {
+        throw new AppError(key + ' deve ser percentual entre 0 e 100', 400);
+      }
+      clean[key] = num;
+    }
+  }
+
+  // Percentuais que aceitam null (22/09/2026 — card_price_pct)
+  for (const key of ALLOWED_NULLABLE_PCT_KEYS) {
+    if (key in settings) {
+      const raw = settings[key];
+      if (raw === null || raw === '') { clean[key] = null; continue; }
+      const num = typeof raw === 'boolean' ? NaN : Number(raw);
+      if (!Number.isFinite(num) || num < 0 || num > 100) {
         throw new AppError(key + ' deve ser percentual entre 0 e 100', 400);
       }
       clean[key] = num;
