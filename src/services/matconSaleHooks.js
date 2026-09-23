@@ -191,19 +191,25 @@ async function afterSaleInsert(client, { companyId, sale, body, userId }) {
   return { quote_id: quoteId, delivery_id: delivery.id, delivery_token: delivery.public_token };
 }
 
-// ── Cancelamento ─────────────────────────────────────────────
+// ── A tabela existe? ─────────────────────────────────────────
 //
-// O cancelamento roda em TODA venda (a maioria sem Matcon), dentro da
-// transacao. Um 42P01 ali abortaria a transacao inteira, entao pergunta
-// antes se a tabela existe (cache de 60s, mesmo padrao de saleNumber.js).
+// Duas pessoas perguntam: o cancelamento (dentro da transacao, onde um
+// 42P01 abortaria tudo) e as telas de Vendas, que embutem o EXISTS de
+// has_pending_delivery no SELECT que ja fazem (sem consulta a mais: o
+// banco fica em Sao Paulo e o backend nos EUA, ~190 ms por ida).
+//
+// Cache: "existe" e PERMANENTE no processo (a tabela nao some); "nao
+// existe" e reperguntado a cada 60s (a 352 pode ter acabado de rodar).
+// Assim, em regime, nenhuma tela paga ida extra ao banco por isto.
 let _tabelaCheckedAt = 0;
 let _tabelaExiste = null;
 
-async function tabelasMatconExistem(client) {
+async function tabelasMatconExistem(q) {
   const now = Date.now();
-  if (_tabelaExiste !== null && (now - _tabelaCheckedAt) < 60000) return _tabelaExiste;
+  if (_tabelaExiste === true) return true;
+  if (_tabelaExiste === false && (now - _tabelaCheckedAt) < 60000) return false;
   try {
-    const r = await client.query(
+    const r = await q.query(
       "SELECT to_regclass('public.matcon_deliveries') IS NOT NULL AS ok"
     );
     _tabelaExiste = !!(r && r.rows && r.rows[0] && r.rows[0].ok);
@@ -212,6 +218,23 @@ async function tabelasMatconExistem(client) {
   }
   _tabelaCheckedAt = now;
   return _tabelaExiste;
+}
+
+/**
+ * Fragmento de SELECT para `has_pending_delivery` (selo "saldo a entregar"):
+ * venda com entrega aberta (stage <> delivered, nao cancelada). Mesmo
+ * idioma do saleNumberSelect: sem a tabela, `false` com o mesmo alias, pra
+ * forma do JSON nao mudar. Pergunte antes com tabelasMatconExistem().
+ *
+ * @param {boolean} available  resultado de tabelasMatconExistem()
+ * @param {string} [alias]     alias da tabela sales na query (default 's')
+ */
+function pendingDeliverySelect(available, alias) {
+  const a = alias || 's';
+  if (!available) return 'false AS has_pending_delivery';
+  return `EXISTS (SELECT 1 FROM matcon_deliveries md
+                   WHERE md.sale_id = ${a}.id AND md.cancelled_at IS NULL
+                     AND md.stage <> 'delivered') AS has_pending_delivery`;
 }
 
 /**
@@ -245,34 +268,6 @@ async function afterSaleCancel(client, { companyId, saleId }) {
     : vazio;
 }
 
-/**
- * Quais destas vendas ainda tem entrega pendente (stage <> delivered, nao
- * cancelada). Alimenta `has_pending_delivery` no detalhe e nas listas de
- * vendas (selo "saldo a entregar"). Fora de transacao: qualquer erro
- * (tabela ausente, mock) vira "nenhuma pendente" — um selo cosmetico
- * nunca derruba a tela de Vendas.
- *
- * @returns {Promise<Set<string>>}
- */
-async function salesWithPendingDelivery(q, saleIds) {
-  const ids = (saleIds || []).filter((id) => typeof id === 'string' && UUID_RE.test(id));
-  if (!ids.length) return new Set();
-  try {
-    const r = await q.query(
-      `SELECT DISTINCT sale_id
-         FROM matcon_deliveries
-        WHERE sale_id = ANY($1::uuid[])
-          AND cancelled_at IS NULL
-          AND stage <> 'delivered'`,
-      [ids]
-    );
-    return new Set(((r && r.rows) || []).map((row) => String(row.sale_id)));
-  } catch (e) {
-    if (e && e.code !== '42P01') console.warn('[matcon] has_pending_delivery:', e.message);
-    return new Set();
-  }
-}
-
 // Exposto so pros testes: zera o cache da sondagem.
 function _resetCache() { _tabelaCheckedAt = 0; _tabelaExiste = null; }
 
@@ -280,7 +275,8 @@ module.exports = {
   afterSaleInsert,
   afterSaleCancel,
   createFirstDelivery,
-  salesWithPendingDelivery,
+  tabelasMatconExistem,
+  pendingDeliverySelect,
   diasDeEntrega,
   enderecoDoCliente,
   _resetCache,

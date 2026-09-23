@@ -11,7 +11,8 @@
 //   3. SEM quote_id: o gancho nao faz nenhuma consulta (venda comum igual);
 //   4. cancelar a venda (DELETE /pdv/sale e POST /sales/:id/cancel) tira
 //      as entregas da esteira e libera o orcamento;
-//   5. has_pending_delivery no GET /pdv/sale/:id.
+//   5. has_pending_delivery no detalhe e nas listas, calculado DENTRO do
+//      SELECT que ja existia (sem ida extra ao banco).
 // ============================================================
 'use strict';
 
@@ -217,31 +218,75 @@ describe('Cancelamento da venda', () => {
   });
 });
 
-describe('has_pending_delivery', () => {
-  test('GET /pdv/sale/:id expoe true quando ha entrega aberta', async () => {
+describe('has_pending_delivery — dentro do SELECT que ja existia', () => {
+  // Backend nos EUA, banco em SP (~190 ms por ida): o selo nao pode custar
+  // uma consulta a mais em toda tela de Vendas. A sondagem da tabela fica
+  // em cache; o EXISTS vai no SELECT principal.
+  function mockDetalhe({ tabela = true, pendente = true } = {}) {
     db.query.mockImplementation((sql) => {
       const s = String(sql);
-      if (/FROM sales s LEFT JOIN users/i.test(s)) return Promise.resolve({ rows: [{ id: saleId, total_amount: 389 }] });
-      if (/FROM matcon_deliveries\s+WHERE sale_id = ANY/i.test(s)) return Promise.resolve({ rows: [{ sale_id: saleId }] });
-      return Promise.resolve({ rows: [] });
-    });
-    const res = await request(app).get(`/api/v1/companies/${cid}/pdv/sale/${saleId}`).set(admin);
-    expect(res.status).toBe(200);
-    expect(res.body.has_pending_delivery).toBe(true);
-  });
-
-  test('erro na consulta (tabela ausente) vira false, nunca 500', async () => {
-    db.query.mockImplementation((sql) => {
-      const s = String(sql);
-      if (/FROM sales s LEFT JOIN users/i.test(s)) return Promise.resolve({ rows: [{ id: saleId, total_amount: 389 }] });
-      if (/FROM matcon_deliveries/i.test(s)) {
-        const e = new Error('relation "matcon_deliveries" does not exist'); e.code = '42P01';
-        return Promise.reject(e);
+      if (/to_regclass\('public\.matcon_deliveries'\)/i.test(s)) return Promise.resolve({ rows: [{ ok: tabela }] });
+      if (/FROM sales s LEFT JOIN users/i.test(s) || /FROM sales s\s+LEFT JOIN customers c/i.test(s)) {
+        return Promise.resolve({ rows: [{ id: saleId, total_amount: 389, has_pending_delivery: tabela && pendente }] });
       }
       return Promise.resolve({ rows: [] });
     });
+  }
+  const consultasSoDoMatcon = () => db.query.mock.calls
+    .map((c) => String(c[0]))
+    .filter((s) => /matcon_deliveries/.test(s) && !/FROM sales s/.test(s) && !/to_regclass/.test(s));
+
+  test('GET /pdv/sale/:id: EXISTS no SELECT principal, sem consulta separada', async () => {
+    mockDetalhe();
+    const res = await request(app).get(`/api/v1/companies/${cid}/pdv/sale/${saleId}`).set(admin);
+    expect(res.status).toBe(200);
+    expect(res.body.has_pending_delivery).toBe(true);
+    const [principal] = callsMatching(db.query, /FROM sales s LEFT JOIN users/i)[0];
+    expect(principal).toMatch(/EXISTS \(SELECT 1 FROM matcon_deliveries md\s+WHERE md\.sale_id = s\.id/);
+    expect(consultasSoDoMatcon()).toHaveLength(0);
+  });
+
+  test('GET /sales/:id (detalhe do app): mesmo desenho', async () => {
+    mockDetalhe();
+    const res = await request(app).get(`/api/v1/companies/${cid}/sales/${saleId}`).set(admin);
+    expect(res.status).toBe(200);
+    expect(res.body.sale.has_pending_delivery).toBe(true);
+    expect(consultasSoDoMatcon()).toHaveLength(0);
+  });
+
+  test('a sondagem da tabela e feita uma vez e fica em cache', async () => {
+    mockDetalhe();
+    await request(app).get(`/api/v1/companies/${cid}/pdv/sale/${saleId}`).set(admin);
+    await request(app).get(`/api/v1/companies/${cid}/pdv/sale/${saleId}`).set(admin);
+    await request(app).get(`/api/v1/companies/${cid}/sales/${saleId}`).set(admin);
+    expect(callsMatching(db.query, /to_regclass/i)).toHaveLength(1);
+  });
+
+  test('listas (/sales e /pdv/sales): EXISTS no SELECT da lista, sem consulta separada', async () => {
+    db.query.mockImplementation((sql) => {
+      const s = String(sql);
+      if (/to_regclass/i.test(s)) return Promise.resolve({ rows: [{ ok: true }] });
+      if (/COUNT\(\*\)::int AS total FROM sales/i.test(s)) return Promise.resolve({ rows: [{ total: 1 }] });
+      if (/AS total_sales/i.test(s)) return Promise.resolve({ rows: [{ total_sales: 1, active_sales: 1, cancelled_sales: 0, revenue: 389, avg_ticket: 389 }] });
+      if (/has_pending_delivery/i.test(s)) return Promise.resolve({ rows: [{ id: saleId, total_amount: 389, has_pending_delivery: true }] });
+      return Promise.resolve({ rows: [] });
+    });
+    const r1 = await request(app).get(`/api/v1/companies/${cid}/sales`).set(admin);
+    expect(r1.status).toBe(200);
+    expect(r1.body.sales[0].has_pending_delivery).toBe(true);
+    const r2 = await request(app).get(`/api/v1/companies/${cid}/pdv/sales`).set(admin);
+    expect(r2.status).toBe(200);
+    expect(r2.body.sales[0].has_pending_delivery).toBe(true);
+    expect(consultasSoDoMatcon()).toHaveLength(0);
+  });
+
+  test('banco sem a 352: false no SELECT, sem citar a tabela e sem 500', async () => {
+    mockDetalhe({ tabela: false });
     const res = await request(app).get(`/api/v1/companies/${cid}/pdv/sale/${saleId}`).set(admin);
     expect(res.status).toBe(200);
     expect(res.body.has_pending_delivery).toBe(false);
+    const [principal] = callsMatching(db.query, /FROM sales s LEFT JOIN users/i)[0];
+    expect(principal).toMatch(/false AS has_pending_delivery/);
+    expect(principal).not.toMatch(/matcon_deliveries/);
   });
 });

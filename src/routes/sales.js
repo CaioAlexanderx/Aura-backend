@@ -55,7 +55,9 @@
 //   persistir NaN) tratada no trocaV2.js.
 //
 // 23/09/2026 — Matcon M1: lista e detalhe expoem `has_pending_delivery`
-//   (selo "saldo a entregar" do SaleDetailModal). O cancel chama
+//   (selo "saldo a entregar" do SaleDetailModal), calculado com EXISTS
+//   DENTRO do SELECT que ja existia — nenhuma ida a mais ao banco (backend
+//   nos EUA, banco em SP: ~190 ms cada). O cancel chama
 //   matconSaleHooks.afterSaleCancel: entregas da venda saem da esteira e o
 //   orcamento volta a poder virar pedido.
 // ============================================================
@@ -169,13 +171,19 @@ router.get('/', asyncHandler(async (req, res) => {
   // 02/06/2026: lista expoe net_amount/returned_value pra troca (lista mostra liquido).
   // net = total_amount (novos) - SUM(troca_returned_items) quando type='troca'.
   // 24/06/2026: NULLIF(...,'NaN') no subselect — um numeric 'NaN' nao polui o returned_value.
-  const withSaleNumber = await hasSaleNumberColumn(pool);
+  // Matcon M1: has_pending_delivery vem dentro do listQuery. As duas
+  // sondagens rodam juntas e ficam em cache: nenhuma ida extra em regime.
+  const [withSaleNumber, comMatcon] = await Promise.all([
+    hasSaleNumberColumn(pool),
+    matconSaleHooks.tabelasMatconExistem(pool),
+  ]);
 
   const listQuery =
     'SELECT s.id, ' + saleNumberSelect(withSaleNumber) + ', ' +
     '       s.total_amount, s.discount_amount, s.payment_method, s.status, ' +
     "       COALESCE(s.type, 'sale') AS type, s.exchange_of_sale_id, " +
     '       s.cancelled_at, s.created_at, ' +
+    '       ' + matconSaleHooks.pendingDeliverySelect(comMatcon) + ', ' +
     '       s.customer_id, c.name AS customer_name, ' +
     '       s.seller_id, COALESCE(s.seller_name, e.name) AS seller_name, s.employee_id, ' +
     '       (SELECT COUNT(*)::int FROM sale_items WHERE sale_id = s.id) AS items_count, ' +
@@ -212,12 +220,6 @@ router.get('/', asyncHandler(async (req, res) => {
   const { rows: statsRows } = await pool.query(statsQuery, vals);
   const stats = statsRows[0];
 
-  // Matcon M1: selo "saldo a entregar". Por ultimo e numa consulta so;
-  // qualquer falha vira false (ver matconSaleHooks).
-  const pendentes = await matconSaleHooks.salesWithPendingDelivery(
-    pool, rows.map(function(r) { return String(r.id); })
-  );
-
   res.json({
     total: total,
     limit: limitNum,
@@ -248,7 +250,7 @@ router.get('/', asyncHandler(async (req, res) => {
         seller: { id: r.seller_id || r.employee_id || null, name: r.seller_name || null },
         items_count: r.items_count,
         transaction_id: r.transaction_id,
-        has_pending_delivery: pendentes.has(String(r.id)),
+        has_pending_delivery: r.has_pending_delivery === true,
       };
     }),
     stats: {
@@ -266,9 +268,12 @@ router.get('/:sale_id', asyncHandler(async (req, res) => {
   const companyId = req.params.id;
   const saleId = req.params.sale_id;
 
+  // Matcon M1: has_pending_delivery no MESMO SELECT (sondagem em cache).
+  const comMatcon = await matconSaleHooks.tabelasMatconExistem(pool);
   const saleRes = await pool.query(
     'SELECT s.*, c.name AS customer_name, c.phone AS customer_phone, c.email AS customer_email, ' +
     '       COALESCE(s.seller_name, e.name) AS seller_name_eff, ' +
+    '       ' + matconSaleHooks.pendingDeliverySelect(comMatcon) + ', ' +
     TX_ID_SUBQUERY +
     'FROM sales s ' +
     'LEFT JOIN customers c ON c.id = s.customer_id ' +
@@ -439,10 +444,6 @@ router.get('/:sale_id', asyncHandler(async (req, res) => {
     if (e.code !== '42P01' && e.code !== '42703') throw e;
   }
 
-  // Matcon M1: selo "saldo a entregar" (SaleDetailModal le
-  // sale.has_pending_delivery). Falha vira false.
-  const pendentes = await matconSaleHooks.salesWithPendingDelivery(pool, [String(sale.id)]);
-
   res.json({
     sale: {
       id: sale.id,
@@ -459,7 +460,7 @@ router.get('/:sale_id', asyncHandler(async (req, res) => {
       cash_tendered: sale.cash_tendered ? parseFloat(sale.cash_tendered) : null,
       coupon_code: sale.coupon_code,
       transaction_id: sale.transaction_id,
-      has_pending_delivery: pendentes.has(String(sale.id)),
+      has_pending_delivery: sale.has_pending_delivery === true,
     },
     customer: sale.customer_id ? {
       id: sale.customer_id,

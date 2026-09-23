@@ -57,7 +57,8 @@
 //   um orcamento) e o DELETE /sale cancela as entregas da venda. A logica
 //   mora em services/matconSaleHooks.js, chamada DENTRO da transacao; sem
 //   quote_id o gancho nao toca o banco. GET /sale/:saleId e GET /sales
-//   expoem has_pending_delivery (selo "saldo a entregar").
+//   expoem has_pending_delivery (selo "saldo a entregar"), calculado DENTRO
+//   do SELECT que ja existia — nenhuma ida a mais ao banco.
 // ============================================================
 const router      = require('express').Router({ mergeParams: true });
 const db          = require('../config/database');
@@ -844,8 +845,12 @@ router.post('/sale-com-sinal', async (req, res) => {
 // ===== GET /sale/:saleId =====
 router.get('/sale/:saleId', async (req, res) => {
   try {
+    // Matcon M1: has_pending_delivery vem no MESMO SELECT (sondagem da
+    // tabela em cache — sem ida extra ao banco em regime).
+    const comMatcon = await matconSaleHooks.tabelasMatconExistem(db);
     const { rows } = await db.query(
-      `SELECT s.*, u.full_name AS user_seller_name, c.name AS customer_name, e.name AS employee_name
+      `SELECT s.*, u.full_name AS user_seller_name, c.name AS customer_name, e.name AS employee_name,
+              ${matconSaleHooks.pendingDeliverySelect(comMatcon)}
        FROM sales s LEFT JOIN users u ON u.id=s.seller_id LEFT JOIN customers c ON c.id=s.customer_id
        LEFT JOIN employees e ON e.id=s.employee_id
        WHERE s.id=$1 AND s.company_id=$2`,
@@ -875,11 +880,9 @@ router.get('/sale/:saleId', async (req, res) => {
     } catch (refErr) {
       if (refErr.code !== '42P01' && refErr.code !== '42703') throw refErr;
     }
-    // Matcon M1: selo "saldo a entregar". Falha vira false (ver servico).
-    const pendentes = await matconSaleHooks.salesWithPendingDelivery(db, [String(rows[0].id)]);
     res.json({
       ...rows[0],
-      has_pending_delivery: pendentes.has(String(rows[0].id)),
+      has_pending_delivery: rows[0].has_pending_delivery === true,
       items: items.map(it => ({ ...it, refunded_quantity: refundedByItem[it.id] || 0 })),
     });
   } catch (e) { res.status(500).json({ error: 'Erro ao buscar venda' }); }
@@ -902,11 +905,16 @@ router.get('/sales', async (req, res) => {
     vals.push(product_barcode); i++;
   }
   try {
-    const withSaleNumber = await hasSaleNumberColumn(db);
+    // As duas sondagens em paralelo (ambas em cache na maioria das vezes).
+    const [withSaleNumber, comMatcon] = await Promise.all([
+      hasSaleNumberColumn(db),
+      matconSaleHooks.tabelasMatconExistem(db),
+    ]);
     const { rows } = await db.query(
       `SELECT s.id, ${saleNumberSelect(withSaleNumber)}, s.total_amount, s.discount_amount,
               s.payment_method, s.coupon_code, s.status,
               s.seller_name, s.created_at,
+              ${matconSaleHooks.pendingDeliverySelect(comMatcon)},
               u.full_name AS user_seller_name, c.name AS customer_name, c.cpf_cnpj,
               e.name AS employee_name, COUNT(si.id) AS items_count
        FROM sales s LEFT JOIN users u ON u.id=s.seller_id LEFT JOIN customers c ON c.id=s.customer_id
@@ -915,9 +923,7 @@ router.get('/sales', async (req, res) => {
        ORDER BY s.created_at DESC LIMIT $${i} OFFSET $${i+1}`,
       [...vals, limit, offset]
     );
-    // Matcon M1: has_pending_delivery por venda, numa consulta so.
-    const pendentes = await matconSaleHooks.salesWithPendingDelivery(db, rows.map(r => String(r.id)));
-    res.json({ sales: rows.map(r => ({ ...r, has_pending_delivery: pendentes.has(String(r.id)) })) });
+    res.json({ sales: rows.map(r => ({ ...r, has_pending_delivery: r.has_pending_delivery === true })) });
   } catch (e) { res.status(500).json({ error: 'Erro ao listar vendas' }); }
 });
 
