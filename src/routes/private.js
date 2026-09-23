@@ -43,6 +43,12 @@ router.use('/matcon', require('./matconPurchases'));
 // desenho da Otica: gate por pdv_settings.matcon_enabled dentro do router,
 // so na escrita, sem requirePlan no prefixo.
 router.use('/matcon/professionals', require('./matconProfessionals'));
+// 23/09/2026 — Matcon M1 (migration 352): orcamentos (/matcon/quotes) e
+// entregas (/matcon/deliveries). Gate por pdv_settings.matcon_enabled
+// dentro do router, so na escrita, sem requirePlan no prefixo (mesmo
+// desenho da OS e da Otica). O router so responde /quotes e /deliveries:
+// outros routers do Matcon podem montar no mesmo /matcon.
+router.use('/matcon', require('./matconOrcamentosEntregas'));
 // F0 Bloco B2 (30/07/2026): categoryMigration atende /categories/migration/*
 // e /products/brand-candidates + /products/brand/apply, com os caminhos ja
 // completos dentro do proprio router -- por isso monta na RAIZ. Tem que vir
