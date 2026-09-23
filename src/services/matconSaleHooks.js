@@ -17,7 +17,13 @@
 //         matcon_default_delivery_days, padrao 2) com TODOS os itens.
 //     Sem quote_id: retorna null SEM tocar o banco (venda comum igual).
 //
+//   Tambem (M3, 23/09/2026): body.referred_by_professional_id presente ->
+//     credita os pontos do profissional parceiro (services/
+//     matconProfessionals.creditReferredSale, dentro de SAVEPOINT proprio).
+//     Nunca derruba a venda: erro vira aviso no log e a venda segue.
+//
 //   afterSaleCancel(client, { companyId, saleId })
+//     - estorna os pontos da indicacao, se houve (reverseReferredSale);
 //     - as entregas da venda ganham cancelled_at e saem da esteira (o
 //       registro fica: e o rastro do que ja tinha ido pro caminhao);
 //     - o orcamento perde o converted_sale_id e continua approved: o
@@ -44,6 +50,8 @@
 'use strict';
 
 const { findOwnerScopedCustomer } = require('../utils/customerScope');
+// M3 (migration 353): pontos do profissional parceiro que indicou a venda.
+const { creditReferredSale, reverseReferredSale } = require('./matconProfessionals');
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const SP_TODAY = "(NOW() AT TIME ZONE 'America/Sao_Paulo')::date";
@@ -133,8 +141,9 @@ async function createFirstDelivery(client, opts) {
  * @returns {Promise<null | {quote_id: string, delivery_id: string, delivery_token: string}>}
  */
 async function afterSaleInsert(client, { companyId, sale, body, userId }) {
+  const referral = await creditarIndicacao(client, { companyId, sale, body });
   const quoteId = body && body.quote_id ? String(body.quote_id) : null;
-  if (!quoteId) return null;
+  if (!quoteId) return referral ? { referral } : null;
   if (!UUID_RE.test(quoteId)) {
     throw erroMatcon(400, 'QUOTE_INVALID', 'Orçamento inválido. Abra o orçamento de novo pela tela de Orçamentos.');
   }
@@ -188,7 +197,32 @@ async function afterSaleInsert(client, { companyId, sale, body, userId }) {
     deliveryDays: diasDeEntrega(cfg[0] && cfg[0].pdv_settings),
   });
 
-  return { quote_id: quoteId, delivery_id: delivery.id, delivery_token: delivery.public_token };
+  return {
+    quote_id: quoteId, delivery_id: delivery.id, delivery_token: delivery.public_token,
+    ...(referral ? { referral } : {}),
+  };
+}
+
+// ── M3: pontos do profissional que indicou ───────────────────
+//
+// O Caixa manda referred_by_professional_id (chip "quem indicou?"). O
+// servico do M3 valida loja/ativo/clube ligado e roda em SAVEPOINT; aqui so
+// garantimos que NADA disso derruba a venda: um erro inesperado vira log e
+// a venda e gravada sem os pontos (o extrato do parceiro nao e mais
+// importante que o dinheiro no caixa).
+async function creditarIndicacao(client, { companyId, sale, body }) {
+  const professionalId = body && body.referred_by_professional_id
+    ? String(body.referred_by_professional_id) : null;
+  if (!professionalId || !sale || !sale.id) return null;
+  if (!UUID_RE.test(professionalId)) return { credited: false, reason: 'INVALID_INPUT' };
+  try {
+    return await creditReferredSale(client, {
+      companyId, saleId: sale.id, professionalId, total: Number(sale.total_amount) || 0,
+    });
+  } catch (e) {
+    console.warn('[matcon] pontos da indicacao nao creditados:', e && e.message);
+    return { credited: false, reason: 'ERROR' };
+  }
 }
 
 // ── A tabela existe? ─────────────────────────────────────────
@@ -242,8 +276,18 @@ function pendingDeliverySelect(available, alias) {
  * @returns {Promise<{deliveries_cancelled: number, quotes_released: number}>}
  */
 async function afterSaleCancel(client, { companyId, saleId }) {
-  const vazio = { deliveries_cancelled: 0, quotes_released: 0 };
+  const vazio = { deliveries_cancelled: 0, quotes_released: 0, points_reversed: false };
   if (!saleId) return vazio;
+  // M3: estorno dos pontos da indicacao (SAVEPOINT proprio; sem a 353 ou
+  // sem credito, so devolve reversed:false). Nunca derruba o cancelamento.
+  let pointsReversed = false;
+  try {
+    const r = await reverseReferredSale(client, { companyId, saleId });
+    pointsReversed = !!(r && r.reversed);
+  } catch (e) {
+    console.warn('[matcon] estorno dos pontos da indicacao falhou:', e && e.message);
+  }
+  vazio.points_reversed = pointsReversed;
   if (!(await tabelasMatconExistem(client))) return vazio;
 
   const r = await client.query(
@@ -264,7 +308,7 @@ async function afterSaleCancel(client, { companyId, saleId }) {
   );
   const row = r && r.rows && r.rows[0];
   return row
-    ? { deliveries_cancelled: row.deliveries_cancelled || 0, quotes_released: row.quotes_released || 0 }
+    ? { deliveries_cancelled: row.deliveries_cancelled || 0, quotes_released: row.quotes_released || 0, points_reversed: pointsReversed }
     : vazio;
 }
 
