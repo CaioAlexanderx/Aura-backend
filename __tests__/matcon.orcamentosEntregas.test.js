@@ -12,6 +12,10 @@
 //      proxima entrega (sequence + 1);
 //   5. gate: matcon_enabled desligado bloqueia SO a escrita (403
 //      MATCON_DISABLED), leitura continua.
+//   6. day=pending ("A entregar"): toda entrega aberta, de qualquer data
+//      — inclusive a nova, marcada pra daqui a 2 dias, que nao cai em
+//      today/tomorrow/late — e pending_orders conta pedidos com entrega
+//      aberta.
 //
 // Banco mockado por CONTEUDO do SQL (mesmo padrao de pdvSaleComSinal):
 // a ordem interna das queries pode mudar sem quebrar o teste. O SQL de
@@ -308,6 +312,82 @@ describe('Entregas', () => {
     expect(sql).toMatch(/d\.scheduled_for = \(NOW\(\) AT TIME ZONE 'America\/Sao_Paulo'\)::date/);
     expect(sql).toMatch(/d\.cancelled_at IS NULL/);
     expect(params).toEqual([cid, 'out', 200]);
+  });
+
+  describe('day=pending ("A entregar")', () => {
+    // Hoje (SP) = dia 0. O banco e mockado, entao a lista abaixo faz o papel
+    // da tabela e `ondeDoSql` aplica o WHERE que a rota montou — so as
+    // clausulas que a rota sabe gerar; qualquer outra quebra o teste.
+    const HOJE = "(NOW() AT TIME ZONE 'America/Sao_Paulo')::date";
+    const ENTREGAS = [
+      // venda nova: 1a entrega pra hoje + 2 (prazo padrao), nada entregue ainda
+      { id: 'nova+2', sale_id: 's-nova', sequence: 1, stage: 'separating', dia: 2 },
+      { id: 'hoje', sale_id: 's-hoje', sequence: 1, stage: 'ready', dia: 0 },
+      { id: 'atrasada', sale_id: 's-atr', sequence: 1, stage: 'out', dia: -1 },
+      // pedido com saldo: 1a viagem entregue, 2a aberta
+      { id: 'saldo-1', sale_id: 's-saldo', sequence: 1, stage: 'delivered', dia: -3 },
+      { id: 'saldo-2', sale_id: 's-saldo', sequence: 2, stage: 'separating', dia: 5 },
+      { id: 'entregue', sale_id: 's-ok', sequence: 1, stage: 'delivered', dia: 0 },
+    ];
+
+    function ondeDoSql(sql) {
+      const where = sql.slice(sql.search(/WHERE d\.company_id/), sql.search(/ORDER BY d\.scheduled_for/));
+      const regras = [
+        ['d.company_id = $1', () => true],
+        ['d.cancelled_at IS NULL', () => true],
+        ["COALESCE(s.status, 'completed') <> 'cancelled'", () => true],
+        ['d.stage = $2', () => true],
+        [`d.scheduled_for = ${HOJE}`, (e) => e.dia === 0],
+        [`d.scheduled_for = ${HOJE} + 1`, (e) => e.dia === 1],
+        [`d.scheduled_for < ${HOJE}`, (e) => e.dia < 0],
+        ["d.stage <> 'delivered'", (e) => e.stage !== 'delivered'],
+      ];
+      const partes = where.replace(/^WHERE\s+/, '').split(/\s+AND\s+/).map((c) => c.trim());
+      const filtros = partes.map((c) => {
+        const r = regras.find(([txt]) => txt === c);
+        if (!r) throw new Error(`clausula inesperada no WHERE: ${c}`);
+        return r[1];
+      });
+      return (e) => filtros.every((f) => f(e));
+    }
+
+    function mockTabela() {
+      mockDb([[/ORDER BY d\.scheduled_for/i, (sql) => ENTREGAS
+        .filter(ondeDoSql(sql))
+        .sort((a, b) => a.dia - b.dia || a.sequence - b.sequence)
+        .map((e) => deliveryRow({ id: e.id, sale_id: e.sale_id, sequence: e.sequence, stage: e.stage }))]]);
+    }
+    const ids = (res) => res.body.deliveries.map((d) => d.id);
+
+    test('entrega nova para daqui a 2 dias aparece em pending (e em nenhum outro dia)', async () => {
+      mockTabela();
+      expect(ids(await request(app).get(`${base}/deliveries?day=pending`).set(admin)))
+        .toEqual(['atrasada', 'hoje', 'nova+2', 'saldo-2']);
+      expect(ids(await request(app).get(`${base}/deliveries?day=today`).set(admin))).toEqual(['hoje', 'entregue']);
+      expect(ids(await request(app).get(`${base}/deliveries?day=tomorrow`).set(admin))).toEqual([]);
+      expect(ids(await request(app).get(`${base}/deliveries?day=late`).set(admin))).toEqual(['atrasada']);
+    });
+
+    test('SQL: so "nao entregue" (cancelada ja sai), sem janela de data nem exigir viagem entregue, por data e sequence', async () => {
+      mockDb();
+      await request(app).get(`${base}/deliveries?day=pending`).set(admin);
+      const [sql, params] = callsMatching(db.query, /ORDER BY d\.scheduled_for/i)[0];
+      const where = sql.slice(sql.search(/WHERE d\.company_id/), sql.search(/ORDER BY d\.scheduled_for/));
+      expect(where).toMatch(/d\.stage <> 'delivered'/);
+      expect(where).toMatch(/d\.cancelled_at IS NULL/);
+      expect(where).not.toMatch(/scheduled_for/);
+      expect(where).not.toMatch(/matcon_deliveries x/);
+      expect(sql).toMatch(/ORDER BY d\.scheduled_for ASC, s\.sale_number ASC NULLS LAST, d\.sequence ASC/);
+      expect(params).toEqual([cid, 200]);
+    });
+
+    test('summary.pending_orders conta vendas distintas com entrega aberta', async () => {
+      mockDb();
+      await request(app).get(`${base}/deliveries?day=pending`).set(admin);
+      const [sumSql] = callsMatching(db.query, /separating_count/i)[0];
+      expect(sumSql).toMatch(/COUNT\(DISTINCT d\.sale_id\) FILTER \(WHERE d\.stage <> 'delivered'\)::int AS pending_orders/);
+      expect(sumSql).not.toMatch(/matcon_deliveries x/);
+    });
   });
 
   test('PATCH stage=out carimba out_at; delivered carimba delivered_at', async () => {

@@ -42,6 +42,13 @@
 //   o saldo vira a proxima (sequence + 1, hoje + matcon_default_delivery_days).
 //   A soma por item da venda nunca passa do vendido: o maximo de cada item
 //   e vendido - ja entregue - o que esta planejado em OUTRA entrega aberta.
+// - day=pending ("A entregar", QA 23/09): TODA entrega aberta (nao
+//   entregue, nao cancelada), de qualquer data, por scheduled_for e
+//   sequence. Antes era so o saldo de pedido com viagem ja entregue, e a
+//   entrega nova — marcada pra hoje + matcon_default_delivery_days — nao
+//   caia em today, tomorrow, late nem pending: sumia da tela.
+//   summary.pending_orders conta os pedidos (vendas distintas) com pelo
+//   menos uma entrega aberta. today, tomorrow, late e sem day: iguais.
 // ============================================================
 'use strict';
 
@@ -672,12 +679,8 @@ router.get('/deliveries', async function (req, res) {
     if (day === 'today') cond.push(`d.scheduled_for = ${SP_TODAY}`);
     else if (day === 'tomorrow') cond.push(`d.scheduled_for = ${SP_TODAY} + 1`);
     else if (day === 'late') cond.push(`d.scheduled_for < ${SP_TODAY} AND d.stage <> 'delivered'`);
-    else if (day === 'pending') {
-      // Pedido com saldo: entrega aberta de uma venda que ja teve viagem entregue.
-      cond.push(`d.stage <> 'delivered' AND EXISTS (
-        SELECT 1 FROM matcon_deliveries x
-         WHERE x.sale_id = d.sale_id AND x.cancelled_at IS NULL AND x.stage = 'delivered')`);
-    }
+    // A entregar: toda entrega aberta, de qualquer data (ver DECISOES).
+    else if (day === 'pending') cond.push("d.stage <> 'delivered'");
     if (stage && stage !== 'all') {
       vals.push(stage);
       cond.push(`d.stage = $${vals.length}`);
@@ -704,9 +707,7 @@ router.get('/deliveries', async function (req, res) {
            AND (d.delivered_at AT TIME ZONE 'America/Sao_Paulo')::date = ${SP_TODAY})::int AS delivered_today_count,
          COALESCE(SUM(s.total_amount) FILTER (WHERE d.stage = 'delivered'
            AND (d.delivered_at AT TIME ZONE 'America/Sao_Paulo')::date = ${SP_TODAY}), 0) AS delivered_today_total,
-         COUNT(DISTINCT d.sale_id) FILTER (WHERE d.stage <> 'delivered' AND EXISTS (
-           SELECT 1 FROM matcon_deliveries x
-            WHERE x.sale_id = d.sale_id AND x.cancelled_at IS NULL AND x.stage = 'delivered'))::int AS pending_orders
+         COUNT(DISTINCT d.sale_id) FILTER (WHERE d.stage <> 'delivered')::int AS pending_orders
        FROM matcon_deliveries d
        JOIN sales s ON s.id = d.sale_id
       WHERE d.company_id = $1 AND d.cancelled_at IS NULL

@@ -25,6 +25,14 @@
 // sugestao com a mesma visibilidade da lista do Estoque (products.js,
 // listVisibilityWhere), para a tela Compras nunca dizer "nada faltando"
 // enquanto o Estoque mostra alerta.
+//
+// REGRA DA LISTA (23/09/2026, decisao do Caio: a regra e a do Estoque):
+// todo produto com estoque <= minimo entra na sugestao — EXATAMENTE o
+// alerta de estoque baixo do Estoque, inclusive minimo 0 com estoque
+// zerado. Antes a conta de reposicao dava 0 nesses casos e o produto
+// sumia: o Estoque mostrava "23 alertas" e Compras "1 item". Quando a
+// conta nao pede nada, a sugestao e o minimo que faz sentido (ver
+// montarSugestao) e `reason` diz por que o item esta ali.
 // ============================================================
 'use strict';
 
@@ -128,8 +136,16 @@ function arredondarParaCima(valor, passo) {
  * - suggested_qty = max(minimo × 1,5, weekly_sales × 3) − estoque,
  *   arredondada para cima na unidade de compra (caixa de 2,32 m² ->
  *   multiplo de 2,32) quando ha purchase_factor.
- * - Entra na lista: suggested_qty > 0 E (abaixo do minimo OU acaba em
- *   ate 14 dias no ritmo de venda).
+ * - Entra na lista: abaixo do minimo (SEMPRE — regra do Estoque, decisao
+ *   de 23/09) OU suggested_qty > 0 e acaba em ate 14 dias no ritmo de
+ *   venda.
+ * - Abaixo do minimo e a conta acima deu <= 0 (minimo 0 com estoque
+ *   zerado, por exemplo): suggested_qty = max(minimo − estoque,
+ *   weekly_sales × 3, 1 unidade de compra) — 1 caixa com purchase_factor,
+ *   senao 1 na unidade de venda — com o mesmo arredondamento.
+ * - reason: "zerado_sem_minimo" (minimo <= 0 e estoque <= 0),
+ *   "abaixo_do_minimo" (demais casos de estoque <= minimo) ou
+ *   "vai_acabar" (acima do minimo, acaba em ate 14 dias).
  */
 function montarSugestao(r) {
   const temVariantes = r.has_variants === true;
@@ -138,29 +154,42 @@ function montarSugestao(r) {
   const vendido30 = Number(r.sold_30d) || 0;
   const semanal = vendido30 / SEMANAS_EM_30_DIAS;
 
+  const abaixoDoMinimo = estoque <= minimo;
+  const fator = numOuNull(r.purchase_factor);
+  const temFator = !!(fator && fator > 0);
+  const naUnidadeDeCompra = (qtd) => {
+    let q;
+    if (temFator) q = arredondarParaCima(qtd, fator);
+    else if (unidadeDecimal(r.unit)) q = arredondarParaCima(qtd, 0.001);
+    else q = Math.ceil(qtd - EPS);
+    return round3(q);
+  };
+
   const alvo = Math.max(minimo * 1.5, semanal * 3);
   const falta = alvo - estoque;
-  if (falta <= EPS) return null;
-
-  const fator = numOuNull(r.purchase_factor);
-  let sugerido;
-  if (fator && fator > 0) sugerido = arredondarParaCima(falta, fator);
-  else if (unidadeDecimal(r.unit)) sugerido = arredondarParaCima(falta, 0.001);
-  else sugerido = Math.ceil(falta - EPS);
-  sugerido = round3(sugerido);
-  if (sugerido <= 0) return null;
+  let sugerido = falta > EPS ? naUnidadeDeCompra(falta) : 0;
+  if (sugerido <= 0) {
+    if (!abaixoDoMinimo) return null;
+    // Regra do Estoque: estoque <= minimo entra sempre. A conta de
+    // reposicao nao pediu nada (minimo 0 e estoque zerado, tipicamente):
+    // o minimo que faz sentido e 1 unidade de compra.
+    const umaUnidade = temFator ? fator : 1;
+    sugerido = naUnidadeDeCompra(Math.max(minimo - estoque, semanal * 3, umaUnidade));
+  }
 
   const porDia = semanal / 7;
   const diasParaAcabar = porDia > 0 ? Math.floor(Math.max(0, estoque) / porDia) : null;
 
-  const abaixoDoMinimo = estoque <= minimo;
   if (!abaixoDoMinimo && !(diasParaAcabar !== null && diasParaAcabar <= DIAS_ALERTA)) return null;
+
+  let reason = 'vai_acabar';
+  if (abaixoDoMinimo) reason = minimo <= 0 && estoque <= 0 ? 'zerado_sem_minimo' : 'abaixo_do_minimo';
 
   // Custo na unidade de venda: ultima nota ÷ fator; sem nota, o custo do
   // cadastro. Sem nenhum dos dois, 0 (a tela mostra ~R$ 0, nao some).
   const ultimaNota = numOuNull(r.last_purchase_unit_cost);
   const custoUnit = ultimaNota && ultimaNota > 0
-    ? ultimaNota / (fator && fator > 0 ? fator : 1)
+    ? ultimaNota / (temFator ? fator : 1)
     : (Number(r.cost_price) || 0);
 
   // Fornecedor: o da ultima nota; senao o cadastrado no produto
@@ -197,6 +226,7 @@ function montarSugestao(r) {
     est_cost: round2(sugerido * custoUnit),
     ...fornecedor,
     days_to_stockout: diasParaAcabar,
+    reason,
     _abaixo_do_minimo: abaixoDoMinimo,
   };
 }

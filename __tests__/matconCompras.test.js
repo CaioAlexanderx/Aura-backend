@@ -5,7 +5,9 @@
 // O que estes testes travam:
 //   1. Regra da sugestao: abaixo do minimo, giro (acaba em ate 14 dias),
 //      arredondamento por caixa (purchase_factor), produto sem custo,
-//      estoque de variantes e o que NAO entra na lista.
+//      estoque de variantes e o que NAO entra na lista. Estoque <= minimo
+//      entra SEMPRE (regra do Estoque, 23/09), inclusive minimo 0 com
+//      estoque zerado — com 1 unidade de compra e reason.
 //   2. GET /purchase-suggestions: summary {total_est_cost, items_below_min,
 //      suppliers} e a mesma regra do alerta do Estoque (stock_min).
 //   3. GET /purchase-orders: lista + summary {draft, sent, received_7d}.
@@ -185,6 +187,7 @@ describe('regra da sugestao (montarSugestao)', () => {
     expect(s.days_to_stockout).toBeNull();
     expect(s.est_cost).toBe(1440); // 48 × custo do cadastro 30
     expect(s._abaixo_do_minimo).toBe(true);
+    expect(s.reason).toBe('abaixo_do_minimo');
   });
 
   test('giro: acima do minimo mas acaba em ate 14 dias -> entra com weekly_sales × 3', () => {
@@ -194,6 +197,39 @@ describe('regra da sugestao (montarSugestao)', () => {
     expect(s.days_to_stockout).toBe(11); // 50 ÷ (30/7) = 11,67
     expect(s.suggested_qty).toBe(40); // max(15, 90) − 50
     expect(s._abaixo_do_minimo).toBe(false);
+    expect(s.reason).toBe('vai_acabar');
+  });
+
+  describe('estoque <= minimo entra sempre (regra do Estoque, 23/09)', () => {
+    test('estoque 0 / minimo 0 / sem venda -> entra com 1 unidade e reason "zerado_sem_minimo"', () => {
+      const s = montarSugestao(linha({ stock_qty: '0', stock_min: '0' }));
+      expect(s).not.toBeNull();
+      expect(s.suggested_qty).toBe(1);
+      expect(s.reason).toBe('zerado_sem_minimo');
+      expect(s._abaixo_do_minimo).toBe(true);
+      expect(s.est_cost).toBe(30);
+      expect(s.days_to_stockout).toBeNull();
+    });
+
+    test('com purchase_factor, 1 unidade de compra = 1 caixa', () => {
+      const s = montarSugestao(linha({ unit: 'm²', stock_qty: '0', stock_min: '0', purchase_factor: '2.3200' }));
+      expect(s.suggested_qty).toBe(2.32);
+      expect(s.reason).toBe('zerado_sem_minimo');
+    });
+
+    test('unidade de medida sem fator: 1 na unidade de venda', () => {
+      expect(montarSugestao(linha({ unit: 'm3', stock_qty: '0', stock_min: '0' })).suggested_qty).toBe(1);
+    });
+
+    test('estoque negativo e minimo 0: repoe o que falta para zerar (mínimo − estoque)', () => {
+      const s = montarSugestao(linha({ stock_qty: '-3', stock_min: '0' }));
+      expect(s.suggested_qty).toBe(3);
+      expect(s.reason).toBe('zerado_sem_minimo');
+    });
+
+    test('estoque positivo e minimo 0 continua fora (0 < estoque, igual ao Estoque)', () => {
+      expect(montarSugestao(linha({ stock_qty: '5', stock_min: '0' }))).toBeNull();
+    });
   });
 
   test('acima do minimo e acaba em mais de 14 dias -> fora da lista', () => {
@@ -284,6 +320,18 @@ describe('GET /matcon/purchase-suggestions', () => {
     expect(sql).toMatch(/COALESCE\(s\.status, 'completed'\) <> 'cancelled'/);
     expect(sql).toMatch(/INTERVAL '30 days'/);
     expect(sql).toMatch(/p\.is_active = true/);
+  });
+
+  test('estoque 0 / minimo 0 entra na lista e conta em items_below_min (mesmo numero do Estoque)', async () => {
+    st.suggestionRows = [
+      linha({}),
+      linha({ id: P_PISO, name: 'Rejunte', stock_qty: '0', stock_min: '0', cost_price: '12' }),
+    ];
+    const res = await request(app).get(`/companies/${CID}/matcon/purchase-suggestions`).set(AUTH);
+    expect(res.status).toBe(200);
+    const rejunte = res.body.suggestions.find((s) => s.product_id === P_PISO);
+    expect(rejunte).toMatchObject({ suggested_qty: 1, reason: 'zerado_sem_minimo', est_cost: 12 });
+    expect(res.body.summary.items_below_min).toBe(2);
   });
 });
 
