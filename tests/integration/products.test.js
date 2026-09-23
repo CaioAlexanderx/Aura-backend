@@ -347,6 +347,71 @@ describe('PATCH /companies/:id/products/:pid — brand', () => {
   });
 });
 
+// ── card_price (migration 351, preco no cartao) ──────────────
+// Casos de degrau 42703, scan e importacao em tests/routes/precoNoCartao.test.js.
+describe('products — card_price (preço no cartão)', () => {
+  test('POST 201 — card_price vai num UPDATE depois do INSERT e volta como número', async () => {
+    db.query.mockResolvedValueOnce({ rows: [{ role: 'owner' }] });
+    db.query.mockResolvedValueOnce({ rows: [{ total: '0' }] });
+    db.query.mockResolvedValueOnce({ rows: [{ id: 'p1', name: 'Camisa' }] });                        // INSERT
+    db.query.mockResolvedValueOnce({ rows: [{ id: 'p1', name: 'Camisa', card_price: '54.90' }] });   // UPDATE card_price
+
+    const res = await request(app)
+      .post(`/api/v1/companies/${cid}/products`)
+      .set(authEssencial)
+      .send({ name: 'Camisa', price: 49.9, card_price: 54.9 });
+
+    expect(res.status).toBe(201);
+    expect(db.query.mock.calls[2][0]).not.toMatch(/card_price/); // INSERT posicional intacto
+    expect(db.query.mock.calls[3][0]).toMatch(/SET card_price = \$2/);
+    expect(res.body.card_price).toBe(54.9);
+  });
+
+  test('POST 201 — sem card_price no body, nenhuma query a mais', async () => {
+    db.query.mockResolvedValueOnce({ rows: [{ role: 'owner' }] });
+    db.query.mockResolvedValueOnce({ rows: [{ total: '0' }] });
+    db.query.mockResolvedValueOnce({ rows: [{ id: 'p1', name: 'Camisa' }] });
+
+    const res = await request(app)
+      .post(`/api/v1/companies/${cid}/products`)
+      .set(authEssencial)
+      .send({ name: 'Camisa', price: 49.9 });
+
+    expect(res.status).toBe(201);
+    expect(db.query).toHaveBeenCalledTimes(3);
+    expect(res.body.card_price).toBeNull();
+  });
+
+  test('PATCH 200 — card_price vazio limpa (null = segue o % da loja)', async () => {
+    db.query.mockResolvedValueOnce({ rows: [{ role: 'owner' }] });
+    db.query.mockResolvedValueOnce({ rows: [{ id: 'p1', card_price: null }] });
+
+    const res = await request(app)
+      .patch(`/api/v1/companies/${cid}/products/p1`)
+      .set(authEssencial)
+      .send({ card_price: '' });
+
+    expect(res.status).toBe(200);
+    expect(db.query.mock.calls[1][0]).toMatch(/card_price = \$1/);
+    expect(db.query.mock.calls[1][1][0]).toBeNull();
+    expect(res.body.card_price).toBeNull();
+  });
+
+  test('GET 200 — listagem devolve card_price numérico', async () => {
+    db.query.mockResolvedValueOnce({ rows: [{ role: 'owner' }] });
+    db.query.mockResolvedValueOnce({ rows: [{ total: '1' }] });
+    db.query.mockResolvedValueOnce({ rows: [{ id: 'p1', name: 'Camisa', price: '49.90', card_price: '54.90' }] });
+
+    const res = await request(app)
+      .get(`/api/v1/companies/${cid}/products`)
+      .set(authEssencial);
+
+    expect(res.status).toBe(200);
+    expect(db.query.mock.calls[2][0]).toMatch(/card_price/);
+    expect(res.body.products[0].card_price).toBe(54.9);
+  });
+});
+
 // ── DELETE /:pid ──────────────────────────────────────────
 describe('DELETE /companies/:id/products/:pid', () => {
   test('200 — deleta produto existente', async () => {
