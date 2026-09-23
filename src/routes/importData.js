@@ -47,10 +47,18 @@ const CUSTOMER_FIELDS = {
 // 'estoque minimo'.includes('estoque') = true → stock_qty mapeado
 // duas vezes → applyMap sobrescreve o valor real com string vazia
 // → parseFloat('') = NaN → stock_qty = 0 para todos os produtos.
+//
+// 22/09/2026 — preco no cartao (migration 351). Planilhas de loja trazem
+// "VALOR DIN" e "VALOR CART" lado a lado; as duas casavam `price` pelo
+// alias 'valor' e a ultima coluna vencia — a loja importava o preco do
+// cartao como preco normal. Agora dinheiro/a vista vao pra `price` e
+// cartao pra `card_price` (ver FIELD_YIELDS_TO e suggestMapping).
 const PRODUCT_FIELDS = {
   cost_price: ['preco de custo', 'preco custo', 'preço custo', 'custo', 'cost', 'cost_price', 'valor custo', 'preco de custo (r$)'],
   name:       ['nome do produto', 'nome', 'produto', 'name', 'descricao', 'descrição', 'description', 'item'],
-  price:      ['preco de venda', 'preco venda', 'preço de venda', 'price', 'valor venda', 'valor', 'preco de venda (r$)'],
+  card_price: ['preco no cartao', 'preco cartao', 'valor cartao', 'valor cart', 'cartao', 'card_price'],
+  price:      ['preco de venda', 'preco venda', 'preço de venda', 'price', 'valor venda', 'valor', 'preco de venda (r$)',
+               'valor din', 'valor dinheiro', 'preco a vista', 'a vista'],
   stock_min:  ['estoque minimo', 'estoque mínimo', 'min', 'minimo', 'stock_min'],
   stock_qty:  ['estoque atual', 'estoque', 'quantidade', 'qty', 'stock', 'qtd', 'saldo'],
   barcode:    ['codigo de barras', 'codigo barras', 'código barras', 'ean', 'barcode', 'gtin', 'codigo de barras (ean)'],
@@ -63,16 +71,51 @@ const PRODUCT_FIELDS = {
   ncm:        ['ncm', 'ncm produto'],
 };
 
+// Campo que CEDE para outro quando o cabecalho casa os dois. "Preco venda
+// cartao" casa `price` ('preco venda') e `card_price` ('cartao'); cabecalho
+// que fala de cartao nunca pode virar o preco normal.
+const FIELD_YIELDS_TO = {
+  price: ['card_price'],
+};
+
+// Forca de um alias contra o cabecalho normalizado: 3 = igual,
+// 2 = palavra inteira no comeco/fim, 1 = contido (so alias >= 4 letras),
+// 0 = nao casa. Mesmas regras de casamento de antes, agora graduadas.
+function aliasScore(normalized, a) {
+  if (normalized === a) return 3;
+  if (normalized.startsWith(a + ' ') || normalized.startsWith(a + '(') || normalized.endsWith(' ' + a)) return 2;
+  if (a.length >= 4 && normalized.includes(a)) return 1;
+  return 0;
+}
+
+// 22/09/2026: antes ganhava o PRIMEIRO campo (na ordem do objeto) que
+// casasse qualquer alias — "VALOR CART" caia em `price` pelo 'valor'
+// antes de chegar em `card_price`. Agora ganha o casamento mais
+// especifico: maior forca e, empatado, alias mais longo; empate total
+// fica com a ordem do objeto (o comportamento antigo).
 function suggestMapping(headers, fieldDefs) {
   const map = {};
   for (const header of headers) {
     const normalized = header.toLowerCase().trim()
       .normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+    const candidatos = [];
     for (const [field, aliases] of Object.entries(fieldDefs)) {
-      if (aliases.some(a => normalized === a || normalized.startsWith(a + ' ') || normalized.startsWith(a + '(') || normalized.endsWith(' ' + a) || (a.length >= 4 && normalized.includes(a)))) {
-        if (!map[header]) map[header] = field;
+      let melhor = null;
+      for (const a of aliases) {
+        const score = aliasScore(normalized, a);
+        if (score && (!melhor || score > melhor.score || (score === melhor.score && a.length > melhor.len))) {
+          melhor = { score, len: a.length };
+        }
       }
+      if (melhor) candidatos.push({ field, ...melhor });
     }
+    const casados = new Set(candidatos.map(c => c.field));
+    let vencedor = null;
+    for (const c of candidatos) {
+      if ((FIELD_YIELDS_TO[c.field] || []).some(f => casados.has(f))) continue;
+      if (!vencedor || c.score > vencedor.score || (c.score === vencedor.score && c.len > vencedor.len)) vencedor = c;
+    }
+    if (vencedor) map[header] = vencedor.field;
   }
   return map;
 }
@@ -107,11 +150,16 @@ function parseDate(value) {
   return null;
 }
 
+// 22/09/2026: duas colunas no mesmo campo (column_map do cliente ou
+// sinonimos) — uma celula vazia nao apaga o valor que outra coluna ja
+// trouxe. Antes a ultima coluna vencia mesmo vazia.
 function applyMap(row, columnMap) {
   const mapped = {};
   for (const [header, field] of Object.entries(columnMap)) {
     if (field && row[header] !== undefined) {
-      mapped[field] = String(row[header] || '').trim();
+      const valor = String(row[header] || '').trim();
+      if (!valor && mapped[field]) continue;
+      mapped[field] = valor;
     }
   }
   return mapped;
@@ -305,9 +353,13 @@ router.post('/products/import', requireAuth, async (req, res) => {
       errors.push({ index: i, error: 'Preço de venda inválido ou ausente', row });
       return;
     }
+    // Preco no cartao (351): opcional, mesmo parse do custo. Vazio, zero ou
+    // invalido = null (segue o % da loja) — nao derruba a linha.
+    const cardPrice = parseBRL(data.card_price);
     valid.push({
       name:        data.name,
       price,
+      card_price:  cardPrice > 0 ? Math.round(cardPrice * 100) / 100 : null,
       cost_price:  parseBRL(data.cost_price),
       stock_qty:   parseFloat(data.stock_qty) || 0,
       stock_min:   parseFloat(data.stock_min) || null,
@@ -398,39 +450,60 @@ router.post('/products/import', requireAuth, async (req, res) => {
   // na pratica nunca deve disparar pois ja deduplicamos acima.
   const CHUNK = 100;
 
-  for (let i = 0; i < toInsert.length; i += CHUNK) {
-    const chunk = toInsert.slice(i, i + CHUNK);
-    if (!chunk.length) break;
+  // Preco no cartao (migration 351): a coluna so entra no INSERT quando a
+  // planilha trouxe algum valor — sem ela, a query e a mesma de antes. Base
+  // atras da 351 (42703): o chunk roda de novo sem a coluna e os chunks
+  // seguintes nem tentam; a importacao nao cai por um campo opcional.
+  let comCardPrice = toInsert.some(p => p.card_price !== null);
+  let cardPriceIgnorado = false;
 
+  function montarInsert(chunk, incluirCardPrice) {
     const placeholders = [];
     const params = [companyId, batchId];
     let n = 3;
-
     for (const p of chunk) {
-      placeholders.push(
-        `($1,$${n++},$${n++},$${n++},$${n++},$${n++},$${n++},$${n++},$${n++},$${n++},$${n++},$${n++},$${n++},$${n++},$2)`
-      );
-      params.push(
+      const valores = [
         p.name, p.price, p.cost_price, p.stock_qty, p.stock_min,
         p.barcode, p.sku, p.category, p.color, p.size,
-        p.unit, p.description, p.ncm
-      );
+        p.unit, p.description, p.ncm,
+      ];
+      if (incluirCardPrice) valores.push(p.card_price);
+      placeholders.push(`($1,${valores.map(() => '$' + (n++)).join(',')},$2)`);
+      params.push(...valores);
     }
+    const colCard = incluirCardPrice ? ', card_price' : '';
+    return {
+      sql: `INSERT INTO products
+           (company_id, name, price, cost_price, stock_qty, stock_min,
+            barcode, sku, category, color, size, unit, description, ncm${colCard}, import_batch_id)
+         VALUES ${placeholders.join(',')}
+         ON CONFLICT DO NOTHING
+         RETURNING id, category`,
+      params,
+    };
+  }
+
+  for (let i = 0; i < toInsert.length; i += CHUNK) {
+    const chunk = toInsert.slice(i, i + CHUNK);
+    if (!chunk.length) break;
 
     try {
       // D4: RETURNING passa a ser necessario -- linkImportedCategories
       // precisa do id real de cada produto inserido. ON CONFLICT DO
       // NOTHING faz o RETURNING trazer SO o que entrou de fato, que e
       // exatamente o conjunto que deve ganhar vinculo.
-      const { rows: inseridos } = await db.query(
-        `INSERT INTO products
-           (company_id, name, price, cost_price, stock_qty, stock_min,
-            barcode, sku, category, color, size, unit, description, ncm, import_batch_id)
-         VALUES ${placeholders.join(',')}
-         ON CONFLICT DO NOTHING
-         RETURNING id, category`,
-        params
-      );
+      let inseridos;
+      try {
+        const q = montarInsert(chunk, comCardPrice);
+        ({ rows: inseridos } = await db.query(q.sql, q.params));
+      } catch (e) {
+        if (e.code !== '42703' || !comCardPrice) throw e;
+        console.warn('[import-products] card_price ignorado: base sem a migration 351');
+        comCardPrice = false;
+        cardPriceIgnorado = true;
+        const q = montarInsert(chunk, false);
+        ({ rows: inseridos } = await db.query(q.sql, q.params));
+      }
       saved += chunk.length;
 
       // Nunca derruba a importacao: linkImportedCategories nao lanca, e o
@@ -474,6 +547,8 @@ router.post('/products/import', requireAuth, async (req, res) => {
       pendentes:  categorias.pending,
       ambiguos:   categorias.ambiguous,
     },
+    // So aparece quando a base ainda nao tem a migration 351.
+    ...(cardPriceIgnorado ? { card_price_ignorado: true } : {}),
   });
 });
 
@@ -792,3 +867,7 @@ router.get('/import-templates/:type', requireAuth, (req, res) => {
 });
 
 module.exports = router;
+// Expostos para teste (22/09/2026): o mapeamento de colunas e puro.
+module.exports.suggestMapping = suggestMapping;
+module.exports.applyMap = applyMap;
+module.exports.PRODUCT_FIELDS = PRODUCT_FIELDS;
