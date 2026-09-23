@@ -466,8 +466,8 @@ router.patch('/quotes/:qid', async function (req, res) {
 
     const { rows } = await db.query(
       `UPDATE matcon_quotes q
-          SET status = $3,
-              approved_at = CASE WHEN $3 = 'approved' THEN COALESCE(q.approved_at, NOW()) ELSE q.approved_at END,
+          SET status = $3::text,
+              approved_at = CASE WHEN $3::text = 'approved' THEN COALESCE(q.approved_at, NOW()) ELSE q.approved_at END,
               items = $4::jsonb,
               subtotal = $5,
               discount = $6,
@@ -810,7 +810,7 @@ router.patch('/deliveries/:did', async function (req, res) {
     if (has(b, 'stage')) {
       if (!STAGES.includes(b.stage)) return res.status(400).json({ error: 'Etapa inválida.' });
       vals.push(b.stage);
-      const p = `$${vals.length}`;
+      const p = `$${vals.length}::text`;
       sets.push(`stage = ${p}`);
       // Saiu: carimba a primeira saida. Entregue: carimba a entrega; voltar
       // de "entregue" pra outra etapa limpa o carimbo.

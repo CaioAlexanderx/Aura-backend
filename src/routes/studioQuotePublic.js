@@ -136,8 +136,8 @@ async function responderMatcon(client, token, action, note) {
   const aceitar = action === 'accept';
   await client.query(
     `UPDATE matcon_quotes
-        SET status        = $1,
-            approved_at   = CASE WHEN $1 = 'approved' THEN COALESCE(approved_at, NOW()) ELSE approved_at END,
+        SET status        = $1::text,
+            approved_at   = CASE WHEN $1::text = 'approved' THEN COALESCE(approved_at, NOW()) ELSE approved_at END,
             response_note = $2,
             responded_at  = NOW()
       WHERE id = $3`,
