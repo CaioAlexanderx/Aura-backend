@@ -229,6 +229,119 @@ async function saldoEmAberto(companyId, saleId, txidPrefix) {
   return saldo;
 }
 
+// ── Entrega do Matcon (23/09/2026, migration 352) ───────────────────────
+//
+// Quarto caminho: o token mora em matcon_deliveries.public_token — uma
+// entrega (viagem do caminhao) de uma venda de material de construcao. A
+// pagina mostra o PEDIDO inteiro, nao so aquela viagem: o cliente quer
+// saber "ja chegou tudo?". Mesma lista do que nao sai (CPF, telefone,
+// ENDERECO de entrega, sobrenome, forma de pagamento, motorista).
+//
+// Etapas: aprovado -> separando -> pronto -> saiu -> entregue. A etapa
+// atual e a da proxima viagem ainda aberta (a de menor sequence); sem
+// nenhuma aberta, o pedido esta entregue.
+//
+// Itens: enquanto nenhuma viagem foi entregue, a lista e a de sempre
+// (nome x qtd) e a data combinada vai em `entrega_combinada`. Depois da
+// primeira viagem entregue (entrega parcial), cada item ganha
+// entregue/total/unidade ("6 de 10 sc") e a data da proxima viagem vai em
+// `proxima_entrega` — o app so fala em "restantes na proxima viagem"
+// quando esses campos vem.
+const ETAPAS_ENTREGA = [
+  { key: 'aprovado',  label: 'Pedido aprovado' },
+  { key: 'separando', label: 'Separando o material' },
+  { key: 'pronto',    label: 'Pronto para sair' },
+  { key: 'saiu',      label: 'Saiu para entrega' },
+  { key: 'entregue',  label: 'Entregue' },
+];
+
+const ETAPA_DO_STAGE = { separating: 1, ready: 2, out: 3, delivered: 4 };
+
+async function entregaMatcon(token) {
+  try {
+    const { rows } = await db.query(
+      `SELECT d.id, d.sale_id, d.company_id, d.cancelled_at,
+              s.status AS sale_status, s.sale_number, s.total_amount, s.created_at,
+              COALESCE(d.customer_name, cu.name) AS customer_name,
+              COALESCE(co.trade_name, co.legal_name) AS loja,
+              CASE WHEN ne.status = 'autorizada' THEN ne.pdf_url END AS danfe_url
+         FROM matcon_deliveries d
+         JOIN sales s ON s.id = d.sale_id
+         LEFT JOIN customers cu ON cu.id = s.customer_id
+         LEFT JOIN companies co ON co.id = d.company_id
+         LEFT JOIN nfce_emissions ne ON ne.id = d.nfe_emission_id
+        WHERE d.public_token = $1
+        LIMIT 1`,
+      [token]
+    );
+    return rows[0] || null;
+  } catch (e) {
+    // Antes da 352 nao ha entrega: os outros caminhos seguem.
+    if (e.code === '42703' || e.code === '42P01') return null;
+    throw e;
+  }
+}
+
+async function respostaDaEntrega(d) {
+  const pedido = d.sale_number != null ? String(d.sale_number) : String(d.sale_id).slice(0, 8).toUpperCase();
+  const base = { loja: d.loja, cliente: primeiroNome(d.customer_name), pedido, tipo: 'entrega' };
+  if (d.cancelled_at || String(d.sale_status || '').toLowerCase() === 'cancelled') {
+    return { cancelado: true, ...base };
+  }
+
+  const { rows: viagens } = await db.query(
+    `SELECT stage, sequence, to_char(scheduled_for, 'YYYY-MM-DD') AS scheduled_for
+       FROM matcon_deliveries
+      WHERE sale_id = $1 AND cancelled_at IS NULL
+      ORDER BY sequence`,
+    [d.sale_id]
+  );
+  const { rows: itens } = await db.query(
+    `SELECT COALESCE(si.product_name_snapshot, p.name, 'Item') AS nome,
+            si.quantity AS total, p.unit AS unidade,
+            COALESCE((SELECT SUM(di.quantity)
+                        FROM matcon_delivery_items di
+                        JOIN matcon_deliveries x ON x.id = di.delivery_id
+                       WHERE di.sale_item_id = si.id AND x.cancelled_at IS NULL
+                         AND x.stage = 'delivered'), 0) AS entregue
+       FROM sale_items si
+       LEFT JOIN products p ON p.id = si.product_id
+      WHERE si.sale_id = $1
+      ORDER BY si.id`,
+    [d.sale_id]
+  );
+
+  const aberta = viagens.find((v) => v.stage !== 'delivered') || null;
+  const algumaEntregue = viagens.some((v) => v.stage === 'delivered');
+  const etapaAtual = aberta ? (ETAPA_DO_STAGE[aberta.stage] || 1) : 4;
+
+  const saldo = await saldoEmAberto(d.company_id, d.sale_id, 'ENT');
+
+  return {
+    cancelado: false,
+    ...base,
+    criado_em: d.created_at,
+    entrega_combinada: !algumaEntregue && aberta ? aberta.scheduled_for : null,
+    imagem:    null,
+    itens: itens.map((it) => {
+      const linha = { nome: it.nome, qtd: parseFloat(it.total) || 0 };
+      if (!algumaEntregue) return linha;
+      return {
+        ...linha,
+        entregue: parseFloat(it.entregue) || 0,
+        total:    parseFloat(it.total) || 0,
+        unidade:  it.unidade || null,
+      };
+    }),
+    total:       parseFloat(d.total_amount) || 0,
+    etapa_atual: etapaAtual,
+    etapas:      ETAPAS_ENTREGA,
+    saldo,
+    proxima_entrega: algumaEntregue && aberta ? aberta.scheduled_for : null,
+    danfe_url:   d.danfe_url || null,
+  };
+}
+
 function respostaDoPedidoDaVitrine(o) {
   const pedido = String(o.order_number || o.id).toUpperCase();
   if (String(o.status || '').toLowerCase() === 'cancelled') {
@@ -286,6 +399,8 @@ router.get('/:token', async function(req, res) {
       if (pedido) return res.json(respostaDoPedidoDaVitrine(pedido));
       const os = await ordemDeServico(token);
       if (os) return res.json(await respostaDaOs(os));
+      const entrega = await entregaMatcon(token);
+      if (entrega) return res.json(await respostaDaEntrega(entrega));
       return res.status(404).json({ error: 'Acompanhamento nao encontrado.' });
     }
     const v = rows[0];
@@ -333,3 +448,5 @@ module.exports._ETAPAS = ETAPAS;
 module.exports._respostaDoPedidoDaVitrine = respostaDoPedidoDaVitrine;
 module.exports._etapaDaOs = etapaDaOs;
 module.exports._ETAPAS_OTICA = ETAPAS_OTICA;
+module.exports._respostaDaEntrega = respostaDaEntrega;
+module.exports._ETAPAS_ENTREGA = ETAPAS_ENTREGA;
