@@ -84,7 +84,7 @@ const { logAuditAction } = require('../middleware/auditLog');
 const { sendSelfServeSignupNotification } = require('../services/mailer');
 const { issueVerification } = require('./verification');
 const { resolveKarateContext } = require('../config/karateRoles');
-const { getExtraSeatsForCompany } = require('../services/extraSeats');
+const { getExtraSeatsForCompany, getExtraSeatsMap } = require('../services/extraSeats');
 const { appModeDoCabecalho } = require('../utils/appMode');
 
 const env        = validateRuntimeEnv();
@@ -584,22 +584,33 @@ router.post('/logout', async (req, res) => {
 });
 
 // POST /api/v1/auth/me
+//
+// 23/09/2026: as quatro consultas saem JUNTAS. O backend (Railway, us-west)
+// e o banco (Supabase, Sao Paulo) ficam a ~190 ms de ida e volta, e esta
+// rota fazia usuario -> empresa -> contagem -> extra_seats em fila (~760 ms
+// so de rede). Nenhuma depende do resultado da outra: todas usam so o que
+// ja vem no JWT (req.user.id e req.user.company). O extra_seats e pedido de
+// antemao e so entra na resposta se a empresa voltar, como antes.
+//
+// A resposta nao muda:
+//   - usuario inexistente continua 404 mesmo que outra consulta falhe (a do
+//     usuario e conferida primeiro);
+//   - erro na empresa ou na contagem continua 500;
+//   - erro no extra_seats continua virando 0 (withExtraSeats nunca lancava).
+// A ordem das chamadas a db.query tambem e a mesma (usuario, empresa,
+// contagem, extra_seats), entao mock em sequencia recebe o mesmo roteiro.
 router.post('/me', requireAuth, async (req, res) => {
   try {
-    const { rows: uRows } = await db.query(
+    const jwtConsolidated = !!req.user.consolidated_view;
+    const jwtCompanyId = req.user.company || null;
+    const buscaEmpresa = !jwtConsolidated && !!jwtCompanyId;
+
+    const userP = db.query(
       'SELECT id, full_name AS name, email, role, is_staff, totp_enabled, email_verified FROM users WHERE id = $1',
       [req.user.id]
     );
-    if (!uRows.length) return res.status(404).json({ error: 'Usuario nao encontrado' });
-    const u = uRows[0];
-
-    const jwtConsolidated = !!req.user.consolidated_view;
-    const jwtCompanyId = req.user.company || null;
-
-    let company = null;
-    let memberRole = 'owner';
-    if (!jwtConsolidated && jwtCompanyId) {
-      const { rows: cRows } = await db.query(
+    const companyP = buscaEmpresa
+      ? db.query(
         `SELECT c.id, c.legal_name, c.plan, c.onboarding_step,
                 c.trial_ends_at, c.module_overrides, c.billing_status,
                 c.access_code_used, c.vertical_active, c.vertical, c.ai_enabled, c.ai_consent_at,
@@ -616,15 +627,10 @@ router.post('/me', requireAuth, async (req, res) => {
             AND cm.is_active = true
           WHERE c.id = $2 AND c.is_active = true
             AND (c.owner_id = $1 OR cm.user_id = $1)`,
-        [u.id, jwtCompanyId]
-      );
-      if (cRows.length) {
-        company = cRows[0];
-        memberRole = cRows[0].member_role || 'owner';
-      }
-    }
-
-    const { rows: countRows } = await db.query(
+        [req.user.id, jwtCompanyId]
+      )
+      : null;
+    const countP = db.query(
       `SELECT COUNT(DISTINCT c.id)::int AS cnt
          FROM companies c
          LEFT JOIN company_members cm
@@ -634,14 +640,39 @@ router.post('/me', requireAuth, async (req, res) => {
           AND cm.is_active = true
         WHERE (c.owner_id = $1 OR cm.user_id = $1)
           AND c.is_active = true`,
-      [u.id]
+      [req.user.id]
     );
+    // 15/06/2026: extra_seats_granted vai no company (fallback do gate de
+    // Equipe). Nunca lanca, igual ao withExtraSeats.
+    const extraSeatsP = buscaEmpresa
+      ? getExtraSeatsMap([jwtCompanyId]).catch(() => new Map())
+      : null;
+    // Se a resposta sair antes (404, ou erro no usuario), as outras ainda
+    // podem rejeitar depois: sem isto viravam unhandledRejection.
+    for (const p of [companyP, countP]) if (p) p.catch(() => {});
+
+    const { rows: uRows } = await userP;
+    if (!uRows.length) return res.status(404).json({ error: 'Usuario nao encontrado' });
+    const u = uRows[0];
+
+    let company = null;
+    let memberRole = 'owner';
+    if (companyP) {
+      const { rows: cRows } = await companyP;
+      if (cRows.length) {
+        company = cRows[0];
+        memberRole = cRows[0].member_role || 'owner';
+      }
+    }
+
+    const { rows: countRows } = await countP;
     const companyCount = countRows[0]?.cnt || 0;
 
-    // 15/06/2026: anexa extra_seats_granted ao company (fallback do gate de Equipe).
-    const companyOut = company
-      ? await withExtraSeats(shapeCompany(company, memberRole), company.id)
-      : null;
+    let companyOut = null;
+    if (company) {
+      const extraMap = await extraSeatsP;
+      companyOut = { ...shapeCompany(company, memberRole), extra_seats_granted: extraMap.get(company.id) || 0 };
+    }
 
     res.json({
       user: { id: u.id, name: u.name, email: u.email, role: u.role, is_staff: u.is_staff || false, totp_enabled: u.totp_enabled || false, email_verified: u.email_verified || false },
