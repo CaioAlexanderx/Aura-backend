@@ -39,6 +39,10 @@ router.use('/otica', require('./otica'));
 // pdv_settings.matcon_enabled dentro do router, so na escrita, sem
 // requirePlan no prefixo (modules.js: as rotas matcon dependem so do toggle).
 router.use('/matcon', require('./matconPurchases'));
+// 23/09/2026 — Matcon M3: Profissionais Parceiros (migration 353). Mesmo
+// desenho da Otica: gate por pdv_settings.matcon_enabled dentro do router,
+// so na escrita, sem requirePlan no prefixo.
+router.use('/matcon/professionals', require('./matconProfessionals'));
 // F0 Bloco B2 (30/07/2026): categoryMigration atende /categories/migration/*
 // e /products/brand-candidates + /products/brand/apply, com os caminhos ja
 // completos dentro do proprio router -- por isso monta na RAIZ. Tem que vir

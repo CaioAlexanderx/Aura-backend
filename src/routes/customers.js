@@ -52,6 +52,7 @@ const { getOwnerScopedCompanyIds } = require('../utils/ownerScope');
 const { toPhoneE164BR } = require('../utils/phone');
 const { parseCpfCnpjInput } = require('../utils/cpfCnpj');
 const { parseTags, parsePreferences, parseImportantDates } = require('../services/customerProfileFields');
+const { attachProfessionalsToCustomers } = require('../services/matconProfessionals');
 
 // Colunas da migration 341. null = ainda nao sabemos; false = 42703 visto.
 let profileColumnsAvailable = null;
@@ -199,6 +200,12 @@ router.get('/', async (req, res) => {
       // Crediario: saldo > 0 = cliente deve. Saldo na empresa onde ele foi cadastrado.
       credit_balance: parseFloat(r.credit_balance) || 0,
     }));
+
+    // 23/09/2026 (Matcon M3): com Matcon + clube do profissional ligados,
+    // cada cliente ganha `professional: {id, trade, points_balance,
+    // referrals_count} | null` (parceiro DESTA loja). Loja sem o modulo nao
+    // ganha a chave. Uma query extra so com a pagina; nunca derruba a lista.
+    await attachProfessionalsToCustomers(companyId, customers);
 
     res.json({
       customers,
