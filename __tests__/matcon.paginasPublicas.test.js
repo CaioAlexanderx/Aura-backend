@@ -6,6 +6,7 @@
 //                                     e de orcamento do Studio)
 //   POST /orcamento/:token/respond  → aceitar = approved, recusar = lost
 //   GET  /acompanhar/:token         → entrega: tipo "entrega", 5 etapas,
+//                                     unidade em todo item desde o inicio,
 //                                     itens "6 de 10 sc" depois da 1a viagem
 //                                     e proxima_entrega
 //
@@ -188,20 +189,28 @@ describe('GET /acompanhar/:token — entrega do Matcon', () => {
     expect(res.body.cliente).toBe('Joao');
     expect(res.body.etapas.map((e) => e.key)).toEqual(['aprovado', 'separando', 'pronto', 'saiu', 'entregue']);
     expect(res.body.etapa_atual).toBe(1);
-    expect(res.body.itens[0]).toEqual({ nome: 'Cimento CP-II', qtd: 10, entregue: 6, total: 10, unidade: 'sc' });
+    expect(res.body.itens[0]).toEqual({ nome: 'Cimento CP-II', qtd: 10, quantidade: 10, unidade: 'sc', entregue: 6, total: 10 });
     expect(res.body.proxima_entrega).toBe('2026-09-26');
     expect(res.body.entrega_combinada).toBeNull();
     expect(JSON.stringify(res.body)).not.toMatch(/Rua|address|telefone|phone/i);
   });
 
-  test('antes da 1a viagem: lista simples e a data combinada', async () => {
+  test('antes da 1a viagem: itens com unidade (sem entregue/total) e a data combinada', async () => {
     mockTracker({
       viagens: [{ stage: 'out', sequence: 1, scheduled_for: '2026-09-24' }],
-      itens: [{ nome: 'Cimento CP-II', total: 10, unidade: 'sc', entregue: 0 }],
+      itens: [
+        { nome: 'Cimento CP-II', total: 10, unidade: 'sc', entregue: 0 },
+        { nome: 'Tijolo baiano', total: 1, unidade: 'milheiro', entregue: 0 },
+        { nome: 'Item avulso', total: 2, unidade: null, entregue: 0 },
+      ],
     });
     const res = await request(app).get(`/acompanhar/${TOKEN}`);
     expect(res.body.etapa_atual).toBe(3); // saiu
-    expect(res.body.itens[0]).toEqual({ nome: 'Cimento CP-II', qtd: 10 });
+    expect(res.body.itens).toEqual([
+      { nome: 'Cimento CP-II', qtd: 10, quantidade: 10, unidade: 'sc' },
+      { nome: 'Tijolo baiano', qtd: 1, quantidade: 1, unidade: 'milheiro' },
+      { nome: 'Item avulso', qtd: 2, quantidade: 2, unidade: null },
+    ]);
     expect(res.body.entrega_combinada).toBe('2026-09-24');
     expect(res.body.proxima_entrega).toBeNull();
   });

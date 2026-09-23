@@ -241,10 +241,12 @@ async function saldoEmAberto(companyId, saleId, txidPrefix) {
 // atual e a da proxima viagem ainda aberta (a de menor sequence); sem
 // nenhuma aberta, o pedido esta entregue.
 //
-// Itens: enquanto nenhuma viagem foi entregue, a lista e a de sempre
-// (nome x qtd) e a data combinada vai em `entrega_combinada`. Depois da
-// primeira viagem entregue (entrega parcial), cada item ganha
-// entregue/total/unidade ("6 de 10 sc") e a data da proxima viagem vai em
+// Itens: todo item leva `quantidade` (= qtd) e `unidade` (unit do
+// produto; sale_items nao tem unidade propria) desde a primeira etapa —
+// sem isso o app mostrava "1x" pra 1 milheiro (QA 23/09). Enquanto nenhuma
+// viagem foi entregue, a data combinada vai em `entrega_combinada`. Depois
+// da primeira viagem entregue (entrega parcial), cada item ganha tambem
+// entregue/total ("6 de 10 sc") e a data da proxima viagem vai em
 // `proxima_entrega` — o app so fala em "restantes na proxima viagem"
 // quando esses campos vem.
 const ETAPAS_ENTREGA = [
@@ -324,13 +326,13 @@ async function respostaDaEntrega(d) {
     entrega_combinada: !algumaEntregue && aberta ? aberta.scheduled_for : null,
     imagem:    null,
     itens: itens.map((it) => {
-      const linha = { nome: it.nome, qtd: parseFloat(it.total) || 0 };
+      const qtd = parseFloat(it.total) || 0;
+      const linha = { nome: it.nome, qtd, quantidade: qtd, unidade: it.unidade || null };
       if (!algumaEntregue) return linha;
       return {
         ...linha,
         entregue: parseFloat(it.entregue) || 0,
-        total:    parseFloat(it.total) || 0,
-        unidade:  it.unidade || null,
+        total:    qtd,
       };
     }),
     total:       parseFloat(d.total_amount) || 0,
