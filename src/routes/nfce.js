@@ -18,6 +18,15 @@
 //   reservado — so nota autorizada/denegada consome numero. (Consequencia
 //   aceita: nota abandonada apos rejeicao vira gap de numeracao, resolvivel
 //   por inutilizacao na SEFAZ.)
+//
+// 23/09/2026 (Matcon M1/M2): /emit aceita `delivery_id` — a NF-e que nasce
+//   de uma entrega (components/matcon/nfeEntregaUtil.ts no app). O minimo
+//   pra esteira de Entregas mostrar "NF-E #N · status" e o DANFE: grava
+//   matcon_deliveries.nfe_emission_id depois do INSERT da emissao. Com
+//   delivery_id, a idempotencia e o reuso de numero apos rejeicao passam a
+//   ser POR ENTREGA (a 2a viagem do mesmo pedido tem a sua propria nota,
+//   com outros itens), nao por venda. Sem delivery_id: nada muda.
+//   O bloco <transp> e o CSOSN por item (resto do M2) ficam fora daqui.
 // ============================================================
 
 const express = require('express');
@@ -286,12 +295,43 @@ router.post('/config', requireAuth, requireRole('client','analyst','admin'), asy
   } catch (err) { res.status(500).json({ error: 'Erro ao salvar config' }); }
 });
 
+// ─── Matcon: NF-e a partir da entrega ────────────────────────
+// Defensivo a migration 352 pendente (42P01/42703): sem a tabela nao ha
+// entrega nenhuma pra achar, e o 404 diz isso.
+async function findDeliveryForEmission(companyId, deliveryId) {
+  if (!/^[0-9a-f-]{36}$/i.test(String(deliveryId))) return null;
+  try {
+    const { rows } = await db.query(
+      `SELECT id, sale_id, nfe_emission_id FROM matcon_deliveries
+        WHERE id=$1 AND company_id=$2 AND cancelled_at IS NULL`,
+      [deliveryId, companyId]
+    );
+    return rows[0] || null;
+  } catch (e) {
+    if (e.code === '42P01' || e.code === '42703') return null;
+    throw e;
+  }
+}
+
+async function linkDeliveryEmission(companyId, deliveryId, emissionId) {
+  try {
+    await db.query(
+      `UPDATE matcon_deliveries SET nfe_emission_id=$1 WHERE id=$2 AND company_id=$3`,
+      [emissionId, deliveryId, companyId]
+    );
+  } catch (e) {
+    // Nunca derrubar a emissao por causa do vinculo com a esteira.
+    console.error('[nfce] vinculo com a entrega falhou:', e.message);
+  }
+}
+
 router.post('/emit', requireAuth, requireRole('client','analyst','admin'), async (req, res) => {
   const {
     items, customer_cpf, customer_name, customer_email, recipient_cnpj,
     payment_method, payment_change, payments,
     sale_id, transaction_id, observacoes,
     tipo = 'nfce',
+    delivery_id,
   } = req.body;
 
   const itemsErr = validateItems(items);
@@ -301,7 +341,29 @@ router.post('/emit', requireAuth, requireRole('client','analyst','admin'), async
   }
 
   try {
-    if (sale_id) {
+    // Matcon: a entrega tem que ser desta loja. Sem ela, 404 antes de
+    // reservar numero. deliveryEmissionId = nota ja ligada a esta entrega.
+    let deliveryEmissionId = null;
+    if (delivery_id) {
+      const delivery = await findDeliveryForEmission(req.params.id, delivery_id);
+      if (!delivery) return res.status(404).json({ error: 'Entrega nao encontrada nesta loja.' });
+      deliveryEmissionId = delivery.nfe_emission_id || null;
+    }
+
+    if (delivery_id) {
+      if (deliveryEmissionId) {
+        const { rows: existing } = await db.query(
+          `SELECT * FROM nfce_emissions
+            WHERE id=$1 AND company_id=$2
+              AND status IN ('autorizada','processando')`,
+          [deliveryEmissionId, req.params.id]
+        );
+        if (existing.length) {
+          const e = existing[0];
+          return res.status(200).json({ nfce: e, tipo, pdf_url: e.pdf_url, xml_url: e.xml_url, qr_code: e.qr_code, url_consulta: e.url_consulta, idempotent: true });
+        }
+      }
+    } else if (sale_id) {
       const { rows: existing } = await db.query(
         `SELECT * FROM nfce_emissions
           WHERE company_id=$1 AND sale_id=$2 AND tipo=$3
@@ -387,7 +449,18 @@ router.post('/emit', requireAuth, requireRole('client','analyst','admin'), async
     const numCol   = useSefazSp ? 'next_number_sefaz_sp' : 'next_number';
     let   serieNF  = useSefazSp ? config.serie_sefaz_sp : config.serie_nfce;
     let numeroNF = null;
-    if (sale_id) {
+    if (delivery_id) {
+      // Por entrega: so reusa o numero da nota rejeitada DESTA entrega.
+      if (deliveryEmissionId) {
+        const { rows: prevRej } = await db.query(
+          `SELECT numero FROM nfce_emissions
+            WHERE id=$1 AND company_id=$2 AND tipo=$3 AND numero IS NOT NULL
+              AND status IN ('rejeitada','erro')`,
+          [deliveryEmissionId, req.params.id, tipo]
+        );
+        if (prevRej.length && prevRej[0].numero != null) numeroNF = parseInt(prevRej[0].numero, 10);
+      }
+    } else if (sale_id) {
       const { rows: prevRej } = await db.query(
         `SELECT numero FROM nfce_emissions
           WHERE company_id=$1 AND sale_id=$2 AND tipo=$3 AND numero IS NOT NULL
@@ -433,6 +506,10 @@ router.post('/emit', requireAuth, requireRole('client','analyst','admin'), async
        payment_change||0, req.user.id, tipo]
     );
     const emission = created[0];
+
+    // Matcon: liga a nota a entrega ANTES de transmitir — se a SEFAZ
+    // rejeitar, a entrega ja mostra a nota rejeitada pra reprocessar.
+    if (delivery_id) await linkDeliveryEmission(req.params.id, delivery_id, emission.id);
 
     let finalStatus = 'processando';
     let prov = {};

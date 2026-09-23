@@ -53,6 +53,12 @@
 //   manual mal aplicado), MAIS virgula sobrando antes do ')' de fechamento --
 //   Postgres rejeitava a query inteira com "syntax error at or near ")"" e
 //   os dois endpoints de busca de venda pra troca caiam 100% (500) no PDV.
+// 23/09/2026 (Matcon M1): POST /sale aceita `quote_id` (venda que nasceu de
+//   um orcamento) e o DELETE /sale cancela as entregas da venda. A logica
+//   mora em services/matconSaleHooks.js, chamada DENTRO da transacao; sem
+//   quote_id o gancho nao toca o banco. GET /sale/:saleId e GET /sales
+//   expoem has_pending_delivery (selo "saldo a entregar"), calculado DENTRO
+//   do SELECT que ja existia — nenhuma ida a mais ao banco.
 // ============================================================
 const router      = require('express').Router({ mergeParams: true });
 const db          = require('../config/database');
@@ -62,6 +68,8 @@ const { checkCouponOwner } = require('../services/couponPolicy');
 const { hasSaleNumberColumn, saleNumberSelect } = require('../utils/saleNumber');
 // 16/09/2026: cliente de outra loja do mesmo dono vale (utils/customerScope.js).
 const { findOwnerScopedCustomer } = require('../utils/customerScope');
+// 23/09/2026 (Matcon M1): ganchos da venda — ver cabecalho do servico.
+const matconSaleHooks = require('../services/matconSaleHooks');
 
 const fmt = (v) => parseFloat(v || 0).toFixed(2);
 const SP_DATE_NOW = "(NOW() AT TIME ZONE 'America/Sao_Paulo')::date";
@@ -692,6 +700,17 @@ async function handleSale(req, res, opts = {}) {
       itemsSummary: productNames.slice(0, 3).join(', '),
     });
 
+    // Matcon M1: venda que nasceu de um orcamento (body.quote_id) grava o
+    // vinculo e cria a 1a entrega. Sem quote_id nao faz nada. Erro aqui
+    // (orcamento de outra loja, ja convertido) reverte a venda inteira.
+    const matconResult = await matconSaleHooks.afterSaleInsert(client, {
+      companyId: req.params.id,
+      sale,
+      body: req.body,
+      userId: req.user?.id || null,
+    });
+    if (matconResult) sale.quote_id = matconResult.quote_id;
+
     await client.query('COMMIT');
 
     const { rows: saleItems } = await db.query(
@@ -735,6 +754,8 @@ async function handleSale(req, res, opts = {}) {
       track_url: sale.tracker_token
         ? `${process.env.APP_PUBLIC_URL || ''}/acompanhar/${sale.tracker_token}`
         : null,
+      // Matcon M1: so aparece quando a venda veio de um orcamento.
+      ...(matconResult ? { matcon: matconResult } : {}),
     });
   } catch (e) {
     await client.query('ROLLBACK');
@@ -824,8 +845,12 @@ router.post('/sale-com-sinal', async (req, res) => {
 // ===== GET /sale/:saleId =====
 router.get('/sale/:saleId', async (req, res) => {
   try {
+    // Matcon M1: has_pending_delivery vem no MESMO SELECT (sondagem da
+    // tabela em cache — sem ida extra ao banco em regime).
+    const comMatcon = await matconSaleHooks.tabelasMatconExistem(db);
     const { rows } = await db.query(
-      `SELECT s.*, u.full_name AS user_seller_name, c.name AS customer_name, e.name AS employee_name
+      `SELECT s.*, u.full_name AS user_seller_name, c.name AS customer_name, e.name AS employee_name,
+              ${matconSaleHooks.pendingDeliverySelect(comMatcon)}
        FROM sales s LEFT JOIN users u ON u.id=s.seller_id LEFT JOIN customers c ON c.id=s.customer_id
        LEFT JOIN employees e ON e.id=s.employee_id
        WHERE s.id=$1 AND s.company_id=$2`,
@@ -855,7 +880,11 @@ router.get('/sale/:saleId', async (req, res) => {
     } catch (refErr) {
       if (refErr.code !== '42P01' && refErr.code !== '42703') throw refErr;
     }
-    res.json({ ...rows[0], items: items.map(it => ({ ...it, refunded_quantity: refundedByItem[it.id] || 0 })) });
+    res.json({
+      ...rows[0],
+      has_pending_delivery: rows[0].has_pending_delivery === true,
+      items: items.map(it => ({ ...it, refunded_quantity: refundedByItem[it.id] || 0 })),
+    });
   } catch (e) { res.status(500).json({ error: 'Erro ao buscar venda' }); }
 });
 
@@ -876,11 +905,16 @@ router.get('/sales', async (req, res) => {
     vals.push(product_barcode); i++;
   }
   try {
-    const withSaleNumber = await hasSaleNumberColumn(db);
+    // As duas sondagens em paralelo (ambas em cache na maioria das vezes).
+    const [withSaleNumber, comMatcon] = await Promise.all([
+      hasSaleNumberColumn(db),
+      matconSaleHooks.tabelasMatconExistem(db),
+    ]);
     const { rows } = await db.query(
       `SELECT s.id, ${saleNumberSelect(withSaleNumber)}, s.total_amount, s.discount_amount,
               s.payment_method, s.coupon_code, s.status,
               s.seller_name, s.created_at,
+              ${matconSaleHooks.pendingDeliverySelect(comMatcon)},
               u.full_name AS user_seller_name, c.name AS customer_name, c.cpf_cnpj,
               e.name AS employee_name, COUNT(si.id) AS items_count
        FROM sales s LEFT JOIN users u ON u.id=s.seller_id LEFT JOIN customers c ON c.id=s.customer_id
@@ -889,7 +923,7 @@ router.get('/sales', async (req, res) => {
        ORDER BY s.created_at DESC LIMIT $${i} OFFSET $${i+1}`,
       [...vals, limit, offset]
     );
-    res.json({ sales: rows });
+    res.json({ sales: rows.map(r => ({ ...r, has_pending_delivery: r.has_pending_delivery === true })) });
   } catch (e) { res.status(500).json({ error: 'Erro ao listar vendas' }); }
 });
 
@@ -1005,6 +1039,9 @@ router.delete('/sale/:saleId', async (req, res) => {
          notes=CONCAT(COALESCE(notes,''),' [CANCELADA]'), updated_at=NOW() WHERE id=$2`,
       [req.user?.id||null, req.params.saleId]
     );
+    // Matcon M1: entregas da venda saem da esteira; o orcamento volta a
+    // poder virar pedido. Venda sem Matcon: so a sondagem da tabela.
+    await matconSaleHooks.afterSaleCancel(client, { companyId: req.params.id, saleId: req.params.saleId });
     await client.query('COMMIT');
     res.json({ ok: true, cancelled: req.params.saleId, items_restored: items.filter(i => i.product_id).length, amount_reversed: parseFloat(sale.total_amount) });
   } catch (e) {
