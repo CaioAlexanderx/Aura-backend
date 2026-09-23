@@ -24,6 +24,7 @@ const db = require('../config/database');
 const { requireAuth } = require('../middleware/auth');
 const { linkImportedCategories } = require('../services/importCategoryLink');
 const { findOrCreateSupplierByCnpj } = require('../services/supplierLookup');
+const { gravarUltimaCompra, casarNotaComPedidos } = require('../services/matconPurchases');
 
 // ─── Mapeamento de colunas — fuzzy match ────────────────────
 
@@ -765,6 +766,46 @@ async function registrarEntradaDeEstoque(client, { productId, companyId, supplie
   }
 }
 
+// ─── Matcon M4 (23/09/2026): ultima compra + pedido de compra ─────
+//
+// A nota grava no produto "quem vendeu e por quanto" (products.last_*,
+// migration 354) e fecha o pedido de compra ENVIADO ao mesmo CNPJ
+// (src/services/matconPurchases.js). Os dois sao best-effort, cada um no
+// seu SAVEPOINT, pelo mesmo motivo do rastro de estoque acima: falha aqui
+// (ex.: base sem a 354) nunca pode derrubar a importacao da nota.
+// Quantidade e custo do produto continuam exatamente como antes.
+async function registrarUltimaCompra(client, productId, nfeInfo, unitCost) {
+  try {
+    await client.query('SAVEPOINT sp_ultima_compra');
+    await gravarUltimaCompra(client, productId, {
+      supplierName: nfeInfo.nome_emitente,
+      supplierCnpj: nfeInfo.cnpj_emitente,
+      supplierPhone: null,
+      unitCost,
+    });
+    await client.query('RELEASE SAVEPOINT sp_ultima_compra');
+  } catch (err) {
+    console.error('[import-nfe] ultima compra error:', err.message);
+    try { await client.query('ROLLBACK TO SAVEPOINT sp_ultima_compra'); } catch (_) { /* ignora */ }
+  }
+}
+
+async function fecharPedidosDeCompra(client, companyId, nfeInfo, chegou) {
+  if (!chegou.length) return;
+  try {
+    await client.query('SAVEPOINT sp_pedido_compra');
+    await casarNotaComPedidos(client, companyId, {
+      supplierCnpj: nfeInfo.cnpj_emitente,
+      invoiceNumber: nfeInfo.numero,
+      items: chegou,
+    });
+    await client.query('RELEASE SAVEPOINT sp_pedido_compra');
+  } catch (err) {
+    console.error('[import-nfe] pedido de compra error:', err.message);
+    try { await client.query('ROLLBACK TO SAVEPOINT sp_pedido_compra'); } catch (_) { /* ignora */ }
+  }
+}
+
 // ─── POST /products/import-nfe ────────────────────────────────
 
 router.post('/products/import-nfe', requireAuth, async (req, res) => {
@@ -816,6 +857,10 @@ router.post('/products/import-nfe', requireAuth, async (req, res) => {
       name: parsed.nfe_info.nome_emitente,
     });
 
+    // Matcon M4: o que entrou no estoque de produto JA cadastrado, para
+    // casar com o pedido de compra enviado ao mesmo fornecedor.
+    const chegou = [];
+
     for (const p of toSave) {
       if (!p.name) continue;
       let existing = null;
@@ -847,7 +892,9 @@ router.post('/products/import-nfe', requireAuth, async (req, res) => {
               quantity: p.stock_qty, unitCost: p.cost_price || null,
               referenceId: batchId, notes: 'Importacao NF-e',
             });
+            chegou.push({ product_id: existing.id, quantity: p.stock_qty });
           }
+          await registrarUltimaCompra(client, existing.id, parsed.nfe_info, p.cost_price);
           dupes++; continue;
         }
       }
@@ -870,8 +917,10 @@ router.post('/products/import-nfe', requireAuth, async (req, res) => {
           referenceId: batchId, notes: 'Importacao NF-e',
         });
       }
+      await registrarUltimaCompra(client, novo.rows[0].id, parsed.nfe_info, p.cost_price);
       saved++;
     }
+    await fecharPedidosDeCompra(client, companyId, parsed.nfe_info, chegou);
     if (req.body.create_expense && parsed.nfe_info.valor_total > 0) {
       const dataEmissao = parsed.nfe_info.data_emissao
         ? parsed.nfe_info.data_emissao.substring(0, 10)
