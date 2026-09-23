@@ -135,6 +135,12 @@ function startServer() {
     // OTICA_WA_AUTO_ENABLED=false. Quem despacha e o waDispatcher.
     const { initOticaReminderJob } = require('./jobs/oticaReminderJob');
     initOticaReminderJob();
+
+    // Matcon M1 (352): orcamento open com validade vencida vira expired —
+    // diario 00h05 BRT e uma vez logo apos o boot. Sem mensagem. Kill
+    // switch MATCON_QUOTE_EXPIRY_ENABLED=false.
+    const { initMatconQuoteExpiryJob } = require('./jobs/matconQuoteExpiryJob');
+    initMatconQuoteExpiryJob();
   });
 }
 
