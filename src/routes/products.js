@@ -268,11 +268,17 @@ router.get('/', async (req, res) => {
       params.push(`%${search}%`);
     }
 
-    const countRes = await db.query(`SELECT COUNT(*) AS total FROM products ${where}`, params);
+    // 23/09/2026: contagem e lista saem JUNTAS. Antes uma esperava a outra, e
+    // cada espera custa ~190 ms (ida e volta Railway us-west -> Supabase Sao
+    // Paulo). A ordem das chamadas a db.query nao muda: o COUNT e disparado
+    // primeiro e o comFallbackDeFicha dispara a 1a tentativa da lista logo
+    // em seguida, sem esperar nada; os degraus de 42703 so saem depois que a
+    // tentativa anterior falha, como antes. Erro em qualquer uma continua 500.
+    const countP = db.query(`SELECT COUNT(*) AS total FROM products ${where}`, params);
     // Migration 305 — ficha tecnica. Tentar-e-cair em vez de consultar o
     // information_schema: uma query a mais desloca a sequencia de mocks
     // dos testes de integracao, e no caminho feliz ela e pura perda.
-    const dataRes = await comFallbackDeFicha((colsFicha, colDuracao, colsMatcon, colCartao) => db.query(
+    const dataP = comFallbackDeFicha((colsFicha, colDuracao, colsMatcon, colCartao) => db.query(
       `SELECT id, name, sku, barcode, category, description, price, cost_price,
               stock_qty, stock_min, stock_max, unit, color, size, image_url, ncm,
               -- brand (migration 261) e mais antiga que a 305/342/350 acima,
@@ -310,6 +316,7 @@ router.get('/', async (req, res) => {
        FROM products ${where} ORDER BY name ASC LIMIT $${params.length + 1} OFFSET $${params.length + 2}`,
       [...params, limit, offset]
     ));
+    const [countRes, dataRes] = await Promise.all([countP, dataP]);
 
     const products = dataRes.rows.map(r => ({
       id: r.id, name: r.name || '', sku: r.sku || '', barcode: r.barcode || '',
