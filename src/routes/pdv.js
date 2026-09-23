@@ -53,6 +53,11 @@
 //   manual mal aplicado), MAIS virgula sobrando antes do ')' de fechamento --
 //   Postgres rejeitava a query inteira com "syntax error at or near ")"" e
 //   os dois endpoints de busca de venda pra troca caiam 100% (500) no PDV.
+// 23/09/2026 (Matcon M1): POST /sale aceita `quote_id` (venda que nasceu de
+//   um orcamento) e o DELETE /sale cancela as entregas da venda. A logica
+//   mora em services/matconSaleHooks.js, chamada DENTRO da transacao; sem
+//   quote_id o gancho nao toca o banco. GET /sale/:saleId e GET /sales
+//   expoem has_pending_delivery (selo "saldo a entregar").
 // ============================================================
 const router      = require('express').Router({ mergeParams: true });
 const db          = require('../config/database');
@@ -62,6 +67,8 @@ const { checkCouponOwner } = require('../services/couponPolicy');
 const { hasSaleNumberColumn, saleNumberSelect } = require('../utils/saleNumber');
 // 16/09/2026: cliente de outra loja do mesmo dono vale (utils/customerScope.js).
 const { findOwnerScopedCustomer } = require('../utils/customerScope');
+// 23/09/2026 (Matcon M1): ganchos da venda — ver cabecalho do servico.
+const matconSaleHooks = require('../services/matconSaleHooks');
 
 const fmt = (v) => parseFloat(v || 0).toFixed(2);
 const SP_DATE_NOW = "(NOW() AT TIME ZONE 'America/Sao_Paulo')::date";
@@ -692,6 +699,17 @@ async function handleSale(req, res, opts = {}) {
       itemsSummary: productNames.slice(0, 3).join(', '),
     });
 
+    // Matcon M1: venda que nasceu de um orcamento (body.quote_id) grava o
+    // vinculo e cria a 1a entrega. Sem quote_id nao faz nada. Erro aqui
+    // (orcamento de outra loja, ja convertido) reverte a venda inteira.
+    const matconResult = await matconSaleHooks.afterSaleInsert(client, {
+      companyId: req.params.id,
+      sale,
+      body: req.body,
+      userId: req.user?.id || null,
+    });
+    if (matconResult) sale.quote_id = matconResult.quote_id;
+
     await client.query('COMMIT');
 
     const { rows: saleItems } = await db.query(
@@ -735,6 +753,8 @@ async function handleSale(req, res, opts = {}) {
       track_url: sale.tracker_token
         ? `${process.env.APP_PUBLIC_URL || ''}/acompanhar/${sale.tracker_token}`
         : null,
+      // Matcon M1: so aparece quando a venda veio de um orcamento.
+      ...(matconResult ? { matcon: matconResult } : {}),
     });
   } catch (e) {
     await client.query('ROLLBACK');
@@ -855,7 +875,13 @@ router.get('/sale/:saleId', async (req, res) => {
     } catch (refErr) {
       if (refErr.code !== '42P01' && refErr.code !== '42703') throw refErr;
     }
-    res.json({ ...rows[0], items: items.map(it => ({ ...it, refunded_quantity: refundedByItem[it.id] || 0 })) });
+    // Matcon M1: selo "saldo a entregar". Falha vira false (ver servico).
+    const pendentes = await matconSaleHooks.salesWithPendingDelivery(db, [String(rows[0].id)]);
+    res.json({
+      ...rows[0],
+      has_pending_delivery: pendentes.has(String(rows[0].id)),
+      items: items.map(it => ({ ...it, refunded_quantity: refundedByItem[it.id] || 0 })),
+    });
   } catch (e) { res.status(500).json({ error: 'Erro ao buscar venda' }); }
 });
 
@@ -889,7 +915,9 @@ router.get('/sales', async (req, res) => {
        ORDER BY s.created_at DESC LIMIT $${i} OFFSET $${i+1}`,
       [...vals, limit, offset]
     );
-    res.json({ sales: rows });
+    // Matcon M1: has_pending_delivery por venda, numa consulta so.
+    const pendentes = await matconSaleHooks.salesWithPendingDelivery(db, rows.map(r => String(r.id)));
+    res.json({ sales: rows.map(r => ({ ...r, has_pending_delivery: pendentes.has(String(r.id)) })) });
   } catch (e) { res.status(500).json({ error: 'Erro ao listar vendas' }); }
 });
 
@@ -1005,6 +1033,9 @@ router.delete('/sale/:saleId', async (req, res) => {
          notes=CONCAT(COALESCE(notes,''),' [CANCELADA]'), updated_at=NOW() WHERE id=$2`,
       [req.user?.id||null, req.params.saleId]
     );
+    // Matcon M1: entregas da venda saem da esteira; o orcamento volta a
+    // poder virar pedido. Venda sem Matcon: so a sondagem da tabela.
+    await matconSaleHooks.afterSaleCancel(client, { companyId: req.params.id, saleId: req.params.saleId });
     await client.query('COMMIT');
     res.json({ ok: true, cancelled: req.params.saleId, items_restored: items.filter(i => i.product_id).length, amount_reversed: parseFloat(sale.total_amount) });
   } catch (e) {

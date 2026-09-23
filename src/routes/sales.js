@@ -53,6 +53,11 @@
 //   SQL usa NULLIF(x,'NaN'::numeric) (uma linha ruim contribui 0, nao zera o
 //   total) e o JS aplica `|| 0` em revenue/avg_ticket/net_amount. Raiz (nao
 //   persistir NaN) tratada no trocaV2.js.
+//
+// 23/09/2026 — Matcon M1: lista e detalhe expoem `has_pending_delivery`
+//   (selo "saldo a entregar" do SaleDetailModal). O cancel chama
+//   matconSaleHooks.afterSaleCancel: entregas da venda saem da esteira e o
+//   orcamento volta a poder virar pedido.
 // ============================================================
 
 const router = require('express').Router({ mergeParams: true });
@@ -62,6 +67,7 @@ const AppError = require('../errors/AppError');
 const creditLedger = require('../services/creditLedger');
 const { cancelDevolucao, activeReturnsOf } = require('../services/credit/refund');
 const { hasSaleNumberColumn, saleNumberSelect } = require('../utils/saleNumber');
+const matconSaleHooks = require('../services/matconSaleHooks');
 
 // Lancamento financeiro da venda, pra UI abrir "Editar lancamento".
 //
@@ -206,6 +212,12 @@ router.get('/', asyncHandler(async (req, res) => {
   const { rows: statsRows } = await pool.query(statsQuery, vals);
   const stats = statsRows[0];
 
+  // Matcon M1: selo "saldo a entregar". Por ultimo e numa consulta so;
+  // qualquer falha vira false (ver matconSaleHooks).
+  const pendentes = await matconSaleHooks.salesWithPendingDelivery(
+    pool, rows.map(function(r) { return String(r.id); })
+  );
+
   res.json({
     total: total,
     limit: limitNum,
@@ -236,6 +248,7 @@ router.get('/', asyncHandler(async (req, res) => {
         seller: { id: r.seller_id || r.employee_id || null, name: r.seller_name || null },
         items_count: r.items_count,
         transaction_id: r.transaction_id,
+        has_pending_delivery: pendentes.has(String(r.id)),
       };
     }),
     stats: {
@@ -426,6 +439,10 @@ router.get('/:sale_id', asyncHandler(async (req, res) => {
     if (e.code !== '42P01' && e.code !== '42703') throw e;
   }
 
+  // Matcon M1: selo "saldo a entregar" (SaleDetailModal le
+  // sale.has_pending_delivery). Falha vira false.
+  const pendentes = await matconSaleHooks.salesWithPendingDelivery(pool, [String(sale.id)]);
+
   res.json({
     sale: {
       id: sale.id,
@@ -442,6 +459,7 @@ router.get('/:sale_id', asyncHandler(async (req, res) => {
       cash_tendered: sale.cash_tendered ? parseFloat(sale.cash_tendered) : null,
       coupon_code: sale.coupon_code,
       transaction_id: sale.transaction_id,
+      has_pending_delivery: pendentes.has(String(sale.id)),
     },
     customer: sale.customer_id ? {
       id: sale.customer_id,
@@ -699,6 +717,10 @@ router.post('/:sale_id/cancel', asyncHandler(async (req, res) => {
       }
     }
 
+    // Matcon M1: entregas da venda saem da esteira; o orcamento que virou
+    // esta venda volta a poder virar pedido (continua approved).
+    const matconUndo = await matconSaleHooks.afterSaleCancel(client, { companyId: companyId, saleId: saleId });
+
     await client.query('COMMIT');
     res.json({
       ok: true,
@@ -717,6 +739,7 @@ router.post('/:sale_id/cancel', asyncHandler(async (req, res) => {
       payouts_reversed: payoutsReversed,
       fiscal_warnings: fiscalWarnings,
       devolucao_undo: devolucaoUndo,
+      deliveries_cancelled: matconUndo.deliveries_cancelled,
     });
   } catch (err) {
     await client.query('ROLLBACK');
