@@ -15,6 +15,7 @@
 //   NUMBER: service_fee_pct, food_service_fee_pct,
 //           card_fee_credit_pct, card_fee_debit_pct
 //   NUMBER OU NULL (percentual 0-100): card_price_pct
+//   STRING (enum) OU NULL: label_size (99x21 | 30x25 | 58mm)
 //
 // 26/05/2026: ampliada whitelist pra desbloquear UI Studio/Food. Antes,
 // app/studio/(estudio)/configuracoes.tsx tentava salvar studio_approval_*
@@ -72,6 +73,15 @@ const ALLOWED_STRING_ARRAY_KEYS = {
 // String enum: studio_approval_mode pode ser "wa_me" ou "whatsapp_business"
 const ALLOWED_STRING_KEYS = {
   studio_approval_mode: ['wa_me', 'whatsapp_business'],
+};
+
+// 24/09/2026 — modelo de etiqueta escolhido pela loja (aura-app
+// LABEL_SIZE_PRESETS). null = a loja nunca escolheu: o app cai na escolha
+// antiga do navegador (localStorage) e, sem ela, no 99x21 — por isso o
+// default NAO pode ser '99x21' (a Eryca, que usa 30x25 so no navegador,
+// voltaria pro 99x21 no primeiro GET). Novos modelos entram nesta lista.
+const ALLOWED_NULLABLE_STRING_KEYS = {
+  label_size: ['99x21', '30x25', '58mm'],
 };
 
 const ALLOWED_NUMBER_KEYS = [
@@ -151,6 +161,7 @@ const DEFAULT_SETTINGS = {
   // mantem o proprio fallback ao ler o jsonb cru.)
   label_offset_mm:           0,
   label_cols:                3,
+  label_size:                null,
 };
 
 function validateSettings(settings) {
@@ -179,6 +190,19 @@ function validateSettings(settings) {
         throw new AppError(key + ' deve ser um de: ' + allowedValues.join(', '), 400);
       }
       clean[key] = settings[key];
+    }
+  }
+
+  // String enum que aceita null (24/09/2026 — label_size)
+  for (const key of Object.keys(ALLOWED_NULLABLE_STRING_KEYS)) {
+    if (key in settings) {
+      const raw = settings[key];
+      if (raw === null || raw === '') { clean[key] = null; continue; }
+      const allowedValues = ALLOWED_NULLABLE_STRING_KEYS[key];
+      if (typeof raw !== 'string' || !allowedValues.includes(raw)) {
+        throw new AppError(key + ' deve ser um de: ' + allowedValues.join(', '), 400);
+      }
+      clean[key] = raw;
     }
   }
 
