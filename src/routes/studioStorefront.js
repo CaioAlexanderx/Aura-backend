@@ -75,6 +75,7 @@ const { normalizarDataDoLote } = require('../services/dataDoLote');
 // Pico: a loja continua no ar e o botao vira orcamento.
 const { modoDaLoja } = require('../services/modoDaLoja');
 const { rastreadoresDaLoja } = require('../services/rastreadores');
+const { vitrineV2Ligada } = require('../services/vitrineV2');
 const { montarRedes } = require('../services/redesSociais');
 const { cotarLote } = require('../services/studioLote');
 const { unitPriceForQty, buildLadder } = require('../services/studioQtyTiers');
@@ -264,6 +265,9 @@ function montarSite(config, nomeDaEmpresa) {
     // e o painel gravava; nenhuma loja lia. Validados aqui — ID mal
     // copiado vira null, nao script quebrado. Ver services/rastreadores.js.
     rastreadores: rastreadoresDaLoja(config),
+    // Chave da vitrine nova por loja (25/09/2026). Só escolhe a tela que
+    // o app desenha; ver services/vitrineV2.js.
+    vitrine_v2: vitrineV2Ligada(config.studio_settings),
   };
 }
 
