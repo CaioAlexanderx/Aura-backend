@@ -22,6 +22,56 @@ const {
   sendOrderStatusEmail,
   sendOwnerNewOrderEmail,
 } = require('./mailer');
+const { vitrineV2Ligada } = require('./vitrineV2');
+
+/**
+ * O link do pedido para o e-mail de confirmacao da cliente do Studio
+ * (Fase 2 da vitrine, 25/09/2026). A loja comum nao tem pagina de pedido
+ * e segue sem link.
+ *
+ *   - loja na vitrine nova (chave `vitrine_v2`): a confirmacao persistente
+ *     no endereco da loja, `<loja>/pedido/<token>`;
+ *   - loja na vitrine de hoje: o acompanhamento, que ja existe e funciona.
+ *
+ * A pagina nova so vira o link do e-mail com a chave ligada porque a
+ * chave e o que garante que o app que a desenha ja esta no ar naquela
+ * loja. Quando a chave sair (fim da Fase 5), sai com ela.
+ *
+ * Best-effort: qualquer falha (coluna ausente, loja sem config) vira
+ * e-mail sem botao, nunca e-mail que nao sai.
+ */
+async function linkDoPedidoDaVitrine(order) {
+  // So o Studio tem pagina de pedido. `vertical` vem da linha recarregada
+  // (NOTIFY_FIELDS) ou do RETURNING * — pedido sem ela nao e do Studio
+  // para este fim, e a loja comum nao paga uma consulta a mais.
+  if (!order || !order.id || order.vertical !== 'studio') return null;
+  try {
+    const { rows } = await db.query(
+      `SELECT o.public_token, o.vertical, dcc.slug, dcc.custom_domain, dcc.custom_domain_status,
+              COALESCE(c.studio_settings, '{}'::jsonb) AS studio_settings
+         FROM digital_orders o
+         JOIN digital_channel_config dcc ON dcc.company_id = o.company_id
+         JOIN companies c ON c.id = o.company_id
+        WHERE o.id = $1
+        LIMIT 1`,
+      [order.id]
+    );
+    const r = rows[0];
+    if (!r || r.vertical !== 'studio' || !r.public_token) return null;
+    if (vitrineV2Ligada(r.studio_settings)) {
+      // Import tardio: storefrontBuilder carrega meio mundo, e este modulo
+      // e requerido por webhooks que nao precisam dele no caminho comum.
+      const { urlDaLoja } = require('./storefrontBuilder');
+      return { url: `${urlDaLoja(r)}/pedido/${r.public_token}`, rotulo: 'Ver meu pedido' };
+    }
+    const app = process.env.APP_PUBLIC_URL || '';
+    if (!/^https:\/\//.test(app)) return null;
+    return { url: `${app}/acompanhar/${r.public_token}`, rotulo: 'Acompanhar meu pedido' };
+  } catch (err) {
+    console.error('[notify] link do pedido indisponivel:', err.message);
+    return null;
+  }
+}
 
 const EXPO_PUSH_URL = 'https://exp.host/--/api/v2/push/send';
 
@@ -113,7 +163,10 @@ const NOTIFY_FIELDS =
   'customer_phone, total, delivery_type, payment_method, ' +
   // migration 288 — sem estas duas o caminho de recarga perde justamente
   // o que o lojista precisa saber num pedido delivery_type='courier'.
-  'courier_name, courier_plate';
+  'courier_name, courier_plate, ' +
+  // Fase 2 da vitrine Studio: decide se o e-mail da cliente leva o link
+  // do pedido (linkDoPedidoDaVitrine) sem uma consulta a mais na loja comum.
+  'vertical';
 
 /**
  * 17/08/2026 — POR QUE ISSO EXISTE:
@@ -233,13 +286,15 @@ async function notifyPaymentConfirmed({ order: input }) {
     }).catch(err => console.error('[notify] owner email error:', err.message))
   ));
 
-  // 3. E-mail ao cliente
+  // 3. E-mail ao cliente — no Studio, com o link do pedido (Fase 2).
   if (order.customer_email) {
+    const link = await linkDoPedidoDaVitrine(order);
     await sendOrderStatusEmail(order.customer_email, {
       order_number:  order.order_number,
       customer_name: order.customer_name,
       status:        'confirmed',
       store_name,
+      ...(link ? { link } : {}),
     }).catch(err => console.error('[notify] customer confirmed email error:', err.message));
   }
 }
@@ -311,4 +366,7 @@ async function notifyManualPixOrder({ order: input }) {
   ));
 }
 
-module.exports = { notifyNewOrder, notifyPaymentConfirmed, notifyStatusChange, notifyManualPixOrder };
+module.exports = {
+  notifyNewOrder, notifyPaymentConfirmed, notifyStatusChange, notifyManualPixOrder,
+  linkDoPedidoDaVitrine,
+};
