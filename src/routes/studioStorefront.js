@@ -85,6 +85,8 @@ const { normalizarDataDoLote } = require('../services/dataDoLote');
 const { modoDaLoja } = require('../services/modoDaLoja');
 const { rastreadoresDaLoja } = require('../services/rastreadores');
 const { vitrineV2Ligada } = require('../services/vitrineV2');
+// Fase 4: links de acompanhamento no endereco da loja com a chave ligada.
+const { linkDoPosCompra } = require('../services/marcaDaLoja');
 const { montarRedes } = require('../services/redesSociais');
 const { cotarLote, codigoDoLote } = require('../services/studioLote');
 const { buildLadder } = require('../services/studioQtyTiers');
@@ -864,7 +866,9 @@ router.post('/:slug/studio/order', async (req, res) => {
 
   try {
     const { rows: configs } = await db.query(
-      `SELECT dcc.*, COALESCE(c.trade_name, c.legal_name) AS company_display_name
+      `SELECT dcc.*, COALESCE(c.trade_name, c.legal_name) AS company_display_name,
+              -- A chave vitrine_v2 decide para onde vai o track_url (Fase 4).
+              COALESCE(c.studio_settings, '{}'::jsonb) AS studio_settings
          FROM digital_channel_config dcc
          JOIN companies c ON c.id = dcc.company_id
         WHERE dcc.slug = $1 AND dcc.is_published = true`, [slug]);
@@ -1270,8 +1274,10 @@ router.post('/:slug/studio/order', async (req, res) => {
       // mostrar. O token vem do RETURNING * (DEFAULT no banco, migration
       // 322); null enquanto a migration nao rodou — a tela simplesmente
       // nao mostra o bloco.
+      // Fase 4: com a chave `vitrine_v2` ligada, no endereco da loja
+      // (`<loja>/acompanhar/<token>`); desligada, o de sempre.
       track_url: order.public_token
-        ? `${process.env.APP_PUBLIC_URL || ''}/acompanhar/${order.public_token}`
+        ? linkDoPosCompra({ config, tipo: 'acompanhar', token: order.public_token })
         : null,
       // Fase 2: a confirmacao persistente, no endereco da loja (dominio
       // proprio quando ativo). null sem a migration 322 — o app cai na
@@ -1542,8 +1548,8 @@ router.get('/:slug/studio/pedido/:token', async (req, res) => {
       loja: config,
       studioSettings: config.studio_settings,
       faixas,
-      // Por ora o acompanhamento atual; a Fase 4 leva para o endereco da loja.
-      acompanharUrl: `${process.env.APP_PUBLIC_URL || ''}/acompanhar/${token}`,
+      // Fase 4: no endereco da loja com a chave ligada (marcaDaLoja.js).
+      acompanharUrl: linkDoPosCompra({ config, tipo: 'acompanhar', token }),
     }));
   } catch (err) {
     console.error('[studio-storefront] pedido por token error:', err);

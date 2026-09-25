@@ -26,6 +26,7 @@
 //   refaz INSERT sem a coluna quando a migration ainda não rodou.
 // ============================================================
 const express = require('express');
+const { linkDoPosCompraDaEmpresa } = require('../services/marcaDaLoja');
 const router  = express.Router({ mergeParams: true });
 const crypto  = require('crypto');
 const db      = require('../config/database');
@@ -895,7 +896,10 @@ router.post('/orders/:oid/approval', async function(req, res) {
   if (!token) return res.status(500).json({ error: 'Não foi possível gerar token' });
 
   const expiresInDays = Math.min(Math.max(parseInt(expires_in_days) || 7, 1), 30);
-  const approvalUrl = `${process.env.APP_PUBLIC_URL || ''}/aprovacao/${token}`;
+  // Fase 4 (25/09/2026): com a chave `vitrine_v2` da loja ligada, o link
+  // vai para o endereco DA LOJA (`<loja>/aprovacao/<token>`), com a marca
+  // dela; desligada, o de sempre. Ver services/marcaDaLoja.js.
+  const approvalUrl = await linkDoPosCompraDaEmpresa(req.params.id, 'aprovacao', token);
   const defaultMsg =
     `Oi ${customerFirstName}! Sua arte do pedido ficou pronta 🎨\n\n` +
     `Dá uma olhada e me confirma se posso imprimir:\n${approvalUrl}\n\n` +
