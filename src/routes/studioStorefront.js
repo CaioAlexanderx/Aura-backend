@@ -57,6 +57,7 @@ const { createMpPixPayment, createMpPreference } = require('../services/mpServic
 const { uploadToR2 }      = require('../utils/r2Storage');
 const { calculateShippingQuote } = require('../services/shippingQuote');
 const { COURIER, validateCourierPickup } = require('../services/courierPickup');
+const { lerAtribuicao, gravarAtribuicao } = require('../services/atribuicaoDoPedido');
 const {
   fetchStorefrontCategories, fetchPrimaryCategoryLinks,
   // S0 do redesign (03/09/2026): banner e redes sociais existem no
@@ -1255,6 +1256,16 @@ router.post('/:slug/studio/order', async (req, res) => {
     } finally {
       client.release();
     }
+
+    // AURINHA (313): o pedido nasce atribuido a conversa que o fechou.
+    // A loja comum ja gravava; a vitrine Studio passou a mandar `origem` e
+    // `hub_conversation_id` na Onda 1B (deep link `?produto=&origem=
+    // &conversa=`, docs/aurinha-checkout-contract.md). Mesmo modulo da
+    // loja comum: best-effort, fora da transacao, guardado 42703 — nunca
+    // derruba o pedido.
+    gravarAtribuicao(db, {
+      orderId: order.id, companyId: cid, atribuicao: lerAtribuicao(req.body), rotulo: 'STUDIO_STOREFRONT',
+    });
 
     // Pagamento Pix / Cartao (mesma logica do storefront.js principal)
     let pixData = null;

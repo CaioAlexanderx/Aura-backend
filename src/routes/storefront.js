@@ -65,6 +65,7 @@ const { calculateShippingQuote } = require('../services/shippingQuote');
 // A home da loja sai da memoria por 60 s (10/09/2026).
 const { paginaLembrada, lembrarPagina } = require('../services/cacheDaPaginaDaLoja');
 const { COURIER, validateCourierPickup } = require('../services/courierPickup');
+const { lerAtribuicao, gravarAtribuicao } = require('../services/atribuicaoDoPedido');
 const lojaEvents          = require('../services/lojaEvents');
 
 function validateCpfCnpj(raw) {
@@ -854,18 +855,9 @@ router.post('/:slug/order', async (req, res) => {
     // docs/aurinha-checkout-contract.md). Best-effort FORA da transação e
     // guardado 42703 (migration 313 pode não ter rodado): atribuição nunca
     // derruba um pedido válido.
-    const origemRaw = typeof req.body.origem === 'string' ? req.body.origem.trim().slice(0, 32) : null;
-    const convRaw = typeof req.body.hub_conversation_id === 'string' ? req.body.hub_conversation_id.trim() : null;
-    const convId = convRaw && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(convRaw) ? convRaw : null;
-    if (origemRaw || convId) {
-      db.query(
-        `UPDATE digital_orders SET origem = COALESCE($1, origem), hub_conversation_id = COALESCE($2, hub_conversation_id)
-          WHERE id = $3 AND company_id = $4`,
-        [origemRaw, convId, order.id, cid]
-      ).catch((e) => {
-        if (e.code !== '42703') console.error('[STOREFRONT] atribuicao error:', e.message);
-      });
-    }
+    gravarAtribuicao(db, {
+      orderId: order.id, companyId: cid, atribuicao: lerAtribuicao(req.body), rotulo: 'STOREFRONT',
+    });
 
     let pixData = null;
     if (pmethod === 'pix') {
