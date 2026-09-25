@@ -106,6 +106,28 @@ function desfazerReescritaDaBorda(url) {
   return u;
 }
 
+/**
+ * O caminho da home da loja, visto do endereco por onde a pessoa chegou.
+ *
+ * Existe para o redirecionamento das paginas que so a vitrine Studio tem
+ * (`/<slug>/sacola`, `/<slug>/pedido/<token>`...; ver routes/storefront.js):
+ * numa loja comum elas voltam para a home, e a home tem um caminho em
+ * cada modo deste middleware. Redirecionar para o caminho interno
+ * (`/api/v1/storefront/...`) poria a rota da API na barra de endereco da
+ * cliente; para a URL canonica, pularia de dominio no meio da visita.
+ *
+ *   loja.getaura.com.br/<slug>/sacola  -> /<slug>
+ *   www.dominio-proprio/sacola         -> /
+ *   api.getaura.com.br/... (direto)    -> /api/v1/storefront/<slug>/page
+ */
+function caminhoDaHomeDaLoja(req, slug) {
+  const host = hostOriginal(req);
+  if (host === LOJA_HOST) return '/' + encodeURIComponent(slug);
+  const proprio = !host || OWNED_HOST_SUFFIXES.some(s => host === s || host.endsWith('.' + s));
+  if (proprio) return `/api/v1/storefront/${encodeURIComponent(slug)}/page`;
+  return '/';
+}
+
 /** Invalida a entrada de cache para um hostname (chamar ao atualizar/remover custom_domain). */
 function invalidateCustomDomainCache(hostname) {
   if (hostname) _cache.delete(hostname);
@@ -187,4 +209,7 @@ async function customDomainMiddleware(req, res, next) {
   }
 }
 
-module.exports = { customDomainMiddleware, invalidateCustomDomainCache, hostOriginal, desfazerReescritaDaBorda };
+module.exports = {
+  customDomainMiddleware, invalidateCustomDomainCache, hostOriginal, desfazerReescritaDaBorda,
+  caminhoDaHomeDaLoja,
+};

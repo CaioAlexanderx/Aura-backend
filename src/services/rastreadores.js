@@ -1,9 +1,10 @@
 // ============================================================
 // AURA. — GA4 e Meta Pixel nas lojas (04/09/2026)
 //
-// As colunas `ga4_measurement_id` e `meta_pixel_id` existem desde a
-// migration 220 e o painel as grava (routes/digitalChannelAnalytics.js).
-// Nenhuma loja as LIA: a lojista colava o ID, salvava, e o Google nunca
+// As colunas `ga4_measurement_id` e `meta_pixel_id` existem no banco e o
+// painel as grava pelo PUT de routes/digitalChannel.js (BE-3, 25/09/2026),
+// validadas por idGa4/idPixel daqui (services/pedidosPelaLoja.js).
+// Ate 04/09/2026 nenhuma loja as LIA: a lojista colava o ID, e o Google nunca
 // via uma visita. Decisao do Caio: GA4, Pixel e SEO em toda loja gerada
 // pela Aura — e o banner de cookies passa a existir por causa deles.
 //

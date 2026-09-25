@@ -113,11 +113,108 @@ describe('a rota que decide', () => {
   test('app fora do ar cai na loja comum em vez de derrubar a loja', () => {
     // `montarVitrineStudio` devolve null nesse caso; o `if (pagina)` e o
     // que impede a pagina em branco.
-    expect(rota).toContain('const pagina = await montarVitrineStudio(slug)');
+    expect(rota).toContain('const pagina = await montarVitrineStudio(slug, cabecalho)');
     expect(rota).toContain('if (pagina) {');
   });
 
   test('a vitrine sai com a CSP dela, nao com a da loja comum', () => {
     expect(rota).toContain('cspDaVitrineStudio(STOREFRONT_API_BASE)');
+  });
+});
+
+// ============================================================
+// BE-1 (25/09/2026) — a previa do link. O robo do WhatsApp nao roda
+// JavaScript: o que ele mostra e o que o servidor escreveu no <head>.
+// As rotas ponta a ponta estao em vitrineStudioEnderecos.test.js.
+// ============================================================
+const {
+  metatagsDaVitrineStudio, comCabecalhoDaLoja, precoEmReais, textoCurto, fotoDaPeca,
+} = require('../src/services/vitrineStudioShell');
+
+describe('as metatags da vitrine Studio', () => {
+  const loja = { nome: 'Sheid Mania', tagline: 'Canecas que viram presente', logo_url: 'https://r2/logo.png' };
+  const peca = {
+    id: '8f21c4a9-5b1e-4c7a-9d3e-2a6f0b1c9e77', name: 'Caneca Alça Coração', price: 49.9,
+    description: 'Porcelana branca, 325 ml.', image_url: 'https://r2/g.jpg', image_thumb_url: 'https://r2/p.jpg',
+  };
+  const url = 'https://loja.getaura.com.br/sheid-mania';
+
+  test('preco em reais, com milhar e centavos; zero ou lixo nao vira preco', () => {
+    expect(precoEmReais(49.9)).toBe('R$ 49,90');
+    expect(precoEmReais('1234.5')).toBe('R$ 1.234,50');
+    expect(precoEmReais(0)).toBe('');
+    expect(precoEmReais(null)).toBe('');
+    expect(precoEmReais('abc')).toBe('');
+  });
+
+  test('descricao longa e cortada na palavra, com reticencias', () => {
+    const t = textoCurto('palavra '.repeat(40), 60);
+    expect(t.length).toBeLessThanOrEqual(60);
+    expect(t.endsWith('palavra…')).toBe(true);
+    expect(textoCurto('  duas\n\nlinhas  ')).toBe('duas linhas');
+  });
+
+  test('a foto: miniatura, depois a grande, depois a galeria', () => {
+    expect(fotoDaPeca(peca)).toBe('https://r2/p.jpg');
+    expect(fotoDaPeca({ image_url: 'https://r2/g.jpg' })).toBe('https://r2/g.jpg');
+    expect(fotoDaPeca({ gallery_urls: [null, 'https://r2/1.jpg'] })).toBe('https://r2/1.jpg');
+    expect(fotoDaPeca({})).toBeNull();
+  });
+
+  test('da peca: titulo "<peca> · <loja>", preco na descricao e tipo product', () => {
+    const h = metatagsDaVitrineStudio({ loja, peca, urlDaLoja: url });
+    expect(h).toContain('<title>Caneca Alça Coração · Sheid Mania</title>');
+    expect(h).toContain('<meta property="og:description" content="R$ 49,90 · Porcelana branca, 325 ml.">');
+    expect(h).toContain(`<meta property="og:url" content="${url}/p/${peca.id}">`);
+    expect(h).toContain('<meta property="og:type" content="product">');
+    expect(h).toContain('<meta name="twitter:card" content="summary_large_image">');
+  });
+
+  test('loja que esconde preco nao tem preco na previa', () => {
+    const h = metatagsDaVitrineStudio({ loja, peca, urlDaLoja: url, mostrarPreco: false });
+    expect(h).not.toContain('R$');
+  });
+
+  test('peca sem descricao ganha "<peca> na <loja>"', () => {
+    const h = metatagsDaVitrineStudio({ loja, peca: { ...peca, description: null }, urlDaLoja: url });
+    expect(h).toContain('content="R$ 49,90 · Caneca Alça Coração na Sheid Mania"');
+  });
+
+  test('sem peca: nome, tagline e logo da loja', () => {
+    const h = metatagsDaVitrineStudio({ loja, peca: null, urlDaLoja: url });
+    expect(h).toContain('<title>Sheid Mania</title>');
+    expect(h).toContain('<meta property="og:description" content="Canecas que viram presente">');
+    expect(h).toContain('<meta property="og:image" content="https://r2/logo.png">');
+    expect(h).toContain('<meta property="og:type" content="website">');
+  });
+
+  test('o que vem da lojista e escapado nos atributos e no <title>', () => {
+    const h = metatagsDaVitrineStudio({
+      loja: { nome: 'A&B "Loja"', tagline: '<img src=x onerror=alert(1)>' },
+      peca: { ...peca, name: '"><script>x()</script>' }, urlDaLoja: url,
+    });
+    expect(h).not.toContain('<script>');
+    expect(h).not.toContain('<img');
+    expect(h).toContain('<title>&quot;&gt;&lt;script&gt;x()&lt;/script&gt; · A&amp;B &quot;Loja&quot;</title>');
+  });
+
+  test('entra no lugar do <title> da casca e tira Open Graph que ela tiver', () => {
+    const casca = '<html><head><title>Aura.</title><meta property="og:image" content="aura.png">'
+      + '<meta name="description" content="Aura"></head><body></body></html>';
+    const r = comCabecalhoDaLoja(casca, metatagsDaVitrineStudio({ loja, peca, urlDaLoja: url }));
+    expect(r).not.toContain('Aura.');
+    expect(r).not.toContain('aura.png');
+    expect(r.match(/<title>/g)).toHaveLength(1);
+    expect(r).toContain('og:image" content="https://r2/p.jpg"');
+  });
+
+  test('casca sem <title> recebe o cabecalho antes de </head>', () => {
+    const r = comCabecalhoDaLoja('<head></head>', '<title>X</title>');
+    expect(r).toBe('<head><title>X</title></head>');
+  });
+
+  test('"$&" no nome nao vira padrao de substituicao', () => {
+    const r = comCabecalhoDaLoja('<head><title>Aura.</title></head>', '<title>R$& co</title>');
+    expect(r).toBe('<head><title>R$& co</title></head>');
   });
 });
