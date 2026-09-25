@@ -76,6 +76,9 @@ const {
   // O endereco publico da loja (dominio proprio quando ativo): a
   // confirmacao do pedido mora nele (Fase 2).
   urlDaLoja,
+  // Fase 5 (25/09/2026): os selos escritos na aba Design, com a mesma
+  // sanitizacao da loja comum e sem os padroes dela.
+  selosDaLojista,
 } = require('../services/storefrontBuilder');
 const { montarRodape } = require('../services/rodapeInstitucional');
 // Empresa de teste: nao notifica ninguem nem cria cobranca de verdade.
@@ -185,6 +188,24 @@ function montarSite(config, nomeDaEmpresa) {
     // A MESMA funcao da loja comum: banner com fallback para a capa e a
     // tagline, no maximo 3, e a versao de celular quando existe.
     banners: parseBanners(config.banners, config.cover_url, config.tagline, config.description),
+    // Fase 5 (25/09/2026): os banners acima sao o FALLBACK da loja comum
+    // (capa + tagline) quando a lojista nao cadastrou nenhum. A home
+    // nova da vitrine Studio precisa saber disso: sem banner de verdade,
+    // o destaque e a peca com o mockup girando (decisao 10 do PO), e nao
+    // a tagline num fundo escuro. A home de hoje continua lendo `banners`.
+    banners_automaticos: parseBanners(config.banners).length === 0,
+    // A faixa de anuncio escrita na aba Design. Vazia = a vitrine monta
+    // a automatica do Studio ("Voce aprova o mockup antes de produzir ·
+    // Pronto em N dias uteis · X% no Pix") com os dados da loja.
+    announcement_bar: typeof config.announcement_bar === 'string' ? config.announcement_bar.trim() : '',
+    // Os selos escritos na aba Design (service_cards), sanitizados como
+    // na loja comum. Vazio = a vitrine monta os automaticos do Studio;
+    // o conjunto de fabrica do painel conta como vazio.
+    service_cards: selosDaLojista(config.service_cards),
+    // A peca que gira no destaque quando nao ha banner (migration 356).
+    // null = automatica. Base sem a coluna: dcc.* nao traz o campo e a
+    // vitrine fica no automatico, sem erro.
+    hero_product_id: config.hero_product_id || null,
     // Instagram, TikTok e Facebook normalizados, com a URL pronta.
     redes: montarRedes(config),
     // O que o rodape da loja comum mostra na coluna de identidade
@@ -1837,6 +1858,8 @@ router.get('/:slug/studio/:pid', function(req, res, next) {
 module.exports = router;
 // Exposto para teste — mesma convencao de karateDojoBeltExams.__validateFile.
 module.exports.__validateCustomizationValues = validateCustomizationValues;
+// Fase 5: o bloco `site` montado, para teste.
+module.exports.__montarSite = montarSite;
 // Expostos pro teste: o delta de preco do verso/meio e regra de dinheiro,
 // e regra de dinheiro sem teste e onde o cliente final e cobrado errado.
 module.exports.__computeBackDelta = computeBackDelta;

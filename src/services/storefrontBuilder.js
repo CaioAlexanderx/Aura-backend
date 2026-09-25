@@ -175,16 +175,63 @@ function destinoDoCta(raw) {
   // sao categoria; sao a grade inteira numa ordem. Mesmo contrato do
   // painel (destinoDoCta.ts) e do botao da home curada.
   if (/^#vista=(todos|novidades|mais_vendidos)$/.test(u)) return u;
+  // Vitrine Studio (Fase 5, 25/09/2026): "Pedir orcamento em lote" e um
+  // destino da loja de encomenda — o banner "50 canecas para a formatura"
+  // leva direto ao orcamento. A loja comum nao tem essa vista; o painel
+  // so oferece este destino na loja Studio.
+  if (u === '#vista=lote') return u;
   return '';
 }
 
-function parseServiceCards(raw, cfg) {
-  let arr = [];
-  if (Array.isArray(raw)) arr = raw;
-  else if (typeof raw === 'string') {
-    try { const p = JSON.parse(raw); if (Array.isArray(p)) arr = p; } catch {}
+function listaCrua(raw) {
+  if (Array.isArray(raw)) return raw;
+  if (typeof raw === 'string') {
+    try { const p = JSON.parse(raw); if (Array.isArray(p)) return p; } catch {}
   }
+  return [];
+}
+
+function parseServiceCards(raw, cfg) {
+  let arr = listaCrua(raw);
   if (!arr.length) arr = selosPadrao(cfg);
+  return sanearSelos(arr);
+}
+
+/**
+ * Os selos que o painel grava sozinho, sem a lojista escrever nada.
+ *
+ * O GET do painel devolve estes quatro quando a coluna esta vazia, e o
+ * primeiro "salvar" na aba Design os grava como se fossem dela. Em
+ * 25/09/2026 as duas lojas Studio (aura-qa e sheid-mania) tinham
+ * exatamente este conjunto no banco — "Entrega rapida" e "Curadoria
+ * editada" numa loja de encomenda que so faz retirada. Ver
+ * DEFAULT_SERVICE_CARDS em routes/digitalChannel.js.
+ */
+const SELOS_DE_FABRICA = new Set([
+  'Entrega rápida|Confirmação no WhatsApp',
+  'Embalagem cuidadosa|Pronta pra presentear',
+  'Pagamento seguro|Pix e demais opções',
+  'Curadoria editada|Produtos selecionados',
+  'Seleção da loja|Escolhidos a dedo',
+]);
+
+/**
+ * Os selos que a LOJISTA escreveu, sanitizados como os da loja comum.
+ *
+ * Diferente de parseServiceCards, nao inventa selo nenhum: vazio e "a
+ * lojista nao escreveu", e a vitrine Studio monta os automaticos DELA
+ * (que dizem "Voce aprova antes", e nao "Troca em 7 dias"). O conjunto
+ * de fabrica do painel, intacto, conta como vazio.
+ */
+function selosDaLojista(raw) {
+  const arr = listaCrua(raw).filter((c) => c && c.enabled !== false);
+  const deFabrica = arr.length > 0 && arr.every((c) =>
+    SELOS_DE_FABRICA.has(`${typeof c.title === 'string' ? c.title : ''}|${typeof c.body === 'string' ? c.body : ''}`));
+  if (deFabrica) return [];
+  return sanearSelos(arr);
+}
+
+function sanearSelos(arr) {
   return arr.slice(0, 4).map((c) => {
     let title = typeof c?.title === 'string' ? c.title : '';
     let body  = typeof c?.body  === 'string' ? c.body  : '';
@@ -1072,6 +1119,9 @@ module.exports = {
   destinoDoCta,
   // Fase 3: barra de anuncio composta, horario do rodape, CNPJ.
   anuncioAutomatico, resumoDeHorario, formatarCnpj, selosPadrao,
+  // Vitrine Studio (Fase 5): os selos escritos pela lojista, sem os
+  // padroes da loja comum — a vitrine Studio tem os automaticos dela.
+  selosDaLojista, SELOS_DE_FABRICA,
   // Exportados em 19/08/2026 (S1) para o storefront do Studio montar a
   // MESMA arvore de categorias que a loja comum, em vez de uma segunda
   // implementacao. As duas regras que importam vivem aqui e valem para

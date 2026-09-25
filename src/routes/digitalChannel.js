@@ -39,6 +39,12 @@ const {
 // servico, com teste; aqui so se grava.
 const { sanitizarPedidosPelaLoja } = require('../services/pedidosPelaLoja');
 const { comoData } = require('../services/modoDaLoja');
+// O destino do botao do banner: a MESMA regra que a vitrine aplica ao
+// ler (storefrontBuilder.parseBanners). Antes o PUT nao copiava cta_url e
+// o destino se perdia ao salvar (JORNADA, Anexo A, item 1).
+const { destinoDoCta } = require('../services/storefrontBuilder');
+// Fase 5 da vitrine Studio: a peca do destaque da home sem banner.
+const { lerPecaDoDestaque } = require('../services/pecaDoDestaque');
 
 const ALLOWED_ICONS = ['truck','pkg','shield','sparkle','leaf','heart','star','pix','card','receipt','bag','user'];
 
@@ -471,6 +477,10 @@ function sanitizeBanners(input) {
     headline:  typeof b?.headline === 'string'  ? b.headline.slice(0, 200) : '',
     body:      typeof b?.body === 'string'      ? b.body.slice(0, 500)     : '',
     cta:       typeof b?.cta === 'string'       ? b.cta.slice(0, 60)       : '',
+    // O destino do botao (http(s), #cat=/caminho ou #vista=...). Validado
+    // aqui com a regra da vitrine: o que ela nao sabe abrir vira '' e a
+    // loja nao desenha botao morto. Endereco gigante tambem vira ''.
+    cta_url:   typeof b?.cta_url === 'string' && b.cta_url.trim().length <= 500 ? destinoDoCta(b.cta_url) : '',
     tone:      ['split','editorial','centered'].includes(b?.tone) ? b.tone : 'split',
     tint:      ['brand','accent'].includes(b?.tint) ? b.tint : 'brand',
     image_url: typeof b?.image_url === 'string' && b.image_url.startsWith('http') ? b.image_url : null,
@@ -563,6 +573,26 @@ router.put('/', requireRole('client', 'analyst', 'admin'), async (req, res) => {
   // devolve 400 e o resto do formulario nao fica salvo pela metade.
   const pedidosPelaLoja = sanitizarPedidosPelaLoja(req.body);
   if (pedidosPelaLoja.erro) return res.status(400).json({ error: pedidosPelaLoja.erro });
+
+  // Fase 5 (migration 356): a peca do destaque. Lida e validada ANTES de
+  // gravar qualquer coisa, como o BE-3: id que nao e da loja devolve 400
+  // e o resto do formulario nao fica salvo pela metade.
+  const pecaDoDestaque = lerPecaDoDestaque(req.body);
+  if (pecaDoDestaque.erro) return res.status(400).json({ error: pecaDoDestaque.erro });
+  if (pecaDoDestaque.definido && pecaDoDestaque.valor) {
+    try {
+      const { rows: achou } = await db.query(
+        `SELECT id FROM products
+          WHERE id = $1 AND ${listVisibilityWhere('$2')} AND is_active IS NOT FALSE
+          LIMIT 1`,
+        [pecaDoDestaque.valor, cid]
+      );
+      if (!achou.length) return res.status(400).json({ error: 'Essa peça não está na loja.' });
+    } catch (e) {
+      console.error('[canal-destaque] validar peca:', e.message);
+      return res.status(500).json({ error: 'Erro ao salvar configuracao do canal digital' });
+    }
+  }
 
   const banners = req.body.banners !== undefined ? sanitizeBanners(req.body.banners) : undefined;
   if (req.body.banners !== undefined && banners === null) {
@@ -1110,6 +1140,26 @@ router.put('/', requireRole('client', 'analyst', 'admin'), async (req, res) => {
       }
     }
 
+    // Fase 5 (migration 356): a peca do destaque. UPDATE separado e 42703
+    // tolerado, como os outros campos novos: base sem a migration nao
+    // impede salvar o resto, e a vitrine segue no automatico.
+    if (pecaDoDestaque.definido) {
+      try {
+        const { rows: updated } = await db.query(
+          `UPDATE digital_channel_config SET hero_product_id = $1, updated_at = NOW()
+            WHERE company_id = $2 RETURNING *`,
+          [pecaDoDestaque.valor, cid]
+        );
+        if (updated.length) savedConfig = updated[0];
+      } catch (e) {
+        if (e.code === '42703') {
+          console.error('[canal-destaque] coluna hero_product_id inexistente — skip:', e.message);
+        } else {
+          throw e;
+        }
+      }
+    }
+
     // A home guardada foi montada com a config antiga: esquece. Vale para
     // os campos acima tambem — a home guardada da loja comum ja sai com
     // GA4/Pixel e a retirada por app deles.
@@ -1389,3 +1439,5 @@ router.post('/setup-pix', requireRole('client', 'analyst', 'admin'), async (req,
 });
 
 module.exports = router;
+// Exportado pra teste (Fase 5): o destino do banner sobrevive ao salvar.
+module.exports.sanitizeBanners = sanitizeBanners;
