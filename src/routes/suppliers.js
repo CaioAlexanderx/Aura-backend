@@ -33,6 +33,123 @@ function limpar(v, max) {
   return s ? s.slice(0, max) : null;
 }
 
+// ─── Tela de Fornecedores do app (25/09/2026) ────────────────
+//
+// O app nao tinha tela nenhuma de fornecedor; a GF Amorim (materiais de
+// construcao, 2.019 produtos) tinha zero fornecedores. Duas rotas novas
+// para o cadastro ser rapido:
+//   GET  /cnpj/:cnpj        -> preenche nome/telefone/e-mail pela Receita
+//   POST /:sid/products     -> vincula (ou desvincula) produtos em lote
+//
+// A consulta publica do onboarding (POST /onboarding/cnpj-lookup) limita
+// 10/hora por IP -- pouco pra quem cadastra a lista de fornecedores de uma
+// vez. Aqui o limite e por empresa e mais folgado.
+let lookupCNPJ = null;
+try { ({ lookupCNPJ } = require('../services/cnpj')); } catch (_) { /* sem o servico, a rota responde 503 */ }
+let redis = null;
+try { redis = require('../config/redis').default || require('../config/redis'); } catch (_) { /* sem cache */ }
+
+const CNPJ_LOOKUP_POR_HORA = 60;
+const consultasPorEmpresa = new Map(); // company_id -> { hora, n }
+
+function dentroDoLimite(cid) {
+  const hora = Math.floor(Date.now() / 3600000);
+  const atual = consultasPorEmpresa.get(cid);
+  if (!atual || atual.hora !== hora) {
+    consultasPorEmpresa.set(cid, { hora, n: 1 });
+    return true;
+  }
+  atual.n += 1;
+  return atual.n <= CNPJ_LOOKUP_POR_HORA;
+}
+
+// ─── GET /cnpj/:cnpj — dados da Receita + "ja cadastrado?" ──
+// Precisa ficar ANTES do GET /:sid, senao "cnpj" vira um :sid.
+router.get('/cnpj/:cnpj', async (req, res) => {
+  const cid = req.params.id;
+  const digits = onlyDigits(req.params.cnpj);
+  if (!isValidCnpj(digits)) return res.status(400).json({ error: 'CNPJ invalido' });
+
+  try {
+    // "Ja cadastrado" vem primeiro e nao gasta consulta na Receita.
+    const { rows: dup } = await db.query(
+      `SELECT id, name FROM suppliers WHERE cnpj = $1 AND ${companyGroupWhere('$2')} LIMIT 1`,
+      [digits, cid]
+    );
+    if (dup.length) return res.json({ cnpj: digits, existing: dup[0] });
+
+    if (!lookupCNPJ) return res.status(503).json({ error: 'Consulta de CNPJ indisponivel. Preencha os dados a mao.' });
+    if (!dentroDoLimite(cid)) {
+      return res.status(429).json({ error: 'Muitas consultas de CNPJ nesta hora. Preencha os dados a mao ou tente mais tarde.' });
+    }
+
+    const rf = await lookupCNPJ(digits, redis);
+    res.json({
+      cnpj: digits,
+      existing: null,
+      // Nome de uso no dia a dia: fantasia quando existe, senao a razao social.
+      name: rf.trade_name || rf.legal_name || '',
+      legal_name: rf.legal_name || '',
+      trade_name: rf.trade_name || '',
+      phone: rf.phone || '',
+      email: rf.email || '',
+      city: rf.address_city || '',
+      state: rf.address_state || '',
+      is_active: rf.is_active !== false,
+      situation: rf.rf_situation || '',
+    });
+  } catch (err) {
+    const msg = err && err.message ? err.message : '';
+    if (msg.includes('não encontrado')) return res.status(404).json({ error: 'CNPJ nao encontrado na Receita Federal' });
+    if (msg.includes('Limite')) return res.status(429).json({ error: 'A Receita esta limitando as consultas agora. Preencha os dados a mao ou tente em alguns minutos.' });
+    console.error('[suppliers] cnpj lookup error:', msg);
+    res.status(502).json({ error: 'Nao consegui consultar a Receita agora. Preencha os dados a mao.' });
+  }
+});
+
+// ─── POST /:sid/products — vincular produtos em lote ────────
+// Body: { product_ids: [...], unlink?: boolean }
+// Mesma visibilidade de produto de products.js (proprio OU compartilhado
+// no grupo) -- escrita espelha a leitura (CLAUDE.md armadilha 7). As
+// colunas soltas supplier_name/supplier_cnpj acompanham, como no POST de
+// produto, pra quem ainda le as duas.
+const MAX_VINCULO_LOTE = 1000;
+
+router.post('/:sid/products', async (req, res) => {
+  const cid = req.params.id;
+  const sid = req.params.sid;
+  const ids = Array.isArray(req.body && req.body.product_ids) ? req.body.product_ids.map(String) : null;
+  const unlink = req.body && req.body.unlink === true;
+  if (!ids || !ids.length) return res.status(400).json({ error: 'product_ids e obrigatorio' });
+  if (ids.length > MAX_VINCULO_LOTE) return res.status(400).json({ error: `No maximo ${MAX_VINCULO_LOTE} produtos por vez` });
+
+  try {
+    const { rows: sup } = await db.query(
+      `SELECT id, name, cnpj FROM suppliers s WHERE id = $1 AND ${companyGroupWhere('$2')}`,
+      [sid, cid]
+    );
+    if (!sup.length) return res.status(404).json({ error: 'Fornecedor nao encontrado' });
+
+    const visivel = `(company_id = $2 OR (is_group_shared = true AND ${companyGroupWhere('$2')}))`;
+    const upd = unlink
+      ? await db.query(
+          `UPDATE products SET supplier_id = NULL, supplier_name = NULL, supplier_cnpj = NULL, updated_at = NOW()
+            WHERE id = ANY($1::uuid[]) AND ${visivel} AND supplier_id = $3`,
+          [ids, cid, sid]
+        )
+      : await db.query(
+          `UPDATE products SET supplier_id = $3, supplier_name = $4, supplier_cnpj = $5, updated_at = NOW()
+            WHERE id = ANY($1::uuid[]) AND ${visivel}`,
+          [ids, cid, sid, sup[0].name, sup[0].cnpj]
+        );
+    res.json({ updated: upd.rowCount, unlink });
+  } catch (err) {
+    if (err.code === '22P02') return res.status(400).json({ error: 'product_ids invalido' });
+    console.error('[suppliers] link products error:', err.message);
+    res.status(500).json({ error: 'Erro ao vincular produtos' });
+  }
+});
+
 // ─── GET / — lista (?q=&active=) ─────────────────────────────
 router.get('/', async (req, res) => {
   const cid = req.params.id;
