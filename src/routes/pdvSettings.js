@@ -15,7 +15,7 @@
 //   NUMBER: service_fee_pct, food_service_fee_pct,
 //           card_fee_credit_pct, card_fee_debit_pct
 //   NUMBER OU NULL (percentual 0-100): card_price_pct
-//   STRING (enum) OU NULL: label_size (99x21 | 30x25 | 58mm)
+//   STRING (enum) OU NULL: label_size (99x21 | 30x25 | 58mm | 105x21)
 //
 // 26/05/2026: ampliada whitelist pra desbloquear UI Studio/Food. Antes,
 // app/studio/(estudio)/configuracoes.tsx tentava salvar studio_approval_*
@@ -80,8 +80,10 @@ const ALLOWED_STRING_KEYS = {
 // antiga do navegador (localStorage) e, sem ela, no 99x21 — por isso o
 // default NAO pode ser '99x21' (a Eryca, que usa 30x25 so no navegador,
 // voltaria pro 99x21 no primeiro GET). Novos modelos entram nesta lista.
+// 25/09/2026 — 105x21: etiqueta 33x21mm em 3 colunas com vao, papel de
+// 105mm (Divina D'Lux).
 const ALLOWED_NULLABLE_STRING_KEYS = {
-  label_size: ['99x21', '30x25', '58mm'],
+  label_size: ['99x21', '30x25', '58mm', '105x21'],
 };
 
 const ALLOWED_NUMBER_KEYS = [
