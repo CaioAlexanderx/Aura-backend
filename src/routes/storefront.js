@@ -437,7 +437,7 @@ router.get('/:slug/p/:id', (req, res) => servirPaginaDaLoja(req, res, req.params
  * mesmo prefixo (`order`, `order/:oid`, `shipping-quote`, `catalogo`,
  * `produto/:id/fotos`, `studio/*`...) e um curinga as engoliria na
  * primeira rota nova que alguem declarasse abaixo dele. Nenhum destes
- * caminhos colide com uma rota existente — __tests__/lojaServeVitrineStudio
+ * caminhos colide com uma rota existente — __tests__/vitrineStudioEnderecos
  * confere as duas coisas.
  *
  * `indexar: false` nas paginas de compra e nas com token: o link de um
