@@ -578,6 +578,61 @@ async function produtoPublicoPorId({ cid, id, exigeFoto, mostrarPrecos }) {
 }
 
 /**
+ * O que faz uma peca aparecer na vitrine STUDIO (e nao na loja comum).
+ *
+ * Personalizado nao tem estoque de prateleira nem passa pela lista de
+ * destaque da loja comum: o que decide e ser personalizavel, ter o
+ * configurador montado e a lojista nao ter ocultado a peca no Estoque
+ * Studio. Mora aqui, ao lado de NA_VITRINE, para a lista da vitrine
+ * (studioStorefront.js) e a previa do link (pecaDaVitrineStudio) lerem a
+ * MESMA regra — previa de peca que a vitrine nao mostra seria um link
+ * para lugar nenhum.
+ */
+const NA_VITRINE_STUDIO = `is_personalizable = true
+          AND customization_config IS NOT NULL
+          AND studio_storefront_visible IS NOT FALSE`;
+
+/**
+ * O minimo de UMA peca da vitrine Studio para a previa do link (BE-1,
+ * 25/09/2026): nome, descricao, preco e fotos. `null` quando a peca nao
+ * existe, e de outra loja ou a vitrine nao a mostra.
+ *
+ * Nao reusa produtoPublicoPorId de proposito: ele aplica a regra da loja
+ * COMUM (estoque, NA_VITRINE), que esconderia a caneca personalizada sem
+ * estoque — justamente o que a vitrine Studio vende — e ainda carrega
+ * variantes, categorias e galeria, que a metatag nao usa. A visibilidade
+ * (listVisibilityWhere) e a regra de foto (filtroDeFoto) sao as mesmas.
+ */
+async function pecaDaVitrineStudio({ cid, id, exigeFoto }) {
+  if (!/^[0-9a-f-]{36}$/i.test(String(id || ''))) return null;
+  const { rows } = await db.query(
+    `SELECT id, name, description, price, image_url, image_thumb_url, gallery_urls
+       FROM products
+      WHERE ${listVisibilityWhere('$1')}
+        AND id = $2
+        AND is_active IS NOT FALSE
+        AND ${NA_VITRINE_STUDIO}
+        AND ${filtroDeFoto(exigeFoto)}
+      LIMIT 1`,
+    [cid, id]
+  );
+  return rows[0] || null;
+}
+
+/**
+ * O endereco publico da loja: o dominio proprio quando ativo, senao
+ * loja.getaura.com.br/<slug>. Uma funcao so para o payload da loja comum
+ * e para a casca da vitrine Studio — canonica diferente para a mesma
+ * loja e o Google indexando duas.
+ */
+function urlDaLoja(config) {
+  const c = config || {};
+  return (c.custom_domain && c.custom_domain_status === 'active')
+    ? `https://${c.custom_domain}`
+    : `https://loja.getaura.com.br/${c.slug}`;
+}
+
+/**
  * `{ main: [...], by_color: {...} }` de UMA peca (migration 323).
  *
  * UMA query, sempre — inclusive com `cid`. A peca aberta pela grade
@@ -998,9 +1053,7 @@ async function buildStorefront(config) {
     })),
     // URL canônica da loja — custom domain quando ativo, senão loja.getaura.com.br/slug.
     // Consumida pelo aura-app (TabMeuSite) para exibir o link correto ao operador.
-    storefront_url: (config.custom_domain && config.custom_domain_status === 'active')
-      ? `https://${config.custom_domain}`
-      : `https://loja.getaura.com.br/${config.slug}`,
+    storefront_url: urlDaLoja(config),
   };
 }
 
@@ -1011,6 +1064,9 @@ module.exports = {
   buildStorefront, parseFeaturedIds, parseHiddenIds, computeOpenState,
   // URL propria do produto (08/09/2026).
   produtoPublicoPorId,
+  // Previa do link na vitrine Studio (BE-1, 25/09/2026): a peca, a regra
+  // de quem aparece la e o endereco publico da loja.
+  pecaDaVitrineStudio, NA_VITRINE_STUDIO, urlDaLoja,
   // Exportado pra teste: o formato interno `#cat=/caminho` e contrato
   // com o painel (aura-app, destinoDoCta.ts).
   destinoDoCta,

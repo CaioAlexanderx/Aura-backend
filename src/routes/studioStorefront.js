@@ -67,6 +67,9 @@ const {
   // calculados aqui para a loja comum. A vitrine Studio nao tinha rodape
   // nenhum — repetir as duas regras seria a quinta copia da mesma coisa.
   resumoDeHorario, formatarCnpj,
+  // Quem aparece na vitrine Studio: a mesma regra que a previa do link
+  // (BE-1) le em storefront.js.
+  NA_VITRINE_STUDIO,
 } = require('../services/storefrontBuilder');
 const { montarRodape } = require('../services/rodapeInstitucional');
 // Empresa de teste: nao notifica ninguem nem cria cobranca de verdade.
@@ -315,9 +318,7 @@ router.get('/:slug/studio/products', async (req, res) => {
          FROM products
         WHERE ${visibility}
           AND is_active IS NOT FALSE
-          AND is_personalizable = true
-          AND customization_config IS NOT NULL
-          AND studio_storefront_visible IS NOT FALSE
+          AND ${NA_VITRINE_STUDIO}
           AND ${comFoto}
         ORDER BY created_at DESC
         LIMIT 200`,
