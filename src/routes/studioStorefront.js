@@ -85,6 +85,8 @@ const { normalizarDataDoLote } = require('../services/dataDoLote');
 const { modoDaLoja } = require('../services/modoDaLoja');
 const { rastreadoresDaLoja } = require('../services/rastreadores');
 const { vitrineV2Ligada } = require('../services/vitrineV2');
+// Fase 4: links de acompanhamento no endereco da loja com a chave ligada.
+const { linkDoPosCompra } = require('../services/marcaDaLoja');
 const { montarRedes } = require('../services/redesSociais');
 const { cotarLote, codigoDoLote } = require('../services/studioLote');
 const { buildLadder } = require('../services/studioQtyTiers');
@@ -95,6 +97,7 @@ const {
 } = require('../services/precoDoStudio');
 const { PRAZO_HORAS_STUDIO } = require('../jobs/lojaPixExpiradoJob');
 const { montarConfirmacao } = require('../services/confirmacaoDoPedido');
+const { montarRepeticao } = require('../services/repetirPedido');
 const { filtroDeFoto } = require('../services/catalogoPaginado');
 // Selo NOVO com a mesma regra da loja comum (redesign 09/2026).
 const { ehNovo } = require('../services/homeDaLoja');
@@ -864,7 +867,9 @@ router.post('/:slug/studio/order', async (req, res) => {
 
   try {
     const { rows: configs } = await db.query(
-      `SELECT dcc.*, COALESCE(c.trade_name, c.legal_name) AS company_display_name
+      `SELECT dcc.*, COALESCE(c.trade_name, c.legal_name) AS company_display_name,
+              -- A chave vitrine_v2 decide para onde vai o track_url (Fase 4).
+              COALESCE(c.studio_settings, '{}'::jsonb) AS studio_settings
          FROM digital_channel_config dcc
          JOIN companies c ON c.id = dcc.company_id
         WHERE dcc.slug = $1 AND dcc.is_published = true`, [slug]);
@@ -1270,8 +1275,10 @@ router.post('/:slug/studio/order', async (req, res) => {
       // mostrar. O token vem do RETURNING * (DEFAULT no banco, migration
       // 322); null enquanto a migration nao rodou — a tela simplesmente
       // nao mostra o bloco.
+      // Fase 4: com a chave `vitrine_v2` ligada, no endereco da loja
+      // (`<loja>/acompanhar/<token>`); desligada, o de sempre.
       track_url: order.public_token
-        ? `${process.env.APP_PUBLIC_URL || ''}/acompanhar/${order.public_token}`
+        ? linkDoPosCompra({ config, tipo: 'acompanhar', token: order.public_token })
         : null,
       // Fase 2: a confirmacao persistente, no endereco da loja (dominio
       // proprio quando ativo). null sem a migration 322 — o app cai na
@@ -1542,12 +1549,77 @@ router.get('/:slug/studio/pedido/:token', async (req, res) => {
       loja: config,
       studioSettings: config.studio_settings,
       faixas,
-      // Por ora o acompanhamento atual; a Fase 4 leva para o endereco da loja.
-      acompanharUrl: `${process.env.APP_PUBLIC_URL || ''}/acompanhar/${token}`,
+      // Fase 4: no endereco da loja com a chave ligada (marcaDaLoja.js).
+      acompanharUrl: linkDoPosCompra({ config, tipo: 'acompanhar', token }),
     }));
   } catch (err) {
     console.error('[studio-storefront] pedido por token error:', err);
     res.status(500).json({ error: 'Erro ao buscar pedido' });
+  }
+});
+
+// ─────────────────────────────────────────────
+// GET /storefront/:slug/studio/pedido/:token/repetir  (Fase 4, 25/09/2026)
+//
+// "Pedir outro igual": por item, o produto, a quantidade e os valores da
+// personalizacao, filtrados pelo configurador de HOJE. Produto que saiu
+// da vitrine volta com `indisponivel: true`. Montagem e a lista do que
+// nao sai em services/repetirPedido.js.
+//
+// Mesma credencial e mesma leitura do pedido que a confirmacao
+// (pedidoPorToken: token + empresa da loja + vertical studio). Um pedido
+// cancelado tambem pode ser repetido: o Pix que venceu e justamente o
+// caso de quem quer "fazer de novo".
+// ─────────────────────────────────────────────
+router.get('/:slug/studio/pedido/:token/repetir', async (req, res) => {
+  const token = String(req.params.token || '').trim();
+  const naoAchou = () => res.status(404).json({ error: 'Pedido nao encontrado' });
+  if (token.length < 16 || token.length > 128) return naoAchou();
+  try {
+    const slug = req.params.slug.toLowerCase().trim();
+    const { rows: configs } = await db.query(
+      `SELECT dcc.company_id, dcc.require_product_image
+         FROM digital_channel_config dcc
+        WHERE dcc.slug = $1
+        LIMIT 1`, [slug]);
+    if (!configs.length) return naoAchou();
+    const config = configs[0];
+    const cid = config.company_id;
+
+    const pedido = await pedidoPorToken(token, cid);
+    if (!pedido) return naoAchou();
+
+    const { rows: itens } = await db.query(
+      `SELECT i.product_id, i.product_name, i.quantity, i.customization
+         FROM digital_order_items i
+        WHERE i.order_id = $1
+        ORDER BY i.id`,
+      [pedido.id]
+    );
+
+    // Quais desses produtos a vitrine mostra HOJE — a mesma regra da
+    // lista (visibilidade do grupo, ativo, NA_VITRINE_STUDIO e foto).
+    const ids = [...new Set(itens.map((i) => i.product_id).filter(Boolean).map(String))];
+    const naVitrine = new Map();
+    if (ids.length) {
+      const { rows: produtos } = await db.query(
+        `SELECT id, customization_config
+           FROM products
+          WHERE ${listVisibilityWhere('$1')}
+            AND id = ANY($2::uuid[])
+            AND is_active IS NOT FALSE
+            AND ${NA_VITRINE_STUDIO}
+            AND ${filtroDeFoto(config.require_product_image === true)}`,
+        [cid, ids]
+      );
+      for (const p of produtos) naVitrine.set(String(p.id), p);
+    }
+
+    res.set('Cache-Control', 'no-store');
+    res.json(montarRepeticao({ pedido, itens, naVitrine }));
+  } catch (err) {
+    console.error('[studio-storefront] repetir pedido error:', err);
+    res.status(500).json({ error: 'Erro ao buscar o pedido' });
   }
 });
 

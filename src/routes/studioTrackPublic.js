@@ -30,6 +30,10 @@ const { buildStaticBrCode, sanitizeTxid } = require('../services/staticPixServic
 // Fase 2 da vitrine Studio: a confirmacao do pedido mostra a mesma linha
 // do tempo e nao pode ter uma tabela propria.
 const { ETAPAS, etapaDoStatus } = require('../services/etapasDoPedido');
+// Fase 4 da vitrine Studio: a marca da loja e o resumo da personalizacao
+// (o mesmo que a confirmacao do pedido mostra pelo mesmo token).
+const { vitrineDaEmpresa, montarMarca } = require('../services/marcaDaLoja');
+const { resumoDaPersonalizacao } = require('../services/confirmacaoDoPedido');
 
 const primeiroNome = (nome) => String(nome || '').trim().split(/\s+/)[0] || 'você';
 
@@ -48,10 +52,16 @@ async function pedidoDaVitrine(token) {
   try {
     const { rows } = await db.query(
       `SELECT o.id, o.order_number, o.company_id, o.created_at, o.total, o.status,
-              o.studio_production_status, o.customer_name,
+              o.studio_production_status, o.customer_name, o.delivery_type,
               COALESCE(co.trade_name, co.legal_name) AS loja,
-              (SELECT json_agg(json_build_object('nome', i.product_name, 'qtd', i.quantity) ORDER BY i.id)
-                 FROM digital_order_items i WHERE i.order_id = o.id) AS itens,
+              (SELECT json_agg(json_build_object(
+                        'nome', i.product_name, 'qtd', i.quantity,
+                        'imagem', i.product_image,
+                        'customization', i.customization,
+                        'customization_config', p.customization_config) ORDER BY i.id)
+                 FROM digital_order_items i
+                 LEFT JOIN products p ON p.id = i.product_id
+                WHERE i.order_id = o.id) AS itens,
               (SELECT i2.product_image FROM digital_order_items i2
                 WHERE i2.order_id = o.id AND NULLIF(TRIM(i2.product_image), '') IS NOT NULL
                 ORDER BY i2.id LIMIT 1) AS imagem
@@ -326,11 +336,51 @@ async function respostaDaEntrega(d) {
   };
 }
 
-function respostaDoPedidoDaVitrine(o) {
-  const pedido = String(o.order_number || o.id).toUpperCase();
-  if (String(o.status || '').toLowerCase() === 'cancelled') {
-    return { cancelado: true, loja: o.loja, cliente: primeiroNome(o.customer_name), pedido };
+// ── Fase 4: o pedido da vitrine com a marca da loja ─────────────────────
+//
+// A aprovacao de arte em aberto do pedido: "Criando a arte · aguardando
+// voce" vira um botao "Aprovar a arte" na propria pagina (JORNADA §2.3:
+// "a proxima acao a um toque"). So o token do link — quem tem o link do
+// pedido e a mesma cliente que recebeu o de aprovacao.
+async function aprovacaoPendente(orderId) {
+  try {
+    const { rows } = await db.query(
+      `SELECT token FROM studio_approval_links
+        WHERE order_id = $1 AND status = 'pending' AND expires_at > NOW()
+        ORDER BY created_at DESC LIMIT 1`,
+      [orderId]
+    );
+    return rows[0] ? { token: rows[0].token } : null;
+  } catch (e) {
+    if (e.code === '42703' || e.code === '42P01') return null;
+    throw e;
   }
+}
+
+/**
+ * Os itens do pedido da vitrine para a pagina: nome, quantidade, foto do
+ * produto e o resumo da personalizacao ("Frente e verso", "Arte: Mae").
+ * O `customization` bruto NAO sai: tem o endereco do arquivo que a
+ * cliente enviou e o briefing do servico de arte.
+ */
+function itensDoPedidoDaVitrine(itens) {
+  return (itens || []).map((i) => ({
+    nome: i.nome,
+    qtd: i.qtd,
+    imagem: i.imagem || null,
+    resumo: resumoDaPersonalizacao(i.customization_config, i.customization),
+  }));
+}
+
+function respostaDoPedidoDaVitrine(o, extras = {}) {
+  const pedido = String(o.order_number || o.id).toUpperCase();
+  const { vitrine = null, aprovacao = null } = extras;
+  const marca = montarMarca(vitrine);
+  if (String(o.status || '').toLowerCase() === 'cancelled') {
+    return { cancelado: true, loja: o.loja, cliente: primeiroNome(o.customer_name), pedido, marca };
+  }
+  const tipoDeEntrega = o.delivery_type || 'pickup';
+  const retira = tipoDeEntrega === 'pickup' || tipoDeEntrega === 'courier';
   return {
     cancelado: false,
     loja:      o.loja,
@@ -339,11 +389,21 @@ function respostaDoPedidoDaVitrine(o) {
     criado_em: o.created_at,
     entrega_combinada: null,
     imagem:    o.imagem,
-    itens:     o.itens || [],
+    itens:     itensDoPedidoDaVitrine(o.itens),
     total:     parseFloat(o.total) || 0,
     etapa_atual: etapaDoStatus(o.studio_production_status),
     etapas:      ETAPAS,
     saldo:       null,
+    // Fase 4 — so o pedido da vitrine leva estes campos.
+    origem:    'vitrine',
+    marca,
+    // "Pronto" e "Entregue" sao a mesma etapa na linha do tempo; a pagina
+    // troca "Pronto para retirar" por "Entregue" com isto.
+    entregue:  o.studio_production_status === 'delivered',
+    aprovacao,
+    // Onde retirar: o endereco DA LOJA (publico no rodape da vitrine),
+    // nunca o da cliente.
+    retirada_endereco: retira && vitrine && vitrine.address ? String(vitrine.address) : null,
   };
 }
 
@@ -380,7 +440,13 @@ router.get('/:token', async function(req, res) {
 
     if (!rows.length) {
       const pedido = await pedidoDaVitrine(token);
-      if (pedido) return res.json(respostaDoPedidoDaVitrine(pedido));
+      if (pedido) {
+        const [vitrine, aprovacao] = await Promise.all([
+          vitrineDaEmpresa(pedido.company_id),
+          aprovacaoPendente(pedido.id),
+        ]);
+        return res.json(respostaDoPedidoDaVitrine(pedido, { vitrine, aprovacao }));
+      }
       const os = await ordemDeServico(token);
       if (os) return res.json(await respostaDaOs(os));
       const entrega = await entregaMatcon(token);
@@ -388,6 +454,10 @@ router.get('/:token', async function(req, res) {
       return res.status(404).json({ error: 'Acompanhamento nao encontrado.' });
     }
     const v = rows[0];
+    // Fase 4: a encomenda do balcao do Studio tambem ganha a marca da
+    // loja quando a empresa tem vitrine. OS e entrega do Matcon, nao: tem
+    // pagina propria (DANFE, entrega parcial) e seguem no visual de hoje.
+    const marca = montarMarca(await vitrineDaEmpresa(v.company_id));
 
     // Venda cancelada nao vira 404: o cliente merece saber que foi cancelada,
     // e nao ficar olhando um tracker parado achando que esta em producao.
@@ -397,6 +467,7 @@ router.get('/:token', async function(req, res) {
         loja: v.loja,
         cliente: primeiroNome(v.customer_name),
         pedido: String(v.id).slice(0, 8).toUpperCase(),
+        marca,
       });
     }
 
@@ -418,6 +489,7 @@ router.get('/:token', async function(req, res) {
       etapa_atual: etapaAtual,
       etapas:      ETAPAS,
       saldo,
+      marca,
     });
   } catch (err) {
     console.error('[studio/acompanhar]', err.message);
@@ -430,6 +502,7 @@ module.exports._etapaDoStatus = etapaDoStatus;
 module.exports._primeiroNome = primeiroNome;
 module.exports._ETAPAS = ETAPAS;
 module.exports._respostaDoPedidoDaVitrine = respostaDoPedidoDaVitrine;
+module.exports._itensDoPedidoDaVitrine = itensDoPedidoDaVitrine;
 module.exports._etapaDaOs = etapaDaOs;
 module.exports._ETAPAS_OTICA = ETAPAS_OTICA;
 module.exports._respostaDaEntrega = respostaDaEntrega;
