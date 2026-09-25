@@ -16,6 +16,9 @@
 //                delivery_eta_text, origin_zip, origin_lat, origin_lng,
 //                delivery_pricing_mode (flat|distance), delivery_distance_tiers (jsonb),
 //                delivery_free_above_amount.
+// BE-3 (25/09/2026): PUT grava "Pedidos pela loja" — pedidos_pausados,
+//                pedidos_ate, pedidos_recado (355), courier_pickup_enabled,
+//                ga4_measurement_id, meta_pixel_id. Ver services/pedidosPelaLoja.js.
 // ============================================================
 const router = require('express').Router({ mergeParams: true });
 const db     = require('../config/database');
@@ -31,6 +34,11 @@ const {
   CAMPOS: CAMPOS_DE_VITRINE, condicaoDeFalta,
   exigeFotoNoUniverso, sanitizarItens,
 } = require('../services/pendenciasDaVitrine');
+// "Pedidos pela loja" (BE-3, 25/09/2026): fechar para pedidos, data
+// limite, recado, retirada por app e GA4/Pixel. A validacao mora no
+// servico, com teste; aqui so se grava.
+const { sanitizarPedidosPelaLoja } = require('../services/pedidosPelaLoja');
+const { comoData } = require('../services/modoDaLoja');
 
 const ALLOWED_ICONS = ['truck','pkg','shield','sparkle','leaf','heart','star','pix','card','receipt','bag','user'];
 
@@ -75,6 +83,9 @@ const DEFAULT_CONFIG = {
   origin_zip: null, origin_lat: null, origin_lng: null,
   delivery_pricing_mode: 'flat', delivery_distance_tiers: [],
   delivery_free_above_amount: null,
+  // BE-3 — "Pedidos pela loja" (migrations 288, 321, 355).
+  pedidos_pausados: false, pedidos_ate: null, pedidos_recado: null,
+  courier_pickup_enabled: false, ga4_measurement_id: null, meta_pixel_id: null,
 };
 
 const STOREFRONT_BASE = process.env.STOREFRONT_BASE_URL || 'https://loja.getaura.com.br';
@@ -211,6 +222,14 @@ router.get('/', async (req, res) => {
       // Base sem a migration 310 devolve undefined; o painel recebe
       // false e desenha a grade de horarios normal.
       always_open: config.always_open === true,
+      // BE-3 — "Pedidos pela loja". A data sai como AAAA-MM-DD: o driver
+      // devolve `date` como Date, e o painel leria um ISO com fuso.
+      pedidos_pausados: config.pedidos_pausados === true,
+      pedidos_ate: comoData(config.pedidos_ate),
+      pedidos_recado: config.pedidos_recado ?? null,
+      courier_pickup_enabled: config.courier_pickup_enabled === true,
+      ga4_measurement_id: config.ga4_measurement_id ?? null,
+      meta_pixel_id: config.meta_pixel_id ?? null,
       politica_troca_padrao: POLITICA_PADRAO,
       storefront_url: config.slug ? `${STOREFRONT_BASE}/${config.slug}` : null,
       domain_pricing: { '1year': 80, '2years': 152 },
@@ -540,6 +559,10 @@ router.put('/', requireRole('client', 'analyst', 'admin'), async (req, res) => {
   if (card_style && !['editorial','minimal','image-heavy'].includes(card_style)) {
     return res.status(400).json({ error: 'card_style deve ser editorial|minimal|image-heavy' });
   }
+  // BE-3 — validado ANTES de gravar qualquer coisa: um ID de GA4 errado
+  // devolve 400 e o resto do formulario nao fica salvo pela metade.
+  const pedidosPelaLoja = sanitizarPedidosPelaLoja(req.body);
+  if (pedidosPelaLoja.erro) return res.status(400).json({ error: pedidosPelaLoja.erro });
 
   const banners = req.body.banners !== undefined ? sanitizeBanners(req.body.banners) : undefined;
   if (req.body.banners !== undefined && banners === null) {
@@ -1066,10 +1089,34 @@ router.put('/', requireRole('client', 'analyst', 'admin'), async (req, res) => {
       }
     }
 
-    // A home guardada foi montada com a config antiga: esquece.
+    // BE-3 — "Pedidos pela loja" (migrations 288, 321 e 355). UPDATE por
+    // coluna, pelo mesmo motivo dos campos acima: base sem a migration 355
+    // (pedidos_recado) nao pode impedir a lojista de fechar a loja. Os
+    // nomes de coluna vem da lista fixa do sanitizador, nunca do corpo.
+    for (const [coluna, valor] of Object.entries(pedidosPelaLoja.campos)) {
+      try {
+        const { rows: updated } = await db.query(
+          `UPDATE digital_channel_config SET ${coluna} = $1, updated_at = NOW()
+            WHERE company_id = $2 RETURNING *`,
+          [valor, cid]
+        );
+        if (updated.length) savedConfig = updated[0];
+      } catch (e) {
+        if (e.code === '42703') {
+          console.error(`[canal-pedidos] coluna ${coluna} inexistente — skip:`, e.message);
+        } else {
+          throw e;
+        }
+      }
+    }
+
+    // A home guardada foi montada com a config antiga: esquece. Vale para
+    // os campos acima tambem — a home guardada da loja comum ja sai com
+    // GA4/Pixel e a retirada por app deles.
     esquecerPagina(savedConfig.slug || undefined);
     return res.json({
-      config: savedConfig,
+      // pedidos_ate como AAAA-MM-DD, igual ao GET.
+      config: { ...savedConfig, pedidos_ate: comoData(savedConfig.pedidos_ate) },
       saved: true,
       storefront_url: savedConfig.slug ? `${STOREFRONT_BASE}/${savedConfig.slug}` : null,
     });
