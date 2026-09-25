@@ -69,6 +69,23 @@ app.use('/api/v1/storefront', function(req, res, next) {
   next();
 });
 
+// ── CORS aberto pra aprovacao de arte e acompanhamento do pedido ──────────
+// Fase 4 da vitrine Studio (25/09/2026): as duas paginas passam a abrir no
+// endereco DA LOJA (loja.getaura.com.br/<slug>/... ou o dominio proprio da
+// lojista), que nao esta — nem pode estar, o dominio e dela — na lista de
+// origens do painel. O token na URL e a credencial; nao ha cookie. Mesmo
+// padrao do storefront acima.
+for (const prefixo of ['/api/v1/aprovacao', '/api/v1/acompanhar']) {
+  app.use(prefixo, function(req, res, next) {
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, X-Request-ID');
+    res.setHeader('Access-Control-Max-Age', '600');
+    if (req.method === 'OPTIONS') return res.sendStatus(204);
+    next();
+  });
+}
+
 // ── CORS aberto pra rotas publicas de relatorios (acessadas via token JWT) ──
 // Mesmo padrao do storefront: link no email pode ser aberto em qualquer
 // dominio/cliente, e nao precisamos de cookies (autenticacao por token na URL).

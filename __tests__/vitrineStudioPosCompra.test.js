@@ -620,3 +620,22 @@ describe('GET /storefront/:slug/studio/pedido/:token/repetir', () => {
     expect((await repetir('sheid-mania', 'b'.repeat(32))).status).toBe(404);
   });
 });
+
+// ─────────────────────────────────────────────────────────────
+// CORS — a pagina no endereco da loja chama a API de outra origem
+// ─────────────────────────────────────────────────────────────
+describe('CORS aberto para /aprovacao e /acompanhar', () => {
+  const fonte = require('fs').readFileSync(require('path').join(__dirname, '..', 'src/app.js'), 'utf8');
+
+  test('as duas rotas publicas entram no CORS aberto, ANTES do CORS do painel', () => {
+    const aberto = fonte.indexOf("['/api/v1/aprovacao', '/api/v1/acompanhar']");
+    const painel = fonte.indexOf('app.use(cors({');
+    expect(aberto).toBeGreaterThan(-1);
+    expect(aberto).toBeLessThan(painel);
+    // O preflight do POST de resposta (JSON) precisa do POST e do Content-Type.
+    const bloco = fonte.slice(aberto, fonte.indexOf('\n}\n', aberto));
+    expect(bloco).toContain("'GET, POST, OPTIONS'");
+    expect(bloco).toContain("'Content-Type, X-Request-ID'");
+    expect(bloco).not.toMatch(/Allow-Credentials/);
+  });
+});
