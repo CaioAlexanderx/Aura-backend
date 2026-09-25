@@ -5,6 +5,7 @@
 //         (`marca`) — e nada a mais do cliente.
 //   LINKS aprovacao e acompanhamento no endereco da loja com a chave
 //         `vitrine_v2` ligada; desligada, o endereco de sempre.
+//   REP   GET /storefront/:slug/studio/pedido/:token/repetir
 //
 // MOCK POR SQL, NUNCA POR POSICAO. db.query vem do mock global
 // (tests/jest.setup.js).
@@ -30,6 +31,7 @@ const db = require('../src/config/database');
 const { generatePix } = require('../src/services/pixService');
 const { limparCache } = require('../src/services/lojaDeTeste');
 const { montarMarca, linkDoPosCompra } = require('../src/services/marcaDaLoja');
+const { montarRepeticao, personalizacaoDaLinha } = require('../src/services/repetirPedido');
 
 const CID = 'c0000000-0000-0000-0000-000000000001';
 const TOKEN = 'a3f1c2d4e5b6978812ab34cd56ef7890';
@@ -490,3 +492,131 @@ describe('track_url do pedido e acompanhar_url da confirmacao', () => {
   });
 });
 
+// ─────────────────────────────────────────────────────────────
+// REP — Pedir outro igual
+// ─────────────────────────────────────────────────────────────
+const CAMPOS = {
+  fields: [
+    { id: 'nome', type: 'text', label: 'Nome', config: { max_chars: 10 } },
+    { id: 'cor_alca', type: 'color', label: 'Cor', config: { colors: ['#D8436F', '#FFFFFF'] } },
+    { id: 'tamanho', type: 'option', label: 'Tamanho', config: { choices: [{ value: 'p', label: 'P' }, { value: 'g', label: 'G' }] } },
+    { id: 'foto', type: 'image', label: 'Foto' },
+    { id: 'arte', type: 'option', label: 'Arte', config: { is_art_service: true, choices: [{ value: 'none', label: 'Envio' }, { value: 'designer', label: 'Criem' }] } },
+  ],
+  has_back: true,
+  has_middle: false,
+};
+
+describe('personalizacaoDaLinha — filtrada pelo configurador de hoje', () => {
+  test('textos, escolhas, cor, arte como URL e verso', () => {
+    const p = personalizacaoDaLinha(CAMPOS, {
+      nome: 'Mãe', nome_cor: '#D8436F', cor_alca: '#d8436f', tamanho: 'g',
+      foto: 'https://r2/uploads/f.png', arte: 'none', art_service_brief: 'flores',
+      has_back_selected: true, has_middle_selected: true,
+    });
+    expect(p).toEqual({
+      valores: {
+        nome: 'Mãe', nome_cor: '#D8436F', cor_alca: '#d8436f', tamanho: 'g',
+        foto: 'https://r2/uploads/f.png', arte: 'none', art_service_brief: 'flores',
+      },
+      verso: true,
+      // O produto nao oferece mais o meio: nao volta.
+      meio: false,
+      arte_enviada: true,
+    });
+  });
+
+  test('o que o configurador nao conhece mais nao volta', () => {
+    const p = personalizacaoDaLinha(CAMPOS, {
+      nome: 'Um nome muito comprido', cor_alca: '#000000', tamanho: 'gg',
+      foto: 'http://inseguro/f.png', campo_que_saiu: 'x', customer_phone: '12999990000',
+    });
+    expect(p.valores).toEqual({ nome: 'Um nome mu' });
+    expect(p.arte_enviada).toBe(false);
+  });
+
+  test('sem configurador, nada', () => {
+    expect(personalizacaoDaLinha(null, { nome: 'x' })).toEqual({ valores: {}, verso: false, meio: false, arte_enviada: false });
+  });
+});
+
+describe('montarRepeticao', () => {
+  test('produto fora da vitrine vem indisponivel e sem valores', () => {
+    const r = montarRepeticao({
+      pedido: { order_number: '00123' },
+      itens: [
+        { product_id: 'p1', product_name: 'Caneca', quantity: 2, customization: { nome: 'Mãe' } },
+        { product_id: 'p9', product_name: 'Copo', quantity: 1, customization: { nome: 'Pai' } },
+      ],
+      naVitrine: new Map([['p1', { customization_config: CAMPOS }]]),
+    });
+    expect(r.numero).toBe('00123');
+    expect(r.itens[0]).toEqual(expect.objectContaining({ product_id: 'p1', quantidade: 2, indisponivel: false }));
+    expect(r.itens[0].personalizacao.valores).toEqual({ nome: 'Mãe' });
+    expect(r.itens[1]).toEqual({ product_id: 'p9', nome: 'Copo', quantidade: 1, indisponivel: true, personalizacao: null });
+  });
+});
+
+describe('GET /storefront/:slug/studio/pedido/:token/repetir', () => {
+  const app = express();
+  app.use('/storefront', require('../src/routes/studioStorefront'));
+
+  let produtosNaVitrine;
+  let sqlDosProdutos;
+  beforeEach(() => {
+    db.query.mockReset();
+    produtosNaVitrine = [{ id: 'p1', customization_config: CAMPOS }];
+    sqlDosProdutos = null;
+    db.query.mockImplementation(async (sql, params = []) => {
+      const s = String(sql);
+      if (/FROM digital_channel_config dcc/.test(s)) {
+        return { rows: params[0] === 'sheid-mania' ? [{ company_id: CID, require_product_image: false }] : [] };
+      }
+      if (/FROM digital_orders o/.test(s) && /public_token = \$1/.test(s)) {
+        return { rows: params[0] === TOKEN && params[1] === CID ? [{
+          id: 'o1', company_id: CID, order_number: '00123', customer_name: 'Helena Martins',
+          status: 'cancelled', total: 129.7,
+        }] : [] };
+      }
+      if (/FROM digital_order_items i/.test(s)) {
+        return { rows: [
+          { product_id: 'p1', product_name: 'Caneca Alça Coração', quantity: 1,
+            customization: { nome: 'Mãe', foto: 'https://r2/uploads/f.png', has_back_selected: true } },
+          { product_id: 'p2', product_name: 'Caneca Branca', quantity: 2, customization: {} },
+        ] };
+      }
+      if (/FROM products/.test(s)) { sqlDosProdutos = s; return { rows: produtosNaVitrine }; }
+      return { rows: [] };
+    });
+  });
+  const repetir = (slug = 'sheid-mania', token = TOKEN) =>
+    request(app).get(`/storefront/${slug}/studio/pedido/${token}/repetir`);
+
+  test('devolve produto, quantidade e personalizacao — nada do cliente', async () => {
+    const r = await repetir();
+    expect(r.status).toBe(200);
+    expect(r.headers['cache-control']).toBe('no-store');
+    expect(r.body).toEqual({
+      numero: '00123',
+      itens: [
+        { product_id: 'p1', nome: 'Caneca Alça Coração', quantidade: 1, indisponivel: false,
+          personalizacao: { valores: { nome: 'Mãe', foto: 'https://r2/uploads/f.png' }, verso: true, meio: false, arte_enviada: true } },
+        { product_id: 'p2', nome: 'Caneca Branca', quantidade: 2, indisponivel: true, personalizacao: null },
+      ],
+    });
+    expect(JSON.stringify(r.body)).not.toMatch(/Helena|129/);
+  });
+
+  test('a vitrine de hoje decide o que esta disponivel (mesma regra da lista)', async () => {
+    await repetir();
+    expect(sqlDosProdutos).toMatch(/is_personalizable = true/);
+    expect(sqlDosProdutos).toMatch(/studio_storefront_visible IS NOT FALSE/);
+    expect(sqlDosProdutos).toMatch(/is_active IS NOT FALSE/);
+  });
+
+  test('token de outra loja, token curto ou loja inexistente: 404', async () => {
+    expect((await repetir('outra-loja')).status).toBe(404);
+    expect((await repetir('sheid-mania', 'curto')).status).toBe(404);
+    expect((await repetir('sheid-mania', 'b'.repeat(32))).status).toBe(404);
+  });
+});
