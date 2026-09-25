@@ -8,6 +8,9 @@
 // POST /storefront/:slug/order/:oid/upload-proof — Cliente envia comprovante de Pix
 // POST /storefront/:slug/order/:oid/mark-as-paid — Cliente avisa que pagou
 // GET  /storefront/:slug/order/:oid          — Poll status do pedido
+// GET  /storefront/:slug/{c/:cat,sacola,finalizar,pedido/:token,orcamento,
+//      acompanhar/:token,aprovacao/:token} — casca da vitrine Studio (BE-1);
+//      loja comum: 302 para a home
 //
 // MP Fase 2 (21/05/2026): CheckoutPro para pagamento com cartão.
 // payment_method=card cria preferência MP e retorna init_point para
@@ -41,12 +44,17 @@ const {
   produtoPublicoPorId,
   // Galeria por cor de UMA peca (migration 323), com a visibilidade da grade.
   galeriaDaPeca,
+  // Previa do link da vitrine Studio (BE-1, 25/09/2026).
+  pecaDaVitrineStudio, urlDaLoja,
 } = require('../services/storefrontBuilder');
 // Empresa em modo Studio: este endereco serve a vitrine de
 // personalizados, nao a loja comum. Ver services/vitrineStudioShell.js.
 const {
-  ehLojaStudio, montarVitrineStudio, cspDaVitrineStudio,
+  ehLojaStudio, montarVitrineStudio, cspDaVitrineStudio, metatagsDaVitrineStudio,
 } = require('../services/vitrineStudioShell');
+// Loja comum que recebe um endereco da vitrine Studio volta para a home
+// pelo mesmo host por onde chegou (BE-1).
+const { caminhoDaHomeDaLoja } = require('../middleware/customDomain');
 const { paginaDoCatalogo, facetasDoCatalogo, faixaDePreco } = require('../services/catalogoPaginado');
 const { normalizarTamanho } = require('../services/tamanhosDaLoja');
 const { generatePix }     = require('../services/pixService');
@@ -288,18 +296,50 @@ router.get('/:slug/catalogo', async (req, res) => {
 });
 
 /**
+ * O <head> da vitrine Studio para esta requisicao: da peca quando ha uma
+ * (rota /p/<id> ou `?produto=` da Aurinha), da loja no resto. Peca que
+ * nao existe, e de outra loja ou esta oculta na vitrine cai nas metatags
+ * da loja — o link continua abrindo, so sem a foto da peca.
+ */
+async function cabecalhoDaVitrineStudio(cfg, idDaPeca, indexar) {
+  let peca = null;
+  if (idDaPeca) {
+    peca = await pecaDaVitrineStudio({
+      cid: cfg.company_id, id: idDaPeca,
+      exigeFoto: cfg.require_product_image === true,
+    }).catch((e) => { console.error('[storefront] peca da previa:', e.message); return null; });
+  }
+  return metatagsDaVitrineStudio({
+    loja: {
+      // O mesmo nome que a vitrine desenha (montarSite do studioStorefront).
+      nome: cfg.site_name || cfg.company_display_name,
+      tagline: cfg.tagline || cfg.description,
+      logo_url: cfg.logo_url, cover_url: cfg.cover_url,
+    },
+    peca,
+    urlDaLoja: urlDaLoja(cfg),
+    mostrarPreco: cfg.show_prices !== false,
+    indexar,
+  });
+}
+
+/**
  * A pagina da loja. Com `produtoId` (rota /:slug/p/:id, 08/09/2026) a
  * mesma pagina sai com a peca embutida e as metatags dela — e o link que
  * a cliente cola no WhatsApp. Peca que nao existe mais abre a loja com
  * um aviso, nao um erro: o link antigo continua levando a algum lugar.
+ *
+ * `somenteStudio` (BE-1): as paginas que so a vitrine Studio tem (sacola,
+ * checkout, pedido...). A loja comum nao sabe desenha-las, entao ali elas
+ * voltam para a home em vez de mostrar a loja comum com a URL errada.
  */
-async function servirPaginaDaLoja(req, res, produtoId) {
+async function servirPaginaDaLoja(req, res, produtoId, { somenteStudio = false, indexar = true } = {}) {
   try {
     const slug = req.params.slug.toLowerCase().trim();
     // A home (sem peca na URL e sem query) sai da memoria por 60 s — ver
     // services/cacheDaPaginaDaLoja.js. Cabecalhos iguais aos da pagina
     // montada na hora: o navegador nao distingue.
-    const ehHome = !produtoId && !String(req.url || '').includes('?');
+    const ehHome = !produtoId && !somenteStudio && !String(req.url || '').includes('?');
     if (ehHome) {
       const guardada = paginaLembrada(slug);
       if (guardada) {
@@ -311,7 +351,8 @@ async function servirPaginaDaLoja(req, res, produtoId) {
       }
     }
     const { rows } = await db.query(
-      `SELECT dcc.*, COALESCE(c.pdv_settings, '{}'::jsonb) AS company_pdv_settings
+      `SELECT dcc.*, COALESCE(c.pdv_settings, '{}'::jsonb) AS company_pdv_settings,
+              COALESCE(c.trade_name, c.legal_name) AS company_display_name
          FROM digital_channel_config dcc
          JOIN companies c ON c.id = dcc.company_id
         WHERE dcc.slug = $1 AND dcc.is_published = true`, [slug]);
@@ -330,7 +371,14 @@ async function servirPaginaDaLoja(req, res, produtoId) {
     // loja comum atende: loja com a vitrine antiga e melhor do que loja
     // fora do ar.
     if (ehLojaStudio({ pdv_settings: rows[0].company_pdv_settings })) {
-      const pagina = await montarVitrineStudio(slug);
+      // A peca da previa: a da rota /p/<id> ou, na home, a do link da
+      // Aurinha (`?produto=`, docs/aurinha-checkout-contract.md) — que
+      // tambem e colado em conversa e merece a foto da peca.
+      const idDaPeca = produtoId
+        || (!somenteStudio && typeof req.query.produto === 'string' ? req.query.produto : null);
+      const cabecalho = await cabecalhoDaVitrineStudio(rows[0], idDaPeca, indexar)
+        .catch((e) => { console.error('[storefront] metatags da vitrine:', e.message); return ''; });
+      const pagina = await montarVitrineStudio(slug, cabecalho);
       if (pagina) {
         res.setHeader('Content-Security-Policy', cspDaVitrineStudio(STOREFRONT_API_BASE));
         res.removeHeader('X-Frame-Options');
@@ -342,6 +390,11 @@ async function servirPaginaDaLoja(req, res, produtoId) {
         return res.send(pagina);
       }
     }
+
+    // Pagina que so a vitrine Studio tem, pedida numa loja comum (ou numa
+    // Studio com o app fora do ar): a home da loja, e nao um 404 nem a
+    // loja comum desenhada sob a URL da sacola.
+    if (somenteStudio) return res.redirect(302, caminhoDaHomeDaLoja(req, slug));
 
     const data = await buildStorefront(rows[0]);
     if (produtoId) {
@@ -370,6 +423,38 @@ router.get('/:slug/page', (req, res) => servirPaginaDaLoja(req, res, null));
 // aqui pelo middleware de dominio (customDomain.js) sem regra nova: ele
 // so cola o caminho que sobrou depois do slug.
 router.get('/:slug/p/:id', (req, res) => servirPaginaDaLoja(req, res, req.params.id));
+
+/**
+ * As paginas da vitrine Studio nova (BE-1, 25/09/2026).
+ *
+ * O app passou a ter rota para cada tela (`app/[slug]/...`), e o
+ * middleware de dominio ja entrega `/<slug>/sacola` aqui como
+ * `/storefront/<slug>/sacola`. Sem estas rotas o servidor respondia 404
+ * antes de o app carregar: recarregar a sacola, abrir o link do pedido
+ * ou voltar pelo navegador caia num erro.
+ *
+ * Lista EXPLICITA, nunca um curinga `/:slug/*`: as rotas de API moram no
+ * mesmo prefixo (`order`, `order/:oid`, `shipping-quote`, `catalogo`,
+ * `produto/:id/fotos`, `studio/*`...) e um curinga as engoliria na
+ * primeira rota nova que alguem declarasse abaixo dele. Nenhum destes
+ * caminhos colide com uma rota existente — __tests__/lojaServeVitrineStudio
+ * confere as duas coisas.
+ *
+ * `indexar: false` nas paginas de compra e nas com token: o link de um
+ * pedido nao pode virar resultado de busca.
+ */
+const PAGINAS_DA_VITRINE_STUDIO = [
+  { caminho: '/:slug/c/:categoria',       indexar: true },
+  { caminho: '/:slug/sacola',             indexar: false },
+  { caminho: '/:slug/finalizar',          indexar: false },
+  { caminho: '/:slug/pedido/:token',      indexar: false },
+  { caminho: '/:slug/orcamento',          indexar: false },
+  { caminho: '/:slug/acompanhar/:token',  indexar: false },
+  { caminho: '/:slug/aprovacao/:token',   indexar: false },
+];
+for (const { caminho, indexar } of PAGINAS_DA_VITRINE_STUDIO) {
+  router.get(caminho, (req, res) => servirPaginaDaLoja(req, res, null, { somenteStudio: true, indexar }));
+}
 
 /**
  * GET /storefront/:slug/produto/:id/fotos  — a galeria por cor de UMA peca
@@ -1004,3 +1089,5 @@ router.get('/:slug/order/:oid', async (req, res) => {
 });
 
 module.exports = router;
+// Exposto para teste: a lista e contrato com as rotas do app.
+module.exports.PAGINAS_DA_VITRINE_STUDIO = PAGINAS_DA_VITRINE_STUDIO;

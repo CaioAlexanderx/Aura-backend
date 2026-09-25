@@ -31,7 +31,7 @@
 // ============================================================
 'use strict';
 
-const { HOSTS_DOS_RASTREADORES } = require('./rastreadores');
+const { HOSTS_DOS_RASTREADORES, metatagsDeSeo } = require('./rastreadores');
 
 /** Onde o app Expo esta publicado de verdade. */
 const HOST_DO_APP = process.env.STUDIO_APP_ORIGIN || 'https://app.getaura.com.br';
@@ -102,17 +102,130 @@ async function buscarCasca() {
   return html;
 }
 
+// ── A PREVIA DO LINK (BE-1, 25/09/2026) ────────────────────────────────
+// O robo que monta a previa no WhatsApp e no Instagram NAO roda
+// JavaScript: ele le o <head> que o servidor mandou e pronto. A casca do
+// app sai com `<title>Aura.</title>` e nada mais, entao o "Compartilhar"
+// da vitrine mandava um link sem foto e com o nome da Aura. O servidor
+// escreve aqui o que o robo precisa — da peca em /p/<id>, da loja no
+// resto — por requisicao, sem tocar na casca guardada (ver
+// montarVitrineStudio).
+
+function escHtml(s) {
+  return String(s == null ? '' : s)
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
+
+/** "R$ 49,90" — vazio quando nao ha preco que valha mostrar. */
+function precoEmReais(v) {
+  const n = Number(v);
+  if (!Number.isFinite(n) || n <= 0) return '';
+  // O Intl poe espaco inquebravel depois do "R$"; o cartao do WhatsApp
+  // desenha igual, e o teste compara texto simples.
+  return n.toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' }).replace(/\u00a0/g, ' ');
+}
+
+/**
+ * A descricao em uma linha curta. O cartao do WhatsApp mostra duas ou
+ * tres linhas; o resto e cortado por ele no meio da palavra.
+ */
+function textoCurto(texto, max = 150) {
+  const t = String(texto || '').replace(/\s+/g, ' ').trim();
+  if (t.length <= max) return t;
+  const corte = t.slice(0, max - 1);
+  const ultimoEspaco = corte.lastIndexOf(' ');
+  return (ultimoEspaco > max * 0.6 ? corte.slice(0, ultimoEspaco) : corte).replace(/[\s,.;:·-]+$/, '') + '…';
+}
+
+/**
+ * A foto da peca para a previa. A miniatura (ate 640 px, migration 317)
+ * vem primeiro de proposito: o WhatsApp desiste de imagem pesada e mostra
+ * o link sem foto, e 640 px ja enche o cartao grande.
+ */
+function fotoDaPeca(peca) {
+  if (!peca) return null;
+  const galeria = Array.isArray(peca.gallery_urls) ? peca.gallery_urls.filter(Boolean) : [];
+  return peca.image_thumb_url || peca.thumb_url || peca.image_url || galeria[0] || null;
+}
+
+/**
+ * O <head> da vitrine Studio: <title>, descricao e Open Graph.
+ *
+ * `loja` = { nome, tagline, logo_url, cover_url }; `peca` = a linha de
+ * pecaDaVitrineStudio (ou null); `urlDaLoja` = o endereco publico
+ * (storefrontBuilder.urlDaLoja). `indexar: false` para sacola, checkout e
+ * paginas com token: o link de um pedido nao pode virar resultado de
+ * busca.
+ *
+ * Tudo que vem da lojista (nome da peca, descricao, tagline) passa por
+ * escape: um `"><script>` no nome da caneca nao pode sair do atributo.
+ * As metatags sao as MESMAS da loja comum (metatagsDeSeo, #674).
+ */
+function metatagsDaVitrineStudio({ loja, peca, urlDaLoja, mostrarPreco = true, indexar = true }) {
+  const l = loja || {};
+  const nomeDaLoja = String(l.nome || '').trim() || 'Loja';
+  const base = String(urlDaLoja || '').replace(/\/+$/, '');
+
+  let titulo, descricao, url, imagem, tipo;
+  if (peca) {
+    const nome = String(peca.name || '').trim();
+    titulo = nome ? `${nome} · ${nomeDaLoja}` : nomeDaLoja;
+    const preco = mostrarPreco ? precoEmReais(peca.price) : '';
+    const sobre = textoCurto(peca.description) || `${nome} na ${nomeDaLoja}`.trim();
+    descricao = [preco, sobre].filter(Boolean).join(' · ');
+    url = base ? `${base}/p/${encodeURIComponent(peca.id)}` : '';
+    imagem = fotoDaPeca(peca) || l.logo_url || l.cover_url || '';
+    tipo = 'product';
+  } else {
+    titulo = nomeDaLoja;
+    descricao = textoCurto(l.tagline);
+    url = base;
+    imagem = l.logo_url || l.cover_url || '';
+    tipo = 'website';
+  }
+
+  return [
+    `<title>${escHtml(titulo)}</title>`,
+    descricao ? `<meta name="description" content="${escHtml(descricao)}">` : '',
+    indexar ? '' : '<meta name="robots" content="noindex">',
+    metatagsDeSeo({ titulo, descricao, url, imagem, tipo, nomeDaLoja }),
+  ].filter(Boolean).join('\n');
+}
+
+/**
+ * Troca o <head> generico da casca pelo da loja.
+ *
+ * Tira o <title> e qualquer descricao, canonica ou Open Graph que a casca
+ * traga: o robo le a PRIMEIRA og:image, e uma da Aura antes da nossa
+ * ganharia. Os `replace` usam funcao de proposito — com texto, um `$&`
+ * no nome da peca seria interpretado como padrao de substituicao.
+ */
+function comCabecalhoDaLoja(casca, cabecalho) {
+  if (!cabecalho) return casca;
+  const limpa = String(casca)
+    .replace(/<meta\s+(?:property|name)="(?:og:[^"]*|twitter:[^"]*|description|robots)"[^>]*>\s*/gi, '')
+    .replace(/<link\s+rel="canonical"[^>]*>\s*/gi, '');
+  if (/<title[^>]*>[\s\S]*?<\/title>/i.test(limpa)) {
+    return limpa.replace(/<title[^>]*>[\s\S]*?<\/title>/i, () => cabecalho);
+  }
+  return limpa.replace('</head>', () => cabecalho + '</head>');
+}
+
 /**
  * A pagina da vitrine Studio para um slug.
  *
  * Devolve `null` quando o app nao responde — o chamador cai na loja
  * comum, que e gerada aqui e nao depende de ninguem. Loja no ar com a
  * vitrine antiga e melhor do que loja fora do ar.
+ *
+ * `cabecalho` (metatagsDaVitrineStudio) e por requisicao: entra numa
+ * COPIA da casca, nunca na guardada em `_cache` — senao a proxima loja
+ * (ou a proxima peca) sairia com o titulo desta.
  */
-async function montarVitrineStudio(slug) {
+async function montarVitrineStudio(slug, cabecalho = '') {
   try {
-    const casca = apontarParaOApp(await buscarCasca());
-    return casca.replace('</head>', recadoParaOApp(slug) + '</head>');
+    const casca = comCabecalhoDaLoja(apontarParaOApp(await buscarCasca()), cabecalho);
+    return casca.replace('</head>', () => recadoParaOApp(slug) + '</head>');
   } catch (err) {
     console.warn('[vitrineStudio] casca indisponivel:', err.message);
     return null;
@@ -158,5 +271,7 @@ module.exports = {
   recadoParaOApp,
   montarVitrineStudio,
   cspDaVitrineStudio,
+  // Previa do link (BE-1, 25/09/2026).
+  metatagsDaVitrineStudio, comCabecalhoDaLoja, precoEmReais, textoCurto, fotoDaPeca,
   limparCache,
 };
