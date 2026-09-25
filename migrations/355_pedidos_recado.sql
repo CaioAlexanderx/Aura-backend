@@ -27,5 +27,13 @@ DO $$ BEGIN
 EXCEPTION WHEN duplicate_object THEN NULL;
 END $$;
 
+-- GA4 e Pixel: as colunas existem em producao desde a migration 220, mas
+-- nenhum arquivo deste repositorio as cria — um banco montado so pelas
+-- migrations (o da CI) nao as tinha, e o PUT da loja (BE-3) as grava.
+-- Mesmo tipo de producao; IF NOT EXISTS nao toca o que ja existe.
+ALTER TABLE digital_channel_config
+  ADD COLUMN IF NOT EXISTS ga4_measurement_id text,
+  ADD COLUMN IF NOT EXISTS meta_pixel_id text;
+
 COMMENT ON COLUMN digital_channel_config.pedidos_recado IS
   'Recado da lojista na vitrine quando a loja nao aceita pedido (pausada ou depois de pedidos_ate). NULL = texto padrao. Ver services/modoDaLoja.js.';
