@@ -121,3 +121,67 @@ describe('uma regra, dois leitores', () => {
     expect(svc).toContain("require('./studioQtyTiers')");
   });
 });
+
+// ── Fase 2 (25/09/2026): o numero do orcamento ─────────────────────────
+// A tela final mostrava o nome do evento onde a cliente esperava um
+// numero. O codigo sai do id do evento: curto, estavel, sem migration.
+describe('o codigo do orcamento em lote', () => {
+  const { codigoDoLote } = require('../src/services/studioLote');
+  const ID = '3f9a2c11-0b1e-4c7a-9d3e-2a6f0b1c9e77';
+
+  test('L- e os seis primeiros digitos do id, em maiuscula', () => {
+    expect(codigoDoLote(ID)).toBe('L-3F9A2C');
+  });
+
+  test('estavel: o mesmo id da sempre o mesmo codigo', () => {
+    expect(codigoDoLote(ID)).toBe(codigoDoLote(ID.toUpperCase()));
+  });
+
+  test('sem id valido, null', () => {
+    expect(codigoDoLote(null)).toBeNull();
+    expect(codigoDoLote('xyz')).toBeNull();
+  });
+
+  test('POST /bulk-order devolve o codigo; o painel devolve o mesmo', async () => {
+    const express = require('express');
+    const request = require('supertest');
+    const db = require('../src/config/database');
+    db.query.mockReset();
+    db.connect.mockReset();
+    db.query.mockImplementation(async (sql) => {
+      const s = String(sql);
+      if (/FROM digital_channel_config/.test(s)) return { rows: [{ company_id: 'c1' }] };
+      if (/FROM products/.test(s)) return { rows: [{ id: 'p1', name: 'Caneca', price: '39.90' }] };
+      if (/FROM studio_bulk_events/.test(s)) {
+        return { rows: [{ id: ID, event_name: 'Casamento', status: 'draft' }] };
+      }
+      return { rows: [] };
+    });
+    db.connect.mockImplementation(() => ({
+      query: jest.fn(async (sql) => (/INSERT INTO studio_bulk_events/.test(String(sql))
+        ? { rows: [{ id: ID, event_name: 'Casamento', total_qty: 2, total_amount: 79.8, discount_pct: 0, status: 'draft' }] }
+        : { rows: [] })),
+      release: jest.fn(),
+    }));
+
+    const loja = express();
+    loja.use(express.json());
+    loja.use('/storefront', require('../src/routes/studioStorefront'));
+    const r = await request(loja).post('/storefront/sheid-mania/studio/bulk-order').send({
+      product_id: 'p1', event_name: 'Casamento', customer_phone: '12999990000', names: 'Ana\nJoão',
+    });
+    expect(r.status).toBe(201);
+    expect(r.body.codigo).toBe('L-3F9A2C');
+    expect(r.body.event.id).toBe(ID);
+
+    // O painel monta este router sob /companies/:id/studio (auth fica na montagem).
+    const painel = express();
+    painel.use('/companies/:id/studio', require('../src/routes/studioBulkHub'));
+    const lista = await request(painel).get('/companies/c1/studio/bulk-events');
+    expect(lista.status).toBe(200);
+    expect(lista.body.events[0].codigo).toBe('L-3F9A2C');
+    const detalhe = await request(painel).get(`/companies/c1/studio/bulk-events/${ID}`);
+    expect(detalhe.status).toBe(200);
+    expect(detalhe.body.event.codigo).toBe('L-3F9A2C');
+  });
+});

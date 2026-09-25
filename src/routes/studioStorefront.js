@@ -86,7 +86,7 @@ const { modoDaLoja } = require('../services/modoDaLoja');
 const { rastreadoresDaLoja } = require('../services/rastreadores');
 const { vitrineV2Ligada } = require('../services/vitrineV2');
 const { montarRedes } = require('../services/redesSociais');
-const { cotarLote } = require('../services/studioLote');
+const { cotarLote, codigoDoLote } = require('../services/studioLote');
 const { buildLadder } = require('../services/studioQtyTiers');
 const {
   computeBackDelta, computeMiddleDelta,
@@ -1708,7 +1708,11 @@ router.post('/:slug/studio/bulk-order', async (req, res) => {
       );
       await client.query('COMMIT');
 
-      res.status(201).json({ event: ev, item_count: nomes.length, pricing: cot });
+      // `codigo`: o numero curto do orcamento para a tela final e para a
+      // mensagem do WhatsApp (Fase 2). Ver codigoDoLote.
+      res.status(201).json({
+        event: ev, codigo: codigoDoLote(ev.id), item_count: nomes.length, pricing: cot,
+      });
     } catch (e) {
       await client.query('ROLLBACK');
       throw e;

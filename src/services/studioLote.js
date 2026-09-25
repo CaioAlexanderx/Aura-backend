@@ -76,4 +76,24 @@ function cotarLote(qty, unitPrice, rawTiers) {
   };
 }
 
-module.exports = { faixasParaTela, cotarLote };
+/**
+ * O numero do orcamento que a cliente ve ("L-3F9A2C").
+ *
+ * Fase 2 (25/09/2026): a tela final do lote mostrava o NOME DO EVENTO
+ * onde a cliente esperava um numero — e "Casamento Ana e Joao" nao e algo
+ * que se cita no WhatsApp para a lojista achar o pedido. Sequencia por
+ * empresa ("L-0042") pediria coluna e migration; este codigo sai do
+ * proprio id do evento: curto, estavel (o mesmo em qualquer tela, hoje e
+ * daqui a um mes) e sem nada novo no banco. Seis digitos hex dao 16,7
+ * milhoes de codigos — colisao dentro de uma loja e desprezivel para um
+ * numero que serve para achar a conversa, nao para indexar nada.
+ *
+ * O painel (studioBulkHub) devolve o mesmo codigo, para a lojista achar o
+ * orcamento que a cliente citou.
+ */
+function codigoDoLote(id) {
+  const hex = String(id || '').replace(/[^0-9a-f]/gi, '').slice(0, 6).toUpperCase();
+  return hex.length === 6 ? `L-${hex}` : null;
+}
+
+module.exports = { faixasParaTela, cotarLote, codigoDoLote };
