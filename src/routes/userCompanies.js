@@ -139,6 +139,108 @@ router.get('/billing-preview', async (req, res) => {
 });
 
 // ──────────────────────────────────────────────────────────
+// Estoque compartilhado no grupo (migration 355, 25/09/2026)
+//
+// GET   /me/companies/stock-sharing → { available, shared, companies }
+// PATCH /me/companies/stock-sharing   body { shared: boolean }
+//
+// Só o dono, e só com 2+ empresas ativas no grupo (available=false
+// esconde a opção no app). O grupo é o da empresa principal do dono.
+// Desligar grava false em todas as empresas do grupo e descompartilha
+// os produtos já cadastrados; ligar faz o inverso (todos os produtos do
+// grupo passam a aparecer nas duas lojas, como no Davi).
+// ──────────────────────────────────────────────────────────
+const GROUP_OF_PRIMARY = `
+  SELECT g.id, COALESCE(g.trade_name, g.legal_name) AS name, g.is_active,
+         g.share_products_in_group
+    FROM companies p
+    JOIN companies g
+      ON COALESCE(NULLIF(g.billing_owner_company_id, g.id), g.id)
+       = COALESCE(NULLIF(p.billing_owner_company_id, p.id), p.id)
+   WHERE p.owner_id = $1 AND p.is_primary = true AND p.is_active = true`;
+
+function sharingState(rows) {
+  const ativas = rows.filter((r) => r.is_active);
+  return {
+    available: ativas.length >= 2,
+    shared: !rows.some((r) => r.share_products_in_group === false),
+    companies: ativas.map((r) => ({ id: r.id, name: r.name || '' })),
+  };
+}
+
+router.get('/stock-sharing', async (req, res) => {
+  try {
+    const { rows } = await db.query(GROUP_OF_PRIMARY, [req.user.id]);
+    return res.json(sharingState(rows));
+  } catch (err) {
+    // Base sem a 355: a opção não existe ainda, então não aparece.
+    if (err.code === '42703') return res.json({ available: false, shared: true, companies: [] });
+    console.error('[userCompanies] stock-sharing GET error:', err.message);
+    return res.status(500).json({ error: 'Erro ao consultar o estoque do grupo' });
+  }
+});
+
+router.patch('/stock-sharing', async (req, res) => {
+  const userId = req.user.id;
+  const shared = req.body?.shared;
+  if (typeof shared !== 'boolean') {
+    return res.status(400).json({ error: 'shared deve ser true ou false' });
+  }
+
+  const client = await db.connect();
+  try {
+    await client.query('BEGIN');
+
+    const { rows } = await client.query(`${GROUP_OF_PRIMARY} FOR UPDATE OF g`, [userId]);
+    const state = sharingState(rows);
+    if (!state.available) {
+      await client.query('ROLLBACK');
+      return res.status(403).json({
+        error: 'NOT_MULTI_CNPJ',
+        message: 'Esta opção é para quem tem mais de uma empresa no grupo.',
+      });
+    }
+
+    const ids = rows.map((r) => r.id);
+    await client.query(
+      `UPDATE companies SET share_products_in_group = $1, updated_at = NOW()
+        WHERE id = ANY($2::uuid[])`,
+      [shared, ids]
+    );
+    const upd = await client.query(
+      `UPDATE products SET is_group_shared = $1
+        WHERE company_id = ANY($2::uuid[]) AND is_group_shared IS DISTINCT FROM $1`,
+      [shared, ids]
+    );
+
+    try {
+      await client.query('SAVEPOINT audit');
+      await client.query(
+        `INSERT INTO multicnpj_audit
+           (user_id, action, source_company_id, target_company_id, metadata)
+         VALUES ($1, 'stock_sharing', $2, $2, $3::jsonb)`,
+        [userId, ids[0], JSON.stringify({ shared, previous: state.shared, products_changed: upd.rowCount, companies: ids })]
+      );
+    } catch (auditErr) {
+      await client.query('ROLLBACK TO SAVEPOINT audit');
+      console.error('[userCompanies] stock-sharing audit failed:', auditErr.message);
+    }
+
+    await client.query('COMMIT');
+    return res.json({ ...state, shared, products_changed: upd.rowCount });
+  } catch (err) {
+    await client.query('ROLLBACK');
+    if (err.code === '42703') {
+      return res.status(503).json({ error: 'Opção ainda não disponível. Tente novamente em alguns minutos.' });
+    }
+    console.error('[userCompanies] stock-sharing PATCH error:', err.message);
+    return res.status(500).json({ error: 'Erro ao alterar o estoque do grupo' });
+  } finally {
+    client.release();
+  }
+});
+
+// ──────────────────────────────────────────────────────────
 // POST /me/companies — cria empresa adicional
 // Body: { legal_name (obrig), trade_name?, cnpj?, vertical?,
 //         tax_regime?, email?, phone?, address? }
