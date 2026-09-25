@@ -269,7 +269,10 @@ async function sendOrderConfirmationEmail(to, opts) {
 }
 
 // -- Template: atualização de status do pedido Canal Digital (cliente) --
-async function sendOrderStatusEmail(to, { order_number, customer_name, status, store_name }) {
+// `link` (opcional, Fase 2 da vitrine Studio): { url, rotulo } — o botao
+// que leva a cliente de volta ao pedido. So entra quando quem chama tem um
+// endereco absoluto; sem ele o e-mail sai igual ao de sempre.
+async function sendOrderStatusEmail(to, { order_number, customer_name, status, store_name, link }) {
   const firstName = customer_name ? customer_name.split(' ')[0] : '';
   const STATUS_INFO = {
     confirmed: { emoji: '✅', label: 'Confirmado',    msg: 'Pagamento confirmado! Seu pedido está sendo preparado.' },
@@ -279,6 +282,15 @@ async function sendOrderStatusEmail(to, { order_number, customer_name, status, s
     cancelled: { emoji: '❌', label: 'Cancelado',    msg: 'Seu pedido foi cancelado. Em caso de dúvidas, contate a loja.' },
   };
   const info = STATUS_INFO[status] || { emoji: '📋', label: status, msg: 'Status do seu pedido foi atualizado.' };
+
+  const linkValido = !!(link && typeof link.url === 'string' && /^https:\/\//.test(link.url));
+  const escAttr = (v) => String(v).replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;');
+  const botaoDoPedido = linkValido ? `
+    <table width="100%" cellpadding="0" cellspacing="0" style="margin:0 0 20px;">
+      <tr><td align="center">
+        <a href="${escAttr(link.url)}" style="display:inline-block;background:#7c3aed;color:#ffffff;font-size:14px;font-weight:700;text-decoration:none;padding:12px 22px;border-radius:12px;">${escAttr(link.rotulo || 'Ver meu pedido')}</a>
+      </td></tr>
+    </table>` : '';
 
   const html = emailLayout(`
     <p style="font-size:15px;color:#e2e8f0;margin:0 0 6px;">Ol&aacute;, ${firstName || customer_name}!</p>
@@ -293,13 +305,15 @@ async function sendOrderStatusEmail(to, { order_number, customer_name, status, s
         <p style="margin:0;font-size:13px;color:#94a3b8;">${info.msg}</p>
       </td></tr>
     </table>
+    ${botaoDoPedido}
     <p style="font-size:11px;color:#475569;margin:0;">Em caso de d&uacute;vidas, entre em contato com a loja diretamente.</p>
   `);
 
   return sendMail({
     to,
     subject: `${info.emoji} Pedido #${order_number}: ${info.label}`,
-    text: `Pedido #${order_number} em ${store_name}: ${info.label}. ${info.msg}`,
+    text: `Pedido #${order_number} em ${store_name}: ${info.label}. ${info.msg}`
+      + (linkValido ? `\n\n${link.rotulo || 'Ver meu pedido'}: ${link.url}` : ''),
     html,
   });
 }

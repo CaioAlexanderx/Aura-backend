@@ -7,6 +7,8 @@
 // GET  /storefront/:slug/studio/shipping-quote — cotacao de frete por CEP (S2)
 // POST /storefront/:slug/studio/bulk-quote — preco de um lote, sem gravar (S0)
 // POST /storefront/:slug/studio/bulk-order — registra o lote como rascunho (S0)
+// POST /storefront/:slug/studio/cotacao   — preco da sacola, sem gravar (Fase 2)
+// GET  /storefront/:slug/studio/pedido/:token — confirmacao pelo token (Fase 2)
 //
 // Nivel 1 Sub-onda D (25/05/2026)
 // 25/05/2026 (Loja Digital Studio fechamento):
@@ -71,6 +73,9 @@ const {
   // Quem aparece na vitrine Studio: a mesma regra que a previa do link
   // (BE-1) le em storefront.js.
   NA_VITRINE_STUDIO,
+  // O endereco publico da loja (dominio proprio quando ativo): a
+  // confirmacao do pedido mora nele (Fase 2).
+  urlDaLoja,
 } = require('../services/storefrontBuilder');
 const { montarRodape } = require('../services/rodapeInstitucional');
 // Empresa de teste: nao notifica ninguem nem cria cobranca de verdade.
@@ -81,44 +86,21 @@ const { modoDaLoja } = require('../services/modoDaLoja');
 const { rastreadoresDaLoja } = require('../services/rastreadores');
 const { vitrineV2Ligada } = require('../services/vitrineV2');
 const { montarRedes } = require('../services/redesSociais');
-const { cotarLote } = require('../services/studioLote');
-const { unitPriceForQty, buildLadder } = require('../services/studioQtyTiers');
+const { cotarLote, codigoDoLote } = require('../services/studioLote');
+const { buildLadder } = require('../services/studioQtyTiers');
+const {
+  computeBackDelta, computeMiddleDelta,
+  carregarFaixas, cotarItens, totaisDoPedido, prazoDaSacola, faixasDoProduto,
+  itensParaCobranca, r2,
+} = require('../services/precoDoStudio');
+const { PRAZO_HORAS_STUDIO } = require('../jobs/lojaPixExpiradoJob');
+const { montarConfirmacao } = require('../services/confirmacaoDoPedido');
 const { filtroDeFoto } = require('../services/catalogoPaginado');
 // Selo NOVO com a mesma regra da loja comum (redesign 09/2026).
 const { ehNovo } = require('../services/homeDaLoja');
 const { initialArtStatus } = require('../services/artReview');
-
-function validateCpfCnpj(raw) {
-  if (!raw) return null;
-  const d = String(raw).replace(/\D/g, '');
-  if (d.length === 11) return validateCpf(d) ? d : false;
-  if (d.length === 14) return validateCnpj(d) ? d : false;
-  return false;
-}
-function validateCpf(d) {
-  if (/^(\d)\1{10}$/.test(d)) return false;
-  let s = 0;
-  for (let i = 0; i < 9; i++) s += parseInt(d[i]) * (10 - i);
-  let r = (s * 10) % 11; if (r === 10) r = 0;
-  if (r !== parseInt(d[9])) return false;
-  s = 0;
-  for (let i = 0; i < 10; i++) s += parseInt(d[i]) * (11 - i);
-  r = (s * 10) % 11; if (r === 10) r = 0;
-  return r === parseInt(d[10]);
-}
-function validateCnpj(d) {
-  if (/^(\d)\1{13}$/.test(d)) return false;
-  const w1 = [5,4,3,2,9,8,7,6,5,4,3,2];
-  const w2 = [6,5,4,3,2,9,8,7,6,5,4,3,2];
-  let s = 0;
-  for (let i = 0; i < 12; i++) s += parseInt(d[i]) * w1[i];
-  let r = s % 11; r = r < 2 ? 0 : 11 - r;
-  if (r !== parseInt(d[12])) return false;
-  s = 0;
-  for (let i = 0; i < 13; i++) s += parseInt(d[i]) * w2[i];
-  r = s % 11; r = r < 2 ? 0 : 11 - r;
-  return r === parseInt(d[13]);
-}
+// A MESMA validacao de CPF/CNPJ nas duas lojas (services/cpfCnpj.js).
+const { validateCpfCnpj } = require('../services/cpfCnpj');
 
 // Visibility canonica de products (alinhada com storefrontBuilder/storefront.js)
 function listVisibilityWhere(cidParam) {
@@ -134,66 +116,10 @@ function listVisibilityWhere(cidParam) {
   ))`;
 }
 
-// ─────────────────────────────────────────────
-// computeChoicesDelta — soma price_delta de campos do tipo
-// 'option' / 'color' baseado nos valores selecionados em
-// `customization`. Inclusivo: aceita value scalar ou array.
-//
-// Exemplo cfg.fields[i].config.choices = [
-//   { value: 'p', label: 'Pequeno', price_delta: 0 },
-//   { value: 'g', label: 'Grande',  price_delta: 5.00 }
-// ]
-// Se customization[fieldId] === 'g' → soma 5.00
-// ─────────────────────────────────────────────
-function computeChoicesDelta(cfg, customization) {
-  if (!cfg || !Array.isArray(cfg.fields) || !customization) return 0;
-  let delta = 0;
-  for (const f of cfg.fields) {
-    if (f.type !== 'option' && f.type !== 'color') continue;
-    const choices = f.config?.choices;
-    if (!Array.isArray(choices) || choices.length === 0) continue;
-    const selected = customization[f.id];
-    if (selected == null) continue;
-    // Suporta scalar ou array (multi-select futuro)
-    const sels = Array.isArray(selected) ? selected : [selected];
-    for (const s of sels) {
-      const c = choices.find(ch => ch.value === s || ch.label === s);
-      if (c && typeof c.price_delta === 'number' && !isNaN(c.price_delta)) {
-        delta += c.price_delta;
-      }
-    }
-  }
-  return delta;
-}
-
-// ─────────────────────────────────────────────
-// computeBackDelta — retorna o valor cobrado pelo verso quando
-// o cliente marca `customization.has_back_selected = true` E o
-// produto tem cfg.has_back=true E cfg.back_charge_enabled=true.
-// Retorna 0 em qualquer outro cenário (backwards-compatible).
-// ─────────────────────────────────────────────
-function computeBackDelta(cfg, customization) {
-  if (!cfg || cfg.has_back !== true) return 0;
-  if (cfg.back_charge_enabled !== true) return 0;
-  if (!customization || customization.has_back_selected !== true) return 0;
-  const v = cfg.back_price_delta;
-  if (typeof v !== 'number' || !isFinite(v) || v <= 0) return 0;
-  return v;
-}
-
-// ─────────────────────────────────────────────
-// computeMiddleDelta — mesmo contrato do verso, para a faixa central /
-// wrap 360 (caneca, copo). Cobrado so quando o cliente marca
-// `customization.has_middle_selected = true` e a loja ligou a cobranca.
-// ─────────────────────────────────────────────
-function computeMiddleDelta(cfg, customization) {
-  if (!cfg || cfg.has_middle !== true) return 0;
-  if (cfg.middle_charge_enabled !== true) return 0;
-  if (!customization || customization.has_middle_selected !== true) return 0;
-  const v = cfg.middle_price_delta;
-  if (typeof v !== 'number' || !isFinite(v) || v <= 0) return 0;
-  return v;
-}
+// computeChoicesDelta / computeBackDelta / computeMiddleDelta e a conta
+// inteira da linha moram em services/precoDoStudio.js desde a Fase 2
+// (25/09/2026): POST /studio/order e POST /studio/cotacao precisam da
+// MESMA conta, e a rota nao pode ter uma copia dela.
 
 // CORS publico — mesma config do storefront.js
 router.use((req, res, next) => {
@@ -875,6 +801,38 @@ router.post('/:slug/studio/upload', async (req, res) => {
   }
 });
 
+/**
+ * Os produtos citados no corpo do pedido (ou da cotacao), com a
+ * visibilidade canonica da loja — produto de outra empresa nao entra.
+ */
+async function produtosDoCorpo(cid, items) {
+  const productIds = items.map((i) => (i && i.product_id != null ? String(i.product_id) : ''));
+  const { rows: products } = await db.query(
+    `SELECT id, name, price, stock_qty, image_url, is_active,
+            is_personalizable, customization_config
+       FROM products
+      WHERE id::text = ANY($1) AND ${listVisibilityWhere('$2')}`,
+    [productIds, cid]
+  );
+  return Object.fromEntries(products.map((p) => [p.id, p]));
+}
+
+/**
+ * O frete do pedido, pela regra do S2 (calculateShippingQuote, a mesma
+ * da loja comum). So existe em `delivery`; sem CEP, o delivery_fee fixo.
+ * CEP fora da area devolve `erro` pronto para a resposta 400.
+ */
+async function freteDoPedido(config, dtype, addressZip, subtotal) {
+  if (dtype !== 'delivery') return { fee: 0, meta: null, erro: null };
+  if (!addressZip) return { fee: parseFloat(config.delivery_fee) || 0, meta: null, erro: null };
+  const cleanZip = String(addressZip).replace(/\D/g, '');
+  const quote = await calculateShippingQuote(config, cleanZip, subtotal);
+  if (quote.error && quote.fee == null) {
+    return { fee: null, meta: quote, erro: { error: quote.error, distance_km: quote.distance_km } };
+  }
+  return { fee: parseFloat(quote.fee) || 0, meta: quote, erro: null };
+}
+
 // ─────────────────────────────────────────────
 // POST /storefront/:slug/studio/order
 // Cria pedido Studio (digital_orders + digital_order_items
@@ -891,7 +849,7 @@ router.post('/:slug/studio/order', async (req, res) => {
     customer_name, customer_phone, customer_email,
     delivery_type, delivery_address, notes, items,
     payment_method,
-    request_nfce, customer_cpf_cnpj,
+    request_nfce, customer_cpf_cnpj, customer_document,
     address_zip, address_street, address_number, address_complement,
     address_neighborhood, address_city, address_state,
     expected_delivery_fee,
@@ -953,16 +911,26 @@ router.post('/:slug/studio/order', async (req, res) => {
     // Retirada por app (migration 288): o cliente contrata Uber/99 e diz
     // quem vai buscar. Sem nome e placa a lojista entrega a personalizacao
     // de alguem para o primeiro motoboy que citar o numero do pedido.
+    // Fase 2: `courier_informar_depois: true` aceita o pedido sem os dois
+    // (o cliente so sabe quem vem quando chama o app, dias depois); ver
+    // services/courierPickup.js.
     let courierData = null;
     if (dtype === COURIER) {
-      const r = validateCourierPickup(config, req.body);
+      const r = validateCourierPickup(config, req.body, { aceitaInformarDepois: true });
       if (r.error) return res.status(400).json({ error: r.error });
       courierData = r;
     }
 
+    // CPF/CNPJ na nota (Fase 2: "Quero CPF/CNPJ na nota"). O checkout novo
+    // manda `customer_document`; o de hoje (e a loja comum) manda
+    // `customer_cpf_cnpj`. Os dois caem na MESMA validacao de digito da
+    // loja comum (services/cpfCnpj.js) e na mesma coluna. Vazio = ignora.
+    const documento = customer_document != null && String(customer_document).trim() !== ''
+      ? customer_document
+      : customer_cpf_cnpj;
     let cpfNorm = null;
-    if (request_nfce || customer_cpf_cnpj) {
-      cpfNorm = validateCpfCnpj(customer_cpf_cnpj);
+    if (request_nfce || documento) {
+      cpfNorm = validateCpfCnpj(documento);
       if (cpfNorm === false) {
         return res.status(400).json({ error: 'CPF/CNPJ invalido' });
       }
@@ -991,122 +959,50 @@ router.post('/:slug/studio/order', async (req, res) => {
       return res.status(400).json({ error: 'Esta loja nao aceita pagamento na entrega' });
     }
 
-    // Busca produtos + valida que todos sao personalizaveis
-    const productIds = items.map(i => i.product_id);
-    const { rows: products } = await db.query(
-      `SELECT id, name, price, stock_qty, image_url, is_active,
-              is_personalizable, customization_config
-         FROM products
-        WHERE id::text = ANY($1) AND ${listVisibilityWhere('$2')}`,
-      [productIds.map(String), cid]
-    );
-    const productMap = Object.fromEntries(products.map(p => [p.id, p]));
+    // Produtos, faixas de quantidade e a conta de cada linha. As MESMAS
+    // funcoes da cotacao (POST /studio/cotacao): o que a sacola mostrou e
+    // o que o pedido cobra. A regra mora em services/precoDoStudio.js.
+    //
+    // As faixas (S6) sao relidas do banco, nunca aceitas do cliente:
+    // preco de venda e decisao do servidor.
+    const productMap = await produtosDoCorpo(cid, items);
+    const faixas = await carregarFaixas(db, cid);
+    const cot = cotarItens({ items, produtos: productMap, faixas, validar: validateCustomizationValues });
+    if (cot.erro) return res.status(400).json({ error: cot.erro });
 
-    // S6 — as faixas de quantidade que o payload publico exibiu. Sao
-    // relidas aqui do banco, nunca aceitas do cliente: preco de venda e
-    // decisao do servidor.
-    const tiersByProductOrder = {};
-    try {
-      const { rows: regras } = await db.query(
-        `SELECT product_id, qty_tiers
-           FROM studio_pricing_rules
-          WHERE company_id = $1 AND is_active IS NOT FALSE
-            AND qty_tiers IS NOT NULL`,
-        [cid]
-      );
-      regras.forEach((r) => { tiersByProductOrder[r.product_id] = r.qty_tiers; });
-      // A mesma queda para a regra global que a listagem faz: o pedido
-      // tem que cobrar o preco que a pagina mostrou.
-      if (tiersByProductOrder['null'] != null) {
-        tiersByProductOrder.__global = tiersByProductOrder['null'];
+    const orderItems = cot.linhas.map(({ produto: p, quantidade: qty, customization, preco }) => {
+      if (preco.base !== preco.lista) {
+        console.log(`[studio/storefront/order] faixa de quantidade em "${p.name}": ${qty}un R$${preco.lista.toFixed(2)} -> R$${preco.base.toFixed(2)}`);
       }
-    } catch (e) {
-      if (e.code !== '42P01' && e.code !== '42703') throw e;
-    }
-
-    const orderItems = [];
-    let subtotal = 0;
-    let hasStudioItem = false;
-    let totalBackDeltaAdded = 0; // rastreabilidade pro log
-    let totalMiddleDeltaAdded = 0;
-
-    for (const item of items) {
-      const p = productMap[item.product_id];
-      if (!p) return res.status(400).json({ error: `Produto ${item.product_id} nao encontrado` });
-      if (p.is_active === false) return res.status(400).json({ error: `Produto "${p.name}" nao esta disponivel` });
-      if (!p.is_personalizable) {
-        return res.status(400).json({ error: `Produto "${p.name}" nao e personalizavel — use /storefront/:slug/order` });
+      if (preco.verso > 0) {
+        console.log(`[studio/storefront/order] back delta aplicado em "${p.name}": R$${preco.verso.toFixed(2)} x ${qty} = R$${(preco.verso * qty).toFixed(2)}`);
       }
-
-      const qty = parseInt(item.quantity) || 1;
-      if (qty < 1) return res.status(400).json({ error: `Quantidade invalida para "${p.name}"` });
-
-      // Valida customization values vs config (campos required)
-      const cfg = p.customization_config;
-      const valErr = validateCustomizationValues(cfg, item.customization);
-      if (valErr) {
-        return res.status(400).json({ error: `Personalizacao de "${p.name}": ${valErr}` });
+      if (preco.meio > 0) {
+        console.log(`[studio/storefront/order] middle delta aplicado em "${p.name}": R$${preco.meio.toFixed(2)} x ${qty} = R$${(preco.meio * qty).toFixed(2)}`);
       }
-
-      // S6 — desconto progressivo. A faixa incide sobre o preco de tabela;
-      // os deltas de personalizacao sao adicionais e entram DEPOIS. Sem
-      // isso o cliente veria a escada na pagina e pagaria o preco cheio.
-      const listPrice = parseFloat(p.price);
-      const basePrice = unitPriceForQty(
-        listPrice, tiersByProductOrder[p.id] ?? tiersByProductOrder.__global, qty);
-      if (basePrice !== listPrice) {
-        console.log(`[studio/storefront/order] faixa de quantidade em "${p.name}": ${qty}un R$${listPrice.toFixed(2)} -> R$${basePrice.toFixed(2)}`);
+      if (preco.arte > 0) {
+        console.log(`[studio/storefront/order] servico de arte em "${p.name}": R$${preco.arte.toFixed(2)} uma vez na linha (${qty}un)`);
       }
-      const choicesDelta = computeChoicesDelta(cfg, item.customization);
-
-      // Verso (frente/verso) — soma back_price_delta quando cliente marcou
-      const backDelta = computeBackDelta(cfg, item.customization);
-      if (backDelta > 0) {
-        const itemBackTotal = backDelta * qty;
-        totalBackDeltaAdded += itemBackTotal;
-        console.log(`[studio/storefront/order] back delta aplicado em "${p.name}": R$${backDelta.toFixed(2)} x ${qty} = R$${itemBackTotal.toFixed(2)}`);
-      }
-
-      // Meio (faixa central / wrap 360) — mesmo contrato do verso
-      const middleDelta = computeMiddleDelta(cfg, item.customization);
-      if (middleDelta > 0) {
-        const itemMiddleTotal = middleDelta * qty;
-        totalMiddleDeltaAdded += itemMiddleTotal;
-        console.log(`[studio/storefront/order] middle delta aplicado em "${p.name}": R$${middleDelta.toFixed(2)} x ${qty} = R$${itemMiddleTotal.toFixed(2)}`);
-      }
-
-      const effectivePrice = basePrice + choicesDelta + backDelta + middleDelta;
-      const itemSubtotal = effectivePrice * qty;
-      subtotal += itemSubtotal;
-      hasStudioItem = true;
-
-      orderItems.push({
+      return {
         product_id:    p.id,
         product_name:  p.name,
         product_image: p.image_url,
-        unit_price:    effectivePrice,
+        // Sem a arte: ela e cobrada uma vez por linha e mora no subtotal.
+        // unit_price x quantity + arte = subtotal.
+        unit_price:    preco.preco_unitario,
         quantity:      qty,
-        subtotal:      itemSubtotal,
-        customization: item.customization || null,
+        subtotal:      preco.total,
+        customization: customization,
         // S5 — entra na fila de triagem so quem mandou arte propria.
-        art_review_status: initialArtStatus(cfg, item.customization),
-        // metadata auxiliar (nao persistida — so resposta)
-        _base_price: basePrice,
-        _choices_delta: choicesDelta,
-        _back_delta: backDelta,
-      });
-    }
-
-    if (!hasStudioItem) {
-      return res.status(400).json({ error: 'Pedido Studio precisa de ao menos 1 produto personalizavel' });
-    }
-
-    if (totalMiddleDeltaAdded > 0) {
-      console.log(`[studio/storefront/order] total middle_delta somado ao subtotal: R$${totalMiddleDeltaAdded.toFixed(2)}`);
-    }
-    if (totalBackDeltaAdded > 0) {
-      console.log(`[studio/storefront/order] total back_delta somado ao subtotal: R$${totalBackDeltaAdded.toFixed(2)}`);
-    }
+        art_review_status: initialArtStatus(p.customization_config, customization),
+        // metadata auxiliar (nao persistida — so resposta e cobranca)
+        _base_price: preco.base,
+        _choices_delta: preco.opcoes,
+        _back_delta: preco.verso,
+        _art_delta: preco.arte,
+      };
+    });
+    const subtotal = cot.subtotal;
 
     // Frete (S2, 18/08/2026) — mesma regra da loja comum. Antes daqui o
     // Studio cobrava sempre config.delivery_fee, ignorando frete gratis
@@ -1120,35 +1016,22 @@ router.post('/:slug/studio/order', async (req, res) => {
     //
     // Sem CEP, cai no delivery_fee fixo: e o comportamento de antes do S2
     // e o unico possivel sem saber o destino.
-    let delivery_fee = 0;
-    let shippingMeta = null;
-    if (dtype === 'delivery') {
-      if (address_zip) {
-        const cleanZip = String(address_zip).replace(/\D/g, '');
-        const quote = await calculateShippingQuote(config, cleanZip, subtotal);
-        shippingMeta = quote;
-        if (quote.error && quote.fee == null) {
-          return res.status(400).json({
-            error: quote.error,
-            distance_km: quote.distance_km,
-          });
-        }
-        delivery_fee = parseFloat(quote.fee) || 0;
-
-        if (expected_delivery_fee != null && expected_delivery_fee !== '') {
-          const expected = parseFloat(expected_delivery_fee);
-          if (Number.isFinite(expected) && Math.abs(expected - delivery_fee) > 0.01) {
-            return res.status(409).json({
-              error: 'Valor de frete desatualizado. Atualize a pagina e tente de novo.',
-              server_fee: delivery_fee,
-              client_fee: expected,
-            });
-          }
-        }
-      } else {
-        delivery_fee = parseFloat(config.delivery_fee) || 0;
+    const frete = await freteDoPedido(config, dtype, address_zip, subtotal);
+    if (frete.erro) return res.status(400).json(frete.erro);
+    const delivery_fee = frete.fee;
+    const shippingMeta = frete.meta;
+    if (dtype === 'delivery' && address_zip
+        && expected_delivery_fee != null && expected_delivery_fee !== '') {
+      const expected = parseFloat(expected_delivery_fee);
+      if (Number.isFinite(expected) && Math.abs(expected - delivery_fee) > 0.01) {
+        return res.status(409).json({
+          error: 'Valor de frete desatualizado. Atualize a pagina e tente de novo.',
+          server_fee: delivery_fee,
+          client_fee: expected,
+        });
       }
     }
+
     // Desconto do Pix — a MESMA conta da loja comum (storefront.js), e
     // pelo mesmo motivo: o percentual e da loja e a pagina do produto
     // mostra o valor com desconto. Calculado AQUI, nunca confiado no que
@@ -1159,11 +1042,11 @@ router.post('/:slug/studio/order', async (req, res) => {
     // cheio — exatamente o defeito que a fase 6 corrigiu do outro lado.
     // Hoje as duas lojas Studio estao em 0%, entao ninguem foi cobrado a
     // mais; a paridade entra antes de alguem ligar o desconto.
-    const pixPct = Number(config.pix_discount_pct) || 0;
-    const discount_amount = (pmethod === 'pix' && pixPct > 0)
-      ? Math.round(subtotal * pixPct) / 100
-      : 0;
-    const total = subtotal - discount_amount + delivery_fee;
+    const totais = totaisDoPedido({
+      subtotal, pixPct: config.pix_discount_pct, formaDePagamento: pmethod, frete: delivery_fee,
+    });
+    const discount_amount = totais.discount_amount;
+    const total = totais.total;
 
     // Pedido Studio nasce sempre como pending_payment (Pix/cartao) ou
     // confirmed (on_delivery). studio_production_status='pending_art'.
@@ -1268,13 +1151,44 @@ router.post('/:slug/studio/order', async (req, res) => {
     });
 
     // Pagamento Pix / Cartao (mesma logica do storefront.js principal)
+    //
+    // Fase 2 (25/09/2026): o Pix fica GUARDADO no pedido nos tres caminhos
+    // — Mercado Pago, chave da lojista e loja de teste. Ate aqui so o Pix
+    // estatico era gravado; o do MP e o de teste existiam apenas na
+    // resposta deste POST, e a confirmacao pelo token (F5, outro aparelho)
+    // nao tinha como mostrar o codigo de novo. As colunas se chamam
+    // asaas_* por historia (migration 070) e guardam o Pix de qualquer
+    // origem. O id do MP continua em mp_payment_id, que e o que o webhook
+    // le; asaas_payment_id nao o recebe.
+    //
+    // O Pix do MP nasce valendo PRAZO_HORAS_STUDIO (72 h): e quando o job
+    // cancela o pedido pendente. Codigo que morre antes do pedido deixaria
+    // a cliente com uma tela de Pix que o banco recusa.
+    const guardarPix = (dados, { comId }) => db.query(`
+      UPDATE digital_orders SET
+        ${comId ? 'asaas_payment_id     = $5,' : ''}
+        asaas_pix_qrcode     = $1,
+        asaas_pix_payload    = $2,
+        asaas_pix_expires_at = $3
+      WHERE id = $4
+    `, [dados.qrcode, dados.payload, dados.expires_at, order.id, ...(comId ? [dados.payment_id] : [])])
+      // Guardar e para a volta a tela; nao pode derrubar um pedido que ja
+      // tem cobranca criada.
+      .catch((e) => console.error('[studio-storefront] guardar Pix falhou:', e.message));
+
     let pixData = null;
     const lojaDeTeste = await ehLojaDeTeste(cid);
     if (pmethod === 'pix' && lojaDeTeste) {
       // Loja de teste nao cria cobranca em gateway. A tela de
       // confirmacao renderiza inteira — que e o ponto de poder testa-la.
+      // O prazo e o do Studio, para a tela do Pix de teste contar o mesmo
+      // tempo que a de verdade.
       anotarBloqueio(`cobranca Pix do pedido #${order.order_number}`, cid);
-      pixData = pixDeTeste(order, total);
+      pixData = {
+        ...pixDeTeste(order, total),
+        expires_at: new Date(Date.now() + PRAZO_HORAS_STUDIO * 3600 * 1000).toISOString(),
+      };
+      await guardarPix(pixData, { comId: true });
     } else if (pmethod === 'pix') {
       if (hasMpGateway) {
         try {
@@ -1285,37 +1199,21 @@ router.post('/:slug/studio/order', async (req, res) => {
             orderNumber:   order.order_number,
             customerEmail: customer_email || null,
             description:   `Pedido Studio #${order.order_number}`,
+            horasDeValidade: PRAZO_HORAS_STUDIO,
           });
           await db.query(
             `UPDATE digital_orders SET mp_payment_id = $1, updated_at = NOW() WHERE id = $2`,
             [pixData.payment_id, order.id]
           );
+          await guardarPix(pixData, { comId: false });
         } catch (mpErr) {
           console.error('[studio-storefront] MP Pix error, fallback static:', mpErr.message);
           pixData = await generatePix({ order, company_id: cid, total });
-          if (pixData) {
-            await db.query(`
-              UPDATE digital_orders SET
-                asaas_payment_id     = $1,
-                asaas_pix_qrcode     = $2,
-                asaas_pix_payload    = $3,
-                asaas_pix_expires_at = $4
-              WHERE id = $5
-            `, [pixData.payment_id, pixData.qrcode, pixData.payload, pixData.expires_at, order.id]);
-          }
+          if (pixData) await guardarPix(pixData, { comId: true });
         }
       } else {
         pixData = await generatePix({ order, company_id: cid, total });
-        if (pixData) {
-          await db.query(`
-            UPDATE digital_orders SET
-              asaas_payment_id     = $1,
-              asaas_pix_qrcode     = $2,
-              asaas_pix_payload    = $3,
-              asaas_pix_expires_at = $4
-            WHERE id = $5
-          `, [pixData.payment_id, pixData.qrcode, pixData.payload, pixData.expires_at, order.id]);
-        }
+        if (pixData) await guardarPix(pixData, { comId: true });
       }
     }
 
@@ -1330,7 +1228,9 @@ router.post('/:slug/studio/order', async (req, res) => {
           accessToken:     mpGateway.access_token,
           orderId:         order.id,
           orderNumber:     order.order_number,
-          orderItems,
+          // A arte cobrada por linha vira um item proprio (quantidade 1):
+          // sem isso o cartao cobraria so unit_price x quantidade.
+          orderItems:      itensParaCobranca(orderItems),
           customerEmail:   customer_email || null,
           payerCpf:        cpfNorm || null,
           storeName:       config.company_display_name || null,
@@ -1372,6 +1272,13 @@ router.post('/:slug/studio/order', async (req, res) => {
       // nao mostra o bloco.
       track_url: order.public_token
         ? `${process.env.APP_PUBLIC_URL || ''}/acompanhar/${order.public_token}`
+        : null,
+      // Fase 2: a confirmacao persistente, no endereco da loja (dominio
+      // proprio quando ativo). null sem a migration 322 — o app cai na
+      // confirmacao antiga, em memoria.
+      pedido_token: order.public_token || null,
+      pedido_url: order.public_token
+        ? `${urlDaLoja(config)}/pedido/${order.public_token}`
         : null,
       total,
       delivery_fee,
@@ -1433,6 +1340,213 @@ router.get('/:slug/studio/order/:oid', async (req, res) => {
     });
   } catch (err) {
     console.error('[studio-storefront] poll error:', err);
+    res.status(500).json({ error: 'Erro ao buscar pedido' });
+  }
+});
+
+// ─────────────────────────────────────────────
+// POST /storefront/:slug/studio/cotacao  (Fase 2 · BE-5, 25/09/2026)
+//
+// "Quanto fica?" respondido pelo servidor, com as MESMAS funcoes que o
+// POST /studio/order usa para cobrar (services/precoDoStudio.js). Nao
+// grava nada: a sacola e o checkout chamam a cada mudanca.
+//
+// Por que existe: o app mantinha uma copia da conta (faixa, opcoes,
+// verso, meio, Pix) para mostrar o total. Copia que diverge vira o
+// cliente ver um valor e levar 400/409 no pagamento (JORNADA D12). Com a
+// cotacao, a conta do app vira so estimativa instantanea enquanto a
+// resposta nao chega.
+//
+// Corpo: o mesmo `items` do pedido; `payment_method`, `delivery_type` e
+// `cep` opcionais. Item recusado devolve 400 com a MESMA mensagem que o
+// pedido daria, mais `indice` para a sacola apontar a linha.
+// ─────────────────────────────────────────────
+const MAX_ITENS_NA_COTACAO = 200;
+
+router.post('/:slug/studio/cotacao', async (req, res) => {
+  const b = req.body || {};
+  const items = b.items;
+  if (!Array.isArray(items) || items.length === 0) {
+    return res.status(400).json({ error: 'Informe ao menos 1 item no pedido' });
+  }
+  if (items.length > MAX_ITENS_NA_COTACAO) {
+    return res.status(400).json({ error: 'Itens demais para cotar de uma vez' });
+  }
+  try {
+    const slug = req.params.slug.toLowerCase().trim();
+    const { rows: configs } = await db.query(
+      `SELECT dcc.*, COALESCE(c.studio_settings, '{}'::jsonb) AS studio_settings
+         FROM digital_channel_config dcc
+         JOIN companies c ON c.id = dcc.company_id
+        WHERE dcc.slug = $1 AND dcc.is_published = true`, [slug]);
+    if (!configs.length) return res.status(404).json({ error: 'Loja nao encontrada' });
+    const config = configs[0];
+    const cid = config.company_id;
+
+    const productMap = await produtosDoCorpo(cid, items);
+    const faixas = await carregarFaixas(db, cid);
+    const cot = cotarItens({ items, produtos: productMap, faixas, validar: validateCustomizationValues });
+    if (cot.erro) return res.status(400).json({ error: cot.erro, indice: cot.indice });
+
+    // Frete so quando a pessoa ja disse que quer receber em casa. Fora da
+    // area nao e erro da cotacao: a sacola continua mostrando os precos e
+    // o recado vai em `frete_erro` (o pedido, esse sim, recusa).
+    let frete = null;
+    let freteErro = null;
+    if (b.delivery_type === 'delivery') {
+      if (!config.delivery_enabled) {
+        freteErro = 'Entrega nao disponivel nesta loja';
+      } else {
+        const f = await freteDoPedido(config, 'delivery', b.cep || b.address_zip, cot.subtotal);
+        if (f.erro) freteErro = f.erro.error;
+        else frete = f.fee;
+      }
+    }
+
+    // Desconto do Pix so onde ha Pix: chave da lojista ou Mercado Pago —
+    // a mesma deteccao do pedido.
+    let temPix = !!(config.pix_key && String(config.pix_key).trim());
+    if (!temPix) {
+      try {
+        const { rows: gws } = await db.query(
+          `SELECT id FROM companies_payment_gateways WHERE company_id = $1 AND gateway = 'mercadopago' LIMIT 1`,
+          [cid]
+        );
+        temPix = gws.length > 0;
+      } catch (_) {}
+    }
+
+    const forma = String(b.payment_method || '').toLowerCase().trim();
+    const totais = totaisDoPedido({
+      subtotal: cot.subtotal,
+      pixPct: temPix ? config.pix_discount_pct : 0,
+      formaDePagamento: forma,
+      frete: frete || 0,
+    });
+    const ss = config.studio_settings || {};
+
+    res.json({
+      itens: cot.linhas.map((l) => ({
+        indice: l.indice,
+        preco_unitario: r2(l.preco.preco_unitario),
+        total: r2(l.preco.total),
+        detalhe: {
+          base: r2(l.preco.base),
+          opcoes: r2(l.preco.opcoes),
+          verso: r2(l.preco.verso),
+          meio: r2(l.preco.meio),
+          arte: r2(l.preco.arte),
+          faixa: l.preco.faixa,
+        },
+      })),
+      subtotal: r2(totais.subtotal),
+      desconto_pix: r2(totais.desconto_pix),
+      frete: frete == null ? null : r2(frete),
+      frete_erro: freteErro,
+      total: r2(totais.total),
+      total_pix: r2(totais.total_pix),
+      prazo_dias_uteis: prazoDaSacola(
+        ss.default_sla_days,
+        cot.linhas.map((l) => ({ quantidade: l.quantidade, faixas: faixasDoProduto(faixas, l.produto.id) }))
+      ),
+    });
+  } catch (err) {
+    console.error('[studio-storefront] cotacao error:', err);
+    res.status(500).json({ error: 'Erro ao calcular a sacola' });
+  }
+});
+
+// ─────────────────────────────────────────────
+// GET /storefront/:slug/studio/pedido/:token  (Fase 2 · BE-2, 25/09/2026)
+//
+// A confirmacao do pedido lida do servidor pelo public_token (migration
+// 322): `<loja>/pedido/<token>` sobrevive a F5, a fechar a aba e a abrir
+// em outro aparelho, e mostra o Pix de novo enquanto ele esta pendente.
+// O token e a credencial. A montagem (e a lista do que NAO sai) mora em
+// services/confirmacaoDoPedido.js.
+//
+// Nao confundir com `/:slug/pedido/:token` (storefront.js), que serve a
+// CASCA HTML da mesma pagina. Esta e a rota de dados, sob /studio.
+// ─────────────────────────────────────────────
+
+// Colunas de migrations posteriores (288 courier, 316 desconto, comprovante).
+// Base sem alguma delas cai para a consulta minima, uma vez (armadilha 1).
+let _pedidoSemColunasNovas = false;
+
+function sqlDoPedidoPorToken(comColunasNovas) {
+  return `SELECT o.id, o.company_id, o.order_number, o.created_at, o.customer_name,
+                 o.status, o.payment_status, o.payment_method,
+                 o.subtotal, o.delivery_fee, o.total, o.delivery_type,
+                 o.address_neighborhood, o.address_city,
+                 o.studio_production_status,
+                 o.asaas_payment_id, o.asaas_pix_qrcode, o.asaas_pix_payload, o.asaas_pix_expires_at
+                 ${comColunasNovas ? ', o.discount_amount, o.courier_name, o.payment_proof_url' : ''}
+            FROM digital_orders o
+           WHERE o.public_token = $1 AND o.company_id = $2 AND o.vertical = 'studio'
+           LIMIT 1`;
+}
+
+async function pedidoPorToken(token, cid) {
+  try {
+    const { rows } = await db.query(sqlDoPedidoPorToken(!_pedidoSemColunasNovas), [token, cid]);
+    return rows[0] || null;
+  } catch (e) {
+    if (e.code !== '42703') throw e;
+    if (!_pedidoSemColunasNovas) {
+      _pedidoSemColunasNovas = true;
+      return pedidoPorToken(token, cid);
+    }
+    // Sem public_token (migration 322): nenhum link foi gerado ainda.
+    return null;
+  }
+}
+
+router.get('/:slug/studio/pedido/:token', async (req, res) => {
+  const token = String(req.params.token || '').trim();
+  const naoAchou = () => res.status(404).json({ error: 'Pedido nao encontrado' });
+  // Token curto nem chega ao banco: evita varredura barata (mesma regra
+  // do acompanhamento).
+  if (token.length < 16 || token.length > 128) return naoAchou();
+  try {
+    const slug = req.params.slug.toLowerCase().trim();
+    // Sem exigir is_published: quem ja comprou continua vendo o proprio
+    // pedido mesmo com a loja despublicada (mesma regra do poll por id).
+    const { rows: configs } = await db.query(
+      `SELECT dcc.*, COALESCE(c.trade_name, c.legal_name) AS company_display_name,
+              COALESCE(c.studio_settings, '{}'::jsonb) AS studio_settings
+         FROM digital_channel_config dcc
+         JOIN companies c ON c.id = dcc.company_id
+        WHERE dcc.slug = $1
+        LIMIT 1`, [slug]);
+    if (!configs.length) return naoAchou();
+    const config = configs[0];
+
+    const pedido = await pedidoPorToken(token, config.company_id);
+    if (!pedido) return naoAchou();
+
+    const { rows: itens } = await db.query(
+      `SELECT i.product_id, i.product_name, i.quantity, i.unit_price, i.subtotal,
+              i.product_image, i.customization, p.customization_config
+         FROM digital_order_items i
+         LEFT JOIN products p ON p.id = i.product_id
+        WHERE i.order_id = $1
+        ORDER BY i.id`,
+      [pedido.id]
+    );
+    const faixas = await carregarFaixas(db, config.company_id);
+
+    res.set('Cache-Control', 'no-store');
+    res.json(montarConfirmacao({
+      pedido,
+      itens,
+      loja: config,
+      studioSettings: config.studio_settings,
+      faixas,
+      // Por ora o acompanhamento atual; a Fase 4 leva para o endereco da loja.
+      acompanharUrl: `${process.env.APP_PUBLIC_URL || ''}/acompanhar/${token}`,
+    }));
+  } catch (err) {
+    console.error('[studio-storefront] pedido por token error:', err);
     res.status(500).json({ error: 'Erro ao buscar pedido' });
   }
 });
@@ -1594,7 +1708,11 @@ router.post('/:slug/studio/bulk-order', async (req, res) => {
       );
       await client.query('COMMIT');
 
-      res.status(201).json({ event: ev, item_count: nomes.length, pricing: cot });
+      // `codigo`: o numero curto do orcamento para a tela final e para a
+      // mensagem do WhatsApp (Fase 2). Ver codigoDoLote.
+      res.status(201).json({
+        event: ev, codigo: codigoDoLote(ev.id), item_count: nomes.length, pricing: cot,
+      });
     } catch (e) {
       await client.query('ROLLBACK');
       throw e;
@@ -1639,7 +1757,7 @@ router.get('/:slug/studio/:pid', function(req, res, next) {
   // Nao sequestra os subcaminhos reais da API, caso algum seja adicionado
   // depois desta linha por engano.
   const reservados = ['products', 'order', 'upload', 'shipping-quote',
-                      'bulk-quote', 'bulk-order'];
+                      'bulk-quote', 'bulk-order', 'cotacao', 'pedido'];
   if (reservados.includes(req.params.pid)) return next();
   res.redirect(302, urlVitrineStudio(req.params.slug));
 });

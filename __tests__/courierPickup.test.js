@@ -83,6 +83,21 @@ describe('validateCourierPickup', () => {
     }).error).toMatch(/muito longo/);
   });
 
+  // Fase 2 da vitrine Studio: "informo depois" o nome e a placa.
+  test('"informo depois" so vale onde a rota liga a opcao', () => {
+    const corpo = { courier_informar_depois: true };
+    expect(validateCourierPickup(LOJA_OK, corpo, { aceitaInformarDepois: true }))
+      .toEqual({ courier_name: null, courier_plate: null, informar_depois: true });
+    // Sem a opcao (loja comum), a bandeira nao dispensa nada.
+    expect(validateCourierPickup(LOJA_OK, corpo).error).toMatch(/nome do entregador/);
+    // A bandeira precisa ser true de verdade.
+    expect(validateCourierPickup(LOJA_OK, { courier_informar_depois: 'sim' }, { aceitaInformarDepois: true }).error)
+      .toMatch(/nome do entregador/);
+    // E a loja precisa oferecer a modalidade.
+    expect(validateCourierPickup({ courier_pickup_enabled: false }, corpo, { aceitaInformarDepois: true }).error)
+      .toMatch(/nao disponivel/);
+  });
+
   test('COURIER e o valor gravado em delivery_type', () => {
     expect(COURIER).toBe('courier');
   });
@@ -164,6 +179,16 @@ describe('POST /order — retirada por app nos dois storefronts', () => {
       });
       expect(res.status).toBe(400);
       expect(res.body.error).toMatch(/Placa invalida/);
+    });
+
+    test('"informo depois": o Studio aceita, a loja comum segue exigindo', async () => {
+      mockBanco({ ...LOJA, courier_pickup_enabled: true });
+      const res = await pedido(makeApp(mod), { courier_informar_depois: true });
+      if (mod.endsWith('studioStorefront')) expect(res.status).not.toBe(400);
+      else {
+        expect(res.status).toBe(400);
+        expect(res.body.error).toMatch(/nome do entregador/);
+      }
     });
 
     test('dados completos passam da validacao', async () => {

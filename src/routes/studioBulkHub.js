@@ -12,7 +12,7 @@ const db      = require('../config/database');
 // publica passou a cotar lote tambem, e escada de preco com duas
 // implementacoes e a conta do cliente divergindo da conta da lojista.
 // Uma regra, dois leitores — ver services/studioLote.js.
-const { cotarLote } = require('../services/studioLote');
+const { cotarLote, codigoDoLote } = require('../services/studioLote');
 
 /**
  * A escada da LOJISTA para um produto: a regra dele, ou a global da loja.
@@ -59,7 +59,9 @@ router.get('/bulk-events', async function(req, res) {
         LIMIT $${params.length + 1}`,
       [...params, Math.min(parseInt(limit) || 100, 300)]
     );
-    res.json({ events: r.rows });
+    // O mesmo `codigo` que a cliente recebeu na vitrine (Fase 2), para a
+    // lojista achar o orcamento que ela citou no WhatsApp.
+    res.json({ events: r.rows.map((e) => ({ ...e, codigo: codigoDoLote(e.id) })) });
   } catch (err) {
     console.error('[studio/bulk-events:GET]', err.message);
     res.status(500).json({ error: 'Erro ao listar eventos' });
@@ -85,7 +87,10 @@ router.get('/bulk-events/:eid', async function(req, res) {
       [req.params.eid]
     );
 
-    res.json({ event: eventRes.rows[0], items: itemsRes.rows });
+    res.json({
+      event: { ...eventRes.rows[0], codigo: codigoDoLote(eventRes.rows[0].id) },
+      items: itemsRes.rows,
+    });
   } catch (err) {
     console.error('[studio/bulk-events/:eid]', err.message);
     res.status(500).json({ error: 'Erro ao buscar evento' });

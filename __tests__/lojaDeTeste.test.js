@@ -145,7 +145,10 @@ describe('a cobranca tambem para na trava', () => {
   });
 
   test('mas ainda devolve Pix, para a confirmacao ser testavel', () => {
-    expect(rota).toContain('pixData = pixDeTeste(order, total)');
+    // Fase 2: com o prazo do Studio (72 h) por cima do de teste, e guardado
+    // no pedido para a confirmacao pelo token. Comportamento coberto em
+    // vitrineStudioFecharVenda.test.js.
+    expect(rota).toMatch(/pixData = \{\s*\.\.\.pixDeTeste\(order, total\),/);
   });
 });
 

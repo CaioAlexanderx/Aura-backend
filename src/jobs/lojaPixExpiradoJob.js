@@ -73,45 +73,84 @@ async function tickPixExpirado({ db, lojaEvents }) {
 // (digitalOrderConfirmation) e pedido pendente nao tem lancamento.
 //
 // Fora de proposito:
-//   - awaiting_approval: a cliente mandou comprovante, alguem precisa olhar.
-//   - Studio: arte e orcamento tem ritmo proprio; pedido parado la nao e
-//     necessariamente abandonado.
+//   - awaiting_approval: a cliente disse "ja paguei", alguem precisa olhar.
+//   - comprovante anexado (payment_proof_url): mesmo motivo. O upload do
+//     comprovante NAO muda o status — a cliente pode anexar sem tocar em
+//     "Ja paguei", e o pedido continuava na fila de cancelar.
+//
+// Studio (Fase 2 da vitrine, decisao do PO 25/09/2026): entra, com prazo
+// proprio de PRAZO_HORAS_STUDIO. Ficava de fora porque "arte e orcamento
+// tem ritmo proprio" — mas um Pix de vitrine nao pago em tres dias e
+// pedido abandonado, e ele segurava a fila de producao da lojista. So
+// cancela enquanto a producao nao andou: se a lojista ja aprovou a arte
+// ou comecou a produzir sem o Pix, ela combinou algo com a cliente, e o
+// job nao desfaz combinado.
+//
 // Pedido recente (JANELA_DIAS) avisa no sino; pedido antigo cancela calado
-// para o primeiro deploy nao despejar meses de aviso.
+// para o primeiro deploy nao despejar meses de aviso. Loja de teste segue a
+// mesma regra: o aviso e so o sino da propria lojista (lojaEvents), nada
+// sai para o cliente.
 const PRAZO_HORAS = 48;
+const PRAZO_HORAS_STUDIO = 72;
+
+// Status de producao em que o pedido Studio ainda nao andou.
+const STUDIO_PARADO = ['pending_art', 'awaiting_customization'];
 
 const fmtReais = (v) => {
   const n = Number(v);
   return Number.isFinite(n) ? `R$ ${n.toFixed(2).replace('.', ',')}` : 'R$ —';
 };
 
-/** @returns {Promise<{cancelados:number, avisados:number}>} */
-async function tickCancelarPixVencido({ db, lojaEvents }) {
-  const resumo = { cancelados: 0, avisados: 0 };
-  const nota = `\n[EXPIRADO em ${new Date().toISOString()}]: Pix sem pagamento em ${PRAZO_HORAS} h, cancelado automaticamente.`;
+const ehStudio = (pedido) => pedido && pedido.vertical === 'studio';
+const prazoDoPedido = (pedido) => (ehStudio(pedido) ? PRAZO_HORAS_STUDIO : PRAZO_HORAS);
 
-  const { rows } = await db.query(
-    `UPDATE digital_orders SET
+// Base sem a coluna do comprovante (42703): o filtro sai, uma vez, e o
+// job continua cancelando — melhor que parar de cancelar tudo.
+let _semColunaDoComprovante = false;
+
+function sqlDoCancelamento({ comComprovante }) {
+  return `UPDATE digital_orders SET
         status         = 'cancelled',
         payment_status = 'expired',
         cancelled_at   = NOW(),
         updated_at     = NOW(),
-        notes          = COALESCE(notes, '') || $2
+        notes          = COALESCE(notes, '') || CASE WHEN vertical = 'studio' THEN $3 ELSE $2 END
       WHERE id IN (
         SELECT id FROM digital_orders
          WHERE status = 'pending_payment'
            AND payment_method = 'pix'
-           AND COALESCE(vertical, 'retail') <> 'studio'
-           AND COALESCE(payment_status, 'pending') NOT IN ('confirmed', 'paid', 'received')
-           AND created_at < NOW() - INTERVAL '${PRAZO_HORAS} hours'
+           AND COALESCE(payment_status, 'pending') NOT IN ('confirmed', 'paid', 'received')${comComprovante ? `
+           AND payment_proof_url IS NULL` : ''}
+           AND (
+             (COALESCE(vertical, 'retail') <> 'studio'
+               AND created_at < NOW() - INTERVAL '${PRAZO_HORAS} hours')
+             OR (vertical = 'studio'
+               AND created_at < NOW() - INTERVAL '${PRAZO_HORAS_STUDIO} hours'
+               AND COALESCE(studio_production_status, 'pending_art') IN (${STUDIO_PARADO.map((s) => `'${s}'`).join(', ')}))
+           )
          ORDER BY created_at
          LIMIT $1
          FOR UPDATE SKIP LOCKED
       )
         AND status = 'pending_payment'
-      RETURNING id, company_id, order_number, customer_name, total, vertical, created_at`,
-    [BATCH, nota]
-  );
+      RETURNING id, company_id, order_number, customer_name, total, vertical, created_at`;
+}
+
+/** @returns {Promise<{cancelados:number, avisados:number}>} */
+async function tickCancelarPixVencido({ db, lojaEvents }) {
+  const resumo = { cancelados: 0, avisados: 0 };
+  const agora = new Date().toISOString();
+  const nota = (horas) => `\n[EXPIRADO em ${agora}]: Pix sem pagamento em ${horas} h, cancelado automaticamente.`;
+  const params = [BATCH, nota(PRAZO_HORAS), nota(PRAZO_HORAS_STUDIO)];
+
+  let rows;
+  try {
+    ({ rows } = await db.query(sqlDoCancelamento({ comComprovante: !_semColunaDoComprovante }), params));
+  } catch (e) {
+    if (e.code !== '42703' || _semColunaDoComprovante) throw e;
+    _semColunaDoComprovante = true;
+    ({ rows } = await db.query(sqlDoCancelamento({ comComprovante: false }), params));
+  }
 
   const limiteDoAviso = Date.now() - JANELA_DIAS * 24 * 3600 * 1000;
   for (const pedido of rows) {
@@ -119,7 +158,7 @@ async function tickCancelarPixVencido({ db, lojaEvents }) {
     if (new Date(pedido.created_at).getTime() < limiteDoAviso) continue;
     const quem = pedido.customer_name ? ` de ${pedido.customer_name}` : '';
     const criado = await lojaEvents.emitLojaEvent('loja_pix_expirado', pedido, {
-      body: `O Pix de ${fmtReais(pedido.total)}${quem} não foi pago em ${PRAZO_HORAS} h e o pedido foi cancelado automaticamente. Se ainda quiser a venda, chame o cliente.`,
+      body: `O Pix de ${fmtReais(pedido.total)}${quem} não foi pago em ${prazoDoPedido(pedido)} h e o pedido foi cancelado automaticamente. Se ainda quiser a venda, chame o cliente.`,
     });
     if (criado) resumo.avisados++;
   }
@@ -160,6 +199,7 @@ module.exports = {
   tickPixExpirado,
   tickCancelarPixVencido,
   PRAZO_HORAS,
+  PRAZO_HORAS_STUDIO,
   BATCH,
   JANELA_DIAS,
   INTERVALO_MS,

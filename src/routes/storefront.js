@@ -67,38 +67,8 @@ const { paginaLembrada, lembrarPagina } = require('../services/cacheDaPaginaDaLo
 const { COURIER, validateCourierPickup } = require('../services/courierPickup');
 const { lerAtribuicao, gravarAtribuicao } = require('../services/atribuicaoDoPedido');
 const lojaEvents          = require('../services/lojaEvents');
-
-function validateCpfCnpj(raw) {
-  if (!raw) return null;
-  const d = String(raw).replace(/\D/g, '');
-  if (d.length === 11) return validateCpf(d) ? d : false;
-  if (d.length === 14) return validateCnpj(d) ? d : false;
-  return false;
-}
-function validateCpf(d) {
-  if (/^(\d)\1{10}$/.test(d)) return false;
-  let s = 0;
-  for (let i = 0; i < 9; i++) s += parseInt(d[i]) * (10 - i);
-  let r = (s * 10) % 11; if (r === 10) r = 0;
-  if (r !== parseInt(d[9])) return false;
-  s = 0;
-  for (let i = 0; i < 10; i++) s += parseInt(d[i]) * (11 - i);
-  r = (s * 10) % 11; if (r === 10) r = 0;
-  return r === parseInt(d[10]);
-}
-function validateCnpj(d) {
-  if (/^(\d)\1{13}$/.test(d)) return false;
-  const w1 = [5,4,3,2,9,8,7,6,5,4,3,2];
-  const w2 = [6,5,4,3,2,9,8,7,6,5,4,3,2];
-  let s = 0;
-  for (let i = 0; i < 12; i++) s += parseInt(d[i]) * w1[i];
-  let r = s % 11; r = r < 2 ? 0 : 11 - r;
-  if (r !== parseInt(d[12])) return false;
-  s = 0;
-  for (let i = 0; i < 13; i++) s += parseInt(d[i]) * w2[i];
-  r = s % 11; r = r < 2 ? 0 : 11 - r;
-  return r === parseInt(d[13]);
-}
+// A MESMA validacao de CPF/CNPJ nas duas lojas (services/cpfCnpj.js).
+const { validateCpfCnpj } = require('../services/cpfCnpj');
 
 // listVisibilityWhere vive em services/storefrontBuilder.js e e
 // importada acima. A copia local daqui era IDENTICA (conferido por

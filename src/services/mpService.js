@@ -6,7 +6,7 @@ const https = require('https');
  * createMpPixPayment — Gera cobrança Pix via Mercado Pago
  * Retorna { payment_id, qrcode, payload, expires_at, mode: 'mp' } ou lança erro.
  */
-async function createMpPixPayment({ accessToken, total, orderId, orderNumber, customerEmail, description }) {
+async function createMpPixPayment({ accessToken, total, orderId, orderNumber, customerEmail, description, horasDeValidade = 24 }) {
   const body = JSON.stringify({
     transaction_amount: parseFloat(total.toFixed(2)),
     description:        description || `Pedido #${orderNumber}`,
@@ -15,8 +15,11 @@ async function createMpPixPayment({ accessToken, total, orderId, orderNumber, cu
       email: customerEmail || 'cliente@aura.app',
     },
     external_reference: orderId,
-    // Pix expira em 24h
-    date_of_expiration: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(),
+    // Pix expira em 24h por padrao. A vitrine Studio pede 72h (Fase 2,
+    // decisao do PO): e o prazo em que o pedido pendente cancela sozinho,
+    // e um codigo que morre antes do pedido deixaria a cliente com uma
+    // tela de Pix que o banco recusa.
+    date_of_expiration: new Date(Date.now() + horasDeValidade * 60 * 60 * 1000).toISOString(),
   });
 
   const result = await new Promise((resolve, reject) => {

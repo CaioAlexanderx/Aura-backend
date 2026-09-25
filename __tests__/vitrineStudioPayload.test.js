@@ -19,6 +19,7 @@ const path = require('path');
 const fonte = (rel) => fs.readFileSync(path.join(__dirname, '..', rel), 'utf8');
 const studio = fonte('src/routes/studioStorefront.js');
 const comum  = fonte('src/routes/storefront.js');
+const preco  = fonte('src/services/precoDoStudio.js');
 
 describe('o bloco site vive num lugar so', () => {
   test('existe um montarSite, e os dois retornos chamam ele', () => {
@@ -89,11 +90,24 @@ describe('o desconto do Pix, igual nas duas lojas', () => {
 
   test('e cobra com a MESMA conta da loja comum', () => {
     const conta = /const discount_amount = \(pmethod === 'pix' && pixPct > 0\)\s*\n\s*\? Math\.round\(subtotal \* pixPct\) \/ 100\s*\n\s*: 0;/;
-    expect(studio).toMatch(conta);
     expect(comum).toMatch(conta);
-    // Frete fora do desconto, nos dois.
-    expect(studio).toContain('const total = subtotal - discount_amount + delivery_fee;');
     expect(comum).toContain('const total = subtotal - discount_amount + delivery_fee;');
+    // Fase 2 (25/09/2026): no Studio a conta mora em services/precoDoStudio.js,
+    // a mesma para o pedido e para a cotacao. A formula e a da loja comum,
+    // frete fora do desconto.
+    expect(preco).toMatch(/return pct > 0 \? Math\.round\(subtotal \* pct\) \/ 100 : 0;/);
+    expect(preco).toContain('total: subtotal - desconto + fee,');
+    expect(studio).toContain('const totais = totaisDoPedido({');
+    const { totaisDoPedido } = require('../src/services/precoDoStudio');
+    for (const [subtotal, pct] of [[217.69, 5], [99.8, 3], [39.9, 0]]) {
+      const pixPct = pct;
+      const discount_amount = (pct > 0) ? Math.round(subtotal * pixPct) / 100 : 0;
+      const t = totaisDoPedido({ subtotal, pixPct: pct, formaDePagamento: 'pix', frete: 12 });
+      expect(t.discount_amount).toBe(discount_amount);
+      expect(t.total).toBe(subtotal - discount_amount + 12);
+      // Fora do Pix, sem desconto.
+      expect(totaisDoPedido({ subtotal, pixPct: pct, formaDePagamento: 'card', frete: 12 }).total).toBe(subtotal + 12);
+    }
   });
 
   test('o pedido grava o desconto, com saida para banco sem a migration 316', () => {

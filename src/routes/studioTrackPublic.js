@@ -26,28 +26,10 @@ const db = require('../config/database');
 const { resolvePixSetup } = require('../services/credit/collectionNotice');
 const { buildStaticBrCode, sanitizeTxid } = require('../services/staticPixService');
 
-// As etapas que o CLIENTE entende. O board tem 6 colunas operacionais;
-// aqui viram 4 marcos, porque "aprovado" e "em producao" sao a mesma
-// promessa pra quem espera: esta sendo feito.
-const ETAPAS = [
-  { key: 'recebido',  label: 'Pedido recebido' },
-  { key: 'arte',      label: 'Criando a arte' },
-  { key: 'producao',  label: 'Em produção' },
-  { key: 'pronto',    label: 'Pronto' },
-];
-
-// status de producao -> indice da etapa concluida
-function etapaDoStatus(status) {
-  switch (status) {
-    case 'awaiting_customization': return 0;
-    case 'pending_art':            return 1;
-    case 'approved':
-    case 'in_production':          return 2;
-    case 'ready':
-    case 'delivered':              return 3;
-    default:                       return 0; // venda sem producao: so "recebido"
-  }
-}
+// ETAPAS e etapaDoStatus moram em services/etapasDoPedido.js desde a
+// Fase 2 da vitrine Studio: a confirmacao do pedido mostra a mesma linha
+// do tempo e nao pode ter uma tabela propria.
+const { ETAPAS, etapaDoStatus } = require('../services/etapasDoPedido');
 
 const primeiroNome = (nome) => String(nome || '').trim().split(/\s+/)[0] || 'você';
 

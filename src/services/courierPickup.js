@@ -33,13 +33,30 @@ function normalizePlate(raw) {
 /**
  * Valida o bloco de retirada por app de um pedido.
  *
+ * "Informo depois" (Fase 2 da vitrine Studio, decisao do PO 25/09/2026):
+ * o cliente de personalizado so sabe quem vem buscar quando chama o app,
+ * DIAS depois do pedido — a peca ainda vai ser produzida. Exigir nome e
+ * placa no checkout fazia a pessoa inventar um nome ou desistir. Com
+ * `courier_informar_depois: true` o pedido nasce sem os dois (null) e a
+ * lojista combina pelo WhatsApp antes de entregar; a trava de "so entrega
+ * para quem o cliente indicou" continua, so muda o momento.
+ *
+ * So vale onde a rota liga `aceitaInformarDepois` (a vitrine Studio). A
+ * loja comum nao oferece a opcao na tela e segue exigindo os dois.
+ *
  * @param {object} config - row de digital_channel_config
- * @param {object} body   - corpo do pedido (courier_name, courier_plate)
- * @returns {{error: string} | {courier_name: string, courier_plate: string}}
+ * @param {object} body   - corpo do pedido (courier_name, courier_plate,
+ *                          courier_informar_depois)
+ * @param {{aceitaInformarDepois?: boolean}} [opcoes]
+ * @returns {{error: string} | {courier_name: string, courier_plate: string} | {courier_name: null, courier_plate: null, informar_depois: true}}
  */
-function validateCourierPickup(config, body) {
+function validateCourierPickup(config, body, opcoes = {}) {
   if (!config || config.courier_pickup_enabled !== true) {
     return { error: 'Retirada por app nao disponivel nesta loja' };
+  }
+
+  if (opcoes.aceitaInformarDepois === true && body && body.courier_informar_depois === true) {
+    return { courier_name: null, courier_plate: null, informar_depois: true };
   }
 
   const name = body && body.courier_name != null ? String(body.courier_name).trim() : '';

@@ -284,6 +284,10 @@ describe('as rotas de API do mesmo prefixo nao mudam de dono', () => {
     ['post', '/sheid-mania/studio/upload'],
     ['post', '/sheid-mania/studio/bulk-quote'],
     ['post', '/sheid-mania/studio/bulk-order'],
+    // Fase 2: a rota de DADOS da confirmacao mora sob /studio e nao
+    // colide com a casca `/:slug/pedido/:token`.
+    ['get', '/sheid-mania/studio/pedido/tk_abc123def4567890'],
+    ['post', '/sheid-mania/studio/cotacao'],
     ['get', `/sheid-mania/studio/products/${PECA}/visual-template`],
   ];
 

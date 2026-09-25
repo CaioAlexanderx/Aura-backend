@@ -6,9 +6,11 @@
 // Pix manual nao tem data de expiracao e nada os tirava da fila.
 //
 // O que trava aqui e o FILTRO — um filtro frouxo cancela pedido pago:
-//   - so pending_payment (comprovante enviado = awaiting_approval, nao toca)
+//   - so pending_payment ("ja paguei" = awaiting_approval, nao toca)
+//   - comprovante anexado tambem nao (o upload nao muda o status)
 //   - so Pix, e nunca os dois jeitos de "pago" dos gateways
-//   - Studio fora: tem fluxo proprio (arte, orcamento)
+//   - Studio (Fase 2, 25/09/2026): entra com 72 h, e so enquanto a
+//     producao nao andou
 //   - trava de linha, para dois processos nao cancelarem o mesmo pedido
 // E o AVISO: so para pedido recente (7 dias). Pedido de maio cancela calado.
 // ============================================================
@@ -17,7 +19,7 @@
 const fs = require('fs');
 const path = require('path');
 const {
-  tickCancelarPixVencido, PRAZO_HORAS, JANELA_DIAS, BATCH,
+  tickCancelarPixVencido, PRAZO_HORAS, PRAZO_HORAS_STUDIO, JANELA_DIAS, BATCH,
 } = require('../src/jobs/lojaPixExpiradoJob');
 
 const CID = 'c0000000-0000-0000-0000-000000000001';
@@ -59,8 +61,21 @@ describe('filtro do cancelamento', () => {
     expect(sql).toMatch(/NOT IN \('confirmed', 'paid', 'received'\)/);
   });
 
-  test('Studio fica de fora', () => {
-    expect(sql).toMatch(/COALESCE\(vertical, 'retail'\) <> 'studio'/);
+  test('comprovante anexado fica de fora', () => {
+    expect(sql).toMatch(/AND payment_proof_url IS NULL/);
+  });
+
+  test('loja comum: 48 h, como sempre', () => {
+    expect(sql).toMatch(/COALESCE\(vertical, 'retail'\) <> 'studio'\s+AND created_at < NOW\(\) - INTERVAL '48 hours'/);
+  });
+
+  test('Studio: 72 h, e so enquanto a producao nao andou', () => {
+    expect(PRAZO_HORAS_STUDIO).toBe(72);
+    expect(sql).toMatch(/vertical = 'studio'\s+AND created_at < NOW\(\) - INTERVAL '72 hours'\s+AND COALESCE\(studio_production_status, 'pending_art'\) IN \('pending_art', 'awaiting_customization'\)/);
+    // A nota diz o prazo certo de cada um.
+    expect(sql).toMatch(/CASE WHEN vertical = 'studio' THEN \$3 ELSE \$2 END/);
+    expect(params[1]).toContain('48 h');
+    expect(params[2]).toContain('72 h');
   });
 
   test('marca expirado, cancela e deixa nota; com trava de linha e lote', () => {
@@ -86,6 +101,19 @@ describe('aviso no sino', () => {
     expect(opts.body).toContain('cancelado automaticamente');
   });
 
+  test('pedido do Studio avisa com o prazo dele', async () => {
+    const deps = mkDeps([{ ...linha(3, 73), vertical: 'studio' }]);
+    const r = await tickCancelarPixVencido(deps);
+    expect(r).toEqual({ cancelados: 1, avisados: 1 });
+    expect(deps.lojaEvents.emitLojaEvent.mock.calls[0][2].body).toContain('não foi pago em 72 h');
+  });
+
+  test('loja comum avisa com 48 h', async () => {
+    const deps = mkDeps([linha(4, 49)]);
+    await tickCancelarPixVencido(deps);
+    expect(deps.lojaEvents.emitLojaEvent.mock.calls[0][2].body).toContain('não foi pago em 48 h');
+  });
+
   test('pedido antigo cancela calado', async () => {
     const deps = mkDeps([linha(2, 24 * (JANELA_DIAS + 100))]);
     const r = await tickCancelarPixVencido(deps);
@@ -97,6 +125,32 @@ describe('aviso no sino', () => {
     const deps = mkDeps([]);
     expect(await tickCancelarPixVencido(deps)).toEqual({ cancelados: 0, avisados: 0 });
     expect(deps.lojaEvents.emitLojaEvent).not.toHaveBeenCalled();
+  });
+});
+
+describe('base sem a coluna do comprovante', () => {
+  test('42703: cai para a consulta sem o filtro, uma vez, e continua cancelando', async () => {
+    await jest.isolateModulesAsync(async () => {
+      const job = require('../src/jobs/lojaPixExpiradoJob');
+      const erro = Object.assign(new Error('column "payment_proof_url" does not exist'), { code: '42703' });
+      const query = jest.fn()
+        .mockRejectedValueOnce(erro)
+        .mockResolvedValue({ rows: [linha(5, 49)] });
+      const deps = { db: { query }, lojaEvents: { emitLojaEvent: jest.fn().mockResolvedValue(null) } };
+      expect((await job.tickCancelarPixVencido(deps)).cancelados).toBe(1);
+      expect(query.mock.calls[1][0]).not.toMatch(/payment_proof_url/);
+      await job.tickCancelarPixVencido(deps);
+      expect(query).toHaveBeenCalledTimes(3);
+      expect(query.mock.calls[2][0]).not.toMatch(/payment_proof_url/);
+    });
+  });
+
+  test('outro erro sobe', async () => {
+    await jest.isolateModulesAsync(async () => {
+      const job = require('../src/jobs/lojaPixExpiradoJob');
+      const deps = { db: { query: jest.fn().mockRejectedValue(new Error('boom')) }, lojaEvents: {} };
+      await expect(job.tickCancelarPixVencido(deps)).rejects.toThrow('boom');
+    });
   });
 });
 
