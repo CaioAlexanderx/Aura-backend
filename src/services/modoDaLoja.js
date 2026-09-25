@@ -50,6 +50,11 @@ function modoDaLoja(config, agora = new Date()) {
   const c = config || {};
   const ate = comoData(c.pedidos_ate);
   const hoje = hojeNoBrasil(agora);
+  // O recado da propria lojista (migration 355), quando ela escreveu um.
+  // Vale para os dois jeitos de fechar: "Voltamos em 6 de janeiro" serve
+  // tanto para a loja pausada quanto para a temporada encerrada.
+  const recadoDaLoja = typeof c.pedidos_recado === 'string' && c.pedidos_recado.trim()
+    ? c.pedidos_recado.trim() : null;
 
   if (c.pedidos_pausados === true) {
     return {
@@ -57,7 +62,7 @@ function modoDaLoja(config, agora = new Date()) {
       motivo: 'pausado',
       // Escrito aqui, e nao na vitrine, para as duas lojas dizerem o
       // mesmo — e para a lojista poder reescrever um dia num lugar so.
-      recado: 'No momento a loja está fechada para pedidos novos. Você pode pedir um orçamento e a loja responde com prazo.',
+      recado: recadoDaLoja || 'No momento a loja está fechada para pedidos novos. Você pode pedir um orçamento e a loja responde com prazo.',
       pedidos_ate: ate,
     };
   }
@@ -66,7 +71,7 @@ function modoDaLoja(config, agora = new Date()) {
     return {
       aceita: false,
       motivo: 'prazo',
-      recado: 'Os pedidos desta temporada já fecharam. Você pode pedir um orçamento para a próxima leva.',
+      recado: recadoDaLoja || 'Os pedidos desta temporada já fecharam. Você pode pedir um orçamento para a próxima leva.',
       pedidos_ate: ate,
     };
   }
