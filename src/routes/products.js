@@ -395,16 +395,14 @@ router.get('/:pid/variants', async (req, res) => {
 //
 // in_group é pego no MESMO query do count (mantém número de db.query
 // calls — compat com testes existentes).
-router.post('/', async (req, res) => {
-  const cid = req.params.id;
-  const { name, sku, barcode, category, description, price, cost_price, stock_qty, min_stock, stock_max, unit, color, size, ncm, image_url, material, medidas, cuidados, brand } = req.body;
-  if (!name || !String(name).trim()) return res.status(400).json({ error: 'name e obrigatorio' });
+//
+// 25/09/2026 (migration 355): grupo com estoque separado (qualquer empresa
+// do grupo com share_products_in_group = false) cria produto privado. Base
+// sem a 355 cai para a consulta antiga uma vez e memoriza (42703).
+let temColunaSeparacao = true;
 
-  let defaultShared = false;
-  try {
-    const planLimit = getPlanLimit(req.user?.plan);
-    const stats = await db.query(
-      `SELECT
+function statsSql(comSeparacao) {
+  return `SELECT
          (SELECT COUNT(*) FROM products WHERE company_id = $1) AS total,
          EXISTS(
            SELECT 1 FROM companies c
@@ -413,11 +411,39 @@ router.post('/', async (req, res) => {
                (c.billing_owner_company_id IS NOT NULL AND c.billing_owner_company_id != c.id)
                OR EXISTS (SELECT 1 FROM companies sub WHERE sub.billing_owner_company_id = c.id AND sub.id != c.id)
              )
-         ) AS in_group`,
-      [cid]
-    );
+         ) AS in_group${comSeparacao ? `,
+         EXISTS(
+           SELECT 1 FROM companies g
+           WHERE COALESCE(NULLIF(g.billing_owner_company_id, g.id), g.id) = (
+             SELECT COALESCE(NULLIF(billing_owner_company_id, id), id) FROM companies WHERE id = $1
+           )
+             AND g.share_products_in_group = false
+         ) AS group_separated` : ''}`;
+}
+
+async function queryStats(cid) {
+  if (temColunaSeparacao) {
+    try {
+      return await db.query(statsSql(true), [cid]);
+    } catch (err) {
+      if (err.code !== '42703') throw err;
+      temColunaSeparacao = false;
+    }
+  }
+  return db.query(statsSql(false), [cid]);
+}
+
+router.post('/', async (req, res) => {
+  const cid = req.params.id;
+  const { name, sku, barcode, category, description, price, cost_price, stock_qty, min_stock, stock_max, unit, color, size, ncm, image_url, material, medidas, cuidados, brand } = req.body;
+  if (!name || !String(name).trim()) return res.status(400).json({ error: 'name e obrigatorio' });
+
+  let defaultShared = false;
+  try {
+    const planLimit = getPlanLimit(req.user?.plan);
+    const stats = await queryStats(cid);
     const current = parseInt(stats.rows[0]?.total) || 0;
-    defaultShared = stats.rows[0]?.in_group === true;
+    defaultShared = stats.rows[0]?.in_group === true && stats.rows[0]?.group_separated !== true;
     if (current >= planLimit) return res.status(403).json({ error: `Limite de produtos atingido (${planLimit}).`, limit: planLimit, current });
   } catch (err) { console.error('[products] count/group check error:', err.message); }
 
