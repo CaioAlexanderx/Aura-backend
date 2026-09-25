@@ -86,6 +86,11 @@ function startServer() {
     const { initKarateBillingDueScheduler } = require('./jobs/karateBillingDueScheduler');
     initKarateBillingDueScheduler();
 
+    // 25/09/2026: lembrete no sininho das contas a pagar que vencem em 2 dias
+    // (todas as empresas) — diário a partir das 8h BRT.
+    const { initExpenseDueReminderJob } = require('./jobs/expenseDueReminderJob');
+    initExpenseDueReminderJob();
+
     // F3c: régua de cobrança do dojô (dojô→aluno) — diário ~9h10 BRT
     const { initDojoReminderScheduler } = require('./jobs/dojoReminderScheduler');
     initDojoReminderScheduler();

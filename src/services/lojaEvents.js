@@ -244,6 +244,25 @@ const EVENTS = Object.freeze({
     ctaLabel: 'Configurar pagamento',
     ctaRoute: () => '/canal',
   },
+
+  // ── Financeiro (25/09/2026) ─────────────────────────────────────────
+  // Não é evento da loja online: é o lembrete de conta a pagar, 2 dias antes
+  // do vencimento (jobs/expenseDueReminderJob.js). Mora nesta taxonomia de
+  // propósito, para herdar sem código novo o card de evento do sininho, a
+  // severidade ("Precisa de você"), a preferência para desligar e a dedupe.
+  // Título e corpo vêm prontos do job (lista das contas do dia).
+  // No app some depois de visto (AUTO_LIDO em notificationEventModel).
+  loja_conta_vencendo: {
+    severity: 'atencao',
+    defaultOn: true,
+    orderless: true,
+    label: 'Conta a pagar vencendo',
+    hint: 'Lembrete 2 dias antes do vencimento das despesas a pagar do Financeiro.',
+    title: (o) => o.title || 'Conta a pagar vence em 2 dias',
+    body:  (o) => o.body || 'Você tem conta a pagar vencendo em 2 dias.',
+    ctaLabel: 'Ver contas a pagar',
+    ctaRoute: () => '/financeiro',
+  },
 });
 
 const TYPES = Object.freeze(Object.keys(EVENTS));
@@ -421,6 +440,7 @@ async function loadOrder(ref) {
  * @param {object} [opts]
  * @param {string} [opts.dedupeSuffix] substitui o order_id na dedupe_key.
  * @param {string} [opts.body]         sobrescreve o corpo montado.
+ * @param {Date|string} [opts.expiresAt] o aviso some do sininho depois disso.
  * @returns {Promise<object|null>} a linha criada, ou null (desligado, dedup, falha)
  */
 async function emitLojaEvent(type, order = {}, opts = {}) {
@@ -460,6 +480,7 @@ async function emitLojaEvent(type, order = {}, opts = {}) {
       ctaLabel: spec.ctaLabel,
       ctaRoute: spec.ctaRoute ? spec.ctaRoute(payload) : routeForOrder(payload),
       dedupeKey: `loja:${type.slice(PREFIX.length)}:${key}`,
+      expiresAt: opts.expiresAt || null,
     });
 
     // entity_ref/entity_label num UPDATE separado, e não como dois campos a
