@@ -46,7 +46,12 @@ afterEach(() => jest.restoreAllMocks());
 
 test('os tipos com push sao exatamente os que pedem acao imediata', () => {
   const comPush = lojaEvents.TYPES.filter((t) => lojaEvents.EVENTS[t].push === true).sort();
-  expect(comPush).toEqual(['loja_comprovante_enviado', 'loja_pedido_novo', 'loja_pedido_pago']);
+  // 26/09/2026: a resposta da cliente a arte do Studio (A4) — aprovada
+  // libera a producao, ajuste e a cliente esperando arte nova.
+  expect(comPush).toEqual([
+    'loja_ajuste_pedido', 'loja_arte_aprovada',
+    'loja_comprovante_enviado', 'loja_pedido_novo', 'loja_pedido_pago',
+  ]);
 });
 
 test('pedido novo vai para o navegador com titulo, link e agrupamento do pedido', async () => {

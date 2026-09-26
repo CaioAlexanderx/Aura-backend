@@ -8,6 +8,8 @@
 //   3. POST /aprovacao/:token/respond com action=approve|request_changes
 //   4. Se approve → studio_production_status do pedido vira 'approved'
 //      Se request_changes → cria revision, mantém pending
+//   5. A lojista é avisada no sino e no navegador (loja_arte_aprovada /
+//      loja_ajuste_pedido, services/lojaEvents.js)
 //
 // Fase 4 da vitrine Studio (25/09/2026): a página ganha a marca da loja
 // (`marca`, ver services/marcaDaLoja.js), o placar de revisões inclusas
@@ -20,6 +22,8 @@ const db      = require('../config/database');
 const { vitrineDaEmpresa, montarMarca } = require('../services/marcaDaLoja');
 const { carregarFaixas, prazoDaSacola } = require('../services/precoDoStudio');
 const { revisoesInclusas, precoDaRevisaoExtra } = require('../services/politicaDeRevisoes');
+// Objeto inteiro, nao desestruturado: e o ponto de costura do teste.
+const lojaEvents = require('../services/lojaEvents');
 
 // digital_orders.public_token é da migration 322. Base sem ela: a consulta
 // cai para a versão sem o token uma vez e fica nela (armadilha 1).
@@ -178,6 +182,38 @@ function notaComReferencia(note, referencia) {
   return (n ? n + '\n' : '') + 'Referência: ' + referencia;
 }
 
+// A frase que a cliente lê depois de responder. Sem emoji e sem promessa
+// que a loja não fez: o que é verdade é que ela foi avisada (o evento
+// abaixo) e que a arte aprovada vai para a produção no KDS.
+function mensagemDaResposta(action) {
+  return action === 'approve'
+    ? 'Arte aprovada. A loja já foi avisada e segue para a produção.'
+    : 'Pedido de ajuste enviado. A loja já foi avisada.';
+}
+
+/**
+ * Avisa a lojista da resposta (sino + push). Um evento por link: a chave de
+ * dedupe é o id da aprovação, e não o do pedido, porque o mesmo pedido pode
+ * ter vários ajustes, um por link.
+ *
+ * Loja de teste (`is_sandbox`) segue a regra de sempre dos eventos da loja:
+ * o aviso vai para o sino e para o navegador da PRÓPRIA loja — é o que o QA
+ * confere na aura-qa — e nada sai para fora (WhatsApp, e-mail, push de
+ * celular), que é o que a trava de services/lojaDeTeste.js protege.
+ */
+function avisarALoja(action, aprovacao, nota, temReferencia) {
+  const pedido = { id: aprovacao.order_id, company_id: aprovacao.company_id, vertical: 'studio' };
+  if (action === 'approve') {
+    lojaEvents.emit('loja_arte_aprovada', pedido, { dedupeSuffix: aprovacao.id });
+    return;
+  }
+  lojaEvents.emit('loja_ajuste_pedido', {
+    ...pedido,
+    ajuste_texto: nota ? String(nota) : '',
+    ajuste_com_referencia: temReferencia,
+  }, { dedupeSuffix: aprovacao.id });
+}
+
 // POST /aprovacao/:token/respond
 // body: { action: 'approve' | 'request_changes', note?: string, referencia_url?: string }
 router.post('/:token/respond', async function(req, res) {
@@ -250,10 +286,15 @@ router.post('/:token/respond', async function(req, res) {
       ok: true,
       action,
       new_status: newStatus,
-      message: action === 'approve'
-        ? '🎉 Aprovado! A loja já foi notificada e vai começar a produzir.'
-        : 'Pronto! A loja recebeu seu pedido de ajuste e vai te chamar.',
+      message: mensagemDaResposta(action),
     });
+
+    // Achado A4 (26/09/2026): a cliente lia "a loja já foi notificada" e
+    // ninguém era avisado — a resposta só aparecia se alguém abrisse o
+    // pedido. Agora vira evento durável no sino (e push no navegador) da
+    // lojista, pelo mesmo caminho dos outros eventos da loja, DEPOIS da
+    // resposta e sem poder derrubá-la (lojaEvents nunca lança).
+    avisarALoja(action, a, req.body.note, !!referenciaValida(req.body.referencia_url));
   } catch (err) {
     await client.query('ROLLBACK');
     console.error('[aprovacao:respond]', err.message);
@@ -268,3 +309,4 @@ module.exports._respostaDaAprovacao = respostaDaAprovacao;
 module.exports._placarDeRevisoes = placarDeRevisoes;
 module.exports._referenciaValida = referenciaValida;
 module.exports._notaComReferencia = notaComReferencia;
+module.exports._mensagemDaResposta = mensagemDaResposta;
