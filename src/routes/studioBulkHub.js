@@ -13,6 +13,7 @@ const db      = require('../config/database');
 // implementacoes e a conta do cliente divergindo da conta da lojista.
 // Uma regra, dois leitores — ver services/studioLote.js.
 const { cotarLote, codigoDoLote } = require('../services/studioLote');
+const { comPagamentoNaLista } = require('../services/pagamentoDoPedidoStudio');
 
 /**
  * A escada da LOJISTA para um produto: a regra dele, ou a global da loja.
@@ -309,7 +310,11 @@ router.get('/hub/orders', async function(req, res) {
           LIMIT $2`,
         [req.params.id, lim]
       );
-      items.push(...r.rows);
+      // 26/09/2026 (A1 do QA da lojista): `status` aqui e a etapa de
+      // producao; a situacao do pagamento vem a parte (order_status,
+      // payment_method, has_payment_proof) para o selo "Pagamento a
+      // conferir" da fila. Falha nessa consulta so tira o selo.
+      items.push(...(await comPagamentoNaLista(db, req.params.id, r.rows, (o) => o.id)));
     }
 
     if (source === 'all' || source === 'bulk') {

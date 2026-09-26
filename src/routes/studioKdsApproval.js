@@ -32,6 +32,7 @@ const crypto  = require('crypto');
 const db      = require('../config/database');
 const collectionNotice = require('../services/credit/collectionNotice');
 const creditLedger     = require('../services/creditLedger');
+const pagamentoDoPedido = require('../services/pagamentoDoPedidoStudio');
 
 // ═══════════════════════════════════════════════════════
 // FASE 4: KDS de Produção (atualizado 25/05 — KDS unificado + S-2.5)
@@ -546,6 +547,13 @@ ${withBalance ? BALANCE_COLS : ''}
       orders = orders.slice(0, safeLimit);
     }
 
+    // 26/09/2026 (A1): situacao do pagamento dos pedidos da vitrine, para
+    // a fila sinalizar "Pagamento a conferir". Consulta a parte: sem ela a
+    // query RICA continua igual, e a falha nao derruba a lista.
+    orders = await pagamentoDoPedido.comPagamentoNaLista(
+      db, cid, orders, (o) => (o.source === 'digital' ? o.digital_order_id : null)
+    );
+
     return res.json({ orders });
   } catch (errRich) {
     console.error('[studio/orders:GET][rich]', errRich.message, errRich.code, errRich.stack);
@@ -712,7 +720,19 @@ router.get('/orders/:oid', async function(req, res) {
       } catch (e) { console.error('[studio/orders/:oid][approvals]', e.message); }
     }
 
-    res.json({ order: head, items, approvals });
+    // 26/09/2026 (A1 do QA da lojista): forma, situacao, comprovante e
+    // total do pagamento do pedido da vitrine, para o bloco "Pagamento"
+    // do detalhe confirmar o Pix. Somados ao head, nada sai. Falha aqui
+    // nao derruba o detalhe -- o bloco so nao aparece.
+    let order = head;
+    if (head.source === 'digital' && head.digital_order_id) {
+      try {
+        const mapa = await pagamentoDoPedido.pagamentosDosPedidos(db, req.params.id, [head.digital_order_id]);
+        order = { ...head, ...pagamentoDoPedido.camposDoDetalhe(mapa.get(String(head.digital_order_id))) };
+      } catch (e) { console.error('[studio/orders/:oid][pagamento]', e.message); }
+    }
+
+    res.json({ order, items, approvals });
   } catch (err) {
     console.error('[studio/orders/:oid]', err.message, err.stack);
     res.status(500).json({ error: 'Erro ao buscar pedido' });
