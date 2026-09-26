@@ -73,9 +73,26 @@ jobs:
           done
 
       # Heap: o padrão do Node (~2 GB) virou o teto da suíte em 27/07/2026
-      # (OOM, exit 134, com ZERO teste falhando). --runInBand + --coverage
-      # acumulam módulos e mapas de cobertura num processo só; 4 GB dá
-      # folga num runner de 16 GB.
+      # (OOM, exit 134, com ZERO teste falhando) e o limite subiu para 4 GB.
+      # Em 25/09/2026 estourou de novo a 4 GB (PR #756, exit 134 em
+      # dentalAnamnesis.camposPR20 — suíte de 55 linhas, inocente; o rerun
+      # do mesmo commit passou).
+      #
+      # Medido com --logHeapUsage --runInBand na main (25/09, 377 suítes):
+      # o piso pós-GC sobe em linha reta, ~990 MB -> ~4,4 GB, uns 10 MB
+      # retidos por suíte. Não há suíte pesada para culpar: é vazamento
+      # acumulado de um processo só. Subir o heap (6 GB) só adia o estouro
+      # até a suíte crescer mais umas centenas de arquivos.
+      #
+      # Por isso: --maxWorkers=1 + --workerIdleMemoryLimit. Com o limite
+      # definido, o Jest NÃO cai no modo in-band com 1 worker (ver
+      # shouldRunInBand em @jest/core): roda UM processo filho, arquivo a
+      # arquivo, e recicla o filho quando ele passa do limite. Continua
+      # serial — as suítes *.banco / karate.* que usam o Postgres do
+      # serviço nunca rodam ao mesmo tempo, igual ao --runInBand.
+      # Medido localmente: pico de 4,8 GB -> 1,6 GB (~7 reciclagens),
+      # mesmos 6258 testes passando, cobertura idêntica, tempo igual.
+      # O NODE_OPTIONS de 4 GB fica como folga (vale para o filho também).
       #
       # --detectOpenHandles saiu de propósito: ele guarda o stack trace de
       # todo handle assíncrono aberto (e o repo sobe Express/WS em dezenas
@@ -85,4 +102,4 @@ jobs:
       - name: Run tests
         env:
           NODE_OPTIONS: --max-old-space-size=4096
-        run: node node_modules/jest/bin/jest.js --forceExit --runInBand --coverage
+        run: node node_modules/jest/bin/jest.js --forceExit --maxWorkers=1 --workerIdleMemoryLimit=1536MB --coverage
