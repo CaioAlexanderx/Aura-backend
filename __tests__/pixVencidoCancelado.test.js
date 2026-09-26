@@ -72,6 +72,8 @@ describe('filtro do cancelamento', () => {
   test('Studio: 72 h, e so enquanto a producao nao andou', () => {
     expect(PRAZO_HORAS_STUDIO).toBe(72);
     expect(sql).toMatch(/vertical = 'studio'\s+AND created_at < NOW\(\) - INTERVAL '72 hours'\s+AND COALESCE\(studio_production_status, 'pending_art'\) IN \('pending_art', 'awaiting_customization'\)/);
+    // Sinal registrado no painel ("Sinal e saldo") conta como pago: nao cancela.
+    expect(sql).toMatch(/IN \('pending_art', 'awaiting_customization'\)\s+AND COALESCE\(deposit_paid, false\) = false\)/);
     // A nota diz o prazo certo de cada um.
     expect(sql).toMatch(/CASE WHEN vertical = 'studio' THEN \$3 ELSE \$2 END/);
     expect(params[1]).toContain('48 h');
