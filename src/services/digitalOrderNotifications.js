@@ -229,7 +229,7 @@ async function getStoreName(company_id) {
  * approve-payment manual ou pedido on_delivery (já nasce confirmado).
  *
  * Dispara 3 notificações em paralelo:
- *   1. Push ao lojista  — "📦 Novo pedido #X confirmado!"
+ *   1. Push ao lojista  — "📦 Novo pedido #X confirmado!" (Studio: sem emoji)
  *   2. E-mail ao lojista — template com resumo do pedido
  *   3. E-mail ao cliente — "Pedido confirmado ✅"
  */
@@ -253,13 +253,19 @@ async function notifyPaymentConfirmed({ order: input }) {
   // que um motoboy de app vai buscar chega como "🏪 Retirada", e o lojista
   // só descobre que há um terceiro no meio ao abrir o pedido. Nome e placa
   // vão no push porque é a informação de que ele precisa no balcão, na hora.
+  //
+  // Studio sem emoji (achado A16 do QA da vitrine, 26/09/2026): o fluxo
+  // do Studio fala com a voz da loja, em texto. A loja comum fica como
+  // estava — a regra é da vitrine Studio, não dos outros verticais.
+  const comEmoji = order.vertical !== 'studio';
+  const ic = (emoji) => (comEmoji ? `${emoji} ` : '');
   const deliveryLabel =
-    order.delivery_type === 'delivery' ? '🚚 Entrega' :
+    order.delivery_type === 'delivery' ? `${ic('🚚')}Entrega` :
     order.delivery_type === 'courier'
-      ? '🛵 Retirada por app'
+      ? `${ic('🛵')}Retirada por app`
         + (order.courier_name  ? ` · ${order.courier_name}` : '')
         + (order.courier_plate ? ` (${order.courier_plate})` : '')
-      : '🏪 Retirada';
+      : `${ic('🏪')}Retirada`;
   const paymentLabel  = order.payment_method === 'pix'         ? 'Pix' :
                         order.payment_method === 'card'        ? 'Cartão' : 'Na entrega';
 
@@ -267,7 +273,9 @@ async function notifyPaymentConfirmed({ order: input }) {
   const tokens = await getOwnerPushTokens(company_id);
   await sendExpoPush(
     tokens,
-    `📦 Pedido #${order.order_number} confirmado!`,
+    comEmoji
+      ? `📦 Pedido #${order.order_number} confirmado!`
+      : `Pedido #${order.order_number} confirmado`,
     `${order.customer_name} · ${fmt(order.total)} · ${paymentLabel} · ${deliveryLabel}`,
     { type: 'order_payment_confirmed', order_id: order.id, order_number: order.order_number }
   );

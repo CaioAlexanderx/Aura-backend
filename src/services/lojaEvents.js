@@ -95,6 +95,23 @@ function entityOf(spec, payload) {
 }
 const quem = (order) => (order.customer_name ? ` — ${order.customer_name}` : '');
 
+// O começo do que a cliente pediu, numa linha: o bastante para a lojista
+// saber do que se trata na notificação, sem virar parede no sino. Corta
+// na palavra. A referência (se veio) é só anunciada: o link fica no pedido.
+const TRECHO_DO_AJUSTE = 120;
+function corpoDoAjuste(o) {
+  const texto = String(o.ajuste_texto || '').replace(/\s+/g, ' ').trim();
+  let trecho = texto;
+  if (texto.length > TRECHO_DO_AJUSTE) {
+    const corte = texto.slice(0, TRECHO_DO_AJUSTE);
+    const espaco = corte.lastIndexOf(' ');
+    trecho = (espaco > TRECHO_DO_AJUSTE / 2 ? corte.slice(0, espaco) : corte).replace(/[\s.,;:]+$/, '') + '…';
+  }
+  const partes = [trecho ? `"${trecho}"` : 'A cliente pediu ajuste na arte.'];
+  if (o.ajuste_com_referencia) partes.push('Com referência anexada.');
+  return partes.join(' ');
+}
+
 // ── A TAXONOMIA ────────────────────────────────────────────────────────
 // severity: 'info' | 'atencao' | 'critico'
 //   info    — fecha ciclo, é bom saber, não pede nada de ninguém.
@@ -195,6 +212,33 @@ const EVENTS = Object.freeze({
     title: (o) => `Retirada por portador ${num(o)}`,
     body:  (o) => `${o.courier_name || 'Portador'}${o.courier_plate ? ` — placa ${o.courier_plate}` : ''}. Confira nome e placa antes de entregar.`,
     ctaLabel: 'Ver pedido',
+  },
+  // ── Aprovação da arte do Studio (26/09/2026, achado A4) ─────────────
+  // A cliente responde pelo link público (routes/studioApprovalPublic.js)
+  // e a página diz a ela que a loja foi avisada. Até aqui não era: a
+  // resposta só aparecia se alguém abrisse o pedido. Os dois vão para o
+  // navegador também — a aprovação é o que libera a produção, e o ajuste
+  // é a cliente esperando a arte nova. A dedupe é por link de aprovação
+  // (dedupeSuffix), porque o mesmo pedido pode ter vários ajustes.
+  loja_arte_aprovada: {
+    severity: 'info',
+    defaultOn: true,
+    push: true,
+    label: 'Arte aprovada',
+    hint: 'A cliente aprovou a arte pelo link. O pedido segue para a produção.',
+    title: (o) => `Arte aprovada ${num(o)}${quem(o)}`,
+    body:  () => 'A cliente aprovou a arte pelo link. O pedido já está em Aprovado e pode ir para a produção.',
+    ctaLabel: 'Ver pedido',
+  },
+  loja_ajuste_pedido: {
+    severity: 'atencao',
+    defaultOn: true,
+    push: true,
+    label: 'Ajuste pedido',
+    hint: 'A cliente pediu ajuste na arte. Ela espera uma arte nova com outro link de aprovação.',
+    title: (o) => `Ajuste pedido ${num(o)}${quem(o)}`,
+    body:  (o) => corpoDoAjuste(o),
+    ctaLabel: 'Ver ajuste',
   },
   // Não tem pedido no CTA: o que a lojista precisa é repor. A rota é o estoque.
   loja_estoque_baixo: {

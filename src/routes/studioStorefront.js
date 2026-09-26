@@ -100,6 +100,7 @@ const {
 } = require('../services/precoDoStudio');
 const { PRAZO_HORAS_STUDIO } = require('../jobs/lojaPixExpiradoJob');
 const { montarConfirmacao } = require('../services/confirmacaoDoPedido');
+const { politicaDeRevisoes } = require('../services/politicaDeRevisoes');
 const { montarRepeticao } = require('../services/repetirPedido');
 const { filtroDeFoto } = require('../services/catalogoPaginado');
 // Selo NOVO com a mesma regra da loja comum (redesign 09/2026).
@@ -284,14 +285,9 @@ router.get('/:slug/studio/products', async (req, res) => {
       ({ rows: products } = await consultaProdutos(''));
     }
 
-    // Revisions policy — exposta sempre (default null/0 = sem limite/preco)
-    const revisions = {
-      max_included: ss.max_revisions_included != null
-        ? parseInt(ss.max_revisions_included) : 0,
-      extra_price: ss.extra_revision_price != null
-        ? parseFloat(ss.extra_revision_price) : 0,
-      policy_text: ss.revision_policy_text || null,
-    };
+    // Revisions policy — exposta sempre. 0/ausente = ilimitadas, sem
+    // preco de extra (services/politicaDeRevisoes.js, achado A3).
+    const revisions = politicaDeRevisoes(ss);
 
     // Detecta gateway de pagamento (Pix MP, Pix estatico, Cartao).
     //
@@ -1356,13 +1352,7 @@ router.get('/:slug/studio/order/:oid', async (req, res) => {
     const { studio_settings, ...rest } = row;
     res.json({
       ...rest,
-      revisions: {
-        max_included: ss.max_revisions_included != null
-          ? parseInt(ss.max_revisions_included) : 0,
-        extra_price: ss.extra_revision_price != null
-          ? parseFloat(ss.extra_revision_price) : 0,
-        policy_text: ss.revision_policy_text || null,
-      },
+      revisions: politicaDeRevisoes(ss),
       sla_days: ss.default_sla_days != null ? parseInt(ss.default_sla_days) : 3,
       shop_wa_phone: ss.approval_wa_phone || null,
     });

@@ -109,6 +109,26 @@ describe('notifyPaymentConfirmed — enriquecimento do pedido', () => {
     expect(body[0].body).toContain('🚚 Entrega');
   });
 
+  // Achado A16 do QA da vitrine Studio (26/09/2026): o Studio fala sem
+  // emoji. A loja comum (teste acima, com o caminhao) fica como estava.
+  it('pedido do Studio: push sem emoji, com o mesmo conteudo', async () => {
+    const studio = { ...DB_ROW, vertical: 'studio', delivery_type: 'pickup' };
+    db.query.mockImplementation((sql) => {
+      if (/FROM\s+digital_orders/i.test(sql)) return Promise.resolve({ rows: [studio] });
+      if (/FROM\s+digital_channel_config/i.test(sql)) return Promise.resolve({ rows: [{ site_name: 'Sheid' }] });
+      if (/push_tokens/i.test(sql)) return Promise.resolve({ rows: [{ token: 'ExponentPushToken[abc]' }] });
+      if (/FROM\s+users/i.test(sql)) return Promise.resolve({ rows: [] });
+      return Promise.resolve({ rows: [] });
+    });
+
+    await notify.notifyPaymentConfirmed({ order: { ...PARTIAL_ORDER } });
+
+    const [msg] = JSON.parse(global.fetch.mock.calls[0][1].body);
+    expect(msg.title).toBe('Pedido #00001 confirmado');
+    expect(msg.body).toBe('Davi Calçados · R$ 45,90 · Pix · Retirada');
+    expect(`${msg.title} ${msg.body}`).not.toMatch(/\p{Extended_Pictographic}/u);
+  });
+
   it('não vai ao banco quando o caller já passa a linha completa (INSERT ... RETURNING *)', async () => {
     mockDb();
 

@@ -93,6 +93,9 @@ async function tickPixExpirado({ db, lojaEvents }) {
 const PRAZO_HORAS = 48;
 const PRAZO_HORAS_STUDIO = 72;
 
+// Sinal registrado no painel (studio_payments -> deposit_paid) e dinheiro
+// na mao da lojista: o pedido nao e mais "Pix esquecido", mesmo que o
+// payment_status do digital_order continue pendente.
 // Status de producao em que o pedido Studio ainda nao andou.
 const STUDIO_PARADO = ['pending_art', 'awaiting_customization'];
 
@@ -126,7 +129,8 @@ function sqlDoCancelamento({ comComprovante }) {
                AND created_at < NOW() - INTERVAL '${PRAZO_HORAS} hours')
              OR (vertical = 'studio'
                AND created_at < NOW() - INTERVAL '${PRAZO_HORAS_STUDIO} hours'
-               AND COALESCE(studio_production_status, 'pending_art') IN (${STUDIO_PARADO.map((s) => `'${s}'`).join(', ')}))
+               AND COALESCE(studio_production_status, 'pending_art') IN (${STUDIO_PARADO.map((s) => `'${s}'`).join(', ')})
+               AND COALESCE(deposit_paid, false) = false)
            )
          ORDER BY created_at
          LIMIT $1
