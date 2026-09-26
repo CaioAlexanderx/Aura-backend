@@ -920,10 +920,13 @@ router.post('/orders/:oid/approval', async function(req, res) {
   // vai para o endereco DA LOJA (`<loja>/aprovacao/<token>`), com a marca
   // dela; desligada, o de sempre. Ver services/marcaDaLoja.js.
   const approvalUrl = await linkDoPosCompraDaEmpresa(req.params.id, 'aprovacao', token);
+  // Voz da loja, sem emoji e sem prometer prazo em horas (JORNADA §3,
+  // achado A16 do QA): quem responde é a lojista, e "até 1h" era uma
+  // promessa que nenhuma loja fez.
   const defaultMsg =
-    `Oi ${customerFirstName}! Sua arte do pedido ficou pronta 🎨\n\n` +
-    `Dá uma olhada e me confirma se posso imprimir:\n${approvalUrl}\n\n` +
-    `_${shopName} · respondemos em até 1h_`;
+    `Oi ${customerFirstName}! A arte do seu pedido ficou pronta.\n\n` +
+    `Dá uma olhada e me confirma se posso produzir:\n${approvalUrl}\n\n` +
+    `_${shopName}_`;
   const messageText = (custom_message && String(custom_message).trim()) || defaultMsg;
 
   try {
