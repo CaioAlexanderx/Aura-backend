@@ -23,6 +23,7 @@
 
 const { etapaDoStatus, etapasComEstado } = require('./etapasDoPedido');
 const { ehCampoDeServicoDeArte, prazoDaSacola, r2 } = require('./precoDoStudio');
+const { politicaDeRevisoes } = require('./politicaDeRevisoes');
 
 // Horas ate o Pix pendente do Studio cancelar sozinho (decisao do PO,
 // 25/09/2026). Quem cancela e o job; a tela so repete o prazo dele.
@@ -197,11 +198,8 @@ function montarConfirmacao({ pedido, itens, loja, studioSettings, faixas, acompa
         faixas: faixas ? (faixas[i.product_id] ?? faixas.__global ?? null) : null,
       }))
     ),
-    revisoes: {
-      max_included: ss.max_revisions_included != null ? parseInt(ss.max_revisions_included, 10) : 0,
-      extra_price: ss.extra_revision_price != null ? parseFloat(ss.extra_revision_price) : 0,
-      policy_text: ss.revision_policy_text || null,
-    },
+    // 0/ausente = ilimitadas, sem preco de extra (achado A3).
+    revisoes: politicaDeRevisoes(ss),
     acompanhar_url: acompanharUrl || null,
     loja: {
       nome: cfg.site_name || cfg.company_display_name || null,

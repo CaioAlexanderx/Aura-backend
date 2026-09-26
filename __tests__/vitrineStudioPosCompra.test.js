@@ -186,7 +186,7 @@ describe('GET /aprovacao/:token', () => {
       slug: 'sheid-mania', nome: 'Sheid Mania', primary_color: '#D8436F', font_family: 'classic',
       logo_url: 'https://r2/logo.png', whatsapp: '5512996145447', vitrine_v2: true,
     }));
-    expect(r.body.revisoes).toEqual({ inclusas: 2, usadas: 2, valor_extra: 10 });
+    expect(r.body.revisoes).toEqual({ inclusas: 2, usadas: 2, valor_extra: 10, ilimitadas: false });
     expect(r.body.prazo_dias_uteis).toBe(3);
     expect(r.body.order.numero).toBe('00123');
     expect(r.body.acompanhar_token).toBe(TOKEN);
@@ -209,7 +209,8 @@ describe('GET /aprovacao/:token', () => {
     const r = await request(app).get(`/aprovacao/${APROV}`);
     expect(r.status).toBe(200);
     expect(r.body.marca).toBeNull();
-    expect(r.body.revisoes).toEqual({ inclusas: null, usadas: 2, valor_extra: 0 });
+    // Nada configurado = ilimitadas (achado A3), nunca "nenhuma inclusa".
+    expect(r.body.revisoes).toEqual({ inclusas: null, usadas: 2, valor_extra: 0, ilimitadas: true });
   });
 
   test('vitrine indisponivel (42P01) nao derruba a pagina', async () => {

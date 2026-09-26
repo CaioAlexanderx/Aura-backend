@@ -19,6 +19,7 @@ const router  = express.Router({ mergeParams: true });
 const db      = require('../config/database');
 const { vitrineDaEmpresa, montarMarca } = require('../services/marcaDaLoja');
 const { carregarFaixas, prazoDaSacola } = require('../services/precoDoStudio');
+const { revisoesInclusas, precoDaRevisaoExtra } = require('../services/politicaDeRevisoes');
 
 // digital_orders.public_token é da migration 322. Base sem ela: a consulta
 // cai para a versão sem o token uma vez e fica nela (armadilha 1).
@@ -72,15 +73,20 @@ async function lerAprovacao(token) {
  * que passa a ser cobrado ("Esta seria a 3ª revisão: R$ 10,00"). Conta os
  * links do pedido que voltaram com ajuste — cada pedido de ajuste fecha
  * um link e a loja manda outro com a arte nova.
+ *
+ * 0 (ou nada configurado) é ILIMITADO, como o painel diz (achado A3):
+ * `ilimitadas: true`, `inclusas: null` e nenhum preço de extra. O null em
+ * `inclusas` é de propósito: a página que já está no ar lê null como "sem
+ * política, nada a dizer" e para de avisar uma cobrança que não existe
+ * antes mesmo de o app novo subir.
  */
 function placarDeRevisoes(studioSettings, ajustesPedidos) {
-  const ss = studioSettings || {};
-  const inclusas = parseInt(ss.max_revisions_included, 10);
-  const extra = parseFloat(ss.extra_revision_price);
+  const inclusas = revisoesInclusas(studioSettings);
   return {
-    inclusas: Number.isFinite(inclusas) && inclusas >= 0 ? inclusas : null,
+    inclusas,
     usadas: parseInt(ajustesPedidos, 10) || 0,
-    valor_extra: Number.isFinite(extra) && extra > 0 ? extra : 0,
+    valor_extra: precoDaRevisaoExtra(studioSettings),
+    ilimitadas: inclusas == null,
   };
 }
 

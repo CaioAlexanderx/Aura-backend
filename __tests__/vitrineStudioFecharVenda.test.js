@@ -542,7 +542,7 @@ describe('B2 · GET /studio/pedido/:token', () => {
         { chave: 'pronto', rotulo: 'Pronto', estado: 'futuro' },
       ],
       prazo_dias_uteis: 3,
-      revisoes: { max_included: 2, extra_price: 10, policy_text: null },
+      revisoes: { max_included: 2, extra_price: 10, policy_text: null, ilimitadas: false },
       acompanhar_url: `/acompanhar/${TOKEN}`,
       loja: { nome: 'Sheid Mania', whatsapp: '5512996145447' },
     });
