@@ -204,5 +204,87 @@ describe('shape estável nos fallbacks', () => {
     expect(res.body.degraded).toBe('slim');
     expect(res.body.orders[0]).toHaveProperty('card_image_url', null);
     expect(res.body.orders[0]).toHaveProperty('promised_date', null);
+    expect(res.body.orders[0]).toHaveProperty('card_image_source', null);
+    expect(res.body.orders[0]).toHaveProperty('card_customization', null);
+  });
+});
+
+// A capa quase sempre e a foto do catalogo (arte de exemplo). O app precisa
+// saber disso para desenhar a previa da personalizacao real da cliente.
+describe('origem da capa e personalização do cartão', () => {
+  const PERSONALIZACAO = {
+    values: { nome: 'Ana', cor: '#EF4444' },
+    config: { fields: [{ key: 'nome', type: 'text' }] },
+  };
+
+  test('a query rica traz card_customization pelos dois braços e as flags depois da capa', async () => {
+    mockDb({ rows: [] });
+    await get();
+
+    const sql = richSql();
+    expect(sql).toMatch(/AS card_customization/);
+    expect(sql).toMatch(/si4\.customization/);
+    expect(sql).toMatch(/doi4\.customization/);
+    expect(sql).toMatch(/jsonb_typeof\(si4\.customization\) = 'object'/);
+    expect(sql).toMatch(/jsonb_typeof\(doi4\.customization\) = 'object'/);
+    expect(sql).toMatch(/AS card_has_mockup/);
+    expect(sql).toMatch(/AS card_has_render/);
+    // o render digital mantém o cast ::text (BIGINT x UUID em prod)
+    expect(sql.slice(sql.indexOf('AS card_image_url'))).toMatch(/doi2\.id::text = r\.digital_order_item_id::text/);
+    // as colunas novas ficam fora do recorte da cascata
+    const capa = sql.indexOf('AS card_image_url');
+    expect(sql.indexOf('AS card_has_mockup')).toBeGreaterThan(capa);
+    expect(sql.indexOf('AS card_has_render')).toBeGreaterThan(capa);
+    expect(sql.indexOf('AS card_customization')).toBeGreaterThan(capa);
+  });
+
+  test('card_image_source segue o degrau da cascata e as flags não vazam', async () => {
+    mockDb({ rows: [
+      { id: 'm', source: 'digital', card_image_url: 'https://cdn/mockup.png', card_has_mockup: true, card_has_render: true },
+      { id: 'r', source: 'pdv', card_image_url: 'https://cdn/render.png', card_has_mockup: false, card_has_render: true },
+      { id: 'p', source: 'pdv', card_image_url: 'https://cdn/produto.png', card_has_mockup: false, card_has_render: false },
+      { id: 'n', source: 'marketplace', card_image_url: null, card_has_mockup: false, card_has_render: false },
+    ] });
+
+    const res = await get();
+    const porId = Object.fromEntries(res.body.orders.map((o) => [o.id, o]));
+    expect(porId.m.card_image_source).toBe('mockup');
+    expect(porId.r.card_image_source).toBe('render');
+    expect(porId.p.card_image_source).toBe('product');
+    expect(porId.n.card_image_source).toBeNull();
+    for (const o of res.body.orders) {
+      expect(o).not.toHaveProperty('card_has_mockup');
+      expect(o).not.toHaveProperty('card_has_render');
+    }
+  });
+
+  test('card_customization é repassado como veio e sai null quando ausente', async () => {
+    mockDb({ rows: [
+      { id: 'com', source: 'pdv', card_image_url: 'https://cdn/produto.png', card_customization: PERSONALIZACAO },
+      { id: 'sem', source: 'pdv', card_image_url: null },
+    ] });
+
+    const res = await get();
+    const porId = Object.fromEntries(res.body.orders.map((o) => [o.id, o]));
+    expect(porId.com.card_customization).toEqual(PERSONALIZACAO);
+    expect(porId.sem).toHaveProperty('card_customization', null);
+  });
+
+  test('a consulta suplementar não tem personalização e a origem é só a foto', async () => {
+    mockDb({
+      rows: [],
+      semProducao: [
+        { id: 'com-foto', source: 'pdv', created_at: '2026-08-15T10:00:00Z', card_image_url: 'https://cdn/p.png', card_customization: null },
+        { id: 'sem-foto', source: 'pdv', created_at: '2026-08-14T10:00:00Z', card_image_url: null, card_customization: null },
+      ],
+    });
+
+    const res = await get('?with_balance=true');
+    expect(extraSql()).toMatch(/NULL::jsonb AS card_customization/);
+    const porId = Object.fromEntries(res.body.orders.map((o) => [o.id, o]));
+    expect(porId['com-foto'].card_customization).toBeNull();
+    expect(porId['com-foto'].card_image_source).toBe('product');
+    expect(porId['sem-foto'].card_customization).toBeNull();
+    expect(porId['sem-foto'].card_image_source).toBeNull();
   });
 });
