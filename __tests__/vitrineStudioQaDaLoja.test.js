@@ -3,7 +3,8 @@
 //
 //  1. P0 · o slug nao muda mais a cada salvamento do painel
 //  2. P1 · campo de texto apagado no painel fica apagado
-//  3. P0 · o endereco de retirada chega na vitrine e na confirmacao
+//  3. P0 · o endereco de retirada chega na vitrine, na confirmacao e no
+//     acompanhamento
 //  4. P1 · o GET do painel diz se os banners sao os automaticos
 //  5. P1 · a tipografia "Marcante" (editorial) e aceita
 //  6. P1 · "Nao achamos essa loja" com titulo, estilo e saida
@@ -176,6 +177,44 @@ describe('3 · o endereco de retirada', () => {
       .toBe('Rua do Negócio, 10');
     expect(montarConfirmacao({ pedido: { ...pedido, delivery_type: 'delivery' }, itens: [], loja }).entrega.retirada_endereco)
       .toBeNull();
+  });
+});
+
+describe('3b · o acompanhamento le o endereco de retirada da marca', () => {
+  const CID = '56135b5d-defa-4225-aa2c-e6b9433c98ea';
+
+  test('a consulta traz pickup_address', async () => {
+    const { vitrineDaEmpresa } = require('../src/services/marcaDaLoja');
+    db.query.mockReset();
+    db.query.mockResolvedValue({ rows: [{ slug: 'aura-qa', address: 'Negócio', pickup_address: 'Retirada' }] });
+    const v = await vitrineDaEmpresa(CID);
+    expect(String(db.query.mock.calls[0][0])).toContain('dcc.pickup_address');
+    expect(v.pickup_address).toBe('Retirada');
+  });
+
+  test('base sem a coluna (42703): cai para a consulta sem ela e a marca continua', async () => {
+    await jest.isolateModulesAsync(async () => {
+      const dbi = require('../src/config/database');
+      const { vitrineDaEmpresa } = require('../src/services/marcaDaLoja');
+      dbi.query.mockReset();
+      dbi.query.mockImplementation(async (sql) => {
+        if (String(sql).includes('pickup_address')) {
+          throw Object.assign(new Error('column dcc.pickup_address does not exist'), { code: '42703' });
+        }
+        return { rows: [{ slug: 'aura-qa', address: 'Negócio' }] };
+      });
+      const v = await vitrineDaEmpresa(CID);
+      expect(v).toEqual({ slug: 'aura-qa', address: 'Negócio' });
+      // Da segunda vez em diante, direto sem a coluna.
+      await vitrineDaEmpresa(CID);
+      expect(dbi.query).toHaveBeenCalledTimes(3);
+      expect(String(dbi.query.mock.calls[2][0])).not.toContain('pickup_address');
+    });
+  });
+
+  test('o acompanhamento usa pickup_address, com o endereco do negocio como reserva', () => {
+    expect(fonte('src/routes/studioTrackPublic.js'))
+      .toContain('String(vitrine.pickup_address || vitrine.address)');
   });
 });
 
