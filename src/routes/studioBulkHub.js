@@ -303,6 +303,9 @@ router.get('/hub/orders', async function(req, res) {
         `SELECT o.id, 'order'::text AS kind, o.created_at, o.total AS amount,
                 o.studio_production_status AS status,
                 o.customer_name AS name,
+                -- 27/09/2026: o numero que a cliente ve ("Pedido 00001") e o telefone,
+                -- pra busca do Hub achar o pedido pelo numero e nao so pelo uuid.
+                o.order_number, o.customer_phone,
                 (SELECT COUNT(*) FROM digital_order_items oi WHERE oi.order_id = o.id) AS qty
            FROM digital_orders o
           WHERE o.company_id = $1 AND o.vertical = 'studio'
@@ -320,7 +323,9 @@ router.get('/hub/orders', async function(req, res) {
     if (source === 'all' || source === 'bulk') {
       const r = await db.query(
         `SELECT id, 'bulk'::text AS kind, created_at, total_amount AS amount,
-                status, event_name AS name, total_qty AS qty
+                status, event_name AS name, total_qty AS qty,
+                -- evento nao tem numero de pedido; telefone vem pra busca do Hub.
+                NULL::text AS order_number, customer_phone
            FROM studio_bulk_events
           WHERE company_id = $1
           ORDER BY created_at DESC
