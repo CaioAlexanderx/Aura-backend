@@ -65,7 +65,7 @@ const {
   // S0 do redesign (03/09/2026): banner e redes sociais existem no
   // digital_channel_config desde sempre e so a loja comum lia. A vitrine
   // Studio desenhava um cabecalho fixo e nao tinha rodape com contato.
-  parseBanners,
+  parseBanners, bannersAutomaticos,
   // Rodape (04/09/2026): o resumo de horario e o CNPJ formatado ja eram
   // calculados aqui para a loja comum. A vitrine Studio nao tinha rodape
   // nenhum — repetir as duas regras seria a quinta copia da mesma coisa.
@@ -194,7 +194,7 @@ function montarSite(config, nomeDaEmpresa) {
     // nova da vitrine Studio precisa saber disso: sem banner de verdade,
     // o destaque e a peca com o mockup girando (decisao 10 do PO), e nao
     // a tagline num fundo escuro. A home de hoje continua lendo `banners`.
-    banners_automaticos: parseBanners(config.banners).length === 0,
+    banners_automaticos: bannersAutomaticos(config.banners),
     // A faixa de anuncio escrita na aba Design. Vazia = a vitrine monta
     // a automatica do Studio ("Voce aprova o mockup antes de produzir ·
     // Pronto em N dias uteis · X% no Pix") com os dados da loja.
@@ -594,6 +594,12 @@ router.get('/:slug/studio/products', async (req, res) => {
         delivery_enabled:       config.delivery_enabled || false,
         courier_pickup_enabled: config.courier_pickup_enabled === true,
         delivery_fee:           parseFloat(config.delivery_fee) || 0,
+        // Onde retirar (QA 26/09/2026, P0): o endereco de retirada
+        // cadastrado na aba Entrega, no mesmo formato da loja comum
+        // (storefrontBuilder, `contact.pickup_address`). Sem ele a vitrine
+        // mostrava o endereco do negocio (`site.endereco`) como se fosse o
+        // da retirada. null = a loja nao cadastrou um endereco proprio.
+        pickup_address:         config.pickup_address    || null,
         pickup_eta_text:        config.pickup_eta_text   || null,
         delivery_eta_text:      config.delivery_eta_text || null,
       },

@@ -9,9 +9,10 @@
 //  1. o bloco `site` é montado em UM lugar (ele nascia escrito duas
 //     vezes na mesma rota, e as duas copias ja tinham divergido);
 //  2. os campos novos saem da vitrine;
-//  3. o desconto do Pix é calculado no servidor, com a MESMA conta da
-//     loja comum — regra de dinheiro divergente entre as duas vitrines
-//     da mesma empresa foi o defeito da fase 6.
+//  3. o desconto do Pix é calculado no servidor — regra de dinheiro
+//     divergente entre a vitrine e o pedido foi o defeito da fase 6.
+//     Desde o QA de 26/09/2026 o Studio arredonda o preço no Pix em
+//     centavos, a regra combinada com o app.
 // ============================================================
 const fs = require('fs');
 const path = require('path');
@@ -88,14 +89,16 @@ describe('o desconto do Pix, igual nas duas lojas', () => {
     expect(studio).toContain('pix_discount_pct: Number(config.pix_discount_pct) || 0');
   });
 
-  test('e cobra com a MESMA conta da loja comum', () => {
+  test('e cobra no servidor, frete fora do desconto', () => {
     const conta = /const discount_amount = \(pmethod === 'pix' && pixPct > 0\)\s*\n\s*\? Math\.round\(subtotal \* pixPct\) \/ 100\s*\n\s*: 0;/;
     expect(comum).toMatch(conta);
     expect(comum).toContain('const total = subtotal - discount_amount + delivery_fee;');
     // Fase 2 (25/09/2026): no Studio a conta mora em services/precoDoStudio.js,
-    // a mesma para o pedido e para a cotacao. A formula e a da loja comum,
-    // frete fora do desconto.
-    expect(preco).toMatch(/return pct > 0 \? Math\.round\(subtotal \* pct\) \/ 100 : 0;/);
+    // a mesma para o pedido e para a cotacao, frete fora do desconto.
+    // QA 26/09/2026: o Studio arredonda o PRECO no Pix em centavos (regra
+    // combinada com o app); a loja comum segue arredondando o desconto.
+    // As duas so divergem no meio centavo (vitrineStudioQaDaLoja.test.js).
+    expect(preco).toContain('const noPix = Math.round(centavos * (100 - pct) / 100);');
     expect(preco).toContain('total: subtotal - desconto + fee,');
     expect(studio).toContain('const totais = totaisDoPedido({');
     const { totaisDoPedido } = require('../src/services/precoDoStudio');

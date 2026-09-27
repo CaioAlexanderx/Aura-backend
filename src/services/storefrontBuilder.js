@@ -159,6 +159,20 @@ function parseBanners(raw, fallbackCover, fallbackTagline, fallbackDesc) {
 }
 
 /**
+ * A loja esta sem banner proprio, isto e, a vitrine usa os automaticos?
+ *
+ * E o parse de cima SEM o fallback de capa + tagline: se nada do que
+ * esta gravado sobrevive (lista vazia, desligada ou sem conteudo), os
+ * banners do payload sao o fallback. A vitrine Studio (studioStorefront,
+ * `site.banners_automaticos`) e o GET do painel (digitalChannel) leem
+ * daqui, para o painel nao dizer "Seu banner esta no ar" quando a
+ * vitrine mostra outra coisa (QA 26/09/2026).
+ */
+function bannersAutomaticos(raw) {
+  return parseBanners(raw).length === 0;
+}
+
+/**
  * O que conta como destino de CTA: http(s) ou categoria da loja.
  *
  * `#cat=/vestidos` e o unico formato interno aceito — o caminho e o
@@ -1142,4 +1156,6 @@ module.exports = {
   // So pra teste: a regra "CTA apenas com destino http(s) de verdade"
   // vive no parse, e o teste precisa exercita-la sem subir banco.
   parseBanners,
+  // A regra de "sem banner proprio", lida pela vitrine Studio e pelo painel.
+  bannersAutomaticos,
 };

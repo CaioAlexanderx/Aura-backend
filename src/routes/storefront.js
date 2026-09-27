@@ -35,6 +35,7 @@ const router              = require('express').Router();
 const db                  = require('../config/database');
 const notify              = require('../services/digitalOrderNotifications');
 const buildStorefrontPage = require('../templates/storefrontPage');
+const { PAGINA_LOJA_NAO_ENCONTRADA } = require('../templates/lojaNaoEncontrada');
 const {
   buildStorefront, listVisibilityWhere,
   // A pagina 2 monta o produto com o MESMO codigo da pagina 1.
@@ -330,7 +331,10 @@ async function servirPaginaDaLoja(req, res, produtoId, { somenteStudio = false, 
     if (!rows.length) {
       res.setHeader('Content-Security-Policy', STOREFRONT_CSP);
       res.removeHeader('X-Frame-Options');
-      return res.status(404).send('<html><body style="font-family:sans-serif;padding:40px;text-align:center;"><h1>Loja não encontrada</h1><p>Verifique o link ou peça ao lojista pra publicar a loja.</p></body></html>');
+      // Slug inexistente ou loja despublicada: a mesma pagina, com o
+      // mesmo 404 (templates/lojaNaoEncontrada.js, QA 26/09/2026).
+      res.setHeader('Content-Type', 'text/html; charset=utf-8');
+      return res.status(404).send(PAGINA_LOJA_NAO_ENCONTRADA);
     }
 
     // Empresa em modo Studio tem UMA loja, e e esta (decisao de

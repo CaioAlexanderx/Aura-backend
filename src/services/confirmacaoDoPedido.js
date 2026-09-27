@@ -182,7 +182,9 @@ function montarConfirmacao({ pedido, itens, loja, studioSettings, faixas, acompa
     entrega: {
       tipo,
       prazo_texto: (tipo === 'delivery' ? cfg.delivery_eta_text : cfg.pickup_eta_text) || null,
-      retirada_endereco: retirada ? (cfg.address || null) : null,
+      // O endereco de retirada da aba Entrega; sem ele, o do negocio
+      // (como era antes para toda loja). QA 26/09/2026.
+      retirada_endereco: retirada ? (cfg.pickup_address || cfg.address || null) : null,
       bairro_cidade: bairroCidade,
       courier_a_informar: tipo === 'courier' && !o.courier_name,
     },

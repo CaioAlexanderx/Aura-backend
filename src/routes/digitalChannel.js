@@ -42,7 +42,31 @@ const { comoData } = require('../services/modoDaLoja');
 // O destino do botao do banner: a MESMA regra que a vitrine aplica ao
 // ler (storefrontBuilder.parseBanners). Antes o PUT nao copiava cta_url e
 // o destino se perdia ao salvar (JORNADA, Anexo A, item 1).
-const { destinoDoCta } = require('../services/storefrontBuilder');
+const { destinoDoCta, bannersAutomaticos } = require('../services/storefrontBuilder');
+const { TIPOGRAFIAS } = require('../templates/storefrontTypography');
+
+// As chaves de tipografia que a loja sabe desenhar: classic, modern,
+// editorial ("Marcante" no painel) e humanist.
+const FONTES_ACEITAS = Object.keys(TIPOGRAFIAS);
+
+// Texto que a lojista pode APAGAR pelo PUT (QA 26/09/2026). Ate aqui o
+// UPSERT fazia `valor || null` + `COALESCE($n, coluna)`: o painel mandava
+// `tagline: null` quando ela limpava o campo e o texto antigo voltava.
+// A regra agora e explicita: chave AUSENTE no corpo nao mexe; chave
+// presente com null ou '' grava NULL. Fora daqui de proposito: site_name,
+// slug e is_published (nao se apagam por este caminho) e os campos que ja
+// tem UPDATE proprio (instagram, tiktok, facebook, pickup_*, pedidos_*).
+const CAMPOS_DE_TEXTO_APAGAVEIS = [
+  'tagline', 'description', 'address', 'phone', 'whatsapp', 'google_maps_url',
+  'pix_key', 'pix_key_type', 'pix_holder_name', 'pix_holder_city',
+];
+
+/** As colunas que o corpo pediu para apagar (chave presente, null ou ''). */
+function camposParaApagar(body) {
+  const b = body || {};
+  return CAMPOS_DE_TEXTO_APAGAVEIS.filter((c) => Object.prototype.hasOwnProperty.call(b, c)
+    && (b[c] === null || (typeof b[c] === 'string' && !b[c].trim())));
+}
 // Fase 5 da vitrine Studio: a peca do destaque da home sem banner.
 const { lerPecaDoDestaque } = require('../services/pecaDoDestaque');
 
@@ -186,6 +210,9 @@ router.get('/', async (req, res) => {
         require_product_image: false,
         pix_discount_pct: 0,
         always_open: false,
+        // Nada gravado: os banners acima sao os de fabrica do painel, e a
+        // vitrine monta os automaticos dela.
+        banners_automaticos: true,
       });
     }
     const config = rows[0];
@@ -196,6 +223,11 @@ router.get('/', async (req, res) => {
       font_family: config.font_family || 'classic',
       card_style: config.card_style || 'editorial',
       banners: Array.isArray(config.banners) && config.banners.length ? config.banners : DEFAULT_BANNERS,
+      // A vitrine esta usando os banners automaticos (os de cima sao so o
+      // modelo do painel)? A MESMA funcao que a vitrine Studio le
+      // (storefrontBuilder.bannersAutomaticos): sem isto o painel dizia
+      // "Seu banner esta no ar" para um banner que a loja nao mostra.
+      banners_automaticos: bannersAutomaticos(config.banners),
       service_cards: Array.isArray(config.service_cards) && config.service_cards.length ? config.service_cards : DEFAULT_SERVICE_CARDS,
       announcement_bar: config.announcement_bar || '',
       business_hours: config.business_hours || DEFAULT_CONFIG.business_hours,
@@ -242,7 +274,7 @@ router.get('/', async (req, res) => {
     });
   } catch (err) {
     if (err.message?.includes('does not exist')) {
-      return res.json({ ...DEFAULT_CONFIG, exists: false, storefront_url: null });
+      return res.json({ ...DEFAULT_CONFIG, exists: false, storefront_url: null, banners_automaticos: true });
     }
     console.error('digital channel get error:', err);
     res.status(500).json({ error: 'Erro ao buscar configuracao do canal digital' });
@@ -563,8 +595,12 @@ router.put('/', requireRole('client', 'analyst', 'admin'), async (req, res) => {
     const v = validatePixKey(pix_key, pix_key_type);
     if (!v.valid) return res.status(400).json({ error: 'Chave Pix invalida: ' + v.error });
   }
-  if (font_family && !['classic','modern','humanist'].includes(font_family)) {
-    return res.status(400).json({ error: 'font_family deve ser classic|modern|humanist' });
+  // As quatro chaves da tipografia sao as da loja (templates/
+  // storefrontTypography.js) e do CHECK da migration 299. A lista fixa
+  // daqui nao tinha `editorial`, a chave do "Marcante" no painel, e o
+  // PUT recusava a escolha (QA 26/09/2026).
+  if (font_family && !FONTES_ACEITAS.includes(font_family)) {
+    return res.status(400).json({ error: `Tipografia inválida. Use ${FONTES_ACEITAS.slice(0, -1).join(', ')} ou ${FONTES_ACEITAS[FONTES_ACEITAS.length - 1]}.` });
   }
   if (card_style && !['editorial','minimal','image-heavy'].includes(card_style)) {
     return res.status(400).json({ error: 'card_style deve ser editorial|minimal|image-heavy' });
@@ -689,13 +725,40 @@ router.put('/', requireRole('client', 'analyst', 'admin'), async (req, res) => {
     }
   }
 
-  let slug = req.body.slug || null;
-  if (!slug && site_name) {
-    slug = generateSlug(site_name);
-    const { rows: existing } = await db.query(
-      `SELECT slug FROM digital_channel_config WHERE slug = $1 AND company_id != $2`, [slug, cid]
-    );
-    if (existing.length > 0) slug = slug + '-' + Date.now().toString(36).slice(-4);
+  // O endereco da loja (QA 26/09/2026, P0). O painel manda `site_name` em
+  // todo salvamento e nunca `slug`, e o slug era recalculado do nome a
+  // cada PUT: a aura-qa virou aura-qa-espelho-da-sheid e o link que a
+  // lojista ja tinha divulgado parou de abrir. Regra: o nome so gera slug
+  // quando a loja ainda nao tem um (linha inexistente ou slug vazio).
+  // Slug pedido explicitamente segue valendo, e nao pode ser o de outra
+  // empresa (409, a mesma resposta do indice unico).
+  let slug = null;
+  const slugPedido = typeof req.body.slug === 'string' ? req.body.slug.trim() : '';
+  try {
+    if (slugPedido) {
+      const { rows: deOutra } = await db.query(
+        `SELECT slug FROM digital_channel_config WHERE slug = $1 AND company_id != $2`, [slugPedido, cid]
+      );
+      if (deOutra.length > 0) {
+        return res.status(409).json({ error: 'Esse slug já está em uso. Escolha outro nome.' });
+      }
+      slug = slugPedido;
+    } else if (site_name) {
+      const { rows: atual } = await db.query(
+        `SELECT slug FROM digital_channel_config WHERE company_id = $1`, [cid]
+      );
+      const slugAtual = atual.length && typeof atual[0].slug === 'string' ? atual[0].slug.trim() : '';
+      if (!slugAtual) {
+        slug = generateSlug(site_name);
+        const { rows: existing } = await db.query(
+          `SELECT slug FROM digital_channel_config WHERE slug = $1 AND company_id != $2`, [slug, cid]
+        );
+        if (existing.length > 0) slug = slug + '-' + Date.now().toString(36).slice(-4);
+      }
+    }
+  } catch (e) {
+    console.error('[canal-slug] consultar slug:', e.message);
+    return res.status(500).json({ error: 'Erro ao salvar configuracao do canal digital' });
   }
 
   const v2 = await hasV2Columns();
@@ -865,6 +928,22 @@ router.put('/', requireRole('client', 'analyst', 'admin'), async (req, res) => {
       ]);
 
       savedConfig = rows[0];
+    }
+
+    // Campo de texto apagado pela lojista (QA 26/09/2026): o UPSERT acima
+    // trata null como "nao mexe" (COALESCE), entao quem veio null ou ''
+    // e apagado aqui, explicitamente. Os nomes de coluna vem da lista fixa
+    // CAMPOS_DE_TEXTO_APAGAVEIS, nunca do corpo.
+    const apagar = camposParaApagar(req.body);
+    if (apagar.length) {
+      const { rows: limpos } = await db.query(
+        `UPDATE digital_channel_config
+            SET ${apagar.map((c) => `${c} = NULL`).join(', ')}, updated_at = NOW()
+          WHERE company_id = $1
+          RETURNING *`,
+        [cid]
+      );
+      if (limpos.length) savedConfig = limpos[0];
     }
 
     // ============================================================
