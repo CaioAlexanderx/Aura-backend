@@ -223,28 +223,56 @@ router.post('/:oid/approve-payment', requireRole('client', 'analyst', 'admin'), 
 });
 
 // ============================================================
-// POST /:oid/reject-payment — Lojista rejeita pedido (cancelled)
+// POST /:oid/reject-payment — Lojista recusa o pagamento e cancela o pedido
+//
+// QA 28/09/2026 (LJ-33, P0): respondia 500 em toda tentativa num pedido da
+// vitrine Studio. A rota estava certa; quem quebrava era o trigger de
+// estorno de insumos (trg_studio_restore_inputs_digital_cancel), com
+// "column reference stock_qty is ambiguous" — corrigido na migration 357.
+//
+// Recusar pagamento so faz sentido enquanto o pedido espera o pagamento
+// (Pix aguardando, "ja paguei" ou comprovante para conferir). Pedido pago
+// ou em andamento se cancela por "Cancelar pedido" (PATCH /status), que e
+// o caminho que o painel ja usa fora dessa situacao. Fora dela: 409 com o
+// que fazer, em portugues, e nada gravado.
 // ============================================================
+const ESPERANDO_PAGAMENTO = ['pending_payment', 'awaiting_approval'];
+const PAGAMENTO_ENTROU = ['confirmed', 'paid', 'received'];
+
+/** Por que este pedido nao pode ter o pagamento recusado (null = pode). */
+function motivoParaNaoRecusar(order) {
+  const status = String(order.status || '');
+  if (status === 'cancelled') return 'Este pedido já está cancelado.';
+  if (status === 'delivered') return 'Este pedido já foi entregue e não pode ter o pagamento recusado.';
+  if (PAGAMENTO_ENTROU.includes(String(order.payment_status || '').toLowerCase())) {
+    return 'O pagamento deste pedido já foi confirmado. Para desfazer a venda, use "Cancelar pedido".';
+  }
+  if (!ESPERANDO_PAGAMENTO.includes(status)) {
+    return 'Este pedido não está esperando pagamento. Para desfazer a venda, use "Cancelar pedido".';
+  }
+  return null;
+}
+
 router.post('/:oid/reject-payment', requireRole('client', 'analyst', 'admin'), async (req, res) => {
   const { id: cid, oid } = req.params;
   const { reason } = req.body || {};
   try {
     const { rows } = await db.query(
-      `SELECT id, status FROM digital_orders WHERE id = $1 AND company_id = $2`,
+      `SELECT id, status, payment_status FROM digital_orders WHERE id = $1 AND company_id = $2`,
       [oid, cid]
     );
-    if (!rows.length) return res.status(404).json({ error: 'Pedido nao encontrado' });
-    const order = rows[0];
-    if (order.status === 'delivered' || order.status === 'cancelled') {
-      return res.status(409).json({
-        error: `Pedido ja finalizado com status "${order.status}"`,
-      });
-    }
+    if (!rows.length) return res.status(404).json({ error: 'Pedido não encontrado' });
+    const motivo = motivoParaNaoRecusar(rows[0]);
+    if (motivo) return res.status(409).json({ error: motivo, status: rows[0].status });
 
-    const noteSuffix = reason
-      ? '\n[REJEITADO em ' + new Date().toISOString() + ']: ' + String(reason).substring(0, 200)
+    const texto = reason == null ? '' : String(reason).trim().substring(0, 200);
+    const noteSuffix = texto
+      ? '\n[REJEITADO em ' + new Date().toISOString() + ']: ' + texto
       : '\n[REJEITADO em ' + new Date().toISOString() + ']';
 
+    // O status entra no WHERE: se o pedido mudou entre a leitura e aqui
+    // (o webhook confirmou o Pix, a lojista aprovou em outra aba), nada e
+    // cancelado por engano.
     const { rows: updated } = await db.query(`
       UPDATE digital_orders SET
         status = 'cancelled',
@@ -253,8 +281,14 @@ router.post('/:oid/reject-payment', requireRole('client', 'analyst', 'admin'), a
         notes = COALESCE(notes, '') || $1,
         updated_at = NOW()
       WHERE id = $2 AND company_id = $3
+        AND status IN ('pending_payment', 'awaiting_approval')
       RETURNING *
     `, [noteSuffix, oid, cid]);
+    if (!updated.length) {
+      return res.status(409).json({
+        error: 'O pedido mudou enquanto você recusava o pagamento. Atualize a página e confira a situação.',
+      });
+    }
 
     res.json({ order: updated[0], rejected: true });
 
@@ -264,8 +298,10 @@ router.post('/:oid/reject-payment', requireRole('client', 'analyst', 'admin'), a
     lojaEvents.emit('loja_pedido_cancelado', updated[0]);
 
   } catch (err) {
-    console.error('[orders] reject-payment error:', err.message);
-    res.status(500).json({ error: 'Erro ao rejeitar pagamento' });
+    console.error('[orders] reject-payment error:', err.message, err.code || '');
+    res.status(500).json({
+      error: 'Não conseguimos recusar o pagamento agora. O pedido não foi alterado. Tente de novo em instantes; se continuar, fale com o suporte da Aura.',
+    });
   }
 });
 
@@ -339,3 +375,4 @@ router.delete('/:oid', requireRole('client', 'admin'), async (req, res) => {
 });
 
 module.exports = router;
+module.exports.motivoParaNaoRecusar = motivoParaNaoRecusar;

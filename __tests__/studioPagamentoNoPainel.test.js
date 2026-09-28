@@ -232,7 +232,7 @@ describe('(5) a conta Studio confirma o Pix pela rota do Canal', () => {
     db.query.mockImplementation((sql, params) => {
       const s = String(sql);
       if (/SELECT 'owner' AS role/.test(s)) return Promise.resolve({ rows: [{ role: 'owner' }] });
-      if (/SELECT id, status FROM digital_orders/.test(s)) return Promise.resolve({ rows: [{ id: OID, status: 'awaiting_approval' }] });
+      if (/SELECT id, status, payment_status FROM digital_orders/.test(s)) return Promise.resolve({ rows: [{ id: OID, status: 'awaiting_approval', payment_status: 'pending' }] });
       if (/UPDATE digital_orders SET/.test(s)) {
         updates.push({ sql: s, params });
         return Promise.resolve({ rows: [{ id: OID, status: 'cancelled' }] });

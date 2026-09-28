@@ -117,7 +117,72 @@ async function comPagamentoNaLista(db, companyId, linhas, idDoPedido) {
   });
 }
 
+// ── Nota, entrega e Pix vencido no detalhe (QA 28/09/2026) ─────────────
+//
+// LJ-32 (P0): o detalhe nao mostrava o CPF/CNPJ que a cliente pediu na
+// nota nem "Retirada na loja". LJ-34: Pix vencido sem dizer por que nao
+// cancelou. Os campos vem do pedido inteiro (SELECT *: coluna que falte
+// numa base so fica nula, nao derruba nada) e da loja (endereco de
+// retirada, a mesma regra da confirmacao e do acompanhamento).
+const { situacaoDoPixVencido } = require('../jobs/lojaPixExpiradoJob');
+
+const TIPOS_DE_ENTREGA = ['pickup', 'delivery', 'courier'];
+const num = (v) => (v == null || v === '' || !Number.isFinite(Number(v)) ? 0 : Number(v));
+const texto = (v) => {
+  const s = v == null ? '' : String(v).trim();
+  return s || null;
+};
+
+/**
+ * Campos de nota, entrega e Pix vencido do detalhe do pedido Studio.
+ * Pura: `pedido` e a linha de digital_orders, `loja` a de
+ * digital_channel_config (ou null).
+ */
+function camposDeEntregaENota(pedido, loja, agora = Date.now()) {
+  if (!pedido) return {};
+  const tipo = TIPOS_DE_ENTREGA.includes(pedido.delivery_type) ? pedido.delivery_type : 'pickup';
+  const retira = tipo === 'pickup' || tipo === 'courier';
+  const l = loja || {};
+  return {
+    customer_cpf_cnpj: texto(pedido.customer_cpf_cnpj),
+    request_nfce: pedido.nfce_requested === true,
+    delivery_type: tipo,
+    delivery_address: tipo === 'delivery' ? texto(pedido.delivery_address) : null,
+    address_neighborhood: tipo === 'delivery' ? texto(pedido.address_neighborhood) : null,
+    address_city: tipo === 'delivery' ? texto(pedido.address_city) : null,
+    retirada_endereco: retira ? (texto(l.pickup_address) || texto(l.address)) : null,
+    courier_name: texto(pedido.courier_name),
+    courier_plate: texto(pedido.courier_plate),
+    courier_a_informar: tipo === 'courier' && !texto(pedido.courier_name),
+    shipping_fee: num(pedido.delivery_fee),
+    pix_discount: num(pedido.discount_amount),
+    payment_method: pedido.payment_method ?? null,
+    payment_status: pedido.payment_status ?? null,
+    pix_cancelamento: situacaoDoPixVencido(pedido, agora),
+  };
+}
+
+/** Le o pedido e a loja e devolve camposDeEntregaENota. */
+async function entregaENotaDoPedido(db, companyId, digitalOrderId) {
+  const { rows } = await db.query(
+    `SELECT * FROM digital_orders WHERE id = $1 AND company_id = $2 LIMIT 1`,
+    [digitalOrderId, companyId]
+  );
+  if (!rows.length) return {};
+  let loja = null;
+  try {
+    const r = await db.query(
+      `SELECT * FROM digital_channel_config WHERE company_id = $1 LIMIT 1`, [companyId]);
+    loja = r.rows[0] || null;
+  } catch (e) {
+    console.error('[pagamentoDoPedidoStudio] loja do pedido:', e.message);
+  }
+  return camposDeEntregaENota(rows[0], loja);
+}
+
 module.exports = {
+  camposDeEntregaENota,
+  entregaENotaDoPedido,
   pagamentosDosPedidos,
   camposDoDetalhe,
   camposDaLista,

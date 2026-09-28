@@ -48,9 +48,11 @@ test('os tipos com push sao exatamente os que pedem acao imediata', () => {
   const comPush = lojaEvents.TYPES.filter((t) => lojaEvents.EVENTS[t].push === true).sort();
   // 26/09/2026: a resposta da cliente a arte do Studio (A4) — aprovada
   // libera a producao, ajuste e a cliente esperando arte nova.
+  // 28/09/2026: "Ja paguei" sem comprovante trava o pedido como o
+  // comprovante trava — mesmo aviso no navegador.
   expect(comPush).toEqual([
     'loja_ajuste_pedido', 'loja_arte_aprovada',
-    'loja_comprovante_enviado', 'loja_pedido_novo', 'loja_pedido_pago',
+    'loja_comprovante_enviado', 'loja_pagamento_a_conferir', 'loja_pedido_novo', 'loja_pedido_pago',
   ]);
 });
 

@@ -790,6 +790,12 @@ router.get('/orders/:oid', async function(req, res) {
         const mapa = await pagamentoDoPedido.pagamentosDosPedidos(db, req.params.id, [head.digital_order_id]);
         order = { ...head, ...pagamentoDoPedido.camposDoDetalhe(mapa.get(String(head.digital_order_id))) };
       } catch (e) { console.error('[studio/orders/:oid][pagamento]', e.message); }
+      // 28/09/2026 (LJ-32/LJ-34 do QA pos-deploy): CPF/CNPJ da nota,
+      // entrega/retirada, frete, desconto do Pix e por que o Pix vencido
+      // nao cancelou. Mesma regra: somados, e falha nao derruba o detalhe.
+      try {
+        order = { ...order, ...(await pagamentoDoPedido.entregaENotaDoPedido(db, req.params.id, head.digital_order_id)) };
+      } catch (e) { console.error('[studio/orders/:oid][entrega]', e.message); }
     }
 
     res.json({ order, items, approvals });
@@ -953,7 +959,11 @@ router.post('/orders/:oid/approval', async function(req, res) {
   const orderRes = await db.query(
     `SELECT o.id, o.customer_name, o.customer_phone,
             o.customer_name AS display_name,
-            c.trade_name, c.legal_name
+            c.trade_name, c.legal_name,
+            (SELECT NULLIF(btrim(dcc.site_name), '')
+               FROM digital_channel_config dcc
+              WHERE dcc.company_id = o.company_id
+              LIMIT 1) AS site_name
        FROM digital_orders o
        LEFT JOIN companies c ON c.id = o.company_id
       WHERE o.id = $1 AND o.company_id = $2 AND o.vertical = 'studio'
@@ -965,7 +975,10 @@ router.post('/orders/:oid/approval', async function(req, res) {
 
   const phone = customer_phone || order.customer_phone || '';
   const customerFirstName = (order.display_name || 'cliente').split(' ')[0];
-  const shopName = order.trade_name || order.legal_name || 'nossa loja';
+  // A assinatura e o nome da LOJA, o que a cliente viu na vitrine (QA
+  // 28/09/2026: saia "_Aura QA_", o nome da empresa). Sem loja
+  // configurada, o da empresa, como antes.
+  const shopName = order.site_name || order.trade_name || order.legal_name || 'nossa loja';
 
   let token = null;
   for (let i = 0; i < 5; i++) {

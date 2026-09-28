@@ -315,6 +315,40 @@ router.put('/products/:pid/visual-template', async (req, res) => {
   }
 });
 
+// ── Item do pedido do render (QA 28/09/2026, LJ-36) ─────────
+// "Gerar do pedido (motor visual)" dava 500: a coluna
+// digital_order_item_id era UUID e o id de digital_order_items e BIGINT
+// (22P02 'invalid input syntax for type uuid: "43"'). A migration 358
+// alinha o tipo; aqui o id e conferido ANTES do banco, com 400 claro.
+//
+// O painel manda o id do item em digital_order_item_id tambem nos pedidos
+// do Caixa, onde o item e de sale_items (UUID). Um UUID nesse campo so
+// pode ser isso: vai para sale_item_id em vez de virar erro.
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const ID_DIGITAL_RE = /^[1-9][0-9]{0,17}$/;
+
+/**
+ * Normaliza os ids de item do corpo. Devolve { saleItemId, digitalItemId }
+ * ou { erro } com a mensagem para o 400.
+ */
+function itemDoRender({ sale_item_id, digital_order_item_id }) {
+  const vazio = (v) => v === undefined || v === null || v === '';
+  let saleItemId = vazio(sale_item_id) ? null : String(sale_item_id).trim();
+  let digitalItemId = vazio(digital_order_item_id) ? null : String(digital_order_item_id).trim();
+
+  if (digitalItemId && UUID_RE.test(digitalItemId) && !saleItemId) {
+    saleItemId = digitalItemId;
+    digitalItemId = null;
+  }
+  if (saleItemId && !UUID_RE.test(saleItemId)) {
+    return { erro: 'sale_item_id inválido: use o id (UUID) do item da venda.' };
+  }
+  if (digitalItemId && !ID_DIGITAL_RE.test(digitalItemId)) {
+    return { erro: 'digital_order_item_id inválido: use o número do item do pedido da loja (ex.: 43).' };
+  }
+  return { saleItemId, digitalItemId };
+}
+
 // ── POST /studio/visual-renders ─────────────────────────────
 // body: { template_key, template_version?, kind, customization,
 //         file_url?, file_key?, content_type?,
@@ -324,7 +358,6 @@ router.post('/visual-renders', async (req, res) => {
   const {
     template_key, template_version, kind, customization,
     file_url = null, file_key = null, content_type = null,
-    sale_item_id = null, digital_order_item_id = null,
   } = req.body || {};
 
   if (!template_key || typeof template_key !== 'string') {
@@ -336,8 +369,31 @@ router.post('/visual-renders', async (req, res) => {
   if (!customization || typeof customization !== 'object' || Array.isArray(customization)) {
     return res.status(400).json({ error: 'customization (objeto JSON) obrigatório' });
   }
+  const item = itemDoRender(req.body || {});
+  if (item.erro) return res.status(400).json({ error: item.erro });
+  const { saleItemId, digitalItemId } = item;
 
   try {
+    // O item tem que ser DESTA empresa: o render e a prova do que a
+    // cliente aprovou, e nao pode apontar para pedido de outra loja.
+    if (digitalItemId) {
+      const r = await db.query(
+        `SELECT 1 FROM digital_order_items i
+           JOIN digital_orders o ON o.id = i.order_id
+          WHERE i.id = $1 AND o.company_id = $2 LIMIT 1`,
+        [digitalItemId, cid]
+      );
+      if (!r.rows.length) return res.status(404).json({ error: 'Item do pedido não encontrado nesta empresa' });
+    } else if (saleItemId) {
+      const r = await db.query(
+        `SELECT 1 FROM sale_items si
+           JOIN sales s ON s.id = si.sale_id
+          WHERE si.id = $1 AND s.company_id = $2 LIMIT 1`,
+        [saleItemId, cid]
+      );
+      if (!r.rows.length) return res.status(404).json({ error: 'Item da venda não encontrado nesta empresa' });
+    }
+
     // Resolve versão atual do template quando não informada
     let version = parseInt(template_version, 10);
     if (!Number.isFinite(version) || version < 1) {
@@ -359,14 +415,20 @@ router.post('/visual-renders', async (req, res) => {
           file_url, file_key, content_type, created_by)
        VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8, $9, $10, $11, $12)
        RETURNING id, template_key, template_version, kind, content_hash, file_url, created_at`,
-      [cid, template_key, version, sale_item_id, digital_order_item_id,
+      [cid, template_key, version, saleItemId, digitalItemId,
        kind, JSON.stringify(customization), hash,
        file_url, file_key, content_type, req.user && req.user.id]
     );
     res.status(201).json({ render: rows[0] });
   } catch (err) {
     if (isMigrationPending(err)) return migrationPendingRes(res);
-    console.error('[studio/visual-renders] create error:', err.message);
+    // Tipo que o banco recusa (base sem a migration 358) ou valor fora do
+    // formato: e o pedido que veio errado, nao o servidor.
+    if (err && (err.code === '22P02' || err.code === '22003')) {
+      console.error('[studio/visual-renders] payload recusado pelo banco:', err.message);
+      return res.status(400).json({ error: 'Não foi possível registrar o render: o item do pedido veio num formato que o servidor não aceita. Envie o mockup manualmente.' });
+    }
+    console.error('[studio/visual-renders] create error:', err.message, err.code || '');
     res.status(500).json({ error: 'Erro ao registrar render' });
   }
 });
@@ -379,9 +441,11 @@ router.get('/visual-renders', async (req, res) => {
   if (!sale_item_id && !digital_order_item_id) {
     return res.status(400).json({ error: 'Informe sale_item_id ou digital_order_item_id' });
   }
+  const item = itemDoRender({ sale_item_id, digital_order_item_id });
+  if (item.erro) return res.status(400).json({ error: item.erro });
   try {
-    const col = sale_item_id ? 'sale_item_id' : 'digital_order_item_id';
-    const val = sale_item_id || digital_order_item_id;
+    const col = item.saleItemId ? 'sale_item_id' : 'digital_order_item_id';
+    const val = item.saleItemId || item.digitalItemId;
     const { rows } = await db.query(
       `SELECT id, template_key, template_version, kind, customization,
               content_hash, file_url, content_type, created_at
@@ -399,3 +463,4 @@ router.get('/visual-renders', async (req, res) => {
 });
 
 module.exports = router;
+module.exports.itemDoRender = itemDoRender;

@@ -370,28 +370,39 @@ router.get('/hub/alerts', async function(req, res) {
 
     // 2. Pedidos atrasados (>3d sem ir pra ready)
     const overdueRes = await db.query(
-      `SELECT id, customer_name, created_at
+      // Pedido cancelado (Pix vencido, pagamento recusado) nao esta
+      // atrasado: o studio_production_status dele fica onde parou.
+      `SELECT id, order_number, customer_name, created_at
          FROM digital_orders
         WHERE company_id = $1 AND vertical = 'studio'
           AND studio_production_status NOT IN ('delivered','ready','cancelled')
+          AND COALESCE(status, '') <> 'cancelled'
           AND created_at < NOW() - INTERVAL '3 days'
         ORDER BY created_at
         LIMIT 5`,
       [req.params.id]
     );
     for (const r of overdueRes.rows) {
+      // "Pedido 00001", o numero que a lojista e a cliente veem (QA
+      // 28/09/2026: saia "Pedido #BAA22B9D", o comeco do uuid). O trecho
+      // do uuid fica so para pedido antigo sem numero.
+      const numero = r.order_number ? String(r.order_number) : null;
       alerts.push({
         severity: 'danger',
         kind: 'overdue',
-        title: `Pedido #${r.id.slice(0, 8).toUpperCase()} atrasado`,
+        title: numero
+          ? `Pedido ${numero} atrasado`
+          : `Pedido #${String(r.id).slice(0, 8).toUpperCase()} atrasado`,
         sub: `${r.customer_name || 'Sem cadastro'} · há ${Math.round((Date.now() - new Date(r.created_at).getTime()) / 86400000)} dias`,
         href: '/studio/producao',
+        order_id: r.id,
+        order_number: numero,
       });
     }
 
     // 3. Aprovações pendentes >24h
     const approvalRes = await db.query(
-      `SELECT a.id, a.created_at, o.customer_name
+      `SELECT a.id, a.created_at, o.customer_name, o.id AS order_id, o.order_number
          FROM studio_approval_links a
          JOIN digital_orders o ON o.id = a.order_id
         WHERE a.company_id = $1 AND a.status = 'pending'
@@ -408,6 +419,8 @@ router.get('/hub/alerts', async function(req, res) {
         title: `Aprovação pendente há ${Math.round((Date.now() - new Date(r.created_at).getTime()) / 3600000)}h`,
         sub: `${r.customer_name || 'Cliente'} ainda não respondeu — envie lembrete`,
         href: '/studio/producao',
+        order_id: r.order_id || null,
+        order_number: r.order_number ? String(r.order_number) : null,
       });
     }
 
