@@ -258,6 +258,10 @@ router.use('/studio', requirePlan('negocio', 'expansao'), require('./studioArtRe
 router.use('/studio', requirePlan('negocio', 'expansao'), require('./studioMarketplaceListing'));
 // Camada 1 — Orçamento + Precificação + Pagamentos (30/05/2026)
 router.use('/studio', requirePlan('negocio', 'expansao'), require('./studioQuotes'));    // Fase A: Orçamento como entidade
+// Orçamento em vídeo 3D pelo WhatsApp (28/09/2026, migration 361): condições
+// da lojista, vídeo guardado 30 dias, marcar enviado e fechar. Mesmo gate
+// de studioQuotes (o Studio não tem planos próprios, decisão do PO).
+router.use('/studio', requirePlan('negocio', 'expansao'), require('./studioQuoteVideo'));
 router.use('/studio', requirePlan('negocio', 'expansao'), require('./studioPricing'));   // Fase B: Motor de precificação
 router.use('/studio', requirePlan('negocio', 'expansao'), require('./studioPayments'));  // Fase C: Sinal / pagamento parcial
 // F0 Visual Engine (02/07/2026): templates visuais 2D/3D globais mantidos pela
