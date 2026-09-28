@@ -9,6 +9,7 @@ const { Sentry, initSentry } = require('./config/sentry');
 const { sentryContext, sentryError } = require('./middleware/sentryContext');
 const { validateRuntimeEnv } = require('./config/env');
 const { customDomainMiddleware } = require('./middleware/customDomain');
+const { montarJsonDeUpload } = require('./middleware/jsonDeUpload');
 
 const env = validateRuntimeEnv();
 const app = express();
@@ -125,6 +126,13 @@ app.use(cors({
   exposedHeaders: ['X-RateLimit-Limit', 'X-RateLimit-Remaining', 'X-RateLimit-Reset'],
   maxAge:         600,
 }));
+
+// Upload do Studio (vitrine e painel) com teto de 25 MB de corpo: o arquivo
+// vai em base64 e a rota aceita ate 15 MB. Tem que vir ANTES do parser
+// global — ele pula o corpo ja lido. Sem verify: nenhum webhook passa aqui,
+// e guardar 25 MB em req.rawBody seria memoria a toa. Ver
+// middleware/jsonDeUpload.js.
+montarJsonDeUpload(app);
 
 // verify preserva o corpo cru (req.rawBody) — necessário para validar a
 // assinatura HMAC de webhooks (ex.: X-Hub-Signature-256 do WhatsApp/Meta),
