@@ -51,9 +51,12 @@ const SQL_KPIS_DO_HUB = `
 // "Pedido 00001 atrasado · há 24 dias" nao dizia que o atraso era o Pix,
 // nem por que o cancelamento automatico de 72 h nao o pegou. O motivo e
 // a MESMA leitura do job (situacaoDoPixVencido) e o alerta leva ao pedido.
-// A excecao "a producao ja andou" (o caso do 00001) deixou de existir em
-// 28/09/2026 (decisao do Caio): sem pagamento na janela, o job cancela.
+// A excecao "a producao ja andou" (o caso do 00001) so vale para pedido
+// criado antes de CORTE_DA_REGRA_NOVA (jobs/lojaPixExpiradoJob): pedido
+// novo sem pagamento na janela e cancelado, com a producao andando ou nao
+// (decisao do Caio, 28/09/2026).
 const POR_QUE_NAO_CANCELOU = {
+  producao:    'pedido anterior à regra nova: não cancela sozinho porque a produção já andou. Cobre a cliente ou cancele o pedido.',
   ja_paguei:   'a cliente disse que pagou. Confira o extrato e confirme ou recuse o pagamento.',
   comprovante: 'a cliente mandou comprovante. Confira e confirme ou recuse o pagamento.',
   sinal:       'não cancela sozinho porque você registrou o sinal. Cobre o restante ou cancele o pedido.',

@@ -94,12 +94,28 @@ async function tickPixExpirado({ db, lojaEvents }) {
 //   - "Ja paguei" (awaiting_approval) e comprovante anexado (acima);
 //   - sinal registrado pela loja (deposit_paid).
 //
+// E a regra nova vale SO para pedido novo (decisao do Caio, 28/09/2026):
+// pedido Studio criado ANTES de CORTE_DA_REGRA_NOVA mantem a regra antiga
+// — com a producao andando, nao cancela sozinho; o hub explica e a loja
+// cancela ou cobra. Assim o deploy nao cancela de uma vez pedidos que a
+// lojista ja tinha combinado com a cliente. O corte e uma data fixa no
+// codigo (nao "a hora do deploy"): o resultado nao depende de quando o
+// servidor subiu, e o teste e deterministico.
+//
 // Pedido recente (JANELA_DIAS) avisa no sino; pedido antigo cancela calado
 // para o primeiro deploy nao despejar meses de aviso. Loja de teste segue a
 // mesma regra: o aviso e so o sino da propria lojista (lojaEvents), nada
 // sai para o cliente.
 const PRAZO_HORAS = 48;
 const PRAZO_HORAS_STUDIO = 72;
+
+/** A partir daqui (criacao do pedido) a producao andando nao segura o cancelamento. */
+const CORTE_DA_REGRA_NOVA = '2026-09-29T00:00:00-03:00';
+const CORTE_MS = Date.parse(CORTE_DA_REGRA_NOVA);
+
+// Etapas em que o pedido Studio ainda nao andou (so contam para pedido
+// anterior ao corte).
+const STUDIO_PARADO = ['pending_art', 'awaiting_customization'];
 
 // Sinal registrado no painel (studio_payments -> deposit_paid) e dinheiro
 // na mao da lojista: o pedido nao e mais "Pix esquecido", mesmo que o
@@ -137,7 +153,9 @@ function sqlDoCancelamento({ comComprovante }) {
                AND created_at < NOW() - INTERVAL '${PRAZO_HORAS} hours')
              OR (vertical = 'studio'
                AND created_at < NOW() - INTERVAL '${PRAZO_HORAS_STUDIO} hours'
-               AND COALESCE(deposit_paid, false) = false)
+               AND COALESCE(deposit_paid, false) = false
+               AND (created_at >= TIMESTAMPTZ '${CORTE_DA_REGRA_NOVA}'
+                    OR COALESCE(studio_production_status, 'pending_art') IN (${STUDIO_PARADO.map((s) => `'${s}'`).join(', ')})))
            )
          ORDER BY created_at
          LIMIT $1
@@ -152,7 +170,8 @@ function sqlDoCancelamento({ comComprovante }) {
  * cima, lida de UM pedido, para o painel explicar (QA 28/09/2026, LJ-34:
  * "Aguardando Pix ha 24 dias" sem dizer por que).
  *
- * Mesmas constantes (PRAZO_HORAS, PRAZO_HORAS_STUDIO) e as
+ * Mesmas constantes (PRAZO_HORAS, PRAZO_HORAS_STUDIO, CORTE_DA_REGRA_NOVA,
+ * STUDIO_PARADO) e as
  * mesmas condicoes: quem mudar o job muda aqui, no mesmo arquivo — e o
  * teste __tests__/vitrineQaBackend2.test.js confere as duas leituras.
  *
@@ -161,11 +180,12 @@ function sqlDoCancelamento({ comComprovante }) {
  *   'ja_paguei'   a cliente tocou em "Ja paguei" (awaiting_approval)
  *   'comprovante' ha comprovante anexado
  *   'sinal'       Studio com sinal registrado no painel
- *   null          nada segura: o job cancela na proxima volta (a etapa
- *                 da producao nao segura mais — decisao de 28/09/2026)
+ *   'producao'    Studio criado ANTES do corte, com a producao ja andando
+ *                 (regra antiga; pedido novo nao tem essa excecao)
+ *   null          nada segura: o job cancela na proxima volta
  * Pedido que nao e Pix, ja pago, cancelado ou fora da espera: nao vencido.
  *
- * @returns {{ vencido: boolean, motivo: ('comprovante'|'ja_paguei'|'sinal'|null) }}
+ * @returns {{ vencido: boolean, motivo: ('comprovante'|'ja_paguei'|'sinal'|'producao'|null) }}
  */
 function situacaoDoPixVencido(pedido, agora = Date.now()) {
   const nao = { vencido: false, motivo: null };
@@ -181,6 +201,8 @@ function situacaoDoPixVencido(pedido, agora = Date.now()) {
   if (status === 'awaiting_approval') motivo = 'ja_paguei';
   else if (pedido.payment_proof_url) motivo = 'comprovante';
   else if (ehStudio(pedido) && pedido.deposit_paid === true) motivo = 'sinal';
+  else if (ehStudio(pedido) && criado < CORTE_MS
+    && !STUDIO_PARADO.includes(pedido.studio_production_status || 'pending_art')) motivo = 'producao';
   return { vencido: true, motivo };
 }
 
@@ -250,6 +272,8 @@ module.exports = {
   sqlDoCancelamento,
   PRAZO_HORAS,
   PRAZO_HORAS_STUDIO,
+  CORTE_DA_REGRA_NOVA,
+  STUDIO_PARADO,
   BATCH,
   JANELA_DIAS,
   INTERVALO_MS,

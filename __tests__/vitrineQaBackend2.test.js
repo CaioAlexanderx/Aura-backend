@@ -446,7 +446,7 @@ describe('5 e 7 · detalhe do pedido Studio: nota, entrega e Pix vencido', () =>
   });
 
   describe('pix_cancelamento: a mesma regra do job', () => {
-    const { situacaoDoPixVencido, PRAZO_HORAS_STUDIO, PRAZO_HORAS, sqlDoCancelamento } =
+    const { situacaoDoPixVencido, PRAZO_HORAS_STUDIO, PRAZO_HORAS, STUDIO_PARADO, CORTE_DA_REGRA_NOVA, sqlDoCancelamento } =
       require('../src/jobs/lojaPixExpiradoJob');
     const pix = (extra) => ({ ...base({ status: 'pending_payment', created_at: horasAtras(24 * 24) }), ...extra });
 
@@ -455,9 +455,10 @@ describe('5 e 7 · detalhe do pedido Studio: nota, entrega e Pix vencido', () =>
       ['"Ja paguei"', { status: 'awaiting_approval' }, { vencido: true, motivo: 'ja_paguei' }],
       ['comprovante anexado', { payment_proof_url: 'https://r2/x.png' }, { vencido: true, motivo: 'comprovante' }],
       ['sinal registrado', { deposit_paid: true }, { vencido: true, motivo: 'sinal' }],
-      // 28/09/2026 (decisao do Caio): a producao andando nao segura mais.
-      ['arte aprovada (o 00001 do QA): o job cancela', { studio_production_status: 'approved' }, { vencido: true, motivo: null }],
-      ['em producao sem Pix: o job cancela', { studio_production_status: 'in_production' }, { vencido: true, motivo: null }],
+      // Pedidos daqui sao de ANTES do corte da regra nova (28/09): a
+      // producao andando ainda segura. O pedido novo esta em pedidoStudioCancelado.
+      ['arte aprovada (o 00001 do QA, anterior ao corte)', { studio_production_status: 'approved' }, { vencido: true, motivo: 'producao' }],
+      ['em producao sem Pix, anterior ao corte', { studio_production_status: 'in_production' }, { vencido: true, motivo: 'producao' }],
       ['producao parada', { studio_production_status: 'pending_art' }, { vencido: true, motivo: null }],
       ['dentro do prazo', { created_at: horasAtras(PRAZO_HORAS_STUDIO - 1) }, { vencido: false, motivo: null }],
       ['ja pago', { payment_status: 'confirmed' }, { vencido: false, motivo: null }],
@@ -484,7 +485,8 @@ describe('5 e 7 · detalhe do pedido Studio: nota, entrega e Pix vencido', () =>
       expect(sql).toMatch(/COALESCE\(deposit_paid, false\) = false/);
       expect(sql).toContain(`INTERVAL '${PRAZO_HORAS} hours'`);
       expect(sql).toContain(`INTERVAL '${PRAZO_HORAS_STUDIO} hours'`);
-      expect(sql).not.toMatch(/studio_production_status/);
+      for (const s of STUDIO_PARADO) expect(sql).toContain(`'${s}'`);
+      expect(sql).toContain(`created_at >= TIMESTAMPTZ '${CORTE_DA_REGRA_NOVA}'`);
     });
   });
 
@@ -507,7 +509,7 @@ describe('5 e 7 · detalhe do pedido Studio: nota, entrega e Pix vencido', () =>
         customer_cpf_cnpj: '529.982.247-25', request_nfce: true, delivery_type: 'pickup',
         retirada_endereco: LOJA.pickup_address, courier_a_informar: false,
         shipping_fee: 0, pix_discount: 9.48, payment_method: 'pix', payment_status: 'pending',
-        pix_cancelamento: { vencido: true, motivo: null }, // 28/09: a produção andando não segura mais,
+        pix_cancelamento: { vencido: true, motivo: 'producao' }, // pedido anterior ao corte da regra nova
       });
     });
 

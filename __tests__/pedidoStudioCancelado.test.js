@@ -237,20 +237,25 @@ describe('2 · LJ-33/CL-46: o motivo do cancelamento para a cliente', () => {
 // ─────────────────────────────────────────────────────────────
 describe('3 · LJ-34: o Pix vencido que não cancelou diz por quê', () => {
   const { _alertaDoAtraso } = require('../src/routes/studioBulkHub');
-  const agora = new Date('2026-09-28T12:00:00Z').getTime();
+  const agora = new Date('2026-10-20T12:00:00Z').getTime();
+  // O 00001 da aura-qa é de 04/09: anterior ao corte da regra nova.
   const base = {
     id: OID, order_number: '00001', customer_name: 'Marina QA (teste)',
     created_at: '2026-09-04T17:58:14Z', vertical: 'studio', payment_method: 'pix',
     payment_status: 'pending', status: 'pending_payment',
   };
 
-  test('00001: arte aprovada sem o Pix — o job cancela (decisão de 28/09), o alerta diz isso', () => {
+  test('00001 (anterior ao corte), arte aprovada sem o Pix: explica e leva ao pedido', () => {
     const a = _alertaDoAtraso({ ...base, studio_production_status: 'approved' }, agora);
     expect(a.kind).toBe('pix_sem_pagamento');
-    expect(a.title).toBe('Pedido 00001: Pix sem pagamento há 24 dias');
-    expect(a.sub).toBe('Marina QA (teste) · o cancelamento automático cancela na próxima volta.');
-    expect(a.sub).not.toMatch(/produção já andou/);
+    expect(a.title).toMatch(/^Pedido 00001: Pix sem pagamento há \d+ dias$/);
+    expect(a.sub).toMatch(/^Marina QA \(teste\) · pedido anterior à regra nova: não cancela sozinho porque a produção já andou/);
     expect(a.href).toBe(`/studio/pedidos/${OID}`);
+  });
+
+  test('pedido novo igual: o alerta diz que o cancelamento automático cancela', () => {
+    const a = _alertaDoAtraso({ ...base, created_at: '2026-10-01T12:00:00Z', studio_production_status: 'approved' }, agora);
+    expect(a.sub).toBe('Marina QA (teste) · o cancelamento automático cancela na próxima volta.');
   });
 
   test('sinal registrado continua segurando, com o porquê', () => {
@@ -272,36 +277,52 @@ describe('3 · LJ-34: o Pix vencido que não cancelou diz por quê', () => {
 
   test('a fila recebe o mesmo motivo do job (pix_cancelamento)', () => {
     const { camposDaLista } = require('../src/services/pagamentoDoPedidoStudio');
-    const c = camposDaLista({ ...base, studio_production_status: 'approved', deposit_paid: false });
-    expect(c.pix_cancelamento).toEqual({ vencido: true, motivo: null });
+    expect(camposDaLista({ ...base, studio_production_status: 'approved', deposit_paid: false }).pix_cancelamento)
+      .toEqual({ vencido: true, motivo: 'producao' });
+    // (Aqui vale o relógio real; a regra nova, com relógio injetado, está em 3b.)
   });
 });
 
 // ─────────────────────────────────────────────────────────────
-describe('3b · decisão do Caio (28/09): sem pagamento na janela, cancela — produção andando ou não', () => {
+describe('3b · decisão do Caio (28/09): a regra nova vale só para pedido novo', () => {
   const job = require('../src/jobs/lojaPixExpiradoJob');
-  const agora = new Date('2026-09-28T12:00:00Z').getTime();
-  const horasAtras = (h) => new Date(agora - h * 3600 * 1000).toISOString();
-  const studio = (extra) => ({
+  const agora = new Date('2026-10-20T12:00:00Z').getTime();
+  const ANTIGO = '2026-09-28T23:59:59-03:00'; // um segundo antes do corte
+  const NOVO = '2026-09-29T00:00:00-03:00';   // exatamente no corte
+  const studio = (created_at, extra) => ({
     vertical: 'studio', payment_method: 'pix', status: 'pending_payment', payment_status: 'pending',
-    created_at: horasAtras(73), ...extra,
+    created_at, ...extra,
   });
 
-  test.each(['approved', 'in_production', 'ready', 'pending_art', 'awaiting_customization', null])(
-    'etapa %s sem Pix há mais de 72 h: vencido e sem nada que segure', (etapa) => {
-      expect(job.situacaoDoPixVencido(studio({ studio_production_status: etapa }), agora)).toEqual({ vencido: true, motivo: null });
-    });
-
-  test('continuam fora só pagamento registrado ou a conferir', () => {
-    expect(job.situacaoDoPixVencido(studio({ studio_production_status: 'approved', status: 'awaiting_approval' }), agora).motivo).toBe('ja_paguei');
-    expect(job.situacaoDoPixVencido(studio({ studio_production_status: 'approved', payment_proof_url: 'https://r2/x.png' }), agora).motivo).toBe('comprovante');
-    expect(job.situacaoDoPixVencido(studio({ studio_production_status: 'approved', deposit_paid: true }), agora).motivo).toBe('sinal');
+  test('o corte é fixo: 29/09/2026 00:00 de Brasília', () => {
+    expect(job.CORTE_DA_REGRA_NOVA).toBe('2026-09-29T00:00:00-03:00');
+    expect(new Date(job.CORTE_DA_REGRA_NOVA).toISOString()).toBe('2026-09-29T03:00:00.000Z');
   });
 
-  test('o tick cancela o pedido com arte aprovada e sem Pix, gravando pix_expirado', async () => {
+  test.each(['approved', 'in_production', 'ready'])('etapa %s sem Pix: pedido NOVO cancela', (etapa) => {
+    expect(job.situacaoDoPixVencido(studio(NOVO, { studio_production_status: etapa }), agora)).toEqual({ vencido: true, motivo: null });
+  });
+
+  test.each(['approved', 'in_production', 'ready'])('etapa %s sem Pix: pedido ANTIGO não cancela (regra antiga)', (etapa) => {
+    expect(job.situacaoDoPixVencido(studio(ANTIGO, { studio_production_status: etapa }), agora)).toEqual({ vencido: true, motivo: 'producao' });
+  });
+
+  test.each(['pending_art', 'awaiting_customization', null])('produção parada (%s): cancela, antigo ou novo', (etapa) => {
+    expect(job.situacaoDoPixVencido(studio(ANTIGO, { studio_production_status: etapa }), agora).motivo).toBeNull();
+    expect(job.situacaoDoPixVencido(studio(NOVO, { studio_production_status: etapa }), agora).motivo).toBeNull();
+  });
+
+  test.each([[ANTIGO], [NOVO]])('exceções seguram nos dois lados do corte (%s)', (criado) => {
+    const s = (extra) => job.situacaoDoPixVencido(studio(criado, { studio_production_status: 'approved', ...extra }), agora).motivo;
+    expect(s({ status: 'awaiting_approval' })).toBe('ja_paguei');
+    expect(s({ payment_proof_url: 'https://r2/x.png' })).toBe('comprovante');
+    expect(s({ deposit_paid: true })).toBe('sinal');
+  });
+
+  test('o SQL do tick aplica o corte e grava pix_expirado', async () => {
     const fakeDb = { query: jest.fn(async (sql) => {
       if (/UPDATE digital_orders SET/.test(sql)) {
-        return { rows: [{ id: OID, company_id: CID, order_number: '00001', customer_name: 'Marina', total: 35.91, vertical: 'studio', created_at: horasAtras(24 * 24) }] };
+        return { rows: [{ id: OID, company_id: CID, order_number: '00009', customer_name: 'Marina', total: 35.91, vertical: 'studio', created_at: '2026-09-01T12:00:00Z' }] };
       }
       return { rows: [] };
     }) };
@@ -310,11 +331,12 @@ describe('3b · decisão do Caio (28/09): sem pagamento na janela, cancela — p
     expect(r.cancelados).toBe(1);
     const [sql] = fakeDb.query.mock.calls[0];
     expect(sql).toMatch(/cancel_kind\s+= 'pix_expirado'/);
-    expect(sql).not.toMatch(/studio_production_status/);
+    expect(sql).toContain("created_at >= TIMESTAMPTZ '2026-09-29T00:00:00-03:00'");
+    expect(sql).toMatch(/OR COALESCE\(studio_production_status, 'pending_art'\) IN \('pending_art', 'awaiting_customization'\)/);
     expect(sql).toMatch(/COALESCE\(deposit_paid, false\) = false/);
     expect(sql).toMatch(/payment_proof_url IS NULL/);
     expect(sql).toMatch(/WHERE status = 'pending_payment'/);
-    // Pedido de 24 dias: cancela calado (fora da janela do aviso).
+    // Pedido de mais de 7 dias: cancela calado (fora da janela do aviso).
     expect(fakeEventos.emitLojaEvent).not.toHaveBeenCalled();
   });
 
