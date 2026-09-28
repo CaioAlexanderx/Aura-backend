@@ -53,6 +53,7 @@ async function pedidoDaVitrine(token) {
     const { rows } = await db.query(
       `SELECT o.id, o.order_number, o.company_id, o.created_at, o.total, o.status,
               o.studio_production_status, o.customer_name, o.delivery_type,
+              o.courier_name,
               COALESCE(co.trade_name, co.legal_name) AS loja,
               (SELECT json_agg(json_build_object(
                         'nome', i.product_name, 'qtd', i.quantity,
@@ -406,6 +407,12 @@ function respostaDoPedidoDaVitrine(o, extras = {}) {
     // mesma regra da confirmacao do pedido (QA 26/09/2026).
     retirada_endereco: retira && vitrine && (vitrine.pickup_address || vitrine.address)
       ? String(vitrine.pickup_address || vitrine.address) : null,
+    // 28/09/2026: a vitrine troca o texto de retirada quando e portador
+    // (courier) — "o portador leva ate voce" em vez de "retire na loja".
+    // Nem placa, nem outro dado do portador sai daqui.
+    tipo_de_entrega: tipoDeEntrega,
+    courier_name: tipoDeEntrega === 'courier' ? (o.courier_name || null) : null,
+    courier_a_informar: tipoDeEntrega === 'courier' && !o.courier_name,
   };
 }
 

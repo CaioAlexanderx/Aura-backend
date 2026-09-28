@@ -31,7 +31,7 @@ const db = require('../src/config/database');
 const { generatePix } = require('../src/services/pixService');
 const { limparCache } = require('../src/services/lojaDeTeste');
 const { montarMarca, linkDoPosCompra } = require('../src/services/marcaDaLoja');
-const { montarRepeticao, personalizacaoDaLinha } = require('../src/services/repetirPedido');
+const { montarRepeticao, personalizacaoDaLinha, valorDoCampo } = require('../src/services/repetirPedido');
 
 const CID = 'c0000000-0000-0000-0000-000000000001';
 const TOKEN = 'a3f1c2d4e5b6978812ab34cd56ef7890';
@@ -549,6 +549,32 @@ describe('personalizacaoDaLinha — filtrada pelo configurador de hoje', () => {
 
   test('sem configurador, nada', () => {
     expect(personalizacaoDaLinha(null, { nome: 'x' })).toEqual({ valores: {}, verso: false, meio: false, arte_enviada: false });
+  });
+});
+
+// 28/09/2026 — regressao "Pedir outro igual" perdendo a cor: campo de cor
+// sem paleta cadastrada (config.colors vazio/ausente) fazia toda cor
+// original ser descartada, e a vitrine caia em branco/preto pedindo pra
+// escolher de novo. A regra: cor original volta se for hex valido; so
+// descarta quando o campo TEM paleta e a cor nao esta nela (saiu da loja).
+describe('campo de cor sem paleta cadastrada — nao perde a cor original', () => {
+  const CAMPO_SEM_PALETA = { id: 'cor_alca', type: 'color', label: 'Cor', config: {} };
+  const CAMPO_COM_PALETA = { id: 'cor_alca', type: 'color', label: 'Cor', config: { colors: ['#D8436F', '#FFFFFF'] } };
+
+  test('sem paleta + hex valido (#RGB ou #RRGGBB): a cor original volta', () => {
+    expect(valorDoCampo(CAMPO_SEM_PALETA, '#1A2B3C')).toBe('#1A2B3C');
+    expect(valorDoCampo(CAMPO_SEM_PALETA, '#fff')).toBe('#fff');
+  });
+
+  test('sem paleta + valor que nao e hex: descarta (campo volta vazio)', () => {
+    expect(valorDoCampo(CAMPO_SEM_PALETA, 'vermelho')).toBeUndefined();
+    expect(valorDoCampo(CAMPO_SEM_PALETA, '#12345')).toBeUndefined();
+  });
+
+  test('com paleta + cor fora dela (saiu da loja): descarta', () => {
+    expect(valorDoCampo(CAMPO_COM_PALETA, '#000000')).toBeUndefined();
+    // Continua aceitando a cor que ainda esta na paleta.
+    expect(valorDoCampo(CAMPO_COM_PALETA, '#d8436f')).toBe('#d8436f');
   });
 });
 

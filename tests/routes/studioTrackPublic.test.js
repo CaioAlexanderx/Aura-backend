@@ -279,4 +279,43 @@ describe('pedido feito pela vitrine', () => {
     const res = await track();
     expect(res.status).toBe(404);
   });
+
+  // 28/09/2026 — o app troca o texto de "retire na loja" quando e portador
+  // (courier); precisa saber o tipo de entrega e, quando courier, o nome
+  // (ou que ainda falta informar). Nunca a placa.
+  describe('tipo_de_entrega, courier_name e courier_a_informar', () => {
+    test('sem delivery_type: tipo_de_entrega cai em pickup, sem courier', async () => {
+      mockVitrine({ pedido: { ...PEDIDO, delivery_type: undefined, courier_name: undefined } });
+      const res = await track();
+      expect(res.body.tipo_de_entrega).toBe('pickup');
+      expect(res.body.courier_name).toBeNull();
+      expect(res.body.courier_a_informar).toBe(false);
+    });
+
+    test('delivery: tipo_de_entrega "delivery", sem courier', async () => {
+      mockVitrine({ pedido: { ...PEDIDO, delivery_type: 'delivery', courier_name: null } });
+      const res = await track();
+      expect(res.body.tipo_de_entrega).toBe('delivery');
+      expect(res.body.courier_name).toBeNull();
+      expect(res.body.courier_a_informar).toBe(false);
+    });
+
+    test('courier com nome: tipo_de_entrega "courier" e courier_name exposto', async () => {
+      mockVitrine({ pedido: { ...PEDIDO, delivery_type: 'courier', courier_name: 'João Motoboy', courier_plate: 'ABC1D23' } });
+      const res = await track();
+      expect(res.body.tipo_de_entrega).toBe('courier');
+      expect(res.body.courier_name).toBe('João Motoboy');
+      expect(res.body.courier_a_informar).toBe(false);
+      // Placa nunca sai daqui.
+      expect(JSON.stringify(res.body)).not.toMatch(/ABC1D23|courier_plate/);
+    });
+
+    test('courier sem nome ainda: courier_a_informar true', async () => {
+      mockVitrine({ pedido: { ...PEDIDO, delivery_type: 'courier', courier_name: null } });
+      const res = await track();
+      expect(res.body.tipo_de_entrega).toBe('courier');
+      expect(res.body.courier_name).toBeNull();
+      expect(res.body.courier_a_informar).toBe(true);
+    });
+  });
 });
