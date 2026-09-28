@@ -113,7 +113,7 @@ describe('a rota que decide', () => {
   test('app fora do ar cai na loja comum em vez de derrubar a loja', () => {
     // `montarVitrineStudio` devolve null nesse caso; o `if (pagina)` e o
     // que impede a pagina em branco.
-    expect(rota).toContain('const pagina = await montarVitrineStudio(slug, cabecalho)');
+    expect(rota).toContain('const pagina = await montarVitrineStudio(slug, cabecalho, { forcarCasca })');
     expect(rota).toContain('if (pagina) {');
   });
 

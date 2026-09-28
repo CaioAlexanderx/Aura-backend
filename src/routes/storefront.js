@@ -353,7 +353,12 @@ async function servirPaginaDaLoja(req, res, produtoId, { somenteStudio = false, 
         || (!somenteStudio && typeof req.query.produto === 'string' ? req.query.produto : null);
       const cabecalho = await cabecalhoDaVitrineStudio(rows[0], idDaPeca, indexar)
         .catch((e) => { console.error('[storefront] metatags da vitrine:', e.message); return ''; });
-      const pagina = await montarVitrineStudio(slug, cabecalho);
+      // `?_casca=` e a pagina pedindo socorro: o entry do app nao
+      // carregou (deploy novo apagou o bundle da casca guardada) e ela
+      // recarregou uma vez. A casca e buscada de novo, com limite
+      // global — ver services/vitrineStudioShell.js (incidente 28/09).
+      const forcarCasca = typeof req.query._casca === 'string' && req.query._casca !== '';
+      const pagina = await montarVitrineStudio(slug, cabecalho, { forcarCasca });
       if (pagina) {
         res.setHeader('Content-Security-Policy', cspDaVitrineStudio(STOREFRONT_API_BASE));
         res.removeHeader('X-Frame-Options');

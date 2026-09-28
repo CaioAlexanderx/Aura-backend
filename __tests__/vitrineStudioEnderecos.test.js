@@ -94,7 +94,11 @@ beforeEach(() => {
     price: 49.9, image_url: 'https://r2/caneca-1600.jpg', image_thumb_url: 'https://r2/caneca-640.jpg',
     gallery_urls: ['https://r2/caneca-1600.jpg'],
   };
-  global.fetch = jest.fn(async () => ({ ok: true, status: 200, text: async () => CASCA }));
+  // GET devolve a casca; HEAD e a conferencia de que o entry dela ainda e
+  // JavaScript (incidente de 28/09/2026, services/vitrineStudioShell.js).
+  global.fetch = jest.fn(async (_url, opts = {}) => (opts.method === 'HEAD'
+    ? { ok: true, status: 200, headers: { get: () => 'text/javascript' } }
+    : { ok: true, status: 200, headers: { get: () => 'text/html' }, text: async () => CASCA }));
   jest.spyOn(console, 'warn').mockImplementation(() => {});
   jest.spyOn(console, 'error').mockImplementation(() => {});
 });
@@ -257,7 +261,8 @@ describe('a previa do link na casca', () => {
     expect(home).not.toContain('Caneca Alça Coração');
     expect(home).toContain('<title>Sheid Mania</title>');
     // Uma busca so da casca: o cache continua valendo.
-    expect(global.fetch).toHaveBeenCalledTimes(1);
+    const buscasDaCasca = global.fetch.mock.calls.filter(([, o = {}]) => o.method !== 'HEAD');
+    expect(buscasDaCasca).toHaveLength(1);
   });
 
   test('loja comum em /p/<id> continua com a pagina gerada aqui (nada muda)', async () => {
