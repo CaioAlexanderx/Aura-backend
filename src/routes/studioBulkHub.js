@@ -14,6 +14,83 @@ const db      = require('../config/database');
 // Uma regra, dois leitores — ver services/studioLote.js.
 const { cotarLote, codigoDoLote } = require('../services/studioLote');
 const { comPagamentoNaLista } = require('../services/pagamentoDoPedidoStudio');
+const { sqlDaEtapa } = require('../services/cancelamentoDoPedido');
+const { situacaoDoPixVencido } = require('../jobs/lojaPixExpiradoJob');
+
+// ─── KPIs do hub (QA final 28/09/2026, LJ-33) ────────────────
+// Liam a view studio_hub_kpis (migration 133), que conta pela etapa da
+// producao e soma a receita de TODO pedido — um pedido recusado seguia em
+// "Aguardando arte" e na "Receita 7d". A etapa aqui e a do pedido de
+// verdade (cancelado = 'cancelled', ver services/cancelamentoDoPedido) e
+// pedido cancelado nao entra em contador nenhum nem na receita. A view
+// fica como esta (outros leitores, e ela nao e versionada em prod).
+const SQL_KPIS_DO_HUB = `
+  SELECT
+    COUNT(*) FILTER (WHERE etapa = 'pending_art')                      AS pending_art_count,
+    COUNT(*) FILTER (WHERE etapa = 'approved')                         AS approved_count,
+    COUNT(*) FILTER (WHERE etapa = 'in_production')                    AS in_production_count,
+    COUNT(*) FILTER (WHERE etapa = 'ready')                            AS ready_count,
+    COUNT(*) FILTER (WHERE etapa = 'delivered'
+                     AND created_at >= CURRENT_DATE - INTERVAL '7 days') AS delivered_7d,
+    COUNT(*) FILTER (WHERE NOT cancelado AND created_at >= NOW() - INTERVAL '7 days') AS orders_7d,
+    COUNT(*) FILTER (WHERE NOT cancelado AND created_at >= CURRENT_DATE)              AS orders_today,
+    COALESCE(SUM(total) FILTER (WHERE NOT cancelado AND created_at >= NOW() - INTERVAL '7 days'), 0)::numeric(12,2) AS revenue_7d,
+    COALESCE(SUM(total) FILTER (WHERE NOT cancelado AND created_at >= CURRENT_DATE), 0)::numeric(12,2)              AS revenue_today,
+    COUNT(*) FILTER (WHERE etapa NOT IN ('delivered', 'ready', 'cancelled')
+                     AND created_at < NOW() - INTERVAL '3 days')       AS overdue_count,
+    COUNT(*) FILTER (WHERE NOT cancelado)                              AS total_orders
+  FROM (
+    SELECT d.total, d.created_at,
+           ${sqlDaEtapa('d')} AS etapa,
+           (COALESCE(d.status::text, '') = 'cancelled') AS cancelado
+      FROM digital_orders d
+     WHERE d.company_id = $1 AND d.vertical = 'studio'
+  ) o`;
+
+// ─── Alerta de pedido atrasado (LJ-34, QA final 28/09/2026) ──
+// "Pedido 00001 atrasado · há 24 dias" nao dizia que o atraso era o Pix,
+// nem por que o cancelamento automatico de 72 h nao o pegou. O motivo e
+// a MESMA leitura do job (situacaoDoPixVencido): no 00001, a producao ja
+// tinha andado (arte aprovada sem o Pix) — excecao do job por decisao do
+// PO, que nao desfaz o que a lojista combinou com a cliente. Agora o
+// alerta diz isso e leva ao pedido, onde ha "Cancelar pedido".
+const POR_QUE_NAO_CANCELOU = {
+  producao:    'não cancela sozinho porque a produção já andou. Cobre a cliente ou cancele o pedido.',
+  ja_paguei:   'a cliente disse que pagou. Confira o extrato e confirme ou recuse o pagamento.',
+  comprovante: 'a cliente mandou comprovante. Confira e confirme ou recuse o pagamento.',
+  sinal:       'não cancela sozinho porque você registrou o sinal. Cobre o restante ou cancele o pedido.',
+};
+
+function alertaDoAtraso(r, agora = Date.now()) {
+  // "Pedido 00001", o numero que a lojista e a cliente veem (QA
+  // 28/09/2026: saia "Pedido #BAA22B9D", o comeco do uuid). O trecho
+  // do uuid fica so para pedido antigo sem numero.
+  const numero = r.order_number ? String(r.order_number) : null;
+  const nome = numero ? `Pedido ${numero}` : `Pedido #${String(r.id).slice(0, 8).toUpperCase()}`;
+  const dias = Math.round((agora - new Date(r.created_at).getTime()) / 86400000);
+  const quem = r.customer_name || 'Sem cadastro';
+  const pix = situacaoDoPixVencido(r, agora);
+  if (pix.vencido) {
+    return {
+      severity: 'danger',
+      kind: 'pix_sem_pagamento',
+      title: `${nome}: Pix sem pagamento há ${dias} ${dias === 1 ? 'dia' : 'dias'}`,
+      sub: `${quem} · ${POR_QUE_NAO_CANCELOU[pix.motivo] || 'o cancelamento automático cancela na próxima volta.'}`,
+      href: `/studio/pedidos/${r.id}`,
+      order_id: r.id,
+      order_number: numero,
+    };
+  }
+  return {
+    severity: 'danger',
+    kind: 'overdue',
+    title: `${nome} atrasado`,
+    sub: `${quem} · há ${dias} dias`,
+    href: '/studio/producao',
+    order_id: r.id,
+    order_number: numero,
+  };
+}
 
 /**
  * A escada da LOJISTA para um produto: a regra dele, ou a global da loja.
@@ -236,10 +313,7 @@ router.get('/bulk-events/pricing/preview', async function(req, res) {
 // GET /studio/hub/stats — KPIs agregados (view materializada-like)
 router.get('/hub/stats', async function(req, res) {
   try {
-    const kpiRes = await db.query(
-      `SELECT * FROM studio_hub_kpis WHERE company_id = $1 LIMIT 1`,
-      [req.params.id]
-    );
+    const kpiRes = await db.query(SQL_KPIS_DO_HUB, [req.params.id]);
     const bulkRes = await db.query(
       `SELECT
          COUNT(*) FILTER (WHERE status IN ('draft','confirmed','in_production')) AS active_count,
@@ -301,7 +375,8 @@ router.get('/hub/orders', async function(req, res) {
     if (source === 'all' || source === 'orders') {
       const r = await db.query(
         `SELECT o.id, 'order'::text AS kind, o.created_at, o.total AS amount,
-                o.studio_production_status AS status,
+                -- LJ-33: cancelado aparece "Cancelado", nao na etapa em que parou.
+                ${sqlDaEtapa('o')} AS status,
                 o.customer_name AS name,
                 -- 27/09/2026: o numero que a cliente ve ("Pedido 00001") e o telefone,
                 -- pra busca do Hub achar o pedido pelo numero e nao so pelo uuid.
@@ -372,33 +447,23 @@ router.get('/hub/alerts', async function(req, res) {
     const overdueRes = await db.query(
       // Pedido cancelado (Pix vencido, pagamento recusado) nao esta
       // atrasado: o studio_production_status dele fica onde parou.
-      `SELECT id, order_number, customer_name, created_at
-         FROM digital_orders
-        WHERE company_id = $1 AND vertical = 'studio'
-          AND studio_production_status NOT IN ('delivered','ready','cancelled')
-          AND COALESCE(status, '') <> 'cancelled'
-          AND created_at < NOW() - INTERVAL '3 days'
-        ORDER BY created_at
+      // LJ-34: as colunas do pagamento entram para o alerta dizer por que
+      // um Pix vencido nao cancelou (to_jsonb: coluna ausente vira null).
+      `SELECT d.id, d.order_number, d.customer_name, d.created_at,
+              d.status, d.vertical, d.studio_production_status,
+              d.payment_method, d.payment_status,
+              to_jsonb(d)->>'payment_proof_url' AS payment_proof_url,
+              (to_jsonb(d)->>'deposit_paid')::boolean AS deposit_paid
+         FROM digital_orders d
+        WHERE d.company_id = $1 AND d.vertical = 'studio'
+          AND d.studio_production_status NOT IN ('delivered','ready','cancelled')
+          AND COALESCE(d.status, '') <> 'cancelled'
+          AND d.created_at < NOW() - INTERVAL '3 days'
+        ORDER BY d.created_at
         LIMIT 5`,
       [req.params.id]
     );
-    for (const r of overdueRes.rows) {
-      // "Pedido 00001", o numero que a lojista e a cliente veem (QA
-      // 28/09/2026: saia "Pedido #BAA22B9D", o comeco do uuid). O trecho
-      // do uuid fica so para pedido antigo sem numero.
-      const numero = r.order_number ? String(r.order_number) : null;
-      alerts.push({
-        severity: 'danger',
-        kind: 'overdue',
-        title: numero
-          ? `Pedido ${numero} atrasado`
-          : `Pedido #${String(r.id).slice(0, 8).toUpperCase()} atrasado`,
-        sub: `${r.customer_name || 'Sem cadastro'} · há ${Math.round((Date.now() - new Date(r.created_at).getTime()) / 86400000)} dias`,
-        href: '/studio/producao',
-        order_id: r.id,
-        order_number: numero,
-      });
-    }
+    for (const r of overdueRes.rows) alerts.push(alertaDoAtraso(r));
 
     // 3. Aprovações pendentes >24h
     const approvalRes = await db.query(
@@ -455,3 +520,6 @@ router.get('/hub/alerts', async function(req, res) {
 });
 
 module.exports = router;
+
+module.exports._SQL_KPIS_DO_HUB = SQL_KPIS_DO_HUB;
+module.exports._alertaDoAtraso = alertaDoAtraso;

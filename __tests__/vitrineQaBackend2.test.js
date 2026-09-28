@@ -588,7 +588,8 @@ describe('8 · alerta do hub com o numero do pedido', () => {
 
   test('"Pedido 00001 atrasado", com order_number e order_id', async () => {
     banco([
-      [/FROM digital_orders\s+WHERE company_id = \$1 AND vertical = 'studio'/, [
+      // Rodada 3 (28/09): a consulta ganhou o alias `d` e as colunas do Pix (LJ-34).
+      [/FROM digital_orders d\s+WHERE d\.company_id = \$1 AND d\.vertical = 'studio'/, [
         { id: 'baa22b9d-0000-4000-8000-000000000001', order_number: '00001', customer_name: 'Marina', created_at: new Date(Date.now() - 23 * 86400000).toISOString() },
         { id: 'cdf9501f-0000-4000-8000-000000000002', order_number: null, customer_name: null, created_at: new Date(Date.now() - 5 * 86400000).toISOString() },
       ]],
@@ -598,9 +599,9 @@ describe('8 · alerta do hub com o numero do pedido', () => {
     const atrasados = r.body.alerts.filter((a) => a.kind === 'overdue');
     expect(atrasados[0]).toMatchObject({ title: 'Pedido 00001 atrasado', order_number: '00001', order_id: 'baa22b9d-0000-4000-8000-000000000001' });
     expect(atrasados[1]).toMatchObject({ title: 'Pedido #CDF9501F atrasado', order_number: null });
-    const [sql] = chamada(/FROM digital_orders\s+WHERE company_id = \$1 AND vertical = 'studio'/);
+    const [sql] = chamada(/FROM digital_orders d\s+WHERE d\.company_id = \$1 AND d\.vertical = 'studio'/);
     expect(sql).toMatch(/order_number/);
-    expect(sql).toMatch(/COALESCE\(status, ''\) <> 'cancelled'/);
+    expect(sql).toMatch(/COALESCE\(d\.status, ''\) <> 'cancelled'/);
   });
 });
 

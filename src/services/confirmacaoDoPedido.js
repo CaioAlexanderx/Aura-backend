@@ -24,6 +24,7 @@
 const { etapaDoStatus, etapasComEstado } = require('./etapasDoPedido');
 const { ehCampoDeServicoDeArte, prazoDaSacola, r2 } = require('./precoDoStudio');
 const { politicaDeRevisoes } = require('./politicaDeRevisoes');
+const { cancelamentoDoPedido } = require('./cancelamentoDoPedido');
 
 // Horas ate o Pix pendente do Studio cancelar sozinho (decisao do PO,
 // 25/09/2026). Quem cancela e o job; a tela so repete o prazo dele.
@@ -36,6 +37,8 @@ function primeiroNome(nome) {
   const n = String(nome || '').trim().split(/\s+/)[0];
   return n || null;
 }
+
+const TETO_DO_TEXTO = 400;
 
 const curto = (v, max = 40) => {
   const s = String(v).trim().replace(/\s+/g, ' ');
@@ -86,7 +89,11 @@ function resumoDaPersonalizacao(cfg, customization) {
     if (f.type === 'text') {
       // O briefing do servico de arte e texto longo para a lojista.
       if (f.config && f.config.is_art_service === true) continue;
-      out.push(curto(rotulo ? `${rotulo}: ${valor}` : String(valor)));
+      // QA final 28/09/2026 (CL-50/LJ-40): o texto da cliente saia cortado
+      // em 40 caracteres ("Briefing da arte: Nome Helena em dourad…"). E o
+      // que ela escreveu: vai inteiro (a pagina quebra a linha), so com um
+      // teto contra texto enorme.
+      out.push(curto(rotulo ? `${rotulo}: ${valor}` : String(valor), TETO_DO_TEXTO));
     }
   }
   if (arteEnviada) out.push('Arte enviada');
@@ -192,6 +199,11 @@ function montarConfirmacao({ pedido, itens, loja, studioSettings, faixas, acompa
     pix,
     cartao,
     comprovante_enviado: !!o.payment_proof_url,
+    // QA final 28/09/2026 (LJ-33/CL-46): por que cancelou — Pix vencido,
+    // pagamento recusado pela loja ou cancelado pela loja — e o motivo que
+    // a LOJA escreveu. null quando o pedido nao esta cancelado. Nada das
+    // notas alem do motivo da loja sai daqui.
+    cancelamento: cancelamentoDoPedido(o),
     etapas: etapasComEstado(atual),
     prazo_dias_uteis: prazoDaSacola(
       ss.default_sla_days,
