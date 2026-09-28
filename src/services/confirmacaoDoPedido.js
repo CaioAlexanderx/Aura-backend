@@ -38,6 +38,8 @@ function primeiroNome(nome) {
   return n || null;
 }
 
+const TETO_DO_TEXTO = 400;
+
 const curto = (v, max = 40) => {
   const s = String(v).trim().replace(/\s+/g, ' ');
   return s.length > max ? s.slice(0, max - 1) + '…' : s;
@@ -87,7 +89,11 @@ function resumoDaPersonalizacao(cfg, customization) {
     if (f.type === 'text') {
       // O briefing do servico de arte e texto longo para a lojista.
       if (f.config && f.config.is_art_service === true) continue;
-      out.push(curto(rotulo ? `${rotulo}: ${valor}` : String(valor)));
+      // QA final 28/09/2026 (CL-50/LJ-40): o texto da cliente saia cortado
+      // em 40 caracteres ("Briefing da arte: Nome Helena em dourad…"). E o
+      // que ela escreveu: vai inteiro (a pagina quebra a linha), so com um
+      // teto contra texto enorme.
+      out.push(curto(rotulo ? `${rotulo}: ${valor}` : String(valor), TETO_DO_TEXTO));
     }
   }
   if (arteEnviada) out.push('Arte enviada');

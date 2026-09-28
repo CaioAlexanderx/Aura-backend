@@ -402,3 +402,19 @@ describe('7 · LJ-36: upload do mockup aceita os 15 MB que promete', () => {
     expect(proprio).toBeLessThan(global);
   });
 });
+
+// ─────────────────────────────────────────────────────────────
+describe('8 · CL-50/LJ-40: o texto da cliente não é cortado no resumo', () => {
+  const { resumoDaPersonalizacao } = require('../src/services/confirmacaoDoPedido');
+
+  test('briefing longo sai inteiro (a página quebra a linha)', () => {
+    const cfg = { fields: [{ id: 'brief', type: 'text', label: 'Briefing da arte' }] };
+    const texto = 'Nome Helena em dourado, com um coração pequeno do lado direito';
+    expect(resumoDaPersonalizacao(cfg, { brief: texto })).toEqual([`Briefing da arte: ${texto}`]);
+  });
+
+  test('opção continua curta', () => {
+    const cfg = { fields: [{ id: 'cor', type: 'option', label: 'Cor', config: { choices: [{ value: 'x', label: 'A'.repeat(60) }] } }] };
+    expect(resumoDaPersonalizacao(cfg, { cor: 'x' })[0].length).toBe(40);
+  });
+});
