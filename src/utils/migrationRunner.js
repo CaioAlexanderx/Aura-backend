@@ -20,9 +20,26 @@
 // pela metade", nada de continuar e deixar o banco num estado que ninguém
 // consegue descrever. Uma migration que falha derruba o passo de deploy.
 //
-// Múltiplas instâncias subindo juntas: `pg_advisory_lock` numa chave fixa. A
-// segunda instância BLOQUEIA até a primeira terminar e então encontra tudo
-// aplicado — não é um "quem chegar primeiro", é uma fila.
+// Múltiplas instâncias subindo juntas: `pg_advisory_xact_lock` numa chave
+// fixa, DENTRO da transação de cada migration. Quem pega a trava reconfere
+// se a migration ainda falta (outra instância pode tê-la aplicado enquanto
+// esta esperava) e só então roda. A trava some sozinha no COMMIT/ROLLBACK.
+//
+// ── POOLER EM MODO TRANSAÇÃO (incidente de 28/09/2026) ─────────────────
+// O runner roda no preDeployCommand enquanto a versão antiga do app segue
+// no ar. O app ocupa até 15 conexões no pooler do Supabase em modo SESSÃO,
+// que tem pool_size 15: com o app cheio, o runner nem conectava
+// ("EMAXCONNSESSION max clients reached in session mode") e TODO deploy
+// do backend falhava — três seguidos em 28/09 (#766, #765, #768). Por isso
+// scripts/migrate.js conecta pela porta do modo TRANSAÇÃO (6543), que põe
+// o cliente na fila em vez de recusar. Em modo transação não existe estado
+// de sessão confiável entre transações: nada de `SET` de sessão nem de
+// `pg_advisory_lock` de sessão — só `SET LOCAL` e trava de transação.
+//
+// `lock_timeout` de 15 s em cada migration: ALTER TABLE numa tabela quente
+// (digital_orders) pede trava exclusiva; esperando por ela, a migration
+// enfileiraria atrás de si todas as consultas da loja. Com o limite, ela
+// falha rápido e o deploy para, com a versão antiga intacta no ar.
 //
 // ── O PERIGO, E A TRAVA CONTRA ELE ─────────────────────────────────────
 // As 300+ migrations existentes JÁ FORAM aplicadas no banco de produção, à
@@ -57,6 +74,9 @@ const crypto = require('crypto');
 // Chave do advisory lock. Constante fixa e arbitrária: só precisa não
 // colidir com outro pg_advisory_lock do sistema (não há outro hoje).
 const LOCK_KEY = 4823917;
+
+// Quanto uma migration espera por trava de tabela antes de desistir.
+const LOCK_TIMEOUT = '15s';
 
 // Diretórios com migrations, em ordem de precedência para desempate.
 const DIRS = ['src/migrations', 'migrations'];
@@ -141,10 +161,6 @@ async function runMigrations({ pool, root = repoRoot(), log = console.log }) {
   const client = await pool.connect();
   const result = { applied: [], skipped: 0, total: 0 };
   try {
-    // statement_timeout do pool é 30s; uma migration grande passa disso.
-    await client.query('SET statement_timeout TO 0').catch(() => {});
-    await client.query('SELECT pg_advisory_lock($1)', [LOCK_KEY]);
-
     await ensureControlTable(client);
     const done = await appliedKeys(client);
     const all = discover(root);
@@ -181,6 +197,18 @@ async function runMigrations({ pool, root = repoRoot(), log = console.log }) {
       const t0 = Date.now();
       try {
         await client.query('BEGIN');
+        // SET LOCAL: vale só nesta transação (modo transação do pooler).
+        // statement_timeout do pool é 30s; uma migration grande passa disso.
+        await client.query('SET LOCAL statement_timeout = 0');
+        await client.query(`SET LOCAL lock_timeout = '${LOCK_TIMEOUT}'`);
+        await client.query('SELECT pg_advisory_xact_lock($1)', [LOCK_KEY]);
+        // Outra instância pode ter aplicado esta enquanto esperávamos a trava.
+        const ja = await client.query('SELECT 1 FROM schema_migrations WHERE key = $1', [mig.key]);
+        if (ja.rows && ja.rows.length) {
+          await client.query('COMMIT');
+          result.skipped++;
+          continue;
+        }
         await client.query(sql);
         await client.query(
           `INSERT INTO schema_migrations (key, checksum, applied_ms, baseline)
@@ -200,7 +228,6 @@ async function runMigrations({ pool, root = repoRoot(), log = console.log }) {
 
     return result;
   } finally {
-    await client.query('SELECT pg_advisory_unlock($1)', [LOCK_KEY]).catch(() => {});
     client.release();
   }
 }
@@ -216,8 +243,9 @@ async function baseline({ pool, root = repoRoot(), log = console.log }) {
   const client = await pool.connect();
   const result = { marked: [], already: 0, total: 0 };
   try {
-    await client.query('SELECT pg_advisory_lock($1)', [LOCK_KEY]);
     await ensureControlTable(client);
+    await client.query('BEGIN');
+    await client.query('SELECT pg_advisory_xact_lock($1)', [LOCK_KEY]);
     const done = await appliedKeys(client);
     const all = discover(root);
     result.total = all.length;
@@ -233,10 +261,13 @@ async function baseline({ pool, root = repoRoot(), log = console.log }) {
       );
       result.marked.push(mig.key);
     }
+    await client.query('COMMIT');
     log(`[migrate] baseline: ${result.marked.length} registradas sem executar, ${result.already} ja estavam.`);
     return result;
+  } catch (err) {
+    await client.query('ROLLBACK').catch(() => {});
+    throw err;
   } finally {
-    await client.query('SELECT pg_advisory_unlock($1)', [LOCK_KEY]).catch(() => {});
     client.release();
   }
 }
@@ -260,6 +291,7 @@ async function status({ pool, root = repoRoot() }) {
 
 module.exports = {
   LOCK_KEY,
+  LOCK_TIMEOUT,
   DIRS,
   SENTINELA,
   discover,

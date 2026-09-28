@@ -57,6 +57,9 @@ function mkPool({ applied = [], temSchema = false, falharEm = null } = {}) {
       if (/to_regclass/.test(s)) {
         return Promise.resolve({ rows: [{ reg: temSchema ? 'companies' : null }] });
       }
+      if (/SELECT 1 FROM schema_migrations WHERE key/.test(s)) {
+        return Promise.resolve({ rows: registro.has(params[0]) ? [{ '?column?': 1 }] : [] });
+      }
       if (/INSERT INTO schema_migrations/.test(s)) {
         registro.set(params[0], params[1]);
         return Promise.resolve({ rows: [] });
@@ -224,24 +227,92 @@ describe('falha ruidosa', () => {
 
 // ── Concorrência ──────────────────────────────────────────────────────
 describe('multiplas instancias subindo juntas', () => {
-  test('pega e solta o advisory lock na mesma chave', async () => {
+  // 28/09/2026: o runner passou a conectar pelo pooler em modo TRANSAÇÃO.
+  // Lá não há sessão entre transações: a trava é de transação, dentro de
+  // cada migration, e some sozinha no COMMIT/ROLLBACK.
+  test('trava de TRANSACAO na mesma chave, dentro do BEGIN de cada migration', async () => {
     const root = mkRoot({ 'migrations/300_a.sql': 'CREATE TABLE a();' });
     const { pool, log } = mkPool({ applied: [], temSchema: false });
     await runner.runMigrations({ pool, root, log: silencio });
-    const locks = log.filter((c) => /pg_advisory_(un)?lock/.test(c.sql));
-    expect(locks).toHaveLength(2);
-    expect(locks[0].sql).toMatch(/SELECT pg_advisory_lock/);
-    expect(locks[1].sql).toMatch(/pg_advisory_unlock/);
-    expect(locks[0].params).toEqual([runner.LOCK_KEY]);
-    expect(locks[1].params).toEqual([runner.LOCK_KEY]);
+    const sqls = sqlDe(log);
+    expect(sqls.some((s) => /pg_advisory_lock\(|pg_advisory_unlock/.test(s))).toBe(false);
+    const iBegin = sqls.indexOf('BEGIN');
+    const iLock = sqls.findIndex((s) => /pg_advisory_xact_lock/.test(s));
+    const iSql = sqls.findIndex((s) => /CREATE TABLE a\(\)/.test(s));
+    expect(iBegin).toBeGreaterThanOrEqual(0);
+    expect(iLock).toBeGreaterThan(iBegin);
+    expect(iSql).toBeGreaterThan(iLock);
+    expect(log[iLock].params).toEqual([runner.LOCK_KEY]);
   });
 
-  test('lock e liberado mesmo quando uma migration quebra', async () => {
+  test('so SET LOCAL (nada de SET de sessao) e lock_timeout na transacao', async () => {
+    const root = mkRoot({ 'migrations/300_a.sql': 'CREATE TABLE a();' });
+    const { pool, log } = mkPool({ applied: [], temSchema: false });
+    await runner.runMigrations({ pool, root, log: silencio });
+    const sets = sqlDe(log).filter((s) => /^\s*SET\b/i.test(s));
+    expect(sets.length).toBeGreaterThan(0);
+    sets.forEach((s) => expect(s).toMatch(/^\s*SET LOCAL\b/i));
+    expect(sets.some((s) => s.includes(`lock_timeout = '${runner.LOCK_TIMEOUT}'`))).toBe(true);
+  });
+
+  test('outra instancia aplicou enquanto esperavamos a trava: nao roda de novo', async () => {
+    const root = mkRoot({ 'migrations/300_a.sql': 'CREATE TABLE a();' });
+    const ctx = mkPool({ applied: [], temSchema: false });
+    // Simula a outra instância: a migration entra no controle logo depois
+    // da leitura inicial (antes de esta pegar a trava).
+    const original = ctx.client.query;
+    ctx.client.query = jest.fn((sql, params) => {
+      if (/pg_advisory_xact_lock/.test(String(sql))) ctx.registro.set('migrations/300_a.sql', 'x');
+      return original(sql, params);
+    });
+    const r = await runner.runMigrations({ pool: ctx.pool, root, log: silencio });
+    expect(r.applied).toEqual([]);
+    expect(r.skipped).toBe(1);
+    expect(sqlDe(ctx.log).some((s) => /CREATE TABLE a\(\)/.test(s))).toBe(false);
+  });
+
+  test('conexao e liberada mesmo quando uma migration quebra', async () => {
     const root = mkRoot({ 'migrations/300_ruim.sql': 'OPS;' });
     const { pool, log, client } = mkPool({ applied: [], temSchema: false, falharEm: 'OPS;' });
     await expect(runner.runMigrations({ pool, root, log: silencio })).rejects.toThrow();
-    expect(sqlDe(log).some((s) => /pg_advisory_unlock/.test(s))).toBe(true);
+    expect(sqlDe(log)).toContain('ROLLBACK');
     expect(client.release).toHaveBeenCalled();
+  });
+});
+
+describe('scripts/migrate.js: conexao do runner', () => {
+  const { urlDoRunner, conectarComTentativas } = require('../scripts/migrate.js');
+
+  test('pooler do Supabase em modo sessao (5432) vira modo transacao (6543)', () => {
+    expect(urlDoRunner('postgresql://postgres.ref:s%40nha@aws-0-sa-east-1.pooler.supabase.com:5432/postgres?family=4'))
+      .toBe('postgresql://postgres.ref:s%40nha@aws-0-sa-east-1.pooler.supabase.com:6543/postgres');
+  });
+
+  test('porta 6543, host direto e URL explicita ficam como estao', () => {
+    expect(urlDoRunner('postgresql://u:p@aws-0-sa-east-1.pooler.supabase.com:6543/postgres'))
+      .toBe('postgresql://u:p@aws-0-sa-east-1.pooler.supabase.com:6543/postgres');
+    expect(urlDoRunner('postgresql://u:p@db.ref.supabase.co:5432/postgres'))
+      .toBe('postgresql://u:p@db.ref.supabase.co:5432/postgres');
+    expect(urlDoRunner('postgresql://u:p@h.pooler.supabase.com:5432/postgres', { explicita: true }))
+      .toBe('postgresql://u:p@h.pooler.supabase.com:5432/postgres');
+  });
+
+  test('pooler cheio: tenta de novo e segue quando abre vaga', async () => {
+    let n = 0;
+    const pool = { connect: jest.fn(async () => {
+      n++;
+      if (n < 3) throw new Error('(EMAXCONNSESSION) max clients reached in session mode');
+      return { release: jest.fn() };
+    }) };
+    await conectarComTentativas(pool, { tentativas: 5, esperaMs: 1, log: silencio });
+    expect(pool.connect).toHaveBeenCalledTimes(3);
+  });
+
+  test('sem vaga depois de todas as tentativas: lanca o erro do pooler', async () => {
+    const pool = { connect: jest.fn(async () => { throw new Error('(EMAXCONNSESSION) max clients'); }) };
+    await expect(conectarComTentativas(pool, { tentativas: 2, esperaMs: 1, log: silencio }))
+      .rejects.toThrow(/EMAXCONNSESSION/);
+    expect(pool.connect).toHaveBeenCalledTimes(2);
   });
 });
 
