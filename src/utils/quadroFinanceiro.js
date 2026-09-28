@@ -67,7 +67,7 @@ function sqlDosCartoes() {
   return (
     'WITH base AS (' +
     '  SELECT id, description, category, amount, status, due_date, paid_at, created_at,' +
-    '         payment_method, notes, employee_name, recurrence_type, recurrence_index, idempotency_key,' +
+    '         payment_method, notes, employee_id, employee_name, recurrence_type, recurrence_index, idempotency_key,' +
     '         ' + COMP + ' AS comp' +
     '  FROM transactions' +
     "  WHERE company_id = $1 AND type = $2 AND status IN ('pending', 'confirmed')" +
@@ -138,6 +138,7 @@ function montarQuadro({ tipo, hoje, mes, cartoes, grupos }) {
       paid_at: r.paid_at ? new Date(r.paid_at).toISOString() : null,
       payment_method: r.payment_method || null,
       notes: r.notes || null,
+      employee_id: r.employee_id || null,
       employee_name: r.employee_name || null,
       recurrence_type: r.recurrence_type || null,
       recurrence_index: r.recurrence_index == null ? null : Number(r.recurrence_index),
