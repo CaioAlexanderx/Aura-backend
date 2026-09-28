@@ -42,9 +42,16 @@
 --    pelo chamador, o trigger deduz: 'expired' → pix_expirado; senão
 --    cancelado_pela_loja.
 --
--- Sem backfill aqui: pedido já cancelado (legado) é lido como cancelado
--- pelo backend (o painel usa o `status` quando ele é 'cancelled'). O SQL
--- opcional de higiene está na descrição do PR.
+-- 4. Higiene: pedido Studio cancelado antes desta migration fica com a
+--    etapa 'cancelled' (a leitura do backend já o tratava assim; isto é
+--    para quem consulta o banco direto). Poucas linhas, sem varredura
+--    longa: nada aqui espera trava por muito tempo (o runner roda cada
+--    migration com lock_timeout de 15 s). O CHECK entra NOT VALID
+--    justamente para não varrer a tabela com a trava exclusiva.
+--
+-- Sem cancel_kind retroativo: pedido antigo tem o tipo deduzido na
+-- leitura (payment_status 'expired' e a marca "[REJEITADO em ...]" das
+-- notas — services/cancelamentoDoPedido.js).
 --
 -- Idempotente.
 -- ============================================================
@@ -105,3 +112,10 @@ DROP TRIGGER IF EXISTS trg_digital_orders_cancelamento ON public.digital_orders;
 CREATE TRIGGER trg_digital_orders_cancelamento
   BEFORE UPDATE OF status, studio_production_status ON public.digital_orders
   FOR EACH ROW EXECUTE FUNCTION public.fn_digital_orders_cancelamento();
+
+-- 4. Higiene dos cancelados antigos ------------------------------------
+UPDATE public.digital_orders
+   SET studio_production_status = 'cancelled'
+ WHERE vertical = 'studio'
+   AND status = 'cancelled'
+   AND studio_production_status IS DISTINCT FROM 'cancelled';

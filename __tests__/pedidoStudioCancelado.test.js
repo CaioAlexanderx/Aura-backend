@@ -244,12 +244,18 @@ describe('3 · LJ-34: o Pix vencido que não cancelou diz por quê', () => {
     payment_status: 'pending', status: 'pending_payment',
   };
 
-  test('00001: arte aprovada sem o Pix — explica e leva ao pedido', () => {
+  test('00001: arte aprovada sem o Pix — o job cancela (decisão de 28/09), o alerta diz isso', () => {
     const a = _alertaDoAtraso({ ...base, studio_production_status: 'approved' }, agora);
     expect(a.kind).toBe('pix_sem_pagamento');
     expect(a.title).toBe('Pedido 00001: Pix sem pagamento há 24 dias');
-    expect(a.sub).toMatch(/Marina QA \(teste\) · não cancela sozinho porque a produção já andou/);
+    expect(a.sub).toBe('Marina QA (teste) · o cancelamento automático cancela na próxima volta.');
+    expect(a.sub).not.toMatch(/produção já andou/);
     expect(a.href).toBe(`/studio/pedidos/${OID}`);
+  });
+
+  test('sinal registrado continua segurando, com o porquê', () => {
+    const a = _alertaDoAtraso({ ...base, studio_production_status: 'approved', deposit_paid: true }, agora);
+    expect(a.sub).toMatch(/você registrou o sinal/);
   });
 
   test('a cliente disse que pagou: pede para conferir', () => {
@@ -267,7 +273,54 @@ describe('3 · LJ-34: o Pix vencido que não cancelou diz por quê', () => {
   test('a fila recebe o mesmo motivo do job (pix_cancelamento)', () => {
     const { camposDaLista } = require('../src/services/pagamentoDoPedidoStudio');
     const c = camposDaLista({ ...base, studio_production_status: 'approved', deposit_paid: false });
-    expect(c.pix_cancelamento).toEqual({ vencido: true, motivo: 'producao' });
+    expect(c.pix_cancelamento).toEqual({ vencido: true, motivo: null });
+  });
+});
+
+// ─────────────────────────────────────────────────────────────
+describe('3b · decisão do Caio (28/09): sem pagamento na janela, cancela — produção andando ou não', () => {
+  const job = require('../src/jobs/lojaPixExpiradoJob');
+  const agora = new Date('2026-09-28T12:00:00Z').getTime();
+  const horasAtras = (h) => new Date(agora - h * 3600 * 1000).toISOString();
+  const studio = (extra) => ({
+    vertical: 'studio', payment_method: 'pix', status: 'pending_payment', payment_status: 'pending',
+    created_at: horasAtras(73), ...extra,
+  });
+
+  test.each(['approved', 'in_production', 'ready', 'pending_art', 'awaiting_customization', null])(
+    'etapa %s sem Pix há mais de 72 h: vencido e sem nada que segure', (etapa) => {
+      expect(job.situacaoDoPixVencido(studio({ studio_production_status: etapa }), agora)).toEqual({ vencido: true, motivo: null });
+    });
+
+  test('continuam fora só pagamento registrado ou a conferir', () => {
+    expect(job.situacaoDoPixVencido(studio({ studio_production_status: 'approved', status: 'awaiting_approval' }), agora).motivo).toBe('ja_paguei');
+    expect(job.situacaoDoPixVencido(studio({ studio_production_status: 'approved', payment_proof_url: 'https://r2/x.png' }), agora).motivo).toBe('comprovante');
+    expect(job.situacaoDoPixVencido(studio({ studio_production_status: 'approved', deposit_paid: true }), agora).motivo).toBe('sinal');
+  });
+
+  test('o tick cancela o pedido com arte aprovada e sem Pix, gravando pix_expirado', async () => {
+    const fakeDb = { query: jest.fn(async (sql) => {
+      if (/UPDATE digital_orders SET/.test(sql)) {
+        return { rows: [{ id: OID, company_id: CID, order_number: '00001', customer_name: 'Marina', total: 35.91, vertical: 'studio', created_at: horasAtras(24 * 24) }] };
+      }
+      return { rows: [] };
+    }) };
+    const fakeEventos = { emitLojaEvent: jest.fn(async () => ({ id: 'n' })) };
+    const r = await job.tickCancelarPixVencido({ db: fakeDb, lojaEvents: fakeEventos });
+    expect(r.cancelados).toBe(1);
+    const [sql] = fakeDb.query.mock.calls[0];
+    expect(sql).toMatch(/cancel_kind\s+= 'pix_expirado'/);
+    expect(sql).not.toMatch(/studio_production_status/);
+    expect(sql).toMatch(/COALESCE\(deposit_paid, false\) = false/);
+    expect(sql).toMatch(/payment_proof_url IS NULL/);
+    expect(sql).toMatch(/WHERE status = 'pending_payment'/);
+    // Pedido de 24 dias: cancela calado (fora da janela do aviso).
+    expect(fakeEventos.emitLojaEvent).not.toHaveBeenCalled();
+  });
+
+  test('a cliente vê o texto das 72 h (tipo pix_expirado)', () => {
+    expect(cancelamentoDoPedido({ status: 'cancelled', payment_status: 'expired', cancel_kind: 'pix_expirado' }))
+      .toEqual({ tipo: 'pix_expirado', motivo: null });
   });
 });
 
@@ -420,5 +473,31 @@ describe('8 · CL-50/LJ-40: o texto da cliente não é cortado no resumo', () =>
   test('opção continua curta', () => {
     const cfg = { fields: [{ id: 'cor', type: 'option', label: 'Cor', config: { choices: [{ value: 'x', label: 'A'.repeat(60) }] } }] };
     expect(resumoDaPersonalizacao(cfg, { cor: 'x' })[0].length).toBe(40);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────
+describe('9 · migration 360: nomes com acento (id E nome antigo)', () => {
+  const sql = fonte('migrations/360_correcao_de_nomes_com_acento.sql');
+
+  test.each([
+    ['25f526eb-57da-4caa-bf9a-9629638eed49', 'Caneca alca coracao 355ml', 'Caneca alça coração 355ml'],
+    ['b1582583-6f16-41c5-9661-fc6a01fd7301', 'Caneca alca coracao preta 355ml', 'Caneca alça coração preta 355ml'],
+    ['48cb4b2a-5bbc-4703-af4c-32269653edc7', 'Caneca alca colorida 355ml', 'Caneca alça colorida 355ml'],
+    ['3dff306c-b2c0-4a7e-bfbb-cf1304333b96', 'Caneca ceramica vintage fosca', 'Caneca cerâmica vintage fosca'],
+    ['59e86de3-98de-4cc1-b73d-34c98caadebf', 'Xicara com pires e colher', 'Xícara com pires e colher'],
+  ])('%s', (id, antigo, novo) => {
+    expect(sql).toContain(`SET name = '${novo}', updated_at = NOW()\n WHERE id = '${id}' AND name = '${antigo}';`);
+  });
+
+  test('Folha de sublimação: só os dois produtos, e não reescreve o certo', () => {
+    expect(sql).toMatch(/WHERE id IN \('20afafae-898d-41b0-b9b5-1b567be00e02', '8c7f1280-dee8-47a1-9cfe-81b1d9e1dfe4'\)\s+AND name LIKE 'Folha de sublima%'\s+AND name <> 'Folha de sublimação';/);
+    expect(sql).not.toContain('�');
+  });
+
+  test('359: higiene dos cancelados antigos depois do trigger', () => {
+    const m359 = fonte('migrations/359_pedido_studio_cancelado.sql');
+    expect(m359.indexOf('CREATE TRIGGER trg_digital_orders_cancelamento'))
+      .toBeLessThan(m359.indexOf("SET studio_production_status = 'cancelled'"));
   });
 });

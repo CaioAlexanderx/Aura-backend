@@ -50,12 +50,10 @@ const SQL_KPIS_DO_HUB = `
 // ─── Alerta de pedido atrasado (LJ-34, QA final 28/09/2026) ──
 // "Pedido 00001 atrasado · há 24 dias" nao dizia que o atraso era o Pix,
 // nem por que o cancelamento automatico de 72 h nao o pegou. O motivo e
-// a MESMA leitura do job (situacaoDoPixVencido): no 00001, a producao ja
-// tinha andado (arte aprovada sem o Pix) — excecao do job por decisao do
-// PO, que nao desfaz o que a lojista combinou com a cliente. Agora o
-// alerta diz isso e leva ao pedido, onde ha "Cancelar pedido".
+// a MESMA leitura do job (situacaoDoPixVencido) e o alerta leva ao pedido.
+// A excecao "a producao ja andou" (o caso do 00001) deixou de existir em
+// 28/09/2026 (decisao do Caio): sem pagamento na janela, o job cancela.
 const POR_QUE_NAO_CANCELOU = {
-  producao:    'não cancela sozinho porque a produção já andou. Cobre a cliente ou cancele o pedido.',
   ja_paguei:   'a cliente disse que pagou. Confira o extrato e confirme ou recuse o pagamento.',
   comprovante: 'a cliente mandou comprovante. Confira e confirme ou recuse o pagamento.',
   sinal:       'não cancela sozinho porque você registrou o sinal. Cobre o restante ou cancele o pedido.',
