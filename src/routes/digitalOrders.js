@@ -105,7 +105,12 @@ router.get('/:oid', async (req, res) => {
 // PATCH /:oid/status — Avança status do pedido (admin)
 router.patch('/:oid/status', requireRole('client', 'analyst', 'admin'), async (req, res) => {
   const { id: cid, oid } = req.params;
-  const { status } = req.body;
+  const { status, reason } = req.body || {};
+  // QA final 28/09/2026: "Cancelar pedido" do painel Studio manda o motivo,
+  // que a vitrine mostra a cliente (cancel_reason, migration 359).
+  const motivoDoCancelamento = status === 'cancelled' && reason != null && String(reason).trim()
+    ? String(reason).trim().substring(0, 200)
+    : null;
 
   const ALLOWED = ['confirmed', 'preparing', 'ready', 'delivered', 'cancelled'];
   if (!ALLOWED.includes(status)) {
@@ -144,10 +149,12 @@ router.patch('/:oid/status', requireRole('client', 'analyst', 'admin'), async (r
         confirmed_at = CASE WHEN $1 = 'confirmed' AND confirmed_at IS NULL THEN NOW() ELSE confirmed_at END,
         delivered_at = CASE WHEN $1 = 'delivered' AND delivered_at IS NULL THEN NOW() ELSE delivered_at END,
         cancelled_at = CASE WHEN $1 = 'cancelled' AND cancelled_at IS NULL THEN NOW() ELSE cancelled_at END,
+        cancel_kind  = CASE WHEN $1 = 'cancelled' THEN 'cancelado_pela_loja' ELSE cancel_kind END,
+        cancel_reason = CASE WHEN $1 = 'cancelled' THEN $4 ELSE cancel_reason END,
         updated_at   = NOW()
       WHERE id = $2 AND company_id = $3
       RETURNING *
-    `, [status, oid, cid]);
+    `, [status, oid, cid, motivoDoCancelamento]);
 
     res.json({ order: updated[0], updated: true });
 
@@ -273,17 +280,25 @@ router.post('/:oid/reject-payment', requireRole('client', 'analyst', 'admin'), a
     // O status entra no WHERE: se o pedido mudou entre a leitura e aqui
     // (o webhook confirmou o Pix, a lojista aprovou em outra aba), nada e
     // cancelado por engano.
+    //
+    // QA final 28/09/2026 (LJ-33/CL-46): tipo e motivo em colunas proprias
+    // (migration 359) — a vitrine mostra a cliente "A loja nao confirmou o
+    // seu Pix" com o motivo, em vez do texto do Pix vencido. A etapa da
+    // producao (studio_production_status) vira 'cancelled' pelo trigger
+    // da mesma migration, em qualquer caminho de cancelamento.
     const { rows: updated } = await db.query(`
       UPDATE digital_orders SET
         status = 'cancelled',
         payment_status = 'cancelled',
         cancelled_at = NOW(),
+        cancel_kind = 'pagamento_recusado',
+        cancel_reason = $4,
         notes = COALESCE(notes, '') || $1,
         updated_at = NOW()
       WHERE id = $2 AND company_id = $3
         AND status IN ('pending_payment', 'awaiting_approval')
       RETURNING *
-    `, [noteSuffix, oid, cid]);
+    `, [noteSuffix, oid, cid, texto || null]);
     if (!updated.length) {
       return res.status(409).json({
         error: 'O pedido mudou enquanto você recusava o pagamento. Atualize a página e confira a situação.',

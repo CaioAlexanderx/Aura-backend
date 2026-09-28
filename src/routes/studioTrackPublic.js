@@ -34,6 +34,7 @@ const { ETAPAS, etapaDoStatus } = require('../services/etapasDoPedido');
 // (o mesmo que a confirmacao do pedido mostra pelo mesmo token).
 const { vitrineDaEmpresa, montarMarca } = require('../services/marcaDaLoja');
 const { resumoDaPersonalizacao } = require('../services/confirmacaoDoPedido');
+const { cancelamentoDoPedido } = require('../services/cancelamentoDoPedido');
 
 const primeiroNome = (nome) => String(nome || '').trim().split(/\s+/)[0] || 'você';
 
@@ -54,6 +55,11 @@ async function pedidoDaVitrine(token) {
       `SELECT o.id, o.order_number, o.company_id, o.created_at, o.total, o.status,
               o.studio_production_status, o.customer_name, o.delivery_type,
               o.courier_name,
+              -- QA final 28/09/2026 (LJ-33/CL-46): por que cancelou. As notas
+              -- so servem ao motivo da recusa de pedido antigo e nao saem.
+              o.payment_status, o.notes,
+              to_jsonb(o)->>'cancel_kind'   AS cancel_kind,
+              to_jsonb(o)->>'cancel_reason' AS cancel_reason,
               COALESCE(co.trade_name, co.legal_name) AS loja,
               (SELECT json_agg(json_build_object(
                         'nome', i.product_name, 'qtd', i.quantity,
@@ -378,7 +384,11 @@ function respostaDoPedidoDaVitrine(o, extras = {}) {
   const { vitrine = null, aprovacao = null } = extras;
   const marca = montarMarca(vitrine);
   if (String(o.status || '').toLowerCase() === 'cancelled') {
-    return { cancelado: true, loja: o.loja, cliente: primeiroNome(o.customer_name), pedido, marca };
+    return {
+      cancelado: true, loja: o.loja, cliente: primeiroNome(o.customer_name), pedido, marca,
+      // Tipo e motivo escrito pela loja (services/cancelamentoDoPedido).
+      cancelamento: cancelamentoDoPedido(o),
+    };
   }
   const tipoDeEntrega = o.delivery_type || 'pickup';
   const retira = tipoDeEntrega === 'pickup' || tipoDeEntrega === 'courier';

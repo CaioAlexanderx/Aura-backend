@@ -446,7 +446,7 @@ describe('5 e 7 · detalhe do pedido Studio: nota, entrega e Pix vencido', () =>
   });
 
   describe('pix_cancelamento: a mesma regra do job', () => {
-    const { situacaoDoPixVencido, PRAZO_HORAS_STUDIO, PRAZO_HORAS, STUDIO_PARADO, sqlDoCancelamento } =
+    const { situacaoDoPixVencido, PRAZO_HORAS_STUDIO, PRAZO_HORAS, STUDIO_PARADO, CORTE_DA_REGRA_NOVA, sqlDoCancelamento } =
       require('../src/jobs/lojaPixExpiradoJob');
     const pix = (extra) => ({ ...base({ status: 'pending_payment', created_at: horasAtras(24 * 24) }), ...extra });
 
@@ -455,7 +455,10 @@ describe('5 e 7 · detalhe do pedido Studio: nota, entrega e Pix vencido', () =>
       ['"Ja paguei"', { status: 'awaiting_approval' }, { vencido: true, motivo: 'ja_paguei' }],
       ['comprovante anexado', { payment_proof_url: 'https://r2/x.png' }, { vencido: true, motivo: 'comprovante' }],
       ['sinal registrado', { deposit_paid: true }, { vencido: true, motivo: 'sinal' }],
-      ['arte aprovada (o 00001 do QA)', { studio_production_status: 'approved' }, { vencido: true, motivo: 'producao' }],
+      // Pedidos daqui sao de ANTES do corte da regra nova (28/09): a
+      // producao andando ainda segura. O pedido novo esta em pedidoStudioCancelado.
+      ['arte aprovada (o 00001 do QA, anterior ao corte)', { studio_production_status: 'approved' }, { vencido: true, motivo: 'producao' }],
+      ['em producao sem Pix, anterior ao corte', { studio_production_status: 'in_production' }, { vencido: true, motivo: 'producao' }],
       ['producao parada', { studio_production_status: 'pending_art' }, { vencido: true, motivo: null }],
       ['dentro do prazo', { created_at: horasAtras(PRAZO_HORAS_STUDIO - 1) }, { vencido: false, motivo: null }],
       ['ja pago', { payment_status: 'confirmed' }, { vencido: false, motivo: null }],
@@ -483,6 +486,7 @@ describe('5 e 7 · detalhe do pedido Studio: nota, entrega e Pix vencido', () =>
       expect(sql).toContain(`INTERVAL '${PRAZO_HORAS} hours'`);
       expect(sql).toContain(`INTERVAL '${PRAZO_HORAS_STUDIO} hours'`);
       for (const s of STUDIO_PARADO) expect(sql).toContain(`'${s}'`);
+      expect(sql).toContain(`created_at >= TIMESTAMPTZ '${CORTE_DA_REGRA_NOVA}'`);
     });
   });
 
@@ -505,7 +509,7 @@ describe('5 e 7 · detalhe do pedido Studio: nota, entrega e Pix vencido', () =>
         customer_cpf_cnpj: '529.982.247-25', request_nfce: true, delivery_type: 'pickup',
         retirada_endereco: LOJA.pickup_address, courier_a_informar: false,
         shipping_fee: 0, pix_discount: 9.48, payment_method: 'pix', payment_status: 'pending',
-        pix_cancelamento: { vencido: true, motivo: 'producao' },
+        pix_cancelamento: { vencido: true, motivo: 'producao' }, // pedido anterior ao corte da regra nova
       });
     });
 
@@ -588,7 +592,8 @@ describe('8 · alerta do hub com o numero do pedido', () => {
 
   test('"Pedido 00001 atrasado", com order_number e order_id', async () => {
     banco([
-      [/FROM digital_orders\s+WHERE company_id = \$1 AND vertical = 'studio'/, [
+      // Rodada 3 (28/09): a consulta ganhou o alias `d` e as colunas do Pix (LJ-34).
+      [/FROM digital_orders d\s+WHERE d\.company_id = \$1 AND d\.vertical = 'studio'/, [
         { id: 'baa22b9d-0000-4000-8000-000000000001', order_number: '00001', customer_name: 'Marina', created_at: new Date(Date.now() - 23 * 86400000).toISOString() },
         { id: 'cdf9501f-0000-4000-8000-000000000002', order_number: null, customer_name: null, created_at: new Date(Date.now() - 5 * 86400000).toISOString() },
       ]],
@@ -598,9 +603,9 @@ describe('8 · alerta do hub com o numero do pedido', () => {
     const atrasados = r.body.alerts.filter((a) => a.kind === 'overdue');
     expect(atrasados[0]).toMatchObject({ title: 'Pedido 00001 atrasado', order_number: '00001', order_id: 'baa22b9d-0000-4000-8000-000000000001' });
     expect(atrasados[1]).toMatchObject({ title: 'Pedido #CDF9501F atrasado', order_number: null });
-    const [sql] = chamada(/FROM digital_orders\s+WHERE company_id = \$1 AND vertical = 'studio'/);
+    const [sql] = chamada(/FROM digital_orders d\s+WHERE d\.company_id = \$1 AND d\.vertical = 'studio'/);
     expect(sql).toMatch(/order_number/);
-    expect(sql).toMatch(/COALESCE\(status, ''\) <> 'cancelled'/);
+    expect(sql).toMatch(/COALESCE\(d\.status, ''\) <> 'cancelled'/);
   });
 });
 

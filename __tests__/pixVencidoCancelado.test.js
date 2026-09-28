@@ -69,11 +69,14 @@ describe('filtro do cancelamento', () => {
     expect(sql).toMatch(/COALESCE\(vertical, 'retail'\) <> 'studio'\s+AND created_at < NOW\(\) - INTERVAL '48 hours'/);
   });
 
-  test('Studio: 72 h, e so enquanto a producao nao andou', () => {
+  test('Studio: 72 h; pedido novo cancela com a producao andando, o anterior ao corte nao', () => {
     expect(PRAZO_HORAS_STUDIO).toBe(72);
-    expect(sql).toMatch(/vertical = 'studio'\s+AND created_at < NOW\(\) - INTERVAL '72 hours'\s+AND COALESCE\(studio_production_status, 'pending_art'\) IN \('pending_art', 'awaiting_customization'\)/);
     // Sinal registrado no painel ("Sinal e saldo") conta como pago: nao cancela.
-    expect(sql).toMatch(/IN \('pending_art', 'awaiting_customization'\)\s+AND COALESCE\(deposit_paid, false\) = false\)/);
+    expect(sql).toMatch(/vertical = 'studio'\s+AND created_at < NOW\(\) - INTERVAL '72 hours'\s+AND COALESCE\(deposit_paid, false\) = false/);
+    // Decisao do Caio (28/09): corte fixo; antes dele, a regra antiga.
+    expect(sql).toMatch(/AND \(created_at >= TIMESTAMPTZ '2026-09-29T00:00:00-03:00'\s+OR COALESCE\(studio_production_status, 'pending_art'\) IN \('pending_art', 'awaiting_customization'\)\)\)/);
+    // O tipo do cancelamento para a vitrine (migration 359).
+    expect(sql).toMatch(/cancel_kind\s+= 'pix_expirado'/);
     // A nota diz o prazo certo de cada um.
     expect(sql).toMatch(/CASE WHEN vertical = 'studio' THEN \$3 ELSE \$2 END/);
     expect(params[1]).toContain('48 h');
