@@ -39,9 +39,17 @@ const VALID_POSITIONS   = ['center', 'left', 'right'];
 // copo, onde a arte da a volta e nao e nem frente nem verso. Espelha
 // has_back em tudo: area propria, cobranca opcional e side nos fields.
 const VALID_SIDES       = ['front', 'back', 'middle'];
+// Tecnica de impressao do produto (28/09/2026): a vitrine le para orientar
+// a arte da cliente na peca. Opcional — ausente/null = nao informada, o
+// comportamento de antes. O PUT grava o objeto inteiro, e a vitrine
+// devolve o customization_config inteiro: a chave flui sem mais nada.
+const VALID_TECNICAS    = ['sublimacao', 'dtf', 'outra'];
 
 function validateCustomizationConfig(cfg) {
   if (!cfg || typeof cfg !== 'object') return 'config obrigatório';
+  if (cfg.tecnica !== undefined && cfg.tecnica !== null && !VALID_TECNICAS.includes(cfg.tecnica)) {
+    return 'tecnica inválida: use sublimacao, dtf ou outra';
+  }
   if (!cfg.print_area || typeof cfg.print_area !== 'object') return 'print_area obrigatório';
   const pa = cfg.print_area;
   if (typeof pa.width_cm !== 'number' || pa.width_cm <= 0) return 'print_area.width_cm inválido';
@@ -1037,3 +1045,4 @@ router.post('/products/:pid/suggest-templates', async function(req, res) {
 });
 
 module.exports = router;
+module.exports.__validateCustomizationConfig = validateCustomizationConfig;

@@ -23,6 +23,8 @@
 // ============================================================
 'use strict';
 
+const { sanitizarAjustesDaArte, SUFIXOS_DE_AJUSTE } = require('./ajusteDaArte');
+
 // Tipos que guardam a ARTE como endereco (upload ou modelo da galeria).
 const TIPOS_DE_ARTE = new Set(['image', 'template']);
 
@@ -81,15 +83,22 @@ const HEX = /^#[0-9a-f]{3}([0-9a-f]{3})?$/i;
  * Os valores de personalizacao de uma linha, filtrados pelo configurador
  * atual do produto.
  *
- * Alem dos campos, duas chaves laterais que o app grava:
+ * Alem dos campos, as chaves laterais que o app grava:
  *   - `<campo>_cor`: a cor da letra de um campo de texto;
- *   - `art_service_brief`: o briefing do "criem a arte pra mim".
+ *   - `art_service_brief`: o briefing do "criem a arte pra mim";
+ *   - `<campo>_ajuste`, `_fonte`, `_tam`, `_contorno`: onde a arte foi
+ *     posta na peca e como o texto foi escrito (services/ajusteDaArte.js).
+ *     Voltam so quando o campo volta, e limpas contra o configurador de
+ *     HOJE (uma fonte que a loja tirou da lista nao volta).
  */
 function personalizacaoDaLinha(config, customization) {
   const v = customization && typeof customization === 'object' ? customization : {};
   const campos = config && Array.isArray(config.fields) ? config.fields : [];
   const valores = {};
   let temServicoDeArte = false;
+  // Uma vez so, contra o configurador atual: devolve so as chaves validas.
+  const ajustes = sanitizarAjustesDaArte(v, config) || {};
+  const idsDosCampos = new Set(campos.filter(Boolean).map((c) => c.id));
   for (const campo of campos) {
     if (!campo || !campo.id) continue;
     const ok = valorDoCampo(campo, v[campo.id]);
@@ -97,6 +106,14 @@ function personalizacaoDaLinha(config, customization) {
     if (campo.type === 'text') {
       const cor = v[campo.id + '_cor'];
       if (typeof cor === 'string' && HEX.test(cor.trim())) valores[campo.id + '_cor'] = cor.trim();
+    }
+    if (ok !== undefined) {
+      for (const sufixo of SUFIXOS_DE_AJUSTE) {
+        const chave = campo.id + sufixo;
+        // Um campo chamado "<outro>_fonte" e campo, nao chave lateral.
+        if (idsDosCampos.has(chave)) continue;
+        if (ajustes[chave] !== undefined) valores[chave] = ajustes[chave];
+      }
     }
     if (campo.type === 'option' && campo.config && campo.config.is_art_service === true) temServicoDeArte = true;
   }

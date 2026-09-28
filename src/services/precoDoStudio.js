@@ -219,10 +219,15 @@ function precoDaLinha({ produto, faixas, quantidade, customization }) {
  * da loja; `validar(cfg, customization)` e a validacao de campos
  * obrigatorios da rota (injetada para este modulo nao depender dela).
  *
+ * `sanear(customization, cfg)` (opcional) devolve o customization limpo
+ * — hoje, services/ajusteDaArte.js tirando ajuste da arte malformado. A
+ * linha devolvida leva o customization JA LIMPO: e ele que o pedido grava.
+ * Sanear nunca recusa item; so validar recusa.
+ *
  * Devolve `{ erro, indice }` no primeiro item recusado — com a MESMA
  * mensagem que o pedido sempre deu — ou `{ linhas, subtotal }`.
  */
-function cotarItens({ items, produtos, faixas, validar }) {
+function cotarItens({ items, produtos, faixas, validar, sanear }) {
   const linhas = [];
   let subtotal = 0;
   for (let indice = 0; indice < items.length; indice++) {
@@ -237,17 +242,19 @@ function cotarItens({ items, produtos, faixas, validar }) {
     const qty = parseInt(item.quantity) || 1;
     if (qty < 1) return { erro: `Quantidade invalida para "${p.name}"`, indice };
 
-    const valErr = validar ? validar(p.customization_config, item.customization) : null;
+    const customization = sanear ? sanear(item.customization, p.customization_config) : item.customization;
+
+    const valErr = validar ? validar(p.customization_config, customization) : null;
     if (valErr) return { erro: `Personalizacao de "${p.name}": ${valErr}`, indice };
 
     const preco = precoDaLinha({
       produto: p,
       faixas: faixasDoProduto(faixas, p.id),
       quantidade: qty,
-      customization: item.customization,
+      customization,
     });
     subtotal += preco.total;
-    linhas.push({ indice, produto: p, quantidade: qty, customization: item.customization || null, preco });
+    linhas.push({ indice, produto: p, quantidade: qty, customization: customization || null, preco });
   }
   return { linhas, subtotal };
 }
