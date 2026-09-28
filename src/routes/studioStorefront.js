@@ -1503,7 +1503,14 @@ function sqlDoPedidoPorToken(comColunasNovas) {
                  o.subtotal, o.delivery_fee, o.total, o.delivery_type,
                  o.address_neighborhood, o.address_city,
                  o.studio_production_status,
-                 o.asaas_payment_id, o.asaas_pix_qrcode, o.asaas_pix_payload, o.asaas_pix_expires_at
+                 o.asaas_payment_id, o.asaas_pix_qrcode, o.asaas_pix_payload, o.asaas_pix_expires_at,
+                 -- QA final 28/09/2026 (LJ-33/CL-46): tipo e motivo do
+                 -- cancelamento (migration 359; to_jsonb nao quebra sem ela).
+                 -- As notas so servem para o motivo da recusa de pedido
+                 -- antigo; nao saem na resposta (confirmacaoDoPedido).
+                 o.notes,
+                 to_jsonb(o)->>'cancel_kind'   AS cancel_kind,
+                 to_jsonb(o)->>'cancel_reason' AS cancel_reason
                  ${comColunasNovas ? ', o.discount_amount, o.courier_name, o.payment_proof_url' : ''}
             FROM digital_orders o
            WHERE o.public_token = $1 AND o.company_id = $2 AND o.vertical = 'studio'

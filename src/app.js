@@ -126,6 +126,15 @@ app.use(cors({
   maxAge:         600,
 }));
 
+// Upload de mockup do Studio (QA final 28/09/2026, LJ-36): a rota aceita
+// arquivo de até 15 MB (studioUpload.js, MAX_SIZE_MB), que em base64 no
+// JSON passa de 20 MB — mas o parser global abaixo corta em 5 MB. O PNG do
+// motor visual (2048 px) passava disso: o body-parser só responde 413
+// DEPOIS de ler o corpo inteiro, e o painel desistia antes, aos 30 s, com
+// "Não recebemos resposta a tempo". Parser próprio só para esta rota; o
+// global vê req._body e não lê de novo.
+app.use('/api/v1/companies/:id/studio/upload-mockup', express.json({ limit: '21mb' }));
+
 // verify preserva o corpo cru (req.rawBody) — necessário para validar a
 // assinatura HMAC de webhooks (ex.: X-Hub-Signature-256 do WhatsApp/Meta),
 // que é calculada sobre os BYTES exatos do payload, não sobre o JSON reparseado.

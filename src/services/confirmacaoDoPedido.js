@@ -24,6 +24,7 @@
 const { etapaDoStatus, etapasComEstado } = require('./etapasDoPedido');
 const { ehCampoDeServicoDeArte, prazoDaSacola, r2 } = require('./precoDoStudio');
 const { politicaDeRevisoes } = require('./politicaDeRevisoes');
+const { cancelamentoDoPedido } = require('./cancelamentoDoPedido');
 
 // Horas ate o Pix pendente do Studio cancelar sozinho (decisao do PO,
 // 25/09/2026). Quem cancela e o job; a tela so repete o prazo dele.
@@ -192,6 +193,11 @@ function montarConfirmacao({ pedido, itens, loja, studioSettings, faixas, acompa
     pix,
     cartao,
     comprovante_enviado: !!o.payment_proof_url,
+    // QA final 28/09/2026 (LJ-33/CL-46): por que cancelou — Pix vencido,
+    // pagamento recusado pela loja ou cancelado pela loja — e o motivo que
+    // a LOJA escreveu. null quando o pedido nao esta cancelado. Nada das
+    // notas alem do motivo da loja sai daqui.
+    cancelamento: cancelamentoDoPedido(o),
     etapas: etapasComEstado(atual),
     prazo_dias_uteis: prazoDaSacola(
       ss.default_sla_days,
