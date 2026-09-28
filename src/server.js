@@ -146,6 +146,12 @@ function startServer() {
     // switch MATCON_QUOTE_EXPIRY_ENABLED=false.
     const { initMatconQuoteExpiryJob } = require('./jobs/matconQuoteExpiryJob');
     initMatconQuoteExpiryJob();
+
+    // Studio (361): o vídeo do orçamento em vídeo 3D fica guardado 30 dias
+    // (prorrogável). Diário 03h10 BRT e uma vez ~2 min após o boot. Kill
+    // switch STUDIO_QUOTE_VIDEO_EXPIRY_ENABLED=false.
+    const { initOrcamentoVideoExpiryJob } = require('./jobs/orcamentoVideoExpiryJob');
+    initOrcamentoVideoExpiryJob();
   });
 }
 

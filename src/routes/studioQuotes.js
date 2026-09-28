@@ -9,6 +9,7 @@
 // DELETE /studio/quotes/:qid                  → {deleted:true} (só draft)
 // POST   /studio/quotes/:qid/send             → StudioQuoteCreated {quote_url, wa_me_link}
 // POST   /studio/quotes/:qid/convert          → {order_id, quote} (idempotente)
+// POST   /studio/quotes/:qid/aprovar          → {order_id, quote} (a lojista aprova; vídeo 3D, 28/09/2026)
 //
 // M2 (30/05/2026): convert auto-cria marco de sinal em studio_payments
 // quando deposit_amount > 0 (fecha o loop orçamento→sinal sem passo manual).
@@ -23,6 +24,7 @@ const express = require('express');
 const router  = express.Router({ mergeParams: true });
 const crypto  = require('crypto');
 const db      = require('../config/database');
+const { notasDoPedidoAprovado } = require('../services/orcamentoEmVideo');
 
 // ─── helpers ────────────────────────────────────────────────
 
@@ -63,7 +65,8 @@ router.get('/quotes', async function(req, res) {
               status, token, subtotal, discount, total, estimated_cost,
               validity_days, expires_at, sent_at, responded_at, response_note,
               order_id, deposit_pct, deposit_amount, notes, created_by,
-              created_at, updated_at
+              created_at, updated_at,
+              (video_key IS NOT NULL) AS tem_video, video_expira_em, canal_envio
          FROM studio_quotes
         WHERE ${where}
         ORDER BY created_at DESC
@@ -408,9 +411,78 @@ router.post('/quotes/:qid/send', async function(req, res) {
   }
 });
 
+// ─── Pedido a partir do orçamento ────────────────────────────
+// Usado pelo convert (orçamento aceito pelo cliente na página pública) e
+// pelo aprovar (a lojista aprova no painel depois da conversa no WhatsApp,
+// orçamento em vídeo 3D, 28/09/2026). Roda dentro da transação de quem chama.
+// M2: auto-cria marco de sinal em studio_payments se deposit_amount > 0.
+async function criarPedidoDoOrcamento(client, { quote, items, cid, userId, notas }) {
+  const ordRes = await client.query(
+    `INSERT INTO digital_orders
+       (company_id, vertical, status, studio_production_status,
+        customer_name, customer_phone,
+        total_amount, deposit_required, deposit_paid,
+        notes, created_by)
+     VALUES ($1, 'studio', 'pending', 'pending_art',
+             $2, $3, $4, $5, false, $6, $7)
+     RETURNING id`,
+    [
+      cid,
+      quote.customer_name || null,
+      quote.customer_phone || null,
+      parseFloat(quote.total) || 0,
+      quote.deposit_amount != null ? parseFloat(quote.deposit_amount) : null,
+      notas !== undefined ? notas : (quote.notes || null),
+      userId || null,
+    ]
+  );
+  const orderId = ordRes.rows[0].id;
+
+  // Cria itens do pedido
+  for (const it of items) {
+    await client.query(
+      `INSERT INTO digital_order_items
+         (order_id, product_id, product_name, quantity, unit_price, customization)
+       VALUES ($1, $2, $3, $4, $5, $6)`,
+      [
+        orderId,
+        it.product_id || null,
+        String(it.description),
+        parseFloat(it.quantity),
+        parseFloat(it.unit_price),
+        it.customization || null,
+      ]
+    );
+  }
+
+  // M2: Auto-cria marco de sinal quando deposit_amount estava definido.
+  // Fecha o loop orçamento → sinal sem passo manual depois da conversão.
+  // try/catch isolado: não trava a conversão se studio_payments não existir.
+  if (quote.deposit_amount && parseFloat(quote.deposit_amount) > 0) {
+    try {
+      await client.query(
+        `INSERT INTO studio_payments (company_id, order_id, kind, amount, status)
+         VALUES ($1, $2, 'deposit', $3, 'pending')`,
+        [cid, orderId, parseFloat(quote.deposit_amount)]
+      );
+    } catch (payErr) {
+      console.warn('[studio/quotes][payment-auto-create]', payErr.message, payErr.code);
+    }
+  }
+
+  return orderId;
+}
+
+async function itensDoOrcamento(qid) {
+  const iRes = await db.query(
+    `SELECT * FROM studio_quote_items WHERE quote_id = $1 ORDER BY sort_order, created_at`,
+    [qid]
+  );
+  return iRes.rows;
+}
+
 // ─── POST /quotes/:qid/convert ───────────────────────────────
 // Cria digital_order vertical='studio' + itens. Idempotente.
-// M2: auto-cria marco de sinal em studio_payments se deposit_amount > 0.
 router.post('/quotes/:qid/convert', async function(req, res) {
   const cid = req.params.id;
   const qid = req.params.qid;
@@ -434,69 +506,15 @@ router.post('/quotes/:qid/convert', async function(req, res) {
       });
     }
 
-    const iRes = await db.query(
-      `SELECT * FROM studio_quote_items WHERE quote_id = $1 ORDER BY sort_order, created_at`,
-      [qid]
-    );
-    const items = iRes.rows;
+    const items = await itensDoOrcamento(qid);
 
     const client = await db.connect();
     try {
       await client.query('BEGIN');
 
-      // Cria digital_order
-      const ordRes = await client.query(
-        `INSERT INTO digital_orders
-           (company_id, vertical, status, studio_production_status,
-            customer_name, customer_phone,
-            total_amount, deposit_required, deposit_paid,
-            notes, created_by)
-         VALUES ($1, 'studio', 'pending', 'pending_art',
-                 $2, $3, $4, $5, false, $6, $7)
-         RETURNING id`,
-        [
-          cid,
-          quote.customer_name || null,
-          quote.customer_phone || null,
-          parseFloat(quote.total) || 0,
-          quote.deposit_amount != null ? parseFloat(quote.deposit_amount) : null,
-          quote.notes || null,
-          req.user?.id || null,
-        ]
-      );
-      const orderId = ordRes.rows[0].id;
-
-      // Cria itens do pedido
-      for (const it of items) {
-        await client.query(
-          `INSERT INTO digital_order_items
-             (order_id, product_id, product_name, quantity, unit_price, customization)
-           VALUES ($1, $2, $3, $4, $5, $6)`,
-          [
-            orderId,
-            it.product_id || null,
-            String(it.description),
-            parseFloat(it.quantity),
-            parseFloat(it.unit_price),
-            it.customization || null,
-          ]
-        );
-      }
-
-      // M2: Auto-cria marco de sinal quando deposit_amount estava definido.
-      // Fecha o loop orçamento → sinal sem passo manual depois da conversão.
-      // try/catch isolado: não trava a conversão se studio_payments não existir.
-      if (quote.deposit_amount && parseFloat(quote.deposit_amount) > 0) {
-        try {
-          await client.query(
-            `INSERT INTO studio_payments (company_id, order_id, kind, amount, status)
-             VALUES ($1, $2, 'deposit', $3, 'pending')`,
-            [cid, orderId, parseFloat(quote.deposit_amount)]
-          );
-        } catch (payErr) {
-          console.warn('[studio/quotes/convert][payment-auto-create]', payErr.message, payErr.code);
-        }
-      }
+      const orderId = await criarPedidoDoOrcamento(client, {
+        quote, items, cid, userId: req.user?.id,
+      });
 
       // Marca orçamento como convertido
       const updRes = await client.query(
@@ -520,6 +538,69 @@ router.post('/quotes/:qid/convert', async function(req, res) {
   } catch (err) {
     console.error('[studio/quotes/:qid/convert]', err.message);
     res.status(500).json({ error: 'Erro ao converter orçamento em pedido' });
+  }
+});
+
+// ─── POST /quotes/:qid/aprovar ───────────────────────────────
+// Orçamento em vídeo 3D (28/09/2026): a conversa é no WhatsApp da lojista,
+// não há página pública. Quando o cliente topa, ELA aprova no painel: o
+// orçamento vira pedido e entra na esteira da Produção com os itens, a
+// arte (customization), os valores e as condições combinadas (nas notas).
+// Aceita rascunho, enviado ou aceito. Idempotente.
+router.post('/quotes/:qid/aprovar', async function(req, res) {
+  const cid = req.params.id;
+  const qid = req.params.qid;
+
+  try {
+    const qRes = await db.query(
+      `SELECT * FROM studio_quotes WHERE id = $1 AND company_id = $2 LIMIT 1`,
+      [qid, cid]
+    );
+    if (!qRes.rows.length) return res.status(404).json({ error: 'Orçamento não encontrado' });
+    const quote = qRes.rows[0];
+
+    if (quote.order_id) {
+      return res.json({ order_id: quote.order_id, quote });
+    }
+    if (!['draft', 'sent', 'accepted'].includes(quote.status)) {
+      return res.status(400).json({ error: `Não é possível aprovar orçamento com status '${quote.status}'` });
+    }
+
+    const items = await itensDoOrcamento(qid);
+    if (!items.length) return res.status(400).json({ error: 'Orçamento sem itens' });
+
+    const client = await db.connect();
+    try {
+      await client.query('BEGIN');
+
+      const orderId = await criarPedidoDoOrcamento(client, {
+        quote, items, cid, userId: req.user?.id,
+        notas: notasDoPedidoAprovado(quote),
+      });
+
+      const updRes = await client.query(
+        `UPDATE studio_quotes
+            SET status        = 'converted',
+                order_id      = $1,
+                responded_at  = COALESCE(responded_at, NOW()),
+                response_note = COALESCE(response_note, 'Aprovado pela loja'),
+                updated_at    = NOW()
+          WHERE id = $2 AND company_id = $3
+          RETURNING *`,
+        [orderId, qid, cid]
+      );
+
+      await client.query('COMMIT');
+      res.json({ order_id: orderId, quote: updRes.rows[0] });
+    } catch (err) {
+      await client.query('ROLLBACK');
+      throw err;
+    } finally {
+      client.release();
+    }
+  } catch (err) {
+    console.error('[studio/quotes/:qid/aprovar]', err.message);
+    res.status(500).json({ error: 'Erro ao aprovar o orçamento' });
   }
 });
 

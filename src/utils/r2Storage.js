@@ -131,6 +131,31 @@ async function deleteFromR2(key) {
   }
 }
 
+// Download file from R2 as a Buffer (null when missing or R2 not configured).
+// 28/09/2026: o vídeo do orçamento em vídeo 3D volta ao painel por rota
+// autenticada, sem URL pública nem assinada saindo para fora.
+async function downloadFromR2(key) {
+  var client = getS3Client();
+  if (!client) return null;
+
+  try {
+    var GetObjectCommand = require('@aws-sdk/client-s3').GetObjectCommand;
+    var result = await client.send(new GetObjectCommand({ Bucket: R2_BUCKET, Key: key }));
+    var body = result.Body;
+    if (!body) return null;
+    if (typeof body.transformToByteArray === 'function') {
+      return Buffer.from(await body.transformToByteArray());
+    }
+    var chunks = [];
+    for await (var chunk of body) chunks.push(Buffer.from(chunk));
+    return Buffer.concat(chunks);
+  } catch (err) {
+    if (err && (err.name === 'NoSuchKey' || err.$metadata?.httpStatusCode === 404)) return null;
+    console.error('[R2] Download failed:', err.message);
+    return null;
+  }
+}
+
 // List files by prefix
 async function listR2Files(prefix, maxKeys) {
   var client = getS3Client();
@@ -176,6 +201,7 @@ module.exports = {
   uploadToR2: uploadToR2,
   getSignedUrl: getSignedUrl,
   deleteFromR2: deleteFromR2,
+  downloadFromR2: downloadFromR2,
   listR2Files: listR2Files,
   listExpiredFiles: listExpiredFiles,
   getRetentionCutoffDate: getRetentionCutoffDate,

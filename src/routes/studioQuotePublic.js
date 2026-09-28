@@ -220,7 +220,11 @@ router.get('/:token', async function(req, res) {
 
     // Verificar expiração: se status ainda é 'sent' mas já venceu → retornar 'expired'
     const expired = q.expires_at && new Date(q.expires_at) < new Date();
-    const status  = expired && q.status === 'sent' ? 'expired' : q.status;
+    // 361 (28/09/2026): 'closed' é a loja encerrando sem venda. A página
+    // pública só conhece os status de sempre; para o cliente, é um
+    // orçamento que não vale mais ("peça à loja um novo").
+    const status  = q.status === 'closed' ? 'expired'
+                  : expired && q.status === 'sent' ? 'expired' : q.status;
 
     // WhatsApp: só dígitos, pra montar wa.me no front
     const waDigits = String(q.dc_whatsapp || q.dc_phone || '').replace(/\D/g, '') || null;
