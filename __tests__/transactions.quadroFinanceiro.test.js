@@ -69,17 +69,20 @@ describe('utils/quadroFinanceiro', () => {
     const q = quadro.montarQuadro({
       tipo: 'income', hoje: '2026-09-28', mes: '2026-09',
       cartoes: [
-        { coluna: 'atrasado', qtd_coluna: '1', total_coluna: '97.50', id: 'a', description: 'Parcela', category: 'Vendas', amount: '97.50', status: 'pending', comp: '2026-08-30', due_date: '2026-08-30', idempotency_key: null },
-        { coluna: 'feito', qtd_coluna: '1', total_coluna: '250', id: 'f', description: 'Aluguel vitrine', category: 'Outros', amount: '250', status: 'confirmed', comp: '2026-09-05', due_date: '2026-09-05', paid_at: '2026-09-05T03:00:00Z', idempotency_key: 'digital-order-x' },
+        { coluna: 'atrasado', qtd_coluna: '1', total_coluna: '97.50', id: 'a', description: 'Parcela', category: 'Vendas', amount: '97.50', status: 'pending', employee_id: null, comp: '2026-08-30', due_date: '2026-08-30', idempotency_key: null },
+        { coluna: 'feito', qtd_coluna: '1', total_coluna: '250', id: 'f', description: 'Aluguel vitrine', category: 'Outros', amount: '250', status: 'confirmed', comp: '2026-09-05', due_date: '2026-09-05', paid_at: '2026-09-05T03:00:00Z', idempotency_key: 'digital-order-x', employee_id: 'emp-1' },
       ],
       grupos: [{ dia: '2026-09-27', origem: 'caixa', qtd: '9', total: '1284.70' }],
     });
     expect(q.columns.atrasado).toMatchObject({ count: 1, total: 97.5 });
     expect(q.columns.atrasado.items[0]).toMatchObject({ id: 'a', date: '2026-08-30', movable: true, amount: 97.5 });
+    // O modal "Editar lancamento" compara o funcionario com o de antes: sem o id, salvar apagaria o vinculo.
+    expect(q.columns.atrasado.items[0]).toHaveProperty('employee_id', null);
     expect(q.columns.aberto).toMatchObject({ count: 0, total: 0, items: [] });
     expect(q.columns.feito.count).toBe(10);
     expect(q.columns.feito.total).toBe(1534.7);
     expect(q.columns.feito.items[0].movable).toBe(false);
+    expect(q.columns.feito.items[0].employee_id).toBe('emp-1');
     expect(q.columns.feito.grupos).toEqual([{ date: '2026-09-27', origem: 'caixa', count: 9, total: 1284.7 }]);
   });
 });
