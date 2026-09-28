@@ -33,10 +33,6 @@ const db      = require('../config/database');
 const collectionNotice = require('../services/credit/collectionNotice');
 const creditLedger     = require('../services/creditLedger');
 const pagamentoDoPedido = require('../services/pagamentoDoPedidoStudio');
-// QA final 28/09/2026 (LJ-33): pedido cancelado e etapa 'cancelled' tambem
-// na leitura — o cancelamento so mudava `status`, e o quadro lia a etapa.
-const { sqlDaEtapa, etapaDaProducao } = require('../services/cancelamentoDoPedido');
-const ETAPA_DO_PEDIDO = sqlDaEtapa('o');
 
 // ═══════════════════════════════════════════════════════
 // FASE 4: KDS de Produção (atualizado 25/05 — KDS unificado + S-2.5)
@@ -489,7 +485,7 @@ router.get('/orders', async function(req, res) {
     let where = `o.company_id = $1`;
     if (statusFilter) {
       params.push(statusFilter);
-      where += ` AND ${ETAPA_DO_PEDIDO} = $${params.length}`;
+      where += ` AND o.studio_production_status = $${params.length}`;
     }
     where += ` AND o.created_at >= NOW() - INTERVAL '${safeDays} days'`;
     // Aba "A receber": so o que tem saldo em aberto. Sem a tabela de parcelas
@@ -502,7 +498,7 @@ router.get('/orders', async function(req, res) {
 
     const r = await db.query(
       `SELECT o.id, o.created_at, o.total_amount, o.status,
-              ${ETAPA_DO_PEDIDO} AS studio_production_status,
+              o.studio_production_status,
               o.customer_name, o.customer_phone,
               o.display_name,
               o.source,
@@ -629,14 +625,14 @@ ${withBalance ? BALANCE_COLS : ''}
     let where = `o.company_id = $1`;
     if (statusFilter) {
       params.push(statusFilter);
-      where += ` AND ${ETAPA_DO_PEDIDO} = $${params.length}`;
+      where += ` AND o.studio_production_status = $${params.length}`;
     }
     where += ` AND o.created_at >= NOW() - INTERVAL '${safeDays} days'`;
     params.push(safeLimit);
 
     const r = await db.query(
       `SELECT o.id, o.created_at, o.total_amount, o.status,
-              ${ETAPA_DO_PEDIDO} AS studio_production_status,
+              o.studio_production_status,
               o.customer_name, o.customer_phone,
               o.source
          FROM studio_orders o
@@ -672,14 +668,14 @@ ${withBalance ? BALANCE_COLS : ''}
     let where = `company_id = $1 AND vertical = 'studio'`;
     if (statusFilter) {
       params.push(statusFilter);
-      where += ` AND ${sqlDaEtapa('')} = $${params.length}`;
+      where += ` AND studio_production_status = $${params.length}`;
     }
     where += ` AND created_at >= NOW() - INTERVAL '${safeDays} days'`;
     params.push(safeLimit);
 
     const r = await db.query(
       `SELECT id, created_at, total_amount, status,
-              ${sqlDaEtapa('')} AS studio_production_status,
+              studio_production_status,
               customer_name, customer_phone
          FROM digital_orders
         WHERE ${where}
@@ -721,8 +717,7 @@ router.get('/orders/:oid', async function(req, res) {
       [req.params.oid, req.params.id]
     );
     if (!headRes.rows.length) return res.status(404).json({ error: 'Pedido não encontrado' });
-    // LJ-33: pedido cancelado aparece "Cancelado" no selo, sem acoes de producao.
-    const head = { ...headRes.rows[0], studio_production_status: etapaDaProducao(headRes.rows[0]) };
+    const head = headRes.rows[0];
 
     let items = [];
     if (head.source === 'digital') {
@@ -810,28 +805,6 @@ router.get('/orders/:oid', async function(req, res) {
   }
 });
 
-/**
- * Por que a etapa deste pedido nao pode mudar para `destino` (null = pode).
- * So pedido da loja online (source 'digital'): PDV e marketplace seguem
- * como sempre.
- */
-function motivoParaNaoMudarEtapa(head, destino) {
-  if (!head || head.source !== 'digital') return null;
-  if (String(head.status || '') === 'cancelled') {
-    return {
-      codigo: 'order_cancelled',
-      mensagem: 'Este pedido foi cancelado e não volta para a produção. Se a cliente ainda quiser a peça, ela faz um pedido novo.',
-    };
-  }
-  if (destino === 'cancelled') {
-    return {
-      codigo: 'use_cancel_order',
-      mensagem: 'Para cancelar um pedido da loja online, abra o pedido e use "Cancelar pedido". Assim a cliente é avisada.',
-    };
-  }
-  return null;
-}
-
 // ─── PATCH /orders/:oid/production-status — source-aware update ───
 router.patch('/orders/:oid/production-status', async function(req, res) {
   const { status, force } = req.body;
@@ -840,7 +813,7 @@ router.patch('/orders/:oid/production-status', async function(req, res) {
   }
   try {
     const headRes = await db.query(
-      `SELECT source, status, digital_order_id, pdv_sale_id, marketplace_order_id, customization_collected_at
+      `SELECT source, digital_order_id, pdv_sale_id, marketplace_order_id, customization_collected_at
          FROM studio_orders
         WHERE id = $1 AND company_id = $2
         LIMIT 1`,
@@ -848,15 +821,6 @@ router.patch('/orders/:oid/production-status', async function(req, res) {
     );
     if (!headRes.rows.length) return res.status(404).json({ error: 'Pedido não encontrado' });
     const head = headRes.rows[0];
-
-    // QA final 28/09/2026 (LJ-33): o pedido da loja online tem o status do
-    // PEDIDO alem da etapa. Mexer so na etapa deixava os dois dizendo coisas
-    // diferentes: arrastar para "Cancelados" nao cancelava o pedido (a
-    // cliente seguia com o Pix na tela), e arrastar um cancelado de volta o
-    // devolvia a fila. Cancelar e pela rota do pedido ("Cancelar pedido"),
-    // que avisa a cliente e grava o motivo.
-    const bloqueio = motivoParaNaoMudarEtapa(head, status);
-    if (bloqueio) return res.status(409).json({ error: bloqueio.mensagem, code: bloqueio.codigo });
 
     // ── P1 — Gate de produção configurável (Camada 1, 30/05/2026) ─────────
     // Opt-in por loja: require_deposit_for_production em studio_settings.
@@ -1135,4 +1099,3 @@ router.post('/approval/:approvalId/cancel', async function(req, res) {
 });
 
 module.exports = router;
-module.exports._motivoParaNaoMudarEtapa = motivoParaNaoMudarEtapa;

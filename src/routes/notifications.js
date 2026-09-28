@@ -64,7 +64,6 @@
 const router = require('express').Router({ mergeParams: true });
 const db     = require('../config/database');
 const lojaEvents = require('../services/lojaEvents');
-const eventoResolvido = require('../services/eventoResolvido');
 
 // Corte entre as duas famílias de linha em app_notifications. ESCAPE '/'
 // em vez de barra invertida: o '_' de 'loja_' é curinga em LIKE e o
@@ -242,10 +241,6 @@ router.get('/', async (req, res) => {
           created_at:   e.created_at,
         };
       });
-      // QA final 28/09/2026 (LJ-29): aviso que o pedido ja resolveu (pagamento
-      // a conferir de pedido recusado, cancelamento feito pela propria
-      // lojista) sai de "Precisa de voce". Leitura; falha devolve igual.
-      events = await eventoResolvido.comEstadoDoPedido(db, cid, events);
     } catch (err) {
       // Último degrau: nem sem entidade nem sem vertical a query passou
       // (banco anterior à 285, sem dedupe_key). O feed antigo continua
