@@ -136,6 +136,59 @@ const CARD_IMAGE_COL = `
                   ORDER BY doi3.id LIMIT 1)
               ) AS card_image_url,`;
 
+// Origem da capa e personalizacao do item (27/09/2026). Em prod ha 0 renders
+// e 1 mockup: a capa e quase sempre a foto do catalogo, que traz a ARTE DE
+// EXEMPLO do produto -- nao a personalizacao da cliente. O app usa
+// card_image_source para saber que aquilo nao e a arte dela e, nesse caso,
+// desenha a previa a partir de card_customization.
+//
+// As duas flags repetem as condicoes dos degraus 1 e 2 de CARD_IMAGE_COL (com
+// o mesmo cast ::text do render digital, pelo mesmo motivo) em vez de ler o
+// alias card_image_url, que nao existe dentro do mesmo SELECT. Ficam depois de
+// card_image_url para nao entrar no recorte do COALESCE da cascata.
+const CARD_SOURCE_COLS = `
+              EXISTS (SELECT 1 FROM studio_approval_links a
+                       WHERE a.order_id = o.digital_order_id
+                         AND NULLIF(TRIM(a.mockup_url), '') IS NOT NULL) AS card_has_mockup,
+              (EXISTS (SELECT 1 FROM studio_visual_renders r
+                         JOIN sale_items si2 ON si2.id = r.sale_item_id
+                        WHERE si2.sale_id = o.pdv_sale_id
+                          AND NULLIF(TRIM(r.file_url), '') IS NOT NULL)
+               OR EXISTS (SELECT 1 FROM studio_visual_renders r
+                            JOIN digital_order_items doi2 ON doi2.id::text = r.digital_order_item_id::text
+                           WHERE doi2.order_id = o.digital_order_id
+                             AND NULLIF(TRIM(r.file_url), '') IS NOT NULL)) AS card_has_render,`;
+
+// Primeiro item (menor id) com personalizacao em objeto JSON, junto com a
+// configuracao do produto -- o suficiente para o app desenhar a previa.
+// Marketplace nao tem item aqui e fica null.
+const CARD_CUSTOMIZATION_COL = `
+              COALESCE(
+                (SELECT jsonb_build_object('values', si4.customization, 'config', p.customization_config)
+                   FROM sale_items si4 JOIN products p ON p.id = si4.product_id
+                  WHERE si4.sale_id = o.pdv_sale_id AND jsonb_typeof(si4.customization) = 'object'
+                  ORDER BY si4.id LIMIT 1),
+                (SELECT jsonb_build_object('values', doi4.customization, 'config', p.customization_config)
+                   FROM digital_order_items doi4 JOIN products p ON p.id = doi4.product_id
+                  WHERE doi4.order_id = o.digital_order_id AND jsonb_typeof(doi4.customization) = 'object'
+                  ORDER BY doi4.id LIMIT 1)
+              ) AS card_customization,`;
+
+// De que degrau da cascata saiu card_image_url. As flags sao internas e nao
+// vao na resposta; linha sem elas (consulta suplementar) so pode ser foto.
+function fonteDaCapa(row) {
+  const { card_has_mockup, card_has_render, ...rest } = row;
+  let source = null;
+  if (card_has_mockup) source = 'mockup';
+  else if (card_has_render) source = 'render';
+  else if (row.card_image_url && String(row.card_image_url).trim()) source = 'product';
+  return {
+    ...rest,
+    card_image_source: source,
+    card_customization: row.card_customization ?? null,
+  };
+}
+
 // promised_date nasce na migration 285 — separado da imagem porque, sem a
 // coluna, o subselect derrubaria a query RICA inteira pro fallback slim
 // (perdendo item_count, aprovacoes e a propria imagem). Com o guard, o campo
@@ -154,8 +207,10 @@ const NULL_BALANCE = {
 
 // K1: mesmo contrato dos campos de saldo — shape estavel nos fallbacks.
 const NULL_CARD = {
-  card_image_url: null,
-  promised_date:  null,
+  card_image_url:     null,
+  card_image_source:  null,
+  card_customization: null,
+  promised_date:      null,
 };
 
 // Deploy parcial: se credit_installments nao existir, o LATERAL derrubaria a
@@ -448,6 +503,8 @@ router.get('/orders', async function(req, res) {
               o.display_name,
               o.source,
 ${CARD_IMAGE_COL}
+${CARD_SOURCE_COLS}
+${CARD_CUSTOMIZATION_COL}
 ${withPromised ? PROMISED_COL : ''}
 ${withBalance ? BALANCE_COLS : ''}
               o.digital_order_id,
@@ -514,6 +571,7 @@ ${withBalance ? BALANCE_COLS : ''}
                   WHERE si3.sale_id = s.id
                     AND NULLIF(TRIM(p.image_url), '') IS NOT NULL
                   ORDER BY si3.id LIMIT 1) AS card_image_url,
+                NULL::jsonb AS card_customization,
                 ${withPromised ? 's.promised_date' : 'NULL::date'} AS promised_date,
                 bal.installment_id AS balance_installment_id,
                 bal.amount         AS balance_amount,
@@ -546,6 +604,8 @@ ${withBalance ? BALANCE_COLS : ''}
       orders.sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
       orders = orders.slice(0, safeLimit);
     }
+
+    orders = orders.map(fonteDaCapa);
 
     // 26/09/2026 (A1): situacao do pagamento dos pedidos da vitrine, para
     // a fila sinalizar "Pagamento a conferir". Consulta a parte: sem ela a
