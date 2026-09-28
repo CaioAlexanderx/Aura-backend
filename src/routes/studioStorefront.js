@@ -102,6 +102,9 @@ const { PRAZO_HORAS_STUDIO } = require('../jobs/lojaPixExpiradoJob');
 const { montarConfirmacao } = require('../services/confirmacaoDoPedido');
 const { politicaDeRevisoes } = require('../services/politicaDeRevisoes');
 const { montarRepeticao } = require('../services/repetirPedido');
+// Ajuste da arte na peca (posicao/escala/giro, fonte e tamanho do texto):
+// chaves laterais do customization, limpas antes de cotar e de gravar.
+const { sanitizarAjustesDaArte } = require('../services/ajusteDaArte');
 const { filtroDeFoto } = require('../services/catalogoPaginado');
 // Selo NOVO com a mesma regra da loja comum (redesign 09/2026).
 const { ehNovo } = require('../services/homeDaLoja');
@@ -995,7 +998,10 @@ router.post('/:slug/studio/order', async (req, res) => {
     // preco de venda e decisao do servidor.
     const productMap = await produtosDoCorpo(cid, items);
     const faixas = await carregarFaixas(db, cid);
-    const cot = cotarItens({ items, produtos: productMap, faixas, validar: validateCustomizationValues });
+    const cot = cotarItens({
+      items, produtos: productMap, faixas,
+      validar: validateCustomizationValues, sanear: sanitizarAjustesDaArte,
+    });
     if (cot.erro) return res.status(400).json({ error: cot.erro });
 
     const orderItems = cot.linhas.map(({ produto: p, quantidade: qty, customization, preco }) => {
@@ -1409,7 +1415,10 @@ router.post('/:slug/studio/cotacao', async (req, res) => {
 
     const productMap = await produtosDoCorpo(cid, items);
     const faixas = await carregarFaixas(db, cid);
-    const cot = cotarItens({ items, produtos: productMap, faixas, validar: validateCustomizationValues });
+    const cot = cotarItens({
+      items, produtos: productMap, faixas,
+      validar: validateCustomizationValues, sanear: sanitizarAjustesDaArte,
+    });
     if (cot.erro) return res.status(400).json({ error: cot.erro, indice: cot.indice });
 
     // Frete so quando a pessoa ja disse que quer receber em casa. Fora da

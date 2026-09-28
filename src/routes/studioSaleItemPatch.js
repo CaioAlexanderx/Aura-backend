@@ -32,6 +32,34 @@ const db      = require('../config/database');
 // Por que a peca nao aparece na vitrine Studio (QA 28/09/2026, LJ-17): a
 // regra mora ao lado de NA_VITRINE_STUDIO, que a vitrine aplica.
 const { motivoOcultoNaLoja } = require('../services/storefrontBuilder');
+// Ajuste da arte na peca (chaves laterais <campo>_ajuste/_fonte/_tam/_contorno):
+// a mesma limpeza da vitrine antes de gravar (28/09/2026).
+const { sanitizarAjustesDaArte } = require('../services/ajusteDaArte');
+
+/**
+ * O customization_config do produto de um sale_item desta empresa, ou
+ * null. Qualquer falha devolve null: sem config, o PATCH grava como
+ * sempre gravou — limpar o ajuste nunca pode impedir salvar o item.
+ */
+async function configDoItem(saleItemId, cid) {
+  try {
+    const { rows } = await db.query(
+      `SELECT p.customization_config
+         FROM sale_items si
+         JOIN sales s ON s.id = si.sale_id
+         LEFT JOIN products p ON p.id = si.product_id
+        WHERE si.id = $1
+          AND s.company_id = $2
+        LIMIT 1`,
+      [saleItemId, cid]
+    );
+    const cfg = rows && rows[0] ? rows[0].customization_config : null;
+    return cfg && typeof cfg === 'object' && Array.isArray(cfg.fields) ? cfg : null;
+  } catch (e) {
+    console.error('[studio/sale-items] config do produto indisponivel:', e.message);
+    return null;
+  }
+}
 
 // Visibility canonica (mesma de products.js)
 function listVisibilityWhere(cidParam) {
@@ -191,6 +219,11 @@ router.patch('/sale-items/:sale_item_id/customization', async (req, res) => {
   }
 
   try {
+    // Sem config do produto (item avulso, produto apagado, falha na
+    // leitura), o customization vai como veio — o comportamento de antes.
+    const cfg = await configDoItem(saleItemId, cid);
+    const limpo = cfg ? sanitizarAjustesDaArte(customization, cfg) : customization;
+
     // Garante escopo da empresa: sale_item -> sale -> company_id == cid
     const { rows } = await db.query(
       `UPDATE sale_items si
@@ -200,7 +233,7 @@ router.patch('/sale-items/:sale_item_id/customization', async (req, res) => {
           AND si.sale_id = s.id
           AND s.company_id = $3
         RETURNING si.id, si.sale_id, si.product_id, si.customization`,
-      [JSON.stringify(customization), saleItemId, cid]
+      [JSON.stringify(limpo), saleItemId, cid]
     );
 
     if (!rows.length) {
