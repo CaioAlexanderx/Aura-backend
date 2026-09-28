@@ -36,16 +36,44 @@ const { HOSTS_DOS_RASTREADORES, metatagsDeSeo } = require('./rastreadores');
 /** Onde o app Expo esta publicado de verdade. */
 const HOST_DO_APP = process.env.STUDIO_APP_ORIGIN || 'https://app.getaura.com.br';
 
-/**
- * Por quanto tempo a casca fica em memoria.
- *
- * Curto de proposito: e o unico caminho pelo qual um deploy do app chega
- * a quem abre a loja. Dez minutos e o atraso maximo entre publicar o app
- * e a loja servir a versao nova.
- */
-const VALIDADE_MS = 10 * 60 * 1000;
+// ── O INCIDENTE DE 28/09/2026 ──────────────────────────────────────────
+// A casca guardada aponta para `entry-<hash>.js`. Cada deploy do app troca
+// o hash e APAGA o arquivo antigo da Cloudflare; o caminho velho passa a
+// responder 200 com a pagina de fallback do app (text/html, 2,8 KB). Com
+// a casca guardada por 10 minutos, toda loja Studio abria em branco
+// depois de todo deploy do app — sem erro visivel. A Sheid Mania ficou
+// fora do ar assim. Tres camadas agora:
+//
+//   1. antes de confiar na casca, confere que o entry ainda e JavaScript
+//      (HEAD no app, resultado guardado por VALIDACAO_MS);
+//   2. cache curto (VALIDADE_MS) com stale-while-revalidate: a casca
+//      guardada sai na hora e a nova e buscada em segundo plano;
+//   3. a pagina se cura sozinha: se o entry falhar no navegador, ela
+//      recarrega UMA vez com `?_casca=`, e o servidor busca a casca de
+//      novo ignorando o cache (no maximo uma vez a cada
+//      INTERVALO_FORCADA_MS, contra abuso).
 
-let _cache = null; // { html, expiraEm }
+/**
+ * Idade a partir da qual a casca guardada e atualizada em segundo plano.
+ * Quem pede nesse momento ainda recebe a guardada: custo zero por
+ * requisicao, e o deploy do app chega em ~1 minuto.
+ */
+const VALIDADE_MS = 60 * 1000;
+
+/** Por quanto tempo vale a conferencia de que o entry e JavaScript. */
+const VALIDACAO_MS = 30 * 1000;
+
+/** Intervalo minimo entre duas buscas forcadas por `?_casca=`. */
+const INTERVALO_FORCADA_MS = 10 * 1000;
+
+/** O caminho que identifica o bundle principal do Expo. */
+const CAMINHO_DO_ENTRY = '/_expo/static/js/web/entry-';
+
+// { html, entry, buscadaEm, validadaEm }
+let _cache = null;
+let _atualizando = null;  // a busca em segundo plano em andamento
+let _validando = null;    // a conferencia do entry em andamento
+let _ultimaForcada = 0;
 
 /** Empresa em modo Studio? O mesmo interruptor que o painel usa. */
 function ehLojaStudio(company) {
@@ -83,12 +111,45 @@ function recadoParaOApp(slug) {
   return `<script>window.__AURA_VITRINE__={slug:${seguro},base:"/"};</script>`;
 }
 
-/** Busca a casca do app, com cache curto. Lanca se o app estiver fora. */
-async function buscarCasca() {
-  if (_cache && _cache.expiraEm > Date.now()) return _cache.html;
+/** O caminho do `entry-<hash>.js` que a casca carrega, ou null. */
+function entryDaCasca(html) {
+  const m = /(?:src|href)="(\/_expo\/static\/js\/web\/entry-[^"?#]+\.js)[^"]*"/.exec(String(html || ''));
+  return m ? m[1] : null;
+}
 
+/**
+ * O entry ainda existe no app como JavaScript?
+ *
+ * 'js' | 'nao-js' | 'erro'. 'nao-js' e o caso do incidente: o arquivo
+ * sumiu e a Cloudflare responde 200 com a pagina de fallback (text/html).
+ * 'erro' e nao conseguir perguntar (timeout, rede) — nao prova que a
+ * casca esta quebrada, entao quem chama nao a descarta por isso.
+ */
+async function conferirEntry(caminho) {
+  const url = HOST_DO_APP + caminho;
+  try {
+    let r = await fetch(url, { method: 'HEAD', signal: AbortSignal.timeout(3000) });
+    if (r.status === 405 || r.status === 501) {
+      // Host que nao aceita HEAD: um byte so, com range.
+      r = await fetch(url, { headers: { Range: 'bytes=0-0' }, signal: AbortSignal.timeout(3000) });
+      if (r.body && typeof r.body.cancel === 'function') r.body.cancel().catch(() => {});
+    }
+    if (!r.ok) return 'nao-js';
+    const tipo = String((r.headers && r.headers.get('content-type')) || '');
+    return /javascript|ecmascript/i.test(tipo) ? 'js' : 'nao-js';
+  } catch (err) {
+    console.warn('[vitrineStudio] nao deu para conferir o entry:', err.message);
+    return 'erro';
+  }
+}
+
+/**
+ * Busca a casca no app e confere o entry dela. Lanca se o app estiver
+ * fora, se a casca vier sem bundle ou se o bundle dela nao for JS.
+ */
+async function buscarCascaNova() {
   const r = await fetch(HOST_DO_APP + '/', {
-    headers: { Accept: 'text/html' },
+    headers: { Accept: 'text/html', 'Cache-Control': 'no-cache' },
     signal: AbortSignal.timeout(8000),
   });
   if (!r.ok) throw new Error('app respondeu ' + r.status);
@@ -98,8 +159,120 @@ async function buscarCasca() {
   // loja comum, do que servir uma pagina em branco.
   if (!/_expo\/static\/js/.test(html)) throw new Error('casca do app sem bundle');
 
-  _cache = { html, expiraEm: Date.now() + VALIDADE_MS };
-  return html;
+  const entry = entryDaCasca(html);
+  const agora = Date.now();
+  if (entry) {
+    const estado = await conferirEntry(entry);
+    if (estado === 'nao-js') throw new Error('entry da casca nova nao e JavaScript: ' + entry);
+  }
+  return { html, entry, buscadaEm: agora, validadaEm: agora };
+}
+
+/**
+ * Troca a casca guardada por uma nova. Se a busca falhar e houver uma
+ * guardada, fica com ela (melhor que nada) e registra no log.
+ */
+async function renovarCasca(motivo) {
+  try {
+    _cache = await buscarCascaNova();
+    return _cache.html;
+  } catch (err) {
+    if (!_cache) throw err;
+    console.warn(`[vitrineStudio] casca nova indisponivel (${motivo}); servindo a guardada:`, err.message);
+    return _cache.html;
+  }
+}
+
+/** Atualizacao em segundo plano, uma de cada vez. Nunca rejeita. */
+function atualizarEmSegundoPlano() {
+  if (_atualizando) return _atualizando;
+  _atualizando = renovarCasca('stale-while-revalidate')
+    .catch((err) => { console.warn('[vitrineStudio] atualizacao da casca falhou:', err.message); })
+    .finally(() => { _atualizando = null; });
+  return _atualizando;
+}
+
+/**
+ * Confere o entry da casca guardada (no maximo uma vez a cada
+ * VALIDACAO_MS, e uma conferencia por vez). Entry que deixou de ser JS
+ * derruba o cache e a casca e buscada de novo na hora.
+ */
+async function validarCascaGuardada() {
+  if (_validando) return _validando;
+  const guardada = _cache;
+  _validando = (async () => {
+    if (!guardada.entry) { guardada.validadaEm = Date.now(); return; }
+    const estado = await conferirEntry(guardada.entry);
+    guardada.validadaEm = Date.now();
+    if (estado !== 'nao-js') return;
+    console.warn('[vitrineStudio] entry da casca guardada sumiu do app:', guardada.entry);
+    await renovarCasca('entry antigo');
+  })().finally(() => { _validando = null; });
+  return _validando;
+}
+
+/**
+ * A casca do app. Lanca so quando nao ha casca nenhuma para servir.
+ *
+ * `forcar` (a pagina pedindo socorro com `?_casca=`): busca de novo
+ * ignorando o cache, no maximo uma vez a cada INTERVALO_FORCADA_MS para
+ * o parametro nao virar um jeito de martelar o app. Dentro do intervalo,
+ * segue o caminho normal — que ja pega a casca que a forcada anterior
+ * trouxe.
+ */
+async function buscarCasca({ forcar = false } = {}) {
+  const agora = Date.now();
+  if (forcar && agora - _ultimaForcada >= INTERVALO_FORCADA_MS) {
+    _ultimaForcada = agora;
+    return renovarCasca('forcada pela pagina');
+  }
+
+  if (!_cache) return renovarCasca('sem casca guardada');
+
+  if (agora - _cache.validadaEm >= VALIDACAO_MS) await validarCascaGuardada();
+
+  if (Date.now() - _cache.buscadaEm >= VALIDADE_MS) atualizarEmSegundoPlano();
+  return _cache.html;
+}
+
+/**
+ * A autocura no navegador (camada 3).
+ *
+ * Se o entry nao carregar — o arquivo sumiu, a Cloudflare devolveu HTML
+ * e o `nosniff` barrou, ou ele nem chegou a rodar — a pagina recarrega
+ * UMA vez com `?_casca=<agora>`, e o servidor busca a casca nova. O
+ * `sessionStorage` impede o laco: se falhar de novo, fica como esta.
+ * Carregou bem, a marca sai, para o proximo deploy poder se curar
+ * tambem. Sem sessionStorage (aba anonima antiga), nao recarrega: sem
+ * trava, nao ha como garantir que nao entra em laco.
+ *
+ * Os sinais: o `error` do proprio <script> (capturado no window, porque
+ * erro de recurso nao borbulha); um `error` global cujo `filename` e o
+ * entry, antes de o bundle subir; e, no `load`, o `__r` do Metro ausente
+ * — o entry define `__r` na primeira linha, entao sem ele o bundle nao
+ * rodou (erro cross-origin chega sem `filename`, este e o sinal que
+ * sobra).
+ *
+ * O `_casca` sai da barra de endereco antes do bundle rodar, para o
+ * roteador do app nunca ve-lo. Cabe na CSP da vitrine: script inline, e
+ * `'unsafe-inline'` ja esta em script-src.
+ */
+function scriptDeAutocura() {
+  const entry = JSON.stringify(CAMINHO_DO_ENTRY);
+  return '<script>(function(){'
+    + "var K='aura_casca_recarregada',E=" + entry + ',foi=false;'
+    + "try{var u=new URL(location.href);if(u.searchParams.has('_casca')){u.searchParams.delete('_casca');"
+    + "history.replaceState(history.state,'',u.pathname+u.search+u.hash);}}catch(e){}"
+    + 'function subiu(){return typeof window.__r==="function";}'
+    + 'function falhou(){if(foi)return;foi=true;'
+    + 'try{if(sessionStorage.getItem(K))return;sessionStorage.setItem(K,String(Date.now()));}catch(e){return;}'
+    + "var n=new URL(location.href);n.searchParams.set('_casca',String(Date.now()));location.replace(n.href);}"
+    + "window.addEventListener('error',function(ev){var t=ev&&ev.target;"
+    + "if(t&&t.tagName==='SCRIPT'){if(String(t.src||'').indexOf(E)!==-1)falhou();return;}"
+    + "if(!subiu()&&String((ev&&ev.filename)||'').indexOf(E)!==-1)falhou();},true);"
+    + "window.addEventListener('load',function(){if(!subiu()){falhou();return;}"
+    + 'try{sessionStorage.removeItem(K);}catch(e){}});'
+    + '})();</script>';
 }
 
 // ── A PREVIA DO LINK (BE-1, 25/09/2026) ────────────────────────────────
@@ -222,10 +395,10 @@ function comCabecalhoDaLoja(casca, cabecalho) {
  * COPIA da casca, nunca na guardada em `_cache` — senao a proxima loja
  * (ou a proxima peca) sairia com o titulo desta.
  */
-async function montarVitrineStudio(slug, cabecalho = '') {
+async function montarVitrineStudio(slug, cabecalho = '', { forcarCasca = false } = {}) {
   try {
-    const casca = comCabecalhoDaLoja(apontarParaOApp(await buscarCasca()), cabecalho);
-    return casca.replace('</head>', () => recadoParaOApp(slug) + '</head>');
+    const casca = comCabecalhoDaLoja(apontarParaOApp(await buscarCasca({ forcar: forcarCasca })), cabecalho);
+    return casca.replace('</head>', () => recadoParaOApp(slug) + scriptDeAutocura() + '</head>');
   } catch (err) {
     console.warn('[vitrineStudio] casca indisponivel:', err.message);
     return null;
@@ -276,8 +449,13 @@ function cspDaVitrineStudio(baseDaApi) {
   ].join('; ');
 }
 
-/** So para teste: esquece a casca guardada. */
-function limparCache() { _cache = null; }
+/** So para teste: esquece a casca guardada e o limite da busca forcada. */
+function limparCache() {
+  _cache = null; _atualizando = null; _validando = null; _ultimaForcada = 0;
+}
+
+/** So para teste: espera a atualizacao em segundo plano terminar. */
+function _esperarAtualizacao() { return _atualizando || Promise.resolve(); }
 
 module.exports = {
   HOST_DO_APP,
@@ -289,5 +467,8 @@ module.exports = {
   THREE_DO_JSDELIVR,
   // Previa do link (BE-1, 25/09/2026).
   metatagsDaVitrineStudio, comCabecalhoDaLoja, precoEmReais, textoCurto, fotoDaPeca,
-  limparCache,
+  // Casca sem bundle velho (incidente de 28/09/2026).
+  buscarCasca, entryDaCasca, conferirEntry, scriptDeAutocura,
+  VALIDADE_MS, VALIDACAO_MS, INTERVALO_FORCADA_MS, CAMINHO_DO_ENTRY,
+  limparCache, _esperarAtualizacao,
 };
