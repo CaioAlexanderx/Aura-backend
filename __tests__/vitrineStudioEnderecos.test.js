@@ -142,10 +142,10 @@ describe('as paginas da vitrine nova na loja Studio', () => {
     expect((await naLoja('/sheid-mania')).text).not.toContain('noindex');
   });
 
-  test('loja inexistente: a mesma pagina de "Loja nao encontrada"', async () => {
+  test('loja inexistente: a mesma pagina de "Nao achamos essa loja"', async () => {
     const r = await naLoja('/nao-existe/sacola');
     expect(r.status).toBe(404);
-    expect(r.text).toContain('Loja não encontrada');
+    expect(r.text).toContain('<title>Não achamos essa loja</title>');
   });
 });
 

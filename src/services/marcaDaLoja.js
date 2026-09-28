@@ -66,9 +66,13 @@ function montarMarca(row) {
   };
 }
 
-const SQL_DA_MARCA = `
+// `pickup_address` (migration 120) entra para o acompanhamento mostrar o
+// endereco de RETIRADA, e nao o do negocio (QA 26/09/2026). Base sem a
+// coluna: a consulta cai para a versao sem ela, uma vez por processo, em
+// vez de a pagina perder a marca inteira.
+const sqlDaMarca = (comRetirada) => `
   SELECT dcc.slug, dcc.site_name, dcc.logo_url, dcc.primary_color, dcc.font_family,
-         dcc.whatsapp, dcc.phone, dcc.address, dcc.is_published,
+         dcc.whatsapp, dcc.phone, dcc.address,${comRetirada ? ' dcc.pickup_address,' : ''} dcc.is_published,
          dcc.custom_domain, dcc.custom_domain_status,
          COALESCE(c.trade_name, c.legal_name) AS company_display_name,
          COALESCE(c.studio_settings, '{}'::jsonb) AS studio_settings
@@ -76,6 +80,8 @@ const SQL_DA_MARCA = `
     JOIN companies c ON c.id = dcc.company_id
    WHERE dcc.company_id = $1
    LIMIT 1`;
+const SQL_DA_MARCA = sqlDaMarca(true);
+let _semPickupAddress = false;
 
 /**
  * A linha da vitrine de uma empresa, ou null. Best-effort de proposito:
@@ -86,7 +92,14 @@ const SQL_DA_MARCA = `
 async function vitrineDaEmpresa(companyId) {
   if (!companyId) return null;
   try {
-    const { rows } = await db.query(SQL_DA_MARCA, [companyId]);
+    let rows;
+    try {
+      ({ rows } = await db.query(sqlDaMarca(!_semPickupAddress), [companyId]));
+    } catch (e) {
+      if (e.code !== '42703' || _semPickupAddress) throw e;
+      _semPickupAddress = true;
+      ({ rows } = await db.query(sqlDaMarca(false), [companyId]));
+    }
     return rows[0] || null;
   } catch (e) {
     if (e.code !== '42703' && e.code !== '42P01') {

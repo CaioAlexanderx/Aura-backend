@@ -253,13 +253,29 @@ function cotarItens({ items, produtos, faixas, validar }) {
 }
 
 /**
- * Desconto do Pix — a MESMA conta da loja comum (storefront.js): o
- * percentual e da loja, incide so sobre o subtotal (frete fora) e so
- * quando a forma de pagamento e Pix.
+ * Desconto do Pix: o percentual e da loja, incide so sobre o subtotal
+ * (frete fora) e so quando a forma de pagamento e Pix.
+ *
+ * A conta, combinada com o app (QA 26/09/2026), arredonda o PRECO NO PIX,
+ * em centavos inteiros, e o desconto e o que sobra:
+ *
+ *   precoCentavos    = Math.round(preco * 100)
+ *   precoPixCentavos = Math.round(precoCentavos * (100 - pct) / 100)
+ *   desconto         = precoCentavos - precoPixCentavos
+ *
+ * Antes arredondava o DESCONTO (Math.round(subtotal * pct) / 100, a conta
+ * de storefront.js). As duas so divergem no meio centavo: R$ 49,90 a 5%
+ * dava R$ 47,40 aqui e R$ 47,41 na vitrine. A loja comum continua com a
+ * conta antiga: o cartao dela (templates/storefront/parts/card.js) mostra
+ * o preco no Pix com a regra dela, e mudar so o pedido a faria cobrar um
+ * valor diferente do anunciado.
  */
 function descontoDoPix(subtotal, pixPct) {
   const pct = Number(pixPct) || 0;
-  return pct > 0 ? Math.round(subtotal * pct) / 100 : 0;
+  if (!(pct > 0)) return 0;
+  const centavos = Math.round((Number(subtotal) || 0) * 100);
+  const noPix = Math.round(centavos * (100 - pct) / 100);
+  return (centavos - noPix) / 100;
 }
 
 function totaisDoPedido({ subtotal, pixPct, formaDePagamento, frete }) {

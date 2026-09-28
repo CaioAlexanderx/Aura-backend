@@ -401,9 +401,11 @@ function respostaDoPedidoDaVitrine(o, extras = {}) {
     // troca "Pronto para retirar" por "Entregue" com isto.
     entregue:  o.studio_production_status === 'delivered',
     aprovacao,
-    // Onde retirar: o endereco DA LOJA (publico no rodape da vitrine),
-    // nunca o da cliente.
-    retirada_endereco: retira && vitrine && vitrine.address ? String(vitrine.address) : null,
+    // Onde retirar: o endereco de retirada da aba Entrega e, sem ele, o
+    // do negocio (publico no rodape da vitrine), nunca o da cliente. A
+    // mesma regra da confirmacao do pedido (QA 26/09/2026).
+    retirada_endereco: retira && vitrine && (vitrine.pickup_address || vitrine.address)
+      ? String(vitrine.pickup_address || vitrine.address) : null,
   };
 }
 

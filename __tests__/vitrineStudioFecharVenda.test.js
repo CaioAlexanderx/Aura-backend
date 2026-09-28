@@ -244,7 +244,9 @@ describe('B3 · cotacao = pedido', () => {
 
   test('sem forma de pagamento: total cheio, total_pix com o desconto da loja', async () => {
     const c = await cotar({ items: [{ product_id: 'p2', quantity: 1, customization: {} }] });
-    expect(c.body).toMatchObject({ subtotal: 39.9, desconto_pix: 2, total: 39.9, total_pix: 37.9, frete: null });
+    // 5% de R$ 39,90: o preco no Pix e arredondado em centavos (3790,5 ->
+    // 3791), a regra combinada com o app (QA 26/09/2026). Antes, R$ 37,90.
+    expect(c.body).toMatchObject({ subtotal: 39.9, desconto_pix: 1.99, total: 39.9, total_pix: 37.91, frete: null });
   });
 
   test('loja sem Pix nao anuncia desconto de Pix', async () => {
@@ -449,7 +451,8 @@ describe('B1 · POST /studio/order', () => {
     });
     expect(r.status).toBe(201);
     expect(r.body.subtotal).toBeCloseTo(57.9, 10);
-    expect(r.body.total).toBeCloseTo(57.9 - 2.9, 10); // 5% no Pix
+    // 5% no Pix: 5790 x 95 / 100 = 5500,5 -> 5501 centavos (QA 26/09/2026).
+    expect(r.body.total).toBeCloseTo(55.01, 10);
     expect(Object.keys(r.body)).toEqual(expect.arrayContaining([
       'order_id', 'order_number', 'track_url', 'total', 'delivery_fee', 'subtotal', 'status',
       'payment_method', 'shipping', 'studio_production_status', 'pix', 'card',

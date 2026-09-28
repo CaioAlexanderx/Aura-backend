@@ -301,9 +301,11 @@ describe('GET /acompanhar/:token — pedido da vitrine com a marca', () => {
   let pedido;
   let aprovacaoPendente;
   let venda;
+  let vitrineExtra;
   beforeEach(() => {
     db.query.mockReset();
     venda = null;
+    vitrineExtra = {};
     aprovacaoPendente = { token: APROV };
     pedido = {
       id: 'o1', order_number: '00123', company_id: CID, created_at: '2026-09-25T12:00:00Z', total: '129.70',
@@ -320,7 +322,7 @@ describe('GET /acompanhar/:token — pedido da vitrine com a marca', () => {
       if (/FROM sales s/.test(s)) return { rows: venda ? [venda] : [] };
       if (/FROM digital_orders o/.test(s)) return { rows: pedido && params[0] === TOKEN ? [pedido] : [] };
       if (/FROM studio_approval_links/.test(s)) return { rows: aprovacaoPendente ? [aprovacaoPendente] : [] };
-      if (/FROM digital_channel_config dcc/.test(s)) return { rows: [vitrinePadrao()] };
+      if (/FROM digital_channel_config dcc/.test(s)) return { rows: [vitrinePadrao(vitrineExtra)] };
       if (/FROM credit_installments/.test(s)) return { rows: [] };
       return { rows: [] };
     });
@@ -346,6 +348,15 @@ describe('GET /acompanhar/:token — pedido da vitrine com a marca', () => {
       resumo: ['Frente e verso', 'Nome: Mãe', 'Arte enviada'],
     }]);
     expect(JSON.stringify(r.body)).not.toMatch(/foto-da-helena|Martins/);
+  });
+
+  test('com endereco de retirada cadastrado, e ele que aparece (QA 26/09/2026)', async () => {
+    vitrineExtra = { pickup_address: 'Rua da Retirada, 90 — Centro' };
+    const r = await request(app).get(`/acompanhar/${TOKEN}`);
+    expect(r.body.retirada_endereco).toBe('Rua da Retirada, 90 — Centro');
+    // A consulta da marca traz a coluna.
+    const sql = db.query.mock.calls.map(([q]) => String(q)).find((q) => /FROM digital_channel_config dcc/.test(q));
+    expect(sql).toContain('dcc.pickup_address');
   });
 
   test('entregue e entrega em casa (sem endereco de retirada)', async () => {
