@@ -1002,6 +1002,27 @@ router.post('/:slug/order/:oid/upload-proof', async (req, res) => {
   }
 });
 
+/**
+ * "Ja paguei" sem comprovante avisa a lojista no sino (QA 28/09/2026,
+ * LJ-29/LJ-33). Com comprovante, o aviso ja saiu no upload
+ * ("Comprovante para conferir") e um segundo seria ruido. O evento e um
+ * por pedido (dedupe_key em lojaEvents). Fora do caminho da resposta: a
+ * cliente ja recebeu o "aguardando a loja".
+ */
+async function avisarPagamentoAConferir(order) {
+  let comprovante = null;
+  try {
+    const { rows } = await db.query(
+      `SELECT payment_proof_url FROM digital_orders WHERE id = $1`, [order.id]);
+    comprovante = rows[0] ? rows[0].payment_proof_url : null;
+  } catch (e) {
+    // Base sem a coluna (42703): ninguem anexou comprovante por esta base.
+    if (e.code !== '42703') throw e;
+  }
+  if (comprovante) return null;
+  return lojaEvents.emitLojaEvent('loja_pagamento_a_conferir', order);
+}
+
 router.post('/:slug/order/:oid/mark-as-paid', async (req, res) => {
   const slug = req.params.slug.toLowerCase().trim();
   const { oid } = req.params;
@@ -1032,6 +1053,8 @@ router.post('/:slug/order/:oid/mark-as-paid', async (req, res) => {
       notify.notifyStatusChange({ ...order, status: 'awaiting_approval' })
         .catch(err => console.error('[notify] status change error:', err.message));
     }
+    avisarPagamentoAConferir(order)
+      .catch(err => console.error('[storefront] aviso de pagamento a conferir:', err.message));
   } catch (err) {
     console.error('[storefront] mark-as-paid error:', err.message);
     res.status(500).json({ error: 'Erro ao marcar pedido como pago' });

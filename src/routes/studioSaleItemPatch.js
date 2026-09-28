@@ -20,6 +20,8 @@
 //              personalizáveis sem mudança).
 // 16/06/2026 - studio_storefront_visible exposto na lista pro toggle de
 //              visibilidade na Loja Virtual (configurador do produto).
+// 28/09/2026 - motivo_oculto_na_loja: por que a peca nao aparece na vitrine
+//              Studio ("Sem campos de personalização", ...), null quando aparece.
 // 03/07/2026 - visual_template_key exposto (F0 Visual Engine, migration 208):
 //              PDV Studio e configurador usam pra ligar o produto ao template
 //              visual 2D/3D mantido pela Aura.
@@ -27,6 +29,9 @@
 const express = require('express');
 const router  = express.Router({ mergeParams: true });
 const db      = require('../config/database');
+// Por que a peca nao aparece na vitrine Studio (QA 28/09/2026, LJ-17): a
+// regra mora ao lado de NA_VITRINE_STUDIO, que a vitrine aplica.
+const { motivoOcultoNaLoja } = require('../services/storefrontBuilder');
 
 // Visibility canonica (mesma de products.js)
 function listVisibilityWhere(cidParam) {
@@ -53,6 +58,14 @@ router.get('/products', async (req, res) => {
   const limit = Math.min(parseInt(req.query.limit) || 200, 500);
   const includeAll = req.query.include_non_personalizable === 'true'
                   || req.query.include_non_personalizable === '1';
+  // A loja exige foto? (migration 308) Sem a linha ou sem a coluna, nao:
+  // e o mesmo default da vitrine (filtroDeFoto).
+  let exigeFoto = false;
+  try {
+    const { rows: lojas } = await db.query(
+      `SELECT require_product_image FROM digital_channel_config WHERE company_id = $1 LIMIT 1`, [cid]);
+    exigeFoto = !!(lojas[0] && lojas[0].require_product_image === true);
+  } catch (_) { /* coluna ausente: a vitrine tambem nao exige */ }
   try {
     const params = [cid];
     let where;
@@ -102,6 +115,7 @@ router.get('/products', async (req, res) => {
         studio_storefront_visible: r.studio_storefront_visible !== false,
         visual_template_key: r.visual_template_key || null,
         stock_company_id: r.company_id,
+        motivo_oculto_na_loja: motivoOcultoNaLoja(r, { exigeFoto }),
       })),
       count: rows.length,
       include_non_personalizable: includeAll,
@@ -151,6 +165,7 @@ router.get('/products', async (req, res) => {
             studio_storefront_visible: r.studio_storefront_visible !== false,
             visual_template_key: null,
             stock_company_id: r.company_id,
+            motivo_oculto_na_loja: motivoOcultoNaLoja(r, { exigeFoto }),
           })),
           count: rows.length,
           include_non_personalizable: includeAll,

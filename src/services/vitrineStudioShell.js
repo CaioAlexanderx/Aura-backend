@@ -236,10 +236,21 @@ async function montarVitrineStudio(slug, cabecalho = '') {
  * CSP da vitrine Studio.
  *
  * Mais larga que a da loja comum porque o app carrega o proprio bundle
- * de outro dominio nosso, o three.js do cdnjs (o motor 3D da caneca) e
- * as fontes do Google. Cada entrada esta aqui por um motivo; nao ha
+ * de outro dominio nosso, o three.js do cdnjs (o motor 3D da caneca), os
+ * loaders do three no jsdelivr (a camiseta em GLB) e as fontes do Google. Cada entrada esta aqui por um motivo; nao ha
  * curinga em script-src.
  */
+/**
+ * three.js r128 no jsdelivr: GLTFLoader e DRACOLoader (a camiseta 3D) e o
+ * decoder Draco em examples/js/libs/draco/ (o .js e o .wasm chegam por
+ * fetch, dai tambem em connect-src). So o pacote e a versao que o viewer
+ * usa: o jsdelivr serve qualquer pacote do npm, e liberar o host inteiro
+ * em script-src seria abrir a porta para script de terceiros (QA 28/09).
+ * O 'wasm-unsafe-eval' e o que deixa o decoder .wasm compilar; nao libera
+ * eval de JavaScript.
+ */
+const THREE_DO_JSDELIVR = 'https://cdn.jsdelivr.net/npm/three@0.128.0/';
+
 function cspDaVitrineStudio(baseDaApi) {
   // GA4 e Pixel (04/09/2026): os hosts vem de services/rastreadores.js,
   // o mesmo lugar que decide o que injetar. Lista aqui e lista la
@@ -247,12 +258,16 @@ function cspDaVitrineStudio(baseDaApi) {
   const R = HOSTS_DOS_RASTREADORES;
   return [
     "default-src 'self'",
-    `script-src 'self' 'unsafe-inline' ${HOST_DO_APP} https://cdnjs.cloudflare.com https://static.cloudflareinsights.com ${R.script.join(' ')}`,
+    `script-src 'self' 'unsafe-inline' ${HOST_DO_APP} https://cdnjs.cloudflare.com ${THREE_DO_JSDELIVR} 'wasm-unsafe-eval' https://static.cloudflareinsights.com ${R.script.join(' ')}`,
     "script-src-attr 'unsafe-inline'",
+    // O decoder Draco roda num Worker criado de um blob: (DRACOLoader do
+    // r128). Sem worker-src, o navegador cai em script-src, que nao tem
+    // blob:, e o GLB comprimido nao abre.
+    "worker-src 'self' blob:",
     `style-src 'self' 'unsafe-inline' ${HOST_DO_APP} https://fonts.googleapis.com`,
     "img-src 'self' data: blob: https:",
     "media-src 'self' data: blob: https:",
-    `connect-src 'self' ${HOST_DO_APP} ${baseDaApi} https://cloudflareinsights.com https://viacep.com.br https://brasilapi.com.br https://r2.getaura.com.br https://*.r2.dev ${R.connect.join(' ')}`,
+    `connect-src 'self' ${HOST_DO_APP} ${baseDaApi} https://cloudflareinsights.com https://viacep.com.br https://brasilapi.com.br https://r2.getaura.com.br https://*.r2.dev ${THREE_DO_JSDELIVR} ${R.connect.join(' ')}`,
     `font-src 'self' data: ${HOST_DO_APP} https://fonts.gstatic.com`,
     "frame-ancestors *",
     "object-src 'none'",
@@ -271,6 +286,7 @@ module.exports = {
   recadoParaOApp,
   montarVitrineStudio,
   cspDaVitrineStudio,
+  THREE_DO_JSDELIVR,
   // Previa do link (BE-1, 25/09/2026).
   metatagsDaVitrineStudio, comCabecalhoDaLoja, precoEmReais, textoCurto, fotoDaPeca,
   limparCache,

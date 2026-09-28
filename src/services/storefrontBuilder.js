@@ -686,6 +686,36 @@ const NA_VITRINE_STUDIO = `is_personalizable = true
           AND studio_storefront_visible IS NOT FALSE`;
 
 /**
+ * Por que a peca NAO aparece na vitrine Studio, em portugues, para o
+ * Configurador do painel (QA 28/09/2026, LJ-17: o painel dizia 35 pecas
+ * visiveis e a loja mostrava 31 — as quatro de fora nao tinham o
+ * configurador montado, e ninguem dizia isso). `null` = aparece.
+ *
+ * E a leitura, peca a peca, das condicoes de NA_VITRINE_STUDIO acima,
+ * de `is_active IS NOT FALSE` e da regra de foto (filtroDeFoto, migration
+ * 308) que a lista da vitrine (studioStorefront.js) aplica. Mudou uma,
+ * muda a outra — as duas moram aqui, lado a lado.
+ *
+ * @param {object} p  linha de products (is_active, is_personalizable,
+ *                    customization_config, studio_storefront_visible,
+ *                    image_url, gallery_urls)
+ * @param {{ exigeFoto?: boolean }} [loja] require_product_image da loja
+ */
+function motivoOcultoNaLoja(p, { exigeFoto = false } = {}) {
+  if (!p) return null;
+  if (p.is_active === false) return 'Produto inativo';
+  if (p.is_personalizable !== true) return 'Não é personalizável';
+  if (p.studio_storefront_visible === false) return 'Oculto da loja por você';
+  if (p.customization_config == null) return 'Sem campos de personalização';
+  if (exigeFoto === true) {
+    const temCapa = String(p.image_url || '').trim() !== '';
+    const temGaleria = Array.isArray(p.gallery_urls) && p.gallery_urls.length > 0;
+    if (!temCapa && !temGaleria) return 'Sem foto (a loja exige foto)';
+  }
+  return null;
+}
+
+/**
  * O minimo de UMA peca da vitrine Studio para a previa do link (BE-1,
  * 25/09/2026): nome, descricao, preco e fotos. `null` quando a peca nao
  * existe, e de outra loja ou a vitrine nao a mostra.
@@ -1160,6 +1190,8 @@ module.exports = {
   // Previa do link na vitrine Studio (BE-1, 25/09/2026): a peca, a regra
   // de quem aparece la e o endereco publico da loja.
   pecaDaVitrineStudio, NA_VITRINE_STUDIO, urlDaLoja,
+  // Configurador (QA 28/09/2026): por que a peca nao esta na vitrine.
+  motivoOcultoNaLoja,
   // Exportado pra teste: o formato interno `#cat=/caminho` e contrato
   // com o painel (aura-app, destinoDoCta.ts).
   destinoDoCta,

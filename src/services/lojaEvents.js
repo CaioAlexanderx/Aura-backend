@@ -112,6 +112,17 @@ function corpoDoAjuste(o) {
   return partes.join(' ');
 }
 
+// "A cliente Helena disse que pagou o Pix de R$ 85,32 do pedido 00004.
+// Confira na sua conta e confirme no pedido." Voz do Studio (a cliente);
+// na loja comum, "O cliente". Número do pedido como a lojista o vê, sem #.
+function corpoDoPagamentoAConferir(o) {
+  const artigo = o.vertical === 'studio' ? 'A cliente' : 'O cliente';
+  const nome = String(o.customer_name || '').trim();
+  const quemPagou = nome ? `${artigo} ${nome}` : artigo;
+  const pedido = o.order_number ? ` do pedido ${o.order_number}` : '';
+  return `${quemPagou} disse que pagou o Pix de ${fmt(o.total)}${pedido}. Confira na sua conta e confirme no pedido.`;
+}
+
 // ── A TAXONOMIA ────────────────────────────────────────────────────────
 // severity: 'info' | 'atencao' | 'critico'
 //   info    — fecha ciclo, é bom saber, não pede nada de ninguém.
@@ -156,6 +167,20 @@ const EVENTS = Object.freeze({
     title: (o) => `Comprovante para conferir ${num(o)}`,
     body:  (o) => `${quem(o).replace(' — ', '')} enviou o comprovante de ${fmt(o.total)}. Confira e aprove o pagamento.`.trim(),
     ctaLabel: 'Conferir',
+  },
+  // QA 28/09/2026 (LJ-29/LJ-33): a cliente toca em "Já paguei" SEM anexar
+  // comprovante. O pedido vai para awaiting_approval e trava até a lojista
+  // olhar a conta — mas o sino só tinha "Pedido novo". Mesmo grupo do
+  // comprovante ('atencao' = "Precisa de você"); um por pedido (dedupe).
+  loja_pagamento_a_conferir: {
+    severity: 'atencao',
+    defaultOn: true,
+    push: true,
+    label: 'Pagamento a conferir',
+    hint: 'O cliente disse que pagou o Pix, sem comprovante. Confira na sua conta e confirme no pedido.',
+    title: (o) => `Pagamento a conferir ${num(o)}`,
+    body:  (o) => corpoDoPagamentoAConferir(o),
+    ctaLabel: 'Conferir pagamento',
   },
   loja_pix_expirado: {
     severity: 'atencao',

@@ -140,6 +140,44 @@ function sqlDoCancelamento({ comComprovante }) {
       RETURNING id, company_id, order_number, customer_name, total, vertical, created_at`;
 }
 
+/**
+ * Por que um Pix vencido NAO foi cancelado — a mesma regra do UPDATE de
+ * cima, lida de UM pedido, para o painel explicar (QA 28/09/2026, LJ-34:
+ * "Aguardando Pix ha 24 dias" sem dizer por que).
+ *
+ * Mesmas constantes (PRAZO_HORAS, PRAZO_HORAS_STUDIO, STUDIO_PARADO) e as
+ * mesmas condicoes: quem mudar o job muda aqui, no mesmo arquivo — e o
+ * teste __tests__/vitrineQaBackend2.test.js confere as duas leituras.
+ *
+ * `vencido`: Pix sem pagamento ha mais que o prazo (48 h; Studio 72 h).
+ * `motivo`: o que segura o cancelamento de um Pix vencido —
+ *   'ja_paguei'   a cliente tocou em "Ja paguei" (awaiting_approval)
+ *   'comprovante' ha comprovante anexado
+ *   'sinal'       Studio com sinal registrado no painel
+ *   'producao'    Studio com a producao ja andando (arte aprovada etc.)
+ *   null          nada segura: o job cancela na proxima volta
+ * Pedido que nao e Pix, ja pago, cancelado ou fora da espera: nao vencido.
+ *
+ * @returns {{ vencido: boolean, motivo: ('comprovante'|'ja_paguei'|'sinal'|'producao'|null) }}
+ */
+function situacaoDoPixVencido(pedido, agora = Date.now()) {
+  const nao = { vencido: false, motivo: null };
+  if (!pedido || pedido.payment_method !== 'pix') return nao;
+  const status = String(pedido.status || '');
+  if (status !== 'pending_payment' && status !== 'awaiting_approval') return nao;
+  if (['confirmed', 'paid', 'received'].includes(String(pedido.payment_status || 'pending'))) return nao;
+  const criado = new Date(pedido.created_at).getTime();
+  if (!Number.isFinite(criado)) return nao;
+  if (agora - criado <= prazoDoPedido(pedido) * 3600 * 1000) return nao;
+
+  let motivo = null;
+  if (status === 'awaiting_approval') motivo = 'ja_paguei';
+  else if (pedido.payment_proof_url) motivo = 'comprovante';
+  else if (ehStudio(pedido) && pedido.deposit_paid === true) motivo = 'sinal';
+  else if (ehStudio(pedido) && !STUDIO_PARADO.includes(pedido.studio_production_status || 'pending_art')) motivo = 'producao';
+  return { vencido: true, motivo };
+}
+
 /** @returns {Promise<{cancelados:number, avisados:number}>} */
 async function tickCancelarPixVencido({ db, lojaEvents }) {
   const resumo = { cancelados: 0, avisados: 0 };
@@ -202,6 +240,9 @@ module.exports = {
   stopPixExpiradoJob,
   tickPixExpirado,
   tickCancelarPixVencido,
+  situacaoDoPixVencido,
+  sqlDoCancelamento,
+  STUDIO_PARADO,
   PRAZO_HORAS,
   PRAZO_HORAS_STUDIO,
   BATCH,
