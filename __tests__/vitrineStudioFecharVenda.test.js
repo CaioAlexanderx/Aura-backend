@@ -538,8 +538,6 @@ describe('B2 · GET /studio/pedido/:token', () => {
       pix: { qrcode: null, copia_e_cola: '000201PIX', expira_em: '2026-09-28T14:03:00.000Z', modo: 'manual' },
       cartao: null,
       comprovante_enviado: false,
-      // Rodada 3 (28/09): por que cancelou — null enquanto nao cancelou.
-      cancelamento: null,
       etapas: [
         { chave: 'recebido', rotulo: 'Pedido recebido', estado: 'atual' },
         { chave: 'arte', rotulo: 'Criando a arte', estado: 'futuro' },

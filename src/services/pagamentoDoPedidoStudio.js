@@ -29,10 +29,6 @@
 const COLUNAS = [
   'id', 'company_id', 'status', 'payment_method', 'payment_status', 'total',
   'order_number', 'confirmed_at', 'cancelled_at',
-  // LJ-34 (QA final 28/09/2026): o cartao da Producao diz por que um Pix
-  // vencido nao cancelou — a mesma leitura do job (situacaoDoPixVencido).
-  'created_at', 'vertical', 'studio_production_status',
-  "(to_jsonb(digital_orders)->>'deposit_paid')::boolean AS deposit_paid",
 ];
 const COLUNAS_DO_COMPROVANTE = ['payment_proof_url', 'payment_proof_uploaded_at'];
 
@@ -96,7 +92,6 @@ function camposDaLista(linha) {
     payment_method: linha.payment_method ?? null,
     payment_status: linha.payment_status ?? null,
     has_payment_proof: !!linha.payment_proof_url,
-    pix_cancelamento: linha.created_at ? situacaoDoPixVencido(linha) : null,
   };
 }
 
@@ -130,7 +125,6 @@ async function comPagamentoNaLista(db, companyId, linhas, idDoPedido) {
 // numa base so fica nula, nao derruba nada) e da loja (endereco de
 // retirada, a mesma regra da confirmacao e do acompanhamento).
 const { situacaoDoPixVencido } = require('../jobs/lojaPixExpiradoJob');
-const { cancelamentoDoPedido } = require('./cancelamentoDoPedido');
 
 const TIPOS_DE_ENTREGA = ['pickup', 'delivery', 'courier'];
 const num = (v) => (v == null || v === '' || !Number.isFinite(Number(v)) ? 0 : Number(v));
@@ -165,9 +159,6 @@ function camposDeEntregaENota(pedido, loja, agora = Date.now()) {
     payment_method: pedido.payment_method ?? null,
     payment_status: pedido.payment_status ?? null,
     pix_cancelamento: situacaoDoPixVencido(pedido, agora),
-    // QA final 28/09/2026 (LJ-33): o bloco "Cancelado" do detalhe diz quem
-    // cancelou e o motivo que a lojista escreveu (null se nao cancelado).
-    cancelamento: cancelamentoDoPedido(pedido),
   };
 }
 
