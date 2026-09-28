@@ -34,7 +34,7 @@ function mockDb({ key, amount }) {
   db.query.mockImplementation((sql, params) => {
     const s = String(sql);
     const p = params || [];
-    if (/^\s*SELECT amount, idempotency_key FROM transactions/.test(s)) {
+    if (/^\s*SELECT amount, idempotency_key(, category, status)? FROM transactions/.test(s)) {
       return Promise.resolve({ rows: [{ amount: String(estado.amount), idempotency_key: key }] });
     }
     if (/^\s*UPDATE transactions SET/.test(s)) {

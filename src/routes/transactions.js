@@ -28,6 +28,7 @@ var router = require('express').Router({ mergeParams: true });
 var db = require('../config/database');
 var crypto = require('crypto');
 var { resolveSaleLink } = require('../utils/saleLink');
+var quadro = require('../utils/quadroFinanceiro');
 
 function todayBR() {
   return new Date().toLocaleDateString('en-CA', { timeZone: 'America/Sao_Paulo' });
@@ -167,6 +168,25 @@ router.get('/', async function(req, res) {
   } catch (err) { console.error('[transactions] list:', err.message); res.status(500).json({ error: 'Erro ao listar lancamentos' }); }
 });
 
+// GET /board?type=income|expense&month=YYYY-MM — Quadro do Financeiro
+// (Atrasado / A receber / Recebido). Regras em utils/quadroFinanceiro.js.
+router.get('/board', async function(req, res) {
+  var cid = req.params.id;
+  var tipo = req.query.type === 'expense' ? 'expense' : 'income';
+  var hoje = quadro.hojeSP();
+  var mes = quadro.intervaloDoMes(req.query.month, hoje);
+  try {
+    var resultados = await Promise.all([
+      db.query(quadro.sqlDosCartoes(), [cid, tipo, hoje, mes.inicio, mes.fim]),
+      db.query(quadro.sqlDosGrupos(), [cid, tipo, mes.inicio, mes.fim]),
+    ]);
+    res.json(quadro.montarQuadro({
+      tipo: tipo, hoje: hoje, mes: mes.mes,
+      cartoes: resultados[0].rows, grupos: resultados[1].rows,
+    }));
+  } catch (err) { console.error('[transactions] board:', err.message); res.status(500).json({ error: 'Erro ao carregar o quadro' }); }
+});
+
 router.post('/', async function(req, res) {
   var cid = req.params.id;
   var body = req.body;
@@ -248,12 +268,24 @@ router.patch('/:txId', async function(req, res) {
   // de quando abriu; a lojista removeu um item (devolucao abateu 159,90) e o
   // Salvar regravou o valor antigo por cima do abatimento. Valor igual ao atual
   // passa (o modal sempre manda amount); valor diferente e recusado.
-  if (req.body.amount !== undefined) {
+  // 28/09/2026 (Quadro do Financeiro): o quadro da baixa mandando status.
+  // No crediario isso passaria por fora das parcelas (credit_installments) e
+  // do saldo do cliente — a baixa do crediario e so pela tela do Crediario.
+  if (req.body.paid_at !== undefined && req.body.paid_at !== null && !/^\d{4}-\d{2}-\d{2}$/.test(String(req.body.paid_at))) {
+    return res.status(400).json({ error: 'paid_at deve ser uma data (AAAA-MM-DD)' });
+  }
+  if (req.body.amount !== undefined || req.body.status !== undefined) {
     try {
-      var curRes = await db.query('SELECT amount, idempotency_key FROM transactions WHERE id = $1 AND company_id = $2', [txId, cid]);
+      var curRes = await db.query('SELECT amount, idempotency_key, category, status FROM transactions WHERE id = $1 AND company_id = $2', [txId, cid]);
       var cur = curRes.rows[0];
+      if (cur && req.body.status !== undefined && cur.status !== undefined && req.body.status !== cur.status && quadro.eCrediario(cur)) {
+        return res.status(409).json({
+          error: 'O crediário tem baixa própria, parcela a parcela. Para registrar ou desfazer um recebimento, use a tela do Crediário.',
+          code: 'CREDIT_STATUS_DERIVED',
+        });
+      }
       var link = cur ? resolveSaleLink(cur.idempotency_key) : null;
-      if (link && link.source === 'credit') {
+      if (req.body.amount !== undefined && link && link.source === 'credit') {
         if (Math.abs(parseFloat(req.body.amount) - parseFloat(cur.amount)) > 0.005) {
           return res.status(409).json({
             error: 'O valor do crediário acompanha as parcelas e as devoluções e não pode ser editado aqui. Para mudar o valor, faça uma devolução ou troca.',
@@ -269,7 +301,16 @@ router.patch('/:txId', async function(req, res) {
     var f = fields[i];
     if (req.body[f] !== undefined) { updates.push(f + ' = $' + idx); values.push(f === 'amount' ? parseFloat(req.body[f]) : req.body[f]); idx++; }
   }
-  if (req.body.status === 'confirmed') { updates.push('paid_at = COALESCE(paid_at, NOW())'); }
+  // Baixa com data escolhida (quadro): meia-noite SP, mesma convencao '+3h'
+  // do sync de sales.created_at. Voltar para pendente limpa a data da baixa —
+  // antes ficava gravada e o "desfazer" deixava rastro.
+  if (req.body.status === 'pending') {
+    updates.push('paid_at = NULL');
+  } else if (req.body.status === 'confirmed' && req.body.paid_at) {
+    updates.push("paid_at = ($" + idx + "::date + INTERVAL '3 hours')"); values.push(req.body.paid_at); idx++;
+  } else if (req.body.status === 'confirmed') {
+    updates.push('paid_at = COALESCE(paid_at, NOW())');
+  }
   if (updates.length === 0) return res.status(400).json({ error: 'Nenhum campo para atualizar' });
   updates.push('updated_at = NOW()'); values.push(txId, cid);
   try {
