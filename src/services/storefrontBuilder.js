@@ -159,17 +159,49 @@ function parseBanners(raw, fallbackCover, fallbackTagline, fallbackDesc) {
 }
 
 /**
+ * O texto de exemplo que o painel oferece como banner, nas duas versoes
+ * que chegam gravadas: a do GET do painel (DEFAULT_BANNERS em
+ * routes/digitalChannel.js, com corpo) e a do modelo da aba Design
+ * (aura-app, TabDesign.tsx, com corpo vazio). Salvo sem edicao, ele nao
+ * e um banner da lojista (decisao do PO, 28/09/2026).
+ */
+const BANNERS_DE_FABRICA = [
+  { kicker: '', headline: 'Bem-vindo à nossa loja', body: 'Peças escolhidas a dedo pra você.', cta: 'Ver produtos' },
+  { kicker: '', headline: 'Bem-vindo à nossa loja', body: '', cta: 'Ver produtos' },
+];
+
+const normalizarTextoDoBanner = (v) => (typeof v === 'string' ? v.trim().toLocaleLowerCase('pt-BR') : '');
+const CAMPOS_DE_TEXTO_DO_BANNER = ['kicker', 'headline', 'body', 'cta'];
+
+/**
+ * Um banner (ja passado por parseBanners) e o de fabrica? Sem imagem
+ * (larga nem de celular), sem destino, e com kicker, titulo, corpo e botao
+ * iguais aos de um dos modelos, com trim e sem diferenca de caixa.
+ */
+function ehBannerDeFabrica(b) {
+  if (!b || b.image_url || b.image_url_mobile || b.cta_url) return false;
+  return BANNERS_DE_FABRICA.some((f) => CAMPOS_DE_TEXTO_DO_BANNER
+    .every((c) => normalizarTextoDoBanner(b[c]) === normalizarTextoDoBanner(f[c])));
+}
+
+/**
  * A loja esta sem banner proprio, isto e, a vitrine usa os automaticos?
  *
- * E o parse de cima SEM o fallback de capa + tagline: se nada do que
- * esta gravado sobrevive (lista vazia, desligada ou sem conteudo), os
- * banners do payload sao o fallback. A vitrine Studio (studioStorefront,
- * `site.banners_automaticos`) e o GET do painel (digitalChannel) leem
- * daqui, para o painel nao dizer "Seu banner esta no ar" quando a
- * vitrine mostra outra coisa (QA 26/09/2026).
+ * Sim quando nada do que esta gravado sobrevive ao parse (lista vazia,
+ * desligada ou sem conteudo) ou quando TUDO o que sobrevive e o banner de
+ * fabrica (decisao do PO, 28/09/2026). Um banner proprio ao lado do de
+ * fabrica basta para nao ser automatico. O parse aqui e SEM o fallback de
+ * capa + tagline.
+ *
+ * A vitrine Studio (studioStorefront, `site.banners_automaticos`) e o GET
+ * do painel (digitalChannel) leem daqui, para o painel nao dizer "Seu
+ * banner esta no ar" quando a vitrine mostra outra coisa (QA 26/09/2026).
+ * A loja comum nao usa esta funcao: ela continua desenhando o que
+ * parseBanners devolve.
  */
 function bannersAutomaticos(raw) {
-  return parseBanners(raw).length === 0;
+  const lista = parseBanners(raw);
+  return lista.length === 0 || lista.every(ehBannerDeFabrica);
 }
 
 /**
@@ -1157,5 +1189,5 @@ module.exports = {
   // vive no parse, e o teste precisa exercita-la sem subir banco.
   parseBanners,
   // A regra de "sem banner proprio", lida pela vitrine Studio e pelo painel.
-  bannersAutomaticos,
+  bannersAutomaticos, ehBannerDeFabrica, BANNERS_DE_FABRICA,
 };

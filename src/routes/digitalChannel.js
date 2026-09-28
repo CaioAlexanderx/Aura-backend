@@ -1520,3 +1520,6 @@ router.post('/setup-pix', requireRole('client', 'analyst', 'admin'), async (req,
 module.exports = router;
 // Exportado pra teste (Fase 5): o destino do banner sobrevive ao salvar.
 module.exports.sanitizeBanners = sanitizeBanners;
+// Exportado pra teste: o banner que o GET devolve sem nada gravado tem de
+// ser reconhecido como o de fabrica (storefrontBuilder.BANNERS_DE_FABRICA).
+module.exports.DEFAULT_BANNERS = DEFAULT_BANNERS;

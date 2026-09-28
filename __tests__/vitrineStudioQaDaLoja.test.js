@@ -242,6 +242,55 @@ describe('4 · banners_automaticos no GET do painel', () => {
     expect(bannersAutomaticos([BANNER])).toBe(false);
   });
 
+  describe('o banner de fabrica salvo sem edicao conta como "sem banner" (PO, 28/09/2026)', () => {
+    const { parseBanners, ehBannerDeFabrica } = require('../src/services/storefrontBuilder');
+    const { DEFAULT_BANNERS } = require('../src/routes/digitalChannel');
+    // O modelo da aba Design no app (TabDesign.tsx): corpo vazio.
+    const DO_PAINEL = { kicker: '', headline: 'Bem-vindo à nossa loja', body: '', cta: 'Ver produtos', tone: 'split', tint: 'brand', image_url: null, enabled: true };
+
+    test('lista vazia', () => {
+      expect(bannersAutomaticos([])).toBe(true);
+    });
+
+    test('so o banner de fabrica salvo (as duas versoes, e com caixa e espacos diferentes)', () => {
+      expect(bannersAutomaticos(DEFAULT_BANNERS)).toBe(true);
+      expect(bannersAutomaticos([DO_PAINEL])).toBe(true);
+      expect(bannersAutomaticos([{ ...DO_PAINEL, headline: '  BEM-VINDO À NOSSA LOJA ', cta: 'ver produtos' }])).toBe(true);
+      // Os outros dois modelos do painel vem desligados e vazios: nao sobrevivem ao parse.
+      expect(bannersAutomaticos([DO_PAINEL, { ...DO_PAINEL, headline: '', cta: '', enabled: false }])).toBe(true);
+    });
+
+    test('banner de fabrica com imagem (larga ou de celular) e da lojista', () => {
+      expect(bannersAutomaticos([{ ...DO_PAINEL, image_url: 'https://r2/b.jpg' }])).toBe(false);
+      expect(bannersAutomaticos([{ ...DO_PAINEL, image_url_mobile: 'https://r2/m.jpg' }])).toBe(false);
+    });
+
+    test('headline propria, ou botao com destino, e da lojista', () => {
+      expect(bannersAutomaticos([{ ...DO_PAINEL, headline: 'Coleção de verão' }])).toBe(false);
+      expect(bannersAutomaticos([{ ...DO_PAINEL, cta_url: '#vista=novidades' }])).toBe(false);
+    });
+
+    test('um de fabrica e um proprio: nao e automatico', () => {
+      expect(bannersAutomaticos([DO_PAINEL, BANNER])).toBe(false);
+    });
+
+    test('a loja comum continua desenhando o que parseBanners devolve', () => {
+      // Nenhuma mudanca no parse: o de fabrica gravado segue saindo, e o
+      // fallback de capa + tagline segue igual.
+      expect(parseBanners([DO_PAINEL])).toHaveLength(1);
+      expect(parseBanners([DO_PAINEL])[0].headline).toBe('Bem-vindo à nossa loja');
+      expect(parseBanners([], null, 'Minha tagline')[0].headline).toBe('Minha tagline');
+      expect(fonte('src/services/storefrontBuilder.js').match(/bannersAutomaticos\(/g)).toHaveLength(1);
+      expect(ehBannerDeFabrica(null)).toBe(false);
+    });
+
+    test('o GET do painel com o banner de fabrica salvo diz automatico', async () => {
+      bancoDoGet({ company_id: 'cid-1', slug: 'aura-qa', banners: [DO_PAINEL] });
+      const r = await request(app).get('/companies/cid-1/digital-channel');
+      expect(r.body.banners_automaticos).toBe(true);
+    });
+  });
+
   test('loja sem banner gravado: o painel recebe os de fabrica e sabe que sao automaticos', async () => {
     bancoDoGet({ company_id: 'cid-1', slug: 'aura-qa', banners: [] });
     const r = await request(app).get('/companies/cid-1/digital-channel');
