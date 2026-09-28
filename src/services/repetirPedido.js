@@ -47,6 +47,13 @@ function valorDoCampo(campo, valor) {
     }
     case 'color': {
       const cores = campo.config && Array.isArray(campo.config.colors) ? campo.config.colors : [];
+      if (cores.length === 0) {
+        // Campo sem paleta cadastrada: nao ha lista contra a qual conferir,
+        // entao a cor original volta se for um hex valido. Sem isso a
+        // vitrine caia em branco/preto e pedia pra escolher de novo uma cor
+        // que a cliente ja tinha escolhido.
+        return HEX.test(String(valor).trim()) ? valor : undefined;
+      }
       const v = String(valor).toLowerCase();
       return cores.some((c) => String(c).toLowerCase() === v) ? valor : undefined;
     }
