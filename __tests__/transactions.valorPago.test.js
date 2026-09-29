@@ -171,6 +171,24 @@ describe('POST — cadastro "ja paguei"', () => {
     conferirParametros(segunda.sql, segunda.params);
   });
 
+  // 29/09/2026 (hotfix): em producao status e o enum transaction_status. Um
+  // cast $8::text vira texto -> enum na coluna e o Postgres recusa (42804): o
+  // cadastro inteiro dava 500. O status vai sem cast; "esta pago?" e booleano.
+  it.each([
+    ['avulso', {}],
+    ['recorrente', { recurrence_type: 'monthly', recurrence_count: 2 }],
+  ])('status vai sem cast e a baixa decide por booleano (%s)', async (_n, extra) => {
+    const estado = mockLinha(null);
+    await request(buildApp()).post('/companies/' + COMPANY + '/transactions')
+      .send({ ...base, status: 'confirmed', paid_at: '2026-09-20', ...extra });
+    for (const ins of estado.inserts) {
+      expect(ins.sql).not.toMatch(/\$8::/);
+      expect(ins.sql).toMatch(/CASE WHEN \$\d+::boolean THEN/);
+      expect(ins.params[ins.params.length - 1]).toBe(ins.params[7] === 'confirmed');
+      conferirParametros(ins.sql, ins.params);
+    }
+  });
+
   it('paid_at que nao e data e recusado', async () => {
     mockLinha(null);
     const res = await request(buildApp()).post('/companies/' + COMPANY + '/transactions').send({ ...base, paid_at: '20/09/2026' });

@@ -267,17 +267,21 @@ router.post('/', async function(req, res) {
     if (status === 'confirmed' && paidAmountBody !== null && Math.abs(paidAmountBody - valor) >= 0.005) return { amount: paidAmountBody, original: valor };
     return { amount: valor, original: null };
   }
-  var PAID_AT_SQL = "CASE WHEN $8::text = 'confirmed' THEN COALESCE($13::date + INTERVAL '3 hours', NOW()) END";
+  // 29/09/2026 (hotfix): em producao status e o enum transaction_status. O
+  // $8::text da F1 virava texto -> enum na coluna, que o Postgres nao converte
+  // sozinho (42804), e todo cadastro dava 500. "Esta pago?" vai num booleano
+  // proprio e o status segue sem cast, com o tipo que a coluna tiver.
+  var PAID_AT_SQL = "CASE WHEN $15::boolean THEN COALESCE($13::date + INTERVAL '3 hours', NOW()) END";
   try {
     if (!recurrenceType) {
       var v = valoresDaBaixa(finalStatus);
       var result = await db.query(
         'INSERT INTO transactions (company_id, type, amount, description, category, notes, due_date, status, paid_at, created_by, payment_method, employee_id, employee_name, original_amount)' +
-        ' VALUES ($1, $2, $3, $4, $5, $6, $7, $8::text, ' + PAID_AT_SQL + ', $9, $10, $11, $12, $14)' +
+        ' VALUES ($1, $2, $3, $4, $5, $6, $7, $8, ' + PAID_AT_SQL + ', $9, $10, $11, $12, $14)' +
         ' RETURNING id, type, amount, original_amount, description, category, status, due_date, paid_at, created_at, payment_method, employee_id, employee_name',
         [cid, body.type, v.amount, String(body.description).trim(), body.category || 'Outros',
          body.notes || null, dueDate, finalStatus, req.user?.id || null, paymentMethod, employeeId, employeeName,
-         finalStatus === 'confirmed' ? paidAtDate : null, v.original]
+         finalStatus === 'confirmed' ? paidAtDate : null, v.original, finalStatus === 'confirmed']
       );
       var tx = result.rows[0];
       return res.status(201).json({ id: tx.id, type: tx.type, amount: parseFloat(tx.amount), original_amount: tx.original_amount == null ? null : parseFloat(tx.original_amount), description: tx.description, category: tx.category, status: tx.status, due_date: tx.due_date, paid_at: tx.paid_at, created_at: tx.created_at, payment_method: tx.payment_method, employee_id: tx.employee_id, employee_name: tx.employee_name });
@@ -292,13 +296,13 @@ router.post('/', async function(req, res) {
       // Data e valor pagos so valem para a 1a ocorrencia (as outras nascem pendentes).
       var itemValores = valoresDaBaixa(itemStatus);
       // $16 citado sempre: parametro enviado e nao citado quebra o Postgres.
-      var itemPaidAt = "CASE WHEN $8::text = 'confirmed' THEN COALESCE($16::date + INTERVAL '3 hours', NOW()) END";
+      var itemPaidAt = "CASE WHEN $18::boolean THEN COALESCE($16::date + INTERVAL '3 hours', NOW()) END";
       var r = await db.query(
         'INSERT INTO transactions (company_id, type, amount, description, category, notes, due_date, status, paid_at, created_by, recurrence_type, recurrence_group_id, recurrence_index, payment_method, employee_id, employee_name, original_amount)' +
-        ' VALUES ($1, $2, $3, $4, $5, $6, $7, $8::text, ' + itemPaidAt + ', $9, $10, $11, $12, $13, $14, $15, $17)' +
+        ' VALUES ($1, $2, $3, $4, $5, $6, $7, $8, ' + itemPaidAt + ', $9, $10, $11, $12, $13, $14, $15, $17)' +
         ' RETURNING id, type, amount, description, category, status, due_date, recurrence_index',
         [cid, body.type, itemValores.amount, description, category, notes, itemDueDate, itemStatus, userId, recurrenceType, groupId, i, paymentMethod, employeeId, employeeName,
-         itemStatus === 'confirmed' ? paidAtDate : null, itemValores.original]
+         itemStatus === 'confirmed' ? paidAtDate : null, itemValores.original, itemStatus === 'confirmed']
       );
       created.push(r.rows[0]);
     }
