@@ -394,13 +394,18 @@ router.post('/quotes/:qid/send', async function(req, res) {
     }
 
     const vDays = Math.max(1, parseInt(quote.validity_days) || 7);
+    // Reenvio depois de "Cliente pediu ajuste" (362): mesma regra do
+    // marcar-enviado do vídeo, a versão sobe e o selo sai.
+    const reenvioDeAjuste = quote.ajuste_pedido_em != null;
 
     const updRes = await db.query(
       `UPDATE studio_quotes
           SET token      = $1,
               status     = 'sent',
               sent_at    = NOW(),
-              expires_at = NOW() + ($2 || ' days')::interval,
+              expires_at = NOW() + ($2 || ' days')::interval,${reenvioDeAjuste ? `
+              versao           = versao + 1,
+              ajuste_pedido_em = NULL,` : ''}
               updated_at = NOW()
         WHERE id = $3 AND company_id = $4
         RETURNING *`,
