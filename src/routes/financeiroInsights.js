@@ -175,17 +175,29 @@ async function fetchPaymentMethods(companyIds, type, start, end) {
   });
 }
 
+// 29/09/2026 (contas F4 — atrasos clicaveis):
+//   · "hoje" e o dia civil de Sao Paulo, como no Quadro do Financeiro. Com
+//     CURRENT_DATE (UTC no servidor), depois das 21h o que vencia no dia ja
+//     aparecia como atrasado aqui e nao no Quadro.
+//   · Cada faixa separa o que e do crediario: o atraso do crediario se resolve
+//     na tela do Crediario e o resto no Quadro — o app leva cada parte para o
+//     seu lugar. Mesmo criterio de crediario do Quadro (utils/quadroFinanceiro).
+const HOJE_SP = "(NOW() AT TIME ZONE 'America/Sao_Paulo')::date";
+const E_CREDIARIO = "(category ILIKE 'credi_rio%' OR COALESCE(idempotency_key, '') ~* '^(pdv-credit-|credit-payment)')";
+
 async function fetchTimeline(companyIds, type) {
   const sql = `
     SELECT
       CASE
-        WHEN due_date::date < CURRENT_DATE THEN 'atrasadas'
-        WHEN due_date::date <= CURRENT_DATE + INTERVAL '7 days' THEN 'esta_semana'
-        WHEN due_date::date <= (date_trunc('month', CURRENT_DATE) + INTERVAL '1 month - 1 day')::date THEN 'este_mes'
+        WHEN due_date::date < ${HOJE_SP} THEN 'atrasadas'
+        WHEN due_date::date <= ${HOJE_SP} + INTERVAL '7 days' THEN 'esta_semana'
+        WHEN due_date::date <= (date_trunc('month', ${HOJE_SP}) + INTERVAL '1 month - 1 day')::date THEN 'este_mes'
         ELSE 'futuras'
       END AS bucket,
       SUM(amount) AS total,
-      COUNT(*) AS count
+      COUNT(*) AS count,
+      COALESCE(SUM(amount) FILTER (WHERE ${E_CREDIARIO}), 0) AS crediario_total,
+      COUNT(*) FILTER (WHERE ${E_CREDIARIO}) AS crediario_count
     FROM transactions
     WHERE company_id = ANY($1::uuid[])
       AND type = $2
@@ -196,7 +208,11 @@ async function fetchTimeline(companyIds, type) {
   const r = await db.query(sql, [companyIds, type]);
   const out = { atrasadas: { total: 0, count: 0 }, esta_semana: { total: 0, count: 0 }, este_mes: { total: 0, count: 0 }, futuras: { total: 0, count: 0 } };
   r.rows.forEach((row) => {
-    out[row.bucket] = { total: parseFloat(row.total) || 0, count: parseInt(row.count) || 0 };
+    out[row.bucket] = {
+      total: parseFloat(row.total) || 0,
+      count: parseInt(row.count) || 0,
+      crediario: { total: parseFloat(row.crediario_total) || 0, count: parseInt(row.crediario_count) || 0 },
+    };
   });
   return out;
 }
@@ -454,13 +470,15 @@ async function computeInsights(companyIds, period) {
     SELECT
       COALESCE(SUM(amount), 0) AS total,
       COALESCE(COUNT(*), 0) AS count,
-      COALESCE(MAX(CURRENT_DATE - due_date::date), 0) AS oldest_days
+      COALESCE(MAX(${HOJE_SP} - due_date::date), 0) AS oldest_days,
+      COALESCE(SUM(amount) FILTER (WHERE ${E_CREDIARIO}), 0) AS crediario_total,
+      COUNT(*) FILTER (WHERE ${E_CREDIARIO}) AS crediario_count
     FROM transactions
     WHERE company_id = ANY($1::uuid[])
       AND status = 'pending'
       AND type = 'income'
       AND due_date IS NOT NULL
-      AND due_date::date < CURRENT_DATE
+      AND due_date::date < ${HOJE_SP}
   `;
   // Lentidao do Studio (QA 04/09/2026): o app roda em us-west e o banco em
   // Sao Paulo, entao cada ida ao banco custa ~190ms mesmo com a consulta em
@@ -513,6 +531,12 @@ async function computeInsights(companyIds, period) {
   const overdueTotal = parseFloat(overdue.total) || 0;
   const overdueCount = parseInt(overdue.count) || 0;
   const oldestDays = parseInt(overdue.oldest_days) || 0;
+  const overdueCrediario = { amount: parseFloat(overdue.crediario_total) || 0, count: parseInt(overdue.crediario_count) || 0 };
+  // F4: onde esta cada parte do atraso (crediario → tela do Crediario; contas → Quadro).
+  const overdueSplit = {
+    crediario: overdueCrediario,
+    contas: { amount: Math.round((overdueTotal - overdueCrediario.amount) * 100) / 100, count: overdueCount - overdueCrediario.count },
+  };
 
   // Cashflow: history + projection derivada
   const projectionData = buildCashflowProjection(cashflowHistory);
@@ -557,6 +581,7 @@ async function computeInsights(companyIds, period) {
       impact_days: leverImpactDays,
       count: overdueCount,
       oldest_days: oldestDays,
+      split: overdueSplit,
     };
   }
 
