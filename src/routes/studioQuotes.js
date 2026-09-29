@@ -4,7 +4,7 @@
 //
 // GET    /studio/quotes?status=&days=&limit=  → {quotes}
 // POST   /studio/quotes                       → StudioQuote
-// GET    /studio/quotes/:qid                  → {quote, items}
+// GET    /studio/quotes/:qid                  → {quote, items, ajustes}
 // PATCH  /studio/quotes/:qid                  → StudioQuote (só draft)
 // DELETE /studio/quotes/:qid                  → {deleted:true} (só draft)
 // POST   /studio/quotes/:qid/send             → StudioQuoteCreated {quote_url, wa_me_link}
@@ -66,7 +66,8 @@ router.get('/quotes', async function(req, res) {
               validity_days, expires_at, sent_at, responded_at, response_note,
               order_id, deposit_pct, deposit_amount, notes, created_by,
               created_at, updated_at,
-              (video_key IS NOT NULL) AS tem_video, video_expira_em, canal_envio
+              (video_key IS NOT NULL) AS tem_video, video_expira_em, canal_envio,
+              versao, ajuste_pedido_em
          FROM studio_quotes
         WHERE ${where}
         ORDER BY created_at DESC
@@ -187,7 +188,23 @@ router.get('/quotes/:qid', async function(req, res) {
       [req.params.qid]
     );
 
-    res.json({ quote: qRes.rows[0], items: iRes.rows });
+    // Histórico de "Cliente pediu ajuste" (362), do mais novo ao mais
+    // antigo. Registro interno da lojista. Sem a tabela, lista vazia.
+    let ajustes = [];
+    try {
+      const aRes = await db.query(
+        `SELECT id, texto, versao, created_at
+           FROM studio_quote_ajustes
+          WHERE quote_id = $1 AND company_id = $2
+          ORDER BY created_at DESC`,
+        [req.params.qid, req.params.id]
+      );
+      ajustes = aRes.rows;
+    } catch (err) {
+      if (err.code !== '42P01') throw err;
+    }
+
+    res.json({ quote: qRes.rows[0], items: iRes.rows, ajustes });
   } catch (err) {
     console.error('[studio/quotes/:qid:GET]', err.message);
     res.status(500).json({ error: 'Erro ao buscar orçamento' });
