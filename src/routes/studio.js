@@ -31,6 +31,9 @@ const db      = require('../config/database');
 const {
   margemMinima, pecasEmRisco, precoParaOPiso, recadoDoRisco,
 } = require('../services/margemEmRisco');
+const {
+  validarPadraoDoServicoDeArte, aplicarPadraoDoServicoDeArte,
+} = require('../services/servicoDeArtePadrao');
 
 // ─── Schema customization_config (Fase 1 + Verso 26/05/2026) ─
 const VALID_FIELD_TYPES = ['text', 'image', 'template', 'color', 'option'];
@@ -772,6 +775,12 @@ const ALLOWED_STUDIO_SETTINGS = [
   // (studio_settings->>'pix_key'). Sem isto o PATCH dropava a chave e o link
   // de cobrança degradava pro fallback "entre em contato". (Onda 0 · 0.5)
   'pix_key',                      // string — chave Pix da empresa (sinal/charge-link)
+  // Serviço de arte como padrão da loja (28/09/2026): objeto
+  // { adjust_price: number, design_price: number } em R$ — preço de
+  // "ajustar a arte da cliente" e de "criar do zero". Ao salvar, o PATCH
+  // propaga para os produtos com art_service_use_store_default = true
+  // (ver services/servicoDeArtePadrao.js).
+  'art_service_defaults',
 ];
 
 router.get('/settings', async function(req, res) {
@@ -799,8 +808,18 @@ router.patch('/settings', async function(req, res) {
     console.warn('[studio/settings:PATCH] 400 — body sem chaves permitidas:', Object.keys(patch).join(', '), '| permitidas:', ALLOWED_STUDIO_SETTINGS.join(', '));
     return res.status(400).json({ error: 'nada pra atualizar (chaves permitidas: ' + ALLOWED_STUDIO_SETTINGS.join(', ') + ')' });
   }
+  const temPadraoDeArte = filtered.art_service_defaults !== undefined;
+  if (temPadraoDeArte) {
+    const v = validarPadraoDoServicoDeArte(filtered.art_service_defaults);
+    if (!v.ok) return res.status(400).json({ error: v.error });
+    filtered.art_service_defaults = v.value;
+  }
+
+  // Transação: o padrão da loja e os produtos que o seguem mudam juntos.
+  const client = await db.connect();
   try {
-    const r = await db.query(
+    await client.query('BEGIN');
+    const r = await client.query(
       `UPDATE companies
           SET studio_settings = COALESCE(studio_settings, '{}'::jsonb) || $1::jsonb,
               updated_at = NOW()
@@ -808,11 +827,43 @@ router.patch('/settings', async function(req, res) {
         RETURNING COALESCE(studio_settings, '{}'::jsonb) AS settings`,
       [JSON.stringify(filtered), req.params.id]
     );
-    if (!r.rows.length) return res.status(404).json({ error: 'Empresa não encontrada' });
-    res.json({ settings: r.rows[0].settings });
+    if (!r.rows.length) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ error: 'Empresa não encontrada' });
+    }
+
+    let produtosAtualizados = 0;
+    if (temPadraoDeArte) {
+      // Só os produtos que seguem o padrão; os com preço próprio (flag
+      // ausente/false) e os sem campo art_service ficam como estão.
+      const prods = await client.query(
+        `SELECT id, customization_config
+           FROM products
+          WHERE company_id = $1
+            AND customization_config->>'art_service_use_store_default' = 'true'`,
+        [req.params.id]
+      );
+      for (const p of prods.rows) {
+        const novo = aplicarPadraoDoServicoDeArte(p.customization_config, filtered.art_service_defaults);
+        if (!novo) continue;
+        await client.query(
+          `UPDATE products SET customization_config = $1::jsonb, updated_at = NOW() WHERE id = $2`,
+          [JSON.stringify(novo), p.id]
+        );
+        produtosAtualizados++;
+      }
+    }
+
+    await client.query('COMMIT');
+    const body = { settings: r.rows[0].settings };
+    if (temPadraoDeArte) body.art_service_products_updated = produtosAtualizados;
+    res.json(body);
   } catch (err) {
+    await client.query('ROLLBACK').catch(() => {});
     console.error('[studio/settings:PATCH]', err.message);
     res.status(500).json({ error: 'Erro ao salvar configurações' });
+  } finally {
+    client.release();
   }
 });
 
