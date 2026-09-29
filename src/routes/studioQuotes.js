@@ -4,6 +4,7 @@
 //
 // GET    /studio/quotes?status=&days=&limit=  → {quotes}
 // POST   /studio/quotes                       → StudioQuote
+// GET    /studio/quotes/produtos-frequentes?days=&limit= → {mais_usados, recentes} (catálogo do modal, 29/09/2026)
 // GET    /studio/quotes/:qid                  → {quote, items, ajustes}
 // PATCH  /studio/quotes/:qid                  → StudioQuote (só draft)
 // DELETE /studio/quotes/:qid                  → {deleted:true} (só draft)
@@ -25,6 +26,7 @@ const router  = express.Router({ mergeParams: true });
 const crypto  = require('crypto');
 const db      = require('../config/database');
 const { notasDoPedidoAprovado } = require('../services/orcamentoEmVideo');
+const frequentes = require('../services/produtosFrequentesDoOrcamento');
 
 // ─── helpers ────────────────────────────────────────────────
 
@@ -43,6 +45,30 @@ function calcEstimatedCost(items) {
     const cost = it.unit_cost != null ? parseFloat(it.unit_cost) : 0;
     return acc + (parseFloat(it.quantity) || 0) * cost;
   }, 0);
+}
+
+// Um item do orçamento no banco. `visual_template_key` (migration 364) é o
+// modelo de mockup só deste orçamento; null = herda do produto.
+async function inserirItem(client, qid, it, i, { descricaoPadrao = false } = {}) {
+  const desc = String(it.description || '').trim();
+  await client.query(
+    `INSERT INTO studio_quote_items
+       (quote_id, product_id, description, quantity, unit_price,
+        unit_cost, pricing_meta, customization, sort_order, visual_template_key)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
+    [
+      qid,
+      it.product_id || null,
+      descricaoPadrao ? (desc || 'Item') : desc,
+      descricaoPadrao ? (parseFloat(it.quantity) || 1) : parseFloat(it.quantity),
+      descricaoPadrao ? (parseFloat(it.unit_price) || 0) : parseFloat(it.unit_price),
+      it.unit_cost != null ? parseFloat(it.unit_cost) : null,
+      it.pricing_meta ? JSON.stringify(it.pricing_meta) : null,
+      it.customization ? JSON.stringify(it.customization) : null,
+      it.sort_order != null ? parseInt(it.sort_order) : i,
+      it.product_id ? frequentes.lerModeloDoItem(it.visual_template_key) : null,
+    ]
+  );
 }
 
 // ─── GET /quotes ─────────────────────────────────────────────
@@ -141,24 +167,7 @@ router.post('/quotes', async function(req, res) {
     const quote = qRes.rows[0];
 
     for (let i = 0; i < items.length; i++) {
-      const it = items[i];
-      await client.query(
-        `INSERT INTO studio_quote_items
-           (quote_id, product_id, description, quantity, unit_price,
-            unit_cost, pricing_meta, customization, sort_order)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
-        [
-          quote.id,
-          it.product_id || null,
-          String(it.description).trim(),
-          parseFloat(it.quantity),
-          parseFloat(it.unit_price),
-          it.unit_cost != null ? parseFloat(it.unit_cost) : null,
-          it.pricing_meta ? JSON.stringify(it.pricing_meta) : null,
-          it.customization ? JSON.stringify(it.customization) : null,
-          it.sort_order != null ? parseInt(it.sort_order) : i,
-        ]
-      );
+      await inserirItem(client, quote.id, items[i], i);
     }
 
     await client.query('COMMIT');
@@ -169,6 +178,51 @@ router.post('/quotes', async function(req, res) {
     res.status(500).json({ error: 'Erro ao criar orçamento' });
   } finally {
     client.release();
+  }
+});
+
+// ─── GET /quotes/produtos-frequentes ─────────────────────────
+// "Mais usados" e "Recentes" do catálogo do modal do orçamento
+// (29/09/2026). Multi-CNPJ: só orçamentos e pedidos Studio da empresa da
+// rota. Pedido que nasceu de orçamento não conta de novo. Antes de
+// /quotes/:qid, senão o Express leria "produtos-frequentes" como id.
+router.get('/quotes/produtos-frequentes', async function(req, res) {
+  const cid = req.params.id;
+  const dias = frequentes.lerDias(req.query.days);
+  const limite = frequentes.lerLimite(req.query.limit);
+  try {
+    const r = await db.query(
+      `WITH usos AS (
+         SELECT i.product_id, q.id AS origem, q.created_at AS quando
+           FROM studio_quote_items i
+           JOIN studio_quotes q ON q.id = i.quote_id
+          WHERE q.company_id = $1
+            AND i.product_id IS NOT NULL
+            AND q.created_at >= NOW() - ($2 || ' days')::interval
+         UNION ALL
+         SELECT oi.product_id, o.id AS origem, o.created_at AS quando
+           FROM digital_order_items oi
+           JOIN digital_orders o ON o.id = oi.order_id
+          WHERE o.company_id = $1
+            AND o.vertical = 'studio'
+            AND oi.product_id IS NOT NULL
+            AND o.created_at >= NOW() - ($2 || ' days')::interval
+            AND NOT EXISTS (
+              SELECT 1 FROM studio_quotes q2
+               WHERE q2.order_id = o.id AND q2.company_id = $1
+            )
+       )
+       SELECT product_id, COUNT(DISTINCT origem)::int AS usos, MAX(quando) AS ultima_vez
+         FROM usos
+        GROUP BY product_id
+        ORDER BY usos DESC, ultima_vez DESC
+        LIMIT 200`,
+      [cid, String(dias)]
+    );
+    res.json({ days: dias, ...frequentes.listasDeProdutosFrequentes(r.rows, limite) });
+  } catch (err) {
+    console.error('[studio/quotes/produtos-frequentes:GET]', err.message);
+    res.status(500).json({ error: 'Erro ao buscar os produtos mais usados' });
   }
 });
 
@@ -250,24 +304,7 @@ router.patch('/quotes/:qid', async function(req, res) {
 
         await client.query('DELETE FROM studio_quote_items WHERE quote_id = $1', [qid]);
         for (let i = 0; i < items.length; i++) {
-          const it = items[i];
-          await client.query(
-            `INSERT INTO studio_quote_items
-               (quote_id, product_id, description, quantity, unit_price,
-                unit_cost, pricing_meta, customization, sort_order)
-             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
-            [
-              qid,
-              it.product_id || null,
-              String(it.description || '').trim() || 'Item',
-              parseFloat(it.quantity) || 1,
-              parseFloat(it.unit_price) || 0,
-              it.unit_cost != null ? parseFloat(it.unit_cost) : null,
-              it.pricing_meta ? JSON.stringify(it.pricing_meta) : null,
-              it.customization ? JSON.stringify(it.customization) : null,
-              it.sort_order != null ? parseInt(it.sort_order) : i,
-            ]
-          );
+          await inserirItem(client, qid, items[i], i, { descricaoPadrao: true });
         }
       } else if (discount != null) {
         disc  = Math.max(0, parseFloat(discount));
