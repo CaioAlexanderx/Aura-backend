@@ -27,6 +27,11 @@ const lojaEvents = require('./lojaEvents');
 
 const TYPE = 'loja_conta_vencendo';
 const DIAS_ANTES = 2;
+// 29/09/2026 (contas a pagar F3, decisão do Caio): também no DIA do
+// vencimento ("vence hoje"). Mesmo tipo e mesma preferência; o dedupe do
+// aviso do dia ganha ':hoje' (sem isso colidiria com o de 2 dias antes, que
+// segue com a chave antiga para não reenviar o que já foi).
+const ANTECEDENCIAS = [DIAS_ANTES, 0];
 const MAX_NA_LISTA = 3;
 
 const brl = (v) => 'R$ ' + Number(v || 0).toFixed(2).replace('.', ',').replace(/\B(?=(\d{3})+(?!\d))/g, '.');
@@ -47,15 +52,17 @@ function rotulo(t) {
  * Agrupa as contas por empresa e vencimento e monta o aviso de cada grupo.
  * Pura (sem banco): testável.
  *
- * @param {Array<{company_id, id, description, amount, due_date}>} contas
+ * @param {Array<{company_id, id, description, amount, due_date, dias?}>} contas
+ *   dias = dias até o vencimento (2 ou 0); sem ele, vale 2 (compatível).
  * @returns {Array<{company_id, due_date, title, body, dedupeSuffix, expiresAt}>}
  */
 function montarLembretes(contas) {
   const grupos = new Map();
   for (const c of contas || []) {
     const due = String(c.due_date instanceof Date ? c.due_date.toISOString() : c.due_date).slice(0, 10);
-    const k = `${c.company_id}:${due}`;
-    if (!grupos.has(k)) grupos.set(k, { company_id: c.company_id, due_date: due, contas: [] });
+    const dias = c.dias == null ? DIAS_ANTES : Number(c.dias);
+    const k = `${c.company_id}:${due}:${dias}`;
+    if (!grupos.has(k)) grupos.set(k, { company_id: c.company_id, due_date: due, dias, contas: [] });
     grupos.get(k).contas.push(c);
   }
 
@@ -65,13 +72,14 @@ function montarLembretes(contas) {
     const total = contas.reduce((acc, c) => acc + Number(c.amount || 0), 0);
     const n = contas.length;
     const dm = diaMes(g.due_date);
+    const hoje = g.dias === 0;
     let title;
     let body;
     if (n === 1) {
-      title = `Conta a pagar vence em ${dm}`;
-      body = `${rotulo(contas[0])} · ${brl(contas[0].amount)}. Vence em 2 dias.`;
+      title = hoje ? 'Conta a pagar vence hoje' : `Conta a pagar vence em ${dm}`;
+      body = `${rotulo(contas[0])} · ${brl(contas[0].amount)}. ${hoje ? 'Vence hoje.' : 'Vence em 2 dias.'}`;
     } else {
-      title = `${n} contas a pagar vencem em ${dm}`;
+      title = hoje ? `${n} contas a pagar vencem hoje` : `${n} contas a pagar vencem em ${dm}`;
       const lista = contas.slice(0, MAX_NA_LISTA).map((c) => `${rotulo(c)} (${brl(c.amount)})`).join('; ');
       const resto = n > MAX_NA_LISTA ? ` e mais ${n - MAX_NA_LISTA}` : '';
       body = `Total ${brl(total)}: ${lista}${resto}.`;
@@ -81,7 +89,7 @@ function montarLembretes(contas) {
       due_date: g.due_date,
       title,
       body,
-      dedupeSuffix: `${g.company_id}:${g.due_date}`,
+      dedupeSuffix: `${g.company_id}:${g.due_date}` + (hoje ? ':hoje' : ''),
       // Fim do dia do vencimento em São Paulo.
       expiresAt: `${g.due_date}T23:59:59-03:00`,
     });
@@ -90,21 +98,22 @@ function montarLembretes(contas) {
 }
 
 /**
- * Procura as contas que vencem em 2 dias (dia civil de SP) em todas as
+ * Procura as contas que vencem em 2 dias e hoje (dia civil de SP) em todas as
  * empresas ativas e dispara um aviso por empresa/dia. Nunca lança.
  */
 async function runLembretes() {
   let contas = [];
   try {
     const { rows } = await db.query(
-      `SELECT t.company_id, t.id, t.description, t.amount, t.due_date::text AS due_date
+      `SELECT t.company_id, t.id, t.description, t.amount, t.due_date::text AS due_date,
+              (t.due_date - (now() AT TIME ZONE 'America/Sao_Paulo')::date) AS dias
          FROM transactions t
          JOIN companies c ON c.id = t.company_id AND c.is_active = true
         WHERE t.type = 'expense'
           AND t.status = 'pending'
-          AND t.due_date = (now() AT TIME ZONE 'America/Sao_Paulo')::date + $1::int
+          AND t.due_date - (now() AT TIME ZONE 'America/Sao_Paulo')::date = ANY($1::int[])
         ORDER BY t.company_id, t.amount DESC`,
-      [DIAS_ANTES]
+      [ANTECEDENCIAS]
     );
     contas = rows;
   } catch (err) {
@@ -125,4 +134,4 @@ async function runLembretes() {
   return { contas: contas.length, avisos: lembretes.length, criados };
 }
 
-module.exports = { TYPE, DIAS_ANTES, montarLembretes, runLembretes, _brl: brl };
+module.exports = { TYPE, DIAS_ANTES, ANTECEDENCIAS, montarLembretes, runLembretes, _brl: brl };

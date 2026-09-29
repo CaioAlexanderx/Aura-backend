@@ -74,6 +74,31 @@ describe('montarLembretes', () => {
 });
 
 describe('runLembretes', () => {
+  // 29/09/2026 (F3): além de hoje+2, o próprio dia do vencimento.
+  test('vence hoje: título e texto próprios, dedupe com :hoje (não colide com o de 2 dias antes)', () => {
+    const [um] = lembrete.montarLembretes([
+      { company_id: A, id: '1', description: 'Energia', amount: '312.45', due_date: '2026-09-29', dias: 0 },
+    ]);
+    expect(um.title).toBe('Conta a pagar vence hoje');
+    expect(um.body).toBe('Energia · R$ 312,45. Vence hoje.');
+    expect(um.dedupeSuffix).toBe(A + ':2026-09-29:hoje');
+
+    const [dois] = lembrete.montarLembretes([
+      { company_id: A, id: '1', description: 'Energia', amount: '312.45', due_date: '2026-09-29', dias: 0 },
+      { company_id: A, id: '2', description: 'Internet', amount: '129.90', due_date: '2026-09-29', dias: 0 },
+    ]);
+    expect(dois.title).toBe('2 contas a pagar vencem hoje');
+  });
+
+  test('mesmo vencimento em 2 dias e hoje (empresas diferentes no mesmo tick) vira avisos separados', () => {
+    const avisos = lembrete.montarLembretes([
+      { company_id: A, id: '1', description: 'X', amount: '10', due_date: '2026-10-01', dias: 2 },
+      { company_id: A, id: '2', description: 'Y', amount: '20', due_date: '2026-09-29', dias: 0 },
+    ]);
+    expect(avisos.map((a) => a.dedupeSuffix).sort()).toEqual([A + ':2026-09-29:hoje', A + ':2026-10-01']);
+    expect(avisos.find((a) => a.due_date === '2026-10-01').title).toBe('Conta a pagar vence em 01/10');
+  });
+
   test('busca pendentes que vencem em hoje+2 (SP) de empresa ativa e dispara um evento por grupo', async () => {
     db.query.mockResolvedValue({
       rows: [
@@ -88,9 +113,9 @@ describe('runLembretes', () => {
     const [sql, params] = db.query.mock.calls[0];
     expect(sql).toMatch(/t\.type = 'expense'/);
     expect(sql).toMatch(/t\.status = 'pending'/);
-    expect(sql).toMatch(/AT TIME ZONE 'America\/Sao_Paulo'\)::date \+ \$1::int/);
+    expect(sql).toMatch(/t\.due_date - \(now\(\) AT TIME ZONE 'America\/Sao_Paulo'\)::date = ANY\(\$1::int\[\]\)/);
     expect(sql).toMatch(/c\.is_active = true/);
-    expect(params).toEqual([2]);
+    expect(params).toEqual([[2, 0]]);
 
     expect(emit).toHaveBeenCalledTimes(1);
     const [type, payload, opts] = emit.mock.calls[0];
