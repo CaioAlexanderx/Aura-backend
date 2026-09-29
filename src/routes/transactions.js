@@ -88,7 +88,7 @@ router.get('/', async function(req, res) {
     var dataSql =
       'SELECT id, type, amount, description, category, status, notes, due_date, paid_at, created_at,' +
       '       recurrence_type, recurrence_group_id, recurrence_index,' +
-      '       payment_method, employee_id, employee_name, idempotency_key, original_amount' +
+      '       payment_method, employee_id, employee_name, idempotency_key, original_amount, receipt_filename' +
       ' FROM transactions ' + where +
       " ORDER BY COALESCE(due_date, (created_at AT TIME ZONE 'America/Sao_Paulo')::date) DESC, created_at DESC" +
       ' LIMIT $' + (params.length + 1) + ' OFFSET $' + (params.length + 2);
@@ -136,6 +136,8 @@ router.get('/', async function(req, res) {
       return {
         id: r.id, type: r.type, amount: parseFloat(r.amount) || 0,
         original_amount: r.original_amount == null ? null : parseFloat(r.original_amount),
+        // F3: nome do comprovante anexado (o arquivo abre por GET /:txId/receipt).
+        receipt_filename: r.receipt_filename || null,
         desc: r.description || '', description: r.description || '',
         category: r.category || 'Outros', status: r.status || 'confirmed',
         notes: r.notes || '',

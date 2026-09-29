@@ -66,7 +66,7 @@ function intervaloDoMes(mes, hoje) {
 function sqlDosCartoes() {
   return (
     'WITH base AS (' +
-    '  SELECT id, description, category, amount, original_amount, status, due_date, paid_at, created_at,' +
+    '  SELECT id, description, category, amount, original_amount, receipt_filename, status, due_date, paid_at, created_at,' +
     '         payment_method, notes, employee_id, employee_name, recurrence_type, recurrence_index, idempotency_key,' +
     '         ' + COMP + ' AS comp' +
     '  FROM transactions' +
@@ -146,6 +146,8 @@ function montarQuadro({ tipo, hoje, mes, cartoes, grupos, semana }) {
       amount: Number(r.amount) || 0,
       // Valor do boleto quando a baixa foi com outro valor (juros, desconto).
       original_amount: r.original_amount == null ? null : Number(r.original_amount),
+      // F3: comprovante anexado (o app mostra o clipe e abre por GET /:txId/receipt).
+      receipt_filename: r.receipt_filename || null,
       status: r.status,
       date: dataISO(r.comp),
       due_date: dataISO(r.due_date),
