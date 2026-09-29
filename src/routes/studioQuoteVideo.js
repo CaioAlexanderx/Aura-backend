@@ -9,6 +9,7 @@
 // POST /studio/quotes/:qid/video/manter   → +30 dias
 // POST /studio/quotes/:qid/marcar-enviado → draft|sent → sent, SEM token (não há página pública)
 // POST /studio/quotes/:qid/fechar         → encerra sem venda (status 'closed')
+// POST /studio/quotes/:qid/ajuste         → cliente pediu ajuste: registra e volta a draft (362)
 //
 // "Aprovar" (vira pedido) mora em studioQuotes.js, ao lado do convert.
 //
@@ -236,12 +237,17 @@ router.post('/quotes/:qid/marcar-enviado', async function(req, res) {
       return res.status(400).json({ error: `Não é possível enviar orçamento com status '${q.status}'` });
     }
     const vDays = Math.max(1, parseInt(q.validity_days, 10) || 7);
+    // Reenvio depois de "Cliente pediu ajuste" (362): a versão sobe e o
+    // selo sai. Sem ajuste pendente (ou sem a 362) nada disso é tocado.
+    const reenvioDeAjuste = q.ajuste_pedido_em != null;
     const upd = await db.query(
       `UPDATE studio_quotes
           SET status      = 'sent',
               sent_at     = NOW(),
               expires_at  = NOW() + ($1 || ' days')::interval,
-              canal_envio = $2,
+              canal_envio = $2,${reenvioDeAjuste ? `
+              versao           = versao + 1,
+              ajuste_pedido_em = NULL,` : ''}
               updated_at  = NOW()
         WHERE id = $3 AND company_id = $4
         RETURNING *`,
@@ -283,6 +289,53 @@ router.post('/quotes/:qid/fechar', async function(req, res) {
     if (err && err.code === '23514') return res.status(503).json({ error: 'Fechar orçamento ainda não está disponível' });
     console.error('[studio/quotes/:qid/fechar]', err.message);
     res.status(500).json({ error: 'Erro ao fechar o orçamento' });
+  }
+});
+
+// ─── POST /quotes/:qid/ajuste ────────────────────────────────
+// O cliente pediu, no WhatsApp da lojista, para mudar algo no orçamento
+// enviado. Registro interno: guarda o texto e a versão que o cliente viu,
+// e o orçamento volta a 'draft' para ela editar peça, arte, cor, valores
+// e condições. O vídeo antigo fica guardado até ela gerar outro.
+// Um só comando (CTE): só registra se o orçamento ainda estava 'sent'.
+router.post('/quotes/:qid/ajuste', async function(req, res) {
+  const cid = req.params.id;
+  const qid = req.params.qid;
+  const lido = regras.lerPedidoDeAjuste(req.body);
+  if (!lido.ok) return res.status(400).json({ error: lido.erro });
+
+  try {
+    const q = await buscarOrcamento(qid, cid);
+    if (!q) return res.status(404).json({ error: 'Orçamento não encontrado' });
+    if (q.status !== 'sent') {
+      return res.status(400).json({ error: 'Só dá para registrar ajuste de um orçamento enviado' });
+    }
+    const r = await db.query(
+      `WITH q AS (
+         UPDATE studio_quotes
+            SET status           = 'draft',
+                ajuste_pedido_em = NOW(),
+                updated_at       = NOW()
+          WHERE id = $1 AND company_id = $2 AND status = 'sent'
+          RETURNING *
+       ), a AS (
+         INSERT INTO studio_quote_ajustes (quote_id, company_id, texto, versao, created_by)
+         SELECT id, company_id, $3, versao, $4 FROM q
+         RETURNING id, texto, versao, created_at
+       )
+       SELECT (SELECT row_to_json(q) FROM q) AS quote,
+              (SELECT row_to_json(a) FROM a) AS ajuste`,
+      [qid, cid, lido.texto, (req.user && req.user.id) || null]
+    );
+    const linha = r.rows[0] || {};
+    if (!linha.quote) {
+      return res.status(409).json({ error: 'O orçamento mudou enquanto você registrava. Abra de novo.' });
+    }
+    res.status(201).json({ quote: linha.quote, ajuste: linha.ajuste });
+  } catch (err) {
+    if (semColuna(err)) return res.status(503).json({ error: 'Pedido de ajuste ainda não está disponível' });
+    console.error('[studio/quotes/:qid/ajuste]', err.message);
+    res.status(500).json({ error: 'Erro ao registrar o pedido de ajuste' });
   }
 });
 

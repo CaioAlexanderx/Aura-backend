@@ -72,6 +72,22 @@ function lerCondicoes(body) {
   };
 }
 
+/** Tamanho máximo do texto de "O que o cliente pediu". */
+const LIMITE_DO_AJUSTE = 500;
+
+/**
+ * Lê o pedido de ajuste que a lojista registrou (texto obrigatório).
+ * @returns {{ ok: true, texto: string } | { ok: false, erro: string }}
+ */
+function lerPedidoDeAjuste(body) {
+  const texto = String((body && body.texto) || '').trim();
+  if (!texto) return { ok: false, erro: 'Escreva o que o cliente pediu' };
+  if (texto.length > LIMITE_DO_AJUSTE) {
+    return { ok: false, erro: `O pedido deve ter até ${LIMITE_DO_AJUSTE} caracteres` };
+  }
+  return { ok: true, texto };
+}
+
 function reais(v) {
   return 'R$ ' + (Math.round((Number(v) || 0) * 100) / 100).toFixed(2).replace('.', ',')
     .replace(/\B(?=(\d{3})+(?!\d))/g, '.');
@@ -150,7 +166,9 @@ module.exports = {
   FORMATOS,
   CANAIS,
   STATUS_ABERTOS,
+  LIMITE_DO_AJUSTE,
   lerCondicoes,
+  lerPedidoDeAjuste,
   valoresDasCondicoes,
   notasDoPedidoAprovado,
   novaExpiracao,
