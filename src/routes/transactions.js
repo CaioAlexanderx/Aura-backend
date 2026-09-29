@@ -88,7 +88,7 @@ router.get('/', async function(req, res) {
     var dataSql =
       'SELECT id, type, amount, description, category, status, notes, due_date, paid_at, created_at,' +
       '       recurrence_type, recurrence_group_id, recurrence_index,' +
-      '       payment_method, employee_id, employee_name, idempotency_key' +
+      '       payment_method, employee_id, employee_name, idempotency_key, original_amount' +
       ' FROM transactions ' + where +
       " ORDER BY COALESCE(due_date, (created_at AT TIME ZONE 'America/Sao_Paulo')::date) DESC, created_at DESC" +
       ' LIMIT $' + (params.length + 1) + ' OFFSET $' + (params.length + 2);
@@ -135,6 +135,7 @@ router.get('/', async function(req, res) {
     var transactions = dataRes.rows.map(function(r) {
       return {
         id: r.id, type: r.type, amount: parseFloat(r.amount) || 0,
+        original_amount: r.original_amount == null ? null : parseFloat(r.original_amount),
         desc: r.description || '', description: r.description || '',
         category: r.category || 'Outros', status: r.status || 'confirmed',
         notes: r.notes || '',
@@ -213,18 +214,36 @@ router.post('/', async function(req, res) {
       employeeName = empRes.rows[0].name;
     } catch (err) { console.error('[transactions] validate employee:', err.message); }
   }
+  // 28/09/2026 (valor pago): cadastrar "ja paguei" com a data e o valor pagos.
+  // due_date continua sendo o vencimento; paid_at vira a data do pagamento
+  // (meia-noite SP) e, se o valor pago for outro, amount = pago e
+  // original_amount = valor do boleto. Sem paid_at, a baixa e agora (como antes).
+  var paidAtDate = body.paid_at || null;
+  if (paidAtDate && !/^\d{4}-\d{2}-\d{2}$/.test(String(paidAtDate))) return res.status(400).json({ error: 'paid_at deve ser uma data (AAAA-MM-DD)' });
+  var paidAmountBody = null;
+  if (body.paid_amount !== undefined && body.paid_amount !== null && body.paid_amount !== '') {
+    paidAmountBody = Math.round(parseFloat(body.paid_amount) * 100) / 100;
+    if (!(paidAmountBody > 0)) return res.status(400).json({ error: 'paid_amount deve ser maior que zero' });
+  }
+  function valoresDaBaixa(status) {
+    var valor = parseFloat(body.amount);
+    if (status === 'confirmed' && paidAmountBody !== null && Math.abs(paidAmountBody - valor) >= 0.005) return { amount: paidAmountBody, original: valor };
+    return { amount: valor, original: null };
+  }
+  var PAID_AT_SQL = "CASE WHEN $8::text = 'confirmed' THEN COALESCE($13::date + INTERVAL '3 hours', NOW()) END";
   try {
     if (!recurrenceType) {
-      var paidAt = finalStatus === 'confirmed' ? 'NOW()' : 'NULL';
+      var v = valoresDaBaixa(finalStatus);
       var result = await db.query(
-        'INSERT INTO transactions (company_id, type, amount, description, category, notes, due_date, status, paid_at, created_by, payment_method, employee_id, employee_name)' +
-        ' VALUES ($1, $2, $3, $4, $5, $6, $7, $8, ' + paidAt + ', $9, $10, $11, $12)' +
-        ' RETURNING id, type, amount, description, category, status, due_date, paid_at, created_at, payment_method, employee_id, employee_name',
-        [cid, body.type, parseFloat(body.amount), String(body.description).trim(), body.category || 'Outros',
-         body.notes || null, dueDate, finalStatus, req.user?.id || null, paymentMethod, employeeId, employeeName]
+        'INSERT INTO transactions (company_id, type, amount, description, category, notes, due_date, status, paid_at, created_by, payment_method, employee_id, employee_name, original_amount)' +
+        ' VALUES ($1, $2, $3, $4, $5, $6, $7, $8::text, ' + PAID_AT_SQL + ', $9, $10, $11, $12, $14)' +
+        ' RETURNING id, type, amount, original_amount, description, category, status, due_date, paid_at, created_at, payment_method, employee_id, employee_name',
+        [cid, body.type, v.amount, String(body.description).trim(), body.category || 'Outros',
+         body.notes || null, dueDate, finalStatus, req.user?.id || null, paymentMethod, employeeId, employeeName,
+         finalStatus === 'confirmed' ? paidAtDate : null, v.original]
       );
       var tx = result.rows[0];
-      return res.status(201).json({ id: tx.id, type: tx.type, amount: parseFloat(tx.amount), description: tx.description, category: tx.category, status: tx.status, due_date: tx.due_date, paid_at: tx.paid_at, created_at: tx.created_at, payment_method: tx.payment_method, employee_id: tx.employee_id, employee_name: tx.employee_name });
+      return res.status(201).json({ id: tx.id, type: tx.type, amount: parseFloat(tx.amount), original_amount: tx.original_amount == null ? null : parseFloat(tx.original_amount), description: tx.description, category: tx.category, status: tx.status, due_date: tx.due_date, paid_at: tx.paid_at, created_at: tx.created_at, payment_method: tx.payment_method, employee_id: tx.employee_id, employee_name: tx.employee_name });
     }
     var groupId = crypto.randomUUID();
     var amount = parseFloat(body.amount); var description = String(body.description).trim();
@@ -233,12 +252,16 @@ router.post('/', async function(req, res) {
     for (var i = 0; i < recurrenceCount; i++) {
       var itemDueDate = advanceDate(dueDate, recurrenceType, i);
       var itemStatus = i === 0 ? finalStatus : 'pending';
-      var itemPaidAt = itemStatus === 'confirmed' ? 'NOW()' : 'NULL';
+      // Data e valor pagos so valem para a 1a ocorrencia (as outras nascem pendentes).
+      var itemValores = valoresDaBaixa(itemStatus);
+      // $16 citado sempre: parametro enviado e nao citado quebra o Postgres.
+      var itemPaidAt = "CASE WHEN $8::text = 'confirmed' THEN COALESCE($16::date + INTERVAL '3 hours', NOW()) END";
       var r = await db.query(
-        'INSERT INTO transactions (company_id, type, amount, description, category, notes, due_date, status, paid_at, created_by, recurrence_type, recurrence_group_id, recurrence_index, payment_method, employee_id, employee_name)' +
-        ' VALUES ($1, $2, $3, $4, $5, $6, $7, $8, ' + itemPaidAt + ', $9, $10, $11, $12, $13, $14, $15)' +
+        'INSERT INTO transactions (company_id, type, amount, description, category, notes, due_date, status, paid_at, created_by, recurrence_type, recurrence_group_id, recurrence_index, payment_method, employee_id, employee_name, original_amount)' +
+        ' VALUES ($1, $2, $3, $4, $5, $6, $7, $8::text, ' + itemPaidAt + ', $9, $10, $11, $12, $13, $14, $15, $17)' +
         ' RETURNING id, type, amount, description, category, status, due_date, recurrence_index',
-        [cid, body.type, amount, description, category, notes, itemDueDate, itemStatus, userId, recurrenceType, groupId, i, paymentMethod, employeeId, employeeName]
+        [cid, body.type, itemValores.amount, description, category, notes, itemDueDate, itemStatus, userId, recurrenceType, groupId, i, paymentMethod, employeeId, employeeName,
+         itemStatus === 'confirmed' ? paidAtDate : null, itemValores.original]
       );
       created.push(r.rows[0]);
     }
@@ -274,11 +297,29 @@ router.patch('/:txId', async function(req, res) {
   if (req.body.paid_at !== undefined && req.body.paid_at !== null && !/^\d{4}-\d{2}-\d{2}$/.test(String(req.body.paid_at))) {
     return res.status(400).json({ error: 'paid_at deve ser uma data (AAAA-MM-DD)' });
   }
-  if (req.body.amount !== undefined || req.body.status !== undefined) {
+  // 28/09/2026 (valor pago): baixa com valor diferente do boleto. amount vira o
+  // valor pago (o que saiu do caixa, e o que os relatorios ja somam) e o valor
+  // do boleto fica em original_amount. Sem calculo de juros: a lojista digita
+  // o que pagou.
+  var paidAmount = null;
+  if (req.body.paid_amount !== undefined && req.body.paid_amount !== null) {
+    paidAmount = parseFloat(req.body.paid_amount);
+    if (!(paidAmount > 0)) return res.status(400).json({ error: 'paid_amount deve ser maior que zero' });
+    if (req.body.status !== 'confirmed') return res.status(400).json({ error: 'paid_amount so vale junto de status confirmed' });
+    paidAmount = Math.round(paidAmount * 100) / 100;
+    delete req.body.amount;
+  }
+  if (req.body.amount !== undefined || req.body.status !== undefined || paidAmount !== null) {
     try {
       var curRes = await db.query('SELECT amount, idempotency_key, category, status FROM transactions WHERE id = $1 AND company_id = $2', [txId, cid]);
       var cur = curRes.rows[0];
       if (cur && req.body.status !== undefined && cur.status !== undefined && req.body.status !== cur.status && quadro.eCrediario(cur)) {
+        return res.status(409).json({
+          error: 'O crediário tem baixa própria, parcela a parcela. Para registrar ou desfazer um recebimento, use a tela do Crediário.',
+          code: 'CREDIT_STATUS_DERIVED',
+        });
+      }
+      if (cur && paidAmount !== null && quadro.eCrediario(cur)) {
         return res.status(409).json({
           error: 'O crediário tem baixa própria, parcela a parcela. Para registrar ou desfazer um recebimento, use a tela do Crediário.',
           code: 'CREDIT_STATUS_DERIVED',
@@ -306,10 +347,21 @@ router.patch('/:txId', async function(req, res) {
   // antes ficava gravada e o "desfazer" deixava rastro.
   if (req.body.status === 'pending') {
     updates.push('paid_at = NULL');
+    // Desfazer a baixa devolve o valor do boleto (se a baixa tinha mudado o valor).
+    if (req.body.amount === undefined) updates.push('amount = COALESCE(original_amount, amount)');
+    updates.push('original_amount = NULL');
   } else if (req.body.status === 'confirmed' && req.body.paid_at) {
     updates.push("paid_at = ($" + idx + "::date + INTERVAL '3 hours')"); values.push(req.body.paid_at); idx++;
   } else if (req.body.status === 'confirmed') {
     updates.push('paid_at = COALESCE(paid_at, NOW())');
+  }
+  if (paidAmount !== null) {
+    // O SET le a linha antiga: original_amount guarda o valor do boleto uma vez
+    // so (corrigir o valor pago de novo nao perde o original); pagar
+    // exatamente o valor do boleto limpa a coluna.
+    updates.push('original_amount = CASE WHEN ABS($' + idx + '::numeric - COALESCE(original_amount, amount)) < 0.005 THEN NULL ELSE COALESCE(original_amount, amount) END');
+    updates.push('amount = $' + idx + '::numeric');
+    values.push(paidAmount); idx++;
   }
   if (updates.length === 0) return res.status(400).json({ error: 'Nenhum campo para atualizar' });
   updates.push('updated_at = NOW()'); values.push(txId, cid);

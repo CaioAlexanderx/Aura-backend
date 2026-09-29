@@ -66,7 +66,7 @@ function intervaloDoMes(mes, hoje) {
 function sqlDosCartoes() {
   return (
     'WITH base AS (' +
-    '  SELECT id, description, category, amount, status, due_date, paid_at, created_at,' +
+    '  SELECT id, description, category, amount, original_amount, status, due_date, paid_at, created_at,' +
     '         payment_method, notes, employee_name, recurrence_type, recurrence_index, idempotency_key,' +
     '         ' + COMP + ' AS comp' +
     '  FROM transactions' +
@@ -132,6 +132,8 @@ function montarQuadro({ tipo, hoje, mes, cartoes, grupos }) {
       description: r.description,
       category: r.category,
       amount: Number(r.amount) || 0,
+      // Valor do boleto quando a baixa foi com outro valor (juros, desconto).
+      original_amount: r.original_amount == null ? null : Number(r.original_amount),
       status: r.status,
       date: dataISO(r.comp),
       due_date: dataISO(r.due_date),
