@@ -86,7 +86,12 @@ function sqlDosCartoes() {
     "      CASE WHEN coluna = 'feito' THEN NULL ELSE comp END ASC," +
     "      CASE WHEN coluna = 'feito' THEN comp END DESC, created_at DESC) AS ordem," +
     '    COUNT(*) OVER (PARTITION BY coluna) AS qtd_coluna,' +
-    '    SUM(amount) OVER (PARTITION BY coluna) AS total_coluna' +
+    '    SUM(amount) OVER (PARTITION BY coluna) AS total_coluna,' +
+    // F2: o que foi pago a mais (juros/multa) ou a menos (desconto) que o
+    // valor original, na coluna inteira (antes do corte de 150).
+    '    COALESCE(SUM(amount - original_amount) FILTER (WHERE original_amount IS NOT NULL AND amount > original_amount) OVER (PARTITION BY coluna), 0) AS pago_a_mais,' +
+    '    COALESCE(SUM(original_amount - amount) FILTER (WHERE original_amount IS NOT NULL AND amount < original_amount) OVER (PARTITION BY coluna), 0) AS pago_a_menos,' +
+    '    COUNT(*) FILTER (WHERE original_amount IS NOT NULL AND amount > original_amount) OVER (PARTITION BY coluna) AS qtd_a_mais' +
     '  FROM marcada' +
     ')' +
     ' SELECT * FROM numerada WHERE ordem <= ' + LIMITE_POR_COLUNA +
@@ -116,17 +121,24 @@ function dataISO(v) {
   return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
 }
 
-function montarQuadro({ tipo, hoje, mes, cartoes, grupos }) {
+function montarQuadro({ tipo, hoje, mes, cartoes, grupos, semana }) {
   const colunas = {
     atrasado: { total: 0, count: 0, items: [] },
     aberto: { total: 0, count: 0, items: [] },
-    feito: { total: 0, count: 0, items: [], grupos: [] },
+    feito: { total: 0, count: 0, items: [], grupos: [], diferenca: { a_mais: 0, a_menos: 0, count_a_mais: 0 } },
   };
   for (const r of cartoes || []) {
     const col = colunas[r.coluna];
     if (!col) continue;
     col.count = Number(r.qtd_coluna) || 0;
     col.total = Number(r.total_coluna) || 0;
+    if (r.coluna === 'feito') {
+      col.diferenca = {
+        a_mais: Math.round((Number(r.pago_a_mais) || 0) * 100) / 100,
+        a_menos: Math.round((Number(r.pago_a_menos) || 0) * 100) / 100,
+        count_a_mais: Number(r.qtd_a_mais) || 0,
+      };
+    }
     col.items.push({
       id: r.id,
       description: r.description,
@@ -155,7 +167,45 @@ function montarQuadro({ tipo, hoje, mes, cartoes, grupos }) {
     colunas.feito.total += total;
   }
   for (const k of Object.keys(colunas)) colunas[k].total = Math.round(colunas[k].total * 100) / 100;
-  return { type: tipo, month: mes, today: hoje, limit_per_column: LIMITE_POR_COLUNA, columns: colunas };
+  const s = semana || {};
+  return {
+    type: tipo, month: mes, today: hoje, limit_per_column: LIMITE_POR_COLUNA, columns: colunas,
+    // F2: pendente de hoje ate hoje+6, de qualquer mes (a semana cruza a virada).
+    week: { count: Number(s.qtd) || 0, total: Math.round((Number(s.total) || 0) * 100) / 100, until: dataISO(s.ate) },
+  };
+}
+
+// F2: pendentes que vencem de hoje ate hoje+6 (qualquer mes), sem crediario.
+function sqlDaSemana() {
+  return (
+    'SELECT COUNT(*) AS qtd, COALESCE(SUM(amount), 0) AS total, ($2::date + 6) AS ate' +
+    ' FROM transactions' +
+    " WHERE company_id = $1 AND type = $3 AND status = 'pending'" +
+    '   AND NOT ' + SQL_E_CREDIARIO +
+    '   AND ' + COMP + ' BETWEEN $2::date AND $2::date + 6'
+  );
+}
+
+// F2: baixa em lote. Um UPDATE so (atomico, uma ida ao banco): so pendente,
+// so movable (manual ou planilha), nunca crediario. Por item, o valor pago
+// opcional (NULL = paga o proprio valor). Mesma regra do PATCH: amount = pago,
+// original_amount = valor do boleto quando o pago e diferente.
+function sqlDaBaixaEmLote() {
+  return (
+    'UPDATE transactions t SET' +
+    "  status = 'confirmed'," +
+    "  paid_at = COALESCE($3::date + INTERVAL '3 hours', NOW())," +
+    '  payment_method = COALESCE($4::text, t.payment_method),' +
+    '  original_amount = CASE WHEN v.pago IS NULL OR ABS(v.pago - COALESCE(t.original_amount, t.amount)) < 0.005' +
+    '    THEN t.original_amount ELSE COALESCE(t.original_amount, t.amount) END,' +
+    '  amount = COALESCE(v.pago, t.amount),' +
+    '  updated_at = NOW()' +
+    ' FROM unnest($2::uuid[], $5::numeric[]) AS v(id, pago)' +
+    " WHERE t.id = v.id AND t.company_id = $1 AND t.status = 'pending'" +
+    "   AND (t.idempotency_key IS NULL OR t.idempotency_key ~* '^planilha-')" +
+    "   AND NOT (t.category ILIKE 'credi_rio%' OR COALESCE(t.idempotency_key, '') ~* '^(pdv-credit-|credit-payment)')" +
+    ' RETURNING t.id, t.amount, t.original_amount'
+  );
 }
 
 module.exports = {
@@ -167,4 +217,6 @@ module.exports = {
   sqlDosCartoes,
   sqlDosGrupos,
   montarQuadro,
+  sqlDaSemana,
+  sqlDaBaixaEmLote,
 };

@@ -180,12 +180,49 @@ router.get('/board', async function(req, res) {
     var resultados = await Promise.all([
       db.query(quadro.sqlDosCartoes(), [cid, tipo, hoje, mes.inicio, mes.fim]),
       db.query(quadro.sqlDosGrupos(), [cid, tipo, mes.inicio, mes.fim]),
+      db.query(quadro.sqlDaSemana(), [cid, hoje, tipo]),
     ]);
     res.json(quadro.montarQuadro({
       tipo: tipo, hoje: hoje, mes: mes.mes,
-      cartoes: resultados[0].rows, grupos: resultados[1].rows,
+      cartoes: resultados[0].rows, grupos: resultados[1].rows, semana: resultados[2].rows[0],
     }));
   } catch (err) { console.error('[transactions] board:', err.message); res.status(500).json({ error: 'Erro ao carregar o quadro' }); }
+});
+
+// POST /baixa-em-lote — F2 do Quadro: pagar varios de uma vez (boletos
+// atrasados). { items: [{ id, paid_amount? }], paid_at?, payment_method? }.
+// Um UPDATE so; o que nao pode receber baixa (ja pago, crediario, venda) volta
+// em `skipped` sem derrubar o resto.
+var UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+router.post('/baixa-em-lote', async function(req, res) {
+  var cid = req.params.id;
+  var items = Array.isArray(req.body && req.body.items) ? req.body.items : [];
+  if (!items.length) return res.status(400).json({ error: 'Escolha ao menos um lancamento' });
+  if (items.length > 200) return res.status(400).json({ error: 'No maximo 200 lancamentos por vez' });
+  var paidAt = req.body.paid_at || null;
+  if (paidAt && !/^\d{4}-\d{2}-\d{2}$/.test(String(paidAt))) return res.status(400).json({ error: 'paid_at deve ser uma data (AAAA-MM-DD)' });
+  var forma = req.body.payment_method || null;
+  if (forma && VALID_PAYMENTS.indexOf(forma) === -1) return res.status(400).json({ error: 'payment_method invalido (aceitos: ' + VALID_PAYMENTS.join(', ') + ')' });
+  var ids = [], pagos = [], vistos = {};
+  for (var i = 0; i < items.length; i++) {
+    var it = items[i] || {};
+    if (!UUID_RE.test(String(it.id || ''))) return res.status(400).json({ error: 'id invalido no item ' + (i + 1) });
+    if (vistos[it.id]) continue;
+    vistos[it.id] = true;
+    var pago = null;
+    if (it.paid_amount !== undefined && it.paid_amount !== null && it.paid_amount !== '') {
+      pago = Math.round(parseFloat(it.paid_amount) * 100) / 100;
+      if (!(pago > 0)) return res.status(400).json({ error: 'paid_amount deve ser maior que zero (item ' + (i + 1) + ')' });
+    }
+    ids.push(String(it.id)); pagos.push(pago);
+  }
+  try {
+    var r = await db.query(quadro.sqlDaBaixaEmLote(), [cid, ids, paidAt, forma, pagos]);
+    var feitos = r.rows.map(function(x) { return x.id; });
+    var skipped = ids.filter(function(id) { return feitos.indexOf(id) === -1; });
+    var total = r.rows.reduce(function(a, x) { return a + (parseFloat(x.amount) || 0); }, 0);
+    res.json({ updated: feitos.length, skipped: skipped, total: Math.round(total * 100) / 100 });
+  } catch (err) { console.error('[transactions] baixa em lote:', err.message); res.status(500).json({ error: 'Erro ao dar baixa nos lancamentos' }); }
 });
 
 router.post('/', async function(req, res) {
