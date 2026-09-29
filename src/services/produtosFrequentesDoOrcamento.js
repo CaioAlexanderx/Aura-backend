@@ -62,6 +62,8 @@ function listasDeProdutosFrequentes(linhas, limite) {
 /**
  * Modelo de mockup do item do orçamento (studio_quote_items
  * .visual_template_key, migration 364). Vazio = null = herda do produto.
+ * O app grava "sem-mockup" quando a lojista tira o modelo só naquele
+ * orçamento (SEM_MODELO em components/studio/orcamentoVideo/modeloDaPeca.ts).
  */
 function lerModeloDoItem(v) {
   if (typeof v !== 'string') return null;
