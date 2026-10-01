@@ -321,6 +321,40 @@ describe('POST /companies/:id/pdv/sale — cupom + desconto', () => {
     expect(p[5]).toBe(75);
   });
 
+  test.each([
+    ['R$', { discount_type: 'fixed', discount_value: 25 }, 25, 75],
+    ['%', { discount_type: 'percent', discount_value: 12.5 }, 12.5, 87.5],
+  ])('seletor de desconto em %s calcula e grava o valor em reais', async (_label, discount, expectedDiscount, expectedTotal) => {
+    const client = arrange({});
+
+    const res = await request(app)
+      .post(`/api/v1/companies/${cid}/pdv/sale`)
+      .set(auth).send({ payment_method: 'dinheiro', items: [ITEM(100)], ...discount });
+
+    expect(res.status).toBe(201);
+    const p = saleParams(client);
+    expect(p[6]).toBe(expectedDiscount);
+    expect(p[5]).toBe(expectedTotal);
+  });
+
+  test.each([
+    [{ discount_type: 'percent', discount_value: 101 }],
+    [{ discount_type: 'fixed' }],
+    [{ discount_type: 'invalid', discount_value: 10 }],
+    [{ discount_amount: 'invalido' }],
+  ])('recusa descontos manuais invalidos antes de gravar a venda', async (discount) => {
+    const client = arrange({});
+
+    const res = await request(app)
+      .post(`/api/v1/companies/${cid}/pdv/sale`)
+      .set(auth).send({ payment_method: 'dinheiro', items: [ITEM(100)], ...discount });
+
+    expect(res.status).toBe(400);
+    expect(res.body.code).toBe('INVALID_MANUAL_DISCOUNT');
+    expect(saleParams(client)).toBeNull();
+    expect(findQuery(client, /^\s*ROLLBACK/i)).toBeTruthy();
+  });
+  
   test('cupom nominal de outro cliente — 400 COUPON_CUSTOMER_MISMATCH, sem gravar venda', async () => {
     const client = arrange({ coupon: coupon('fixed', 10, { customer_id: 'cust-A', owner_name: 'Maria' }) });
 
