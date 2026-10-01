@@ -31,6 +31,9 @@ router.use('/caixa', require('./caixa'));
 // 31/08/2026 — Ordem de Servico (migration 313). Gate por pdv_settings.os_enabled
 // dentro do proprio router, so na escrita.
 router.use('/service-orders', require('./serviceOrders'));
+// 01/10/2026 — Garantia de produto (migration 365): extensao da OS. Mesmo gate
+// (os_enabled, so na escrita), sem requirePlan no prefixo.
+router.use('/warranties', require('./warranties'));
 // 15/09/2026 — Otica (migration 334): configuracao, laboratorios, receitas
 // e painel. Mesmo desenho da OS: gate por pdv_settings.otica_enabled dentro
 // do router, so na escrita, sem requirePlan no prefixo.

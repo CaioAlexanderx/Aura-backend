@@ -25,6 +25,7 @@ const { autoPrintScript } = require('../utils/autoPrintScript');
 const { findOwnerScopedCustomer, CUSTOMER_NOT_FOUND_BODY } = require('../utils/customerScope');
 const { qrInlineSvg } = require('../utils/qrInline');
 const { buildServiceOrderHtml } = require('../utils/buildServiceOrderHtml');
+const { buildWarrantyHtml } = require('../utils/buildWarrantyHtml');
 
 const NUVEM_URL = process.env.NUVEM_FISCAL_URL || 'https://api.sandbox.nuvemfiscal.com.br';
 
@@ -402,6 +403,69 @@ router.get('/os/:osId', requireAuth, async (req, res) => {
     }
     console.error('[print] os error:', err.message);
     res.status(500).json({ error: 'Erro ao gerar ordem de servico' });
+  }
+});
+
+// ============================================================
+// GET /print/warranty/:warrantyId — Certificado de garantia em A4
+//
+// Mesmo desenho do /print/os: sem gate de os_enabled (segunda via de um
+// documento que o cliente ja tem), marca do lojista no topo. ?autoprint=1
+// abre ja no dialogo de impressao.
+// ============================================================
+router.get('/warranty/:warrantyId', requireAuth, async (req, res) => {
+  try {
+    const companyId = req.params.id;
+    if (!/^[0-9a-f-]{36}$/i.test(req.params.warrantyId)) {
+      return res.status(404).json({ error: 'Garantia nao encontrada' });
+    }
+    const { rows } = await db.query(
+      `SELECT w.*, s.sale_number
+         FROM warranties w LEFT JOIN sales s ON s.id = w.sale_id
+        WHERE w.id = $1 AND w.company_id = $2`,
+      [req.params.warrantyId, companyId]
+    );
+    if (!rows.length) return res.status(404).json({ error: 'Garantia nao encontrada' });
+    const { rows: items } = await db.query(
+      `SELECT product_name, serial, quantity, unit_price, days,
+              to_char(starts_on, 'YYYY-MM-DD') AS starts_on,
+              to_char(expires_on, 'YYYY-MM-DD') AS expires_on
+         FROM warranty_items WHERE warranty_id = $1
+        ORDER BY sort_order, product_name`,
+      [req.params.warrantyId]
+    );
+    const { rows: companyRows } = await db.query(
+      `SELECT trade_name, legal_name, cnpj, phone, logo_url,
+              address_street, address_number, address_district,
+              address_city, address_state, address_zip
+         FROM companies WHERE id = $1`,
+      [companyId]
+    );
+    let brand = {};
+    try {
+      const { rows: b } = await db.query(
+        `SELECT logo_url, primary_color, whatsapp
+           FROM digital_channel_config WHERE company_id = $1`,
+        [companyId]
+      );
+      if (b.length) brand = b[0];
+    } catch (e) {
+      if (e.code !== '42P01') throw e;
+    }
+    res.setHeader('Content-Type', 'text/html; charset=utf-8');
+    res.send(buildWarrantyHtml({
+      warranty: rows[0],
+      items,
+      company: companyRows[0] || {},
+      brand,
+      autoprint: req.query.autoprint === '1',
+    }));
+  } catch (err) {
+    if (err.code === '42P01') {
+      return res.status(503).json({ error: 'Modulo de Garantia ainda nao instalado neste ambiente' });
+    }
+    console.error('[print] warranty error:', err.message);
+    res.status(500).json({ error: 'Erro ao gerar garantia' });
   }
 });
 
