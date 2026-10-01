@@ -86,6 +86,10 @@ const ALLOWED_NULLABLE_STRING_KEYS = {
   label_size: ['99x21', '30x25', '58mm', '105x21'],
 };
 
+// 01/10/2026 — Modelo dos termos da Garantia de produto (texto livre). null/''
+// volta ao modelo padrao da Aura (utils/warrantyTerms.js).
+const ALLOWED_TEXT_KEYS = { warranty_terms: 6000 };
+
 const ALLOWED_NUMBER_KEYS = [
   'service_fee_pct',
   // 22/09/2026 — Matcon (docs/CONTRACT_MATCON.md secoes M0, M1, M3)
@@ -164,6 +168,7 @@ const DEFAULT_SETTINGS = {
   label_offset_mm:           0,
   label_cols:                3,
   label_size:                null,
+  warranty_terms:            null,
 };
 
 function validateSettings(settings) {
@@ -205,6 +210,18 @@ function validateSettings(settings) {
         throw new AppError(key + ' deve ser um de: ' + allowedValues.join(', '), 400);
       }
       clean[key] = raw;
+    }
+  }
+
+  // Texto livre que aceita null (01/10/2026 — warranty_terms)
+  for (const key of Object.keys(ALLOWED_TEXT_KEYS)) {
+    if (key in settings) {
+      const raw = settings[key];
+      if (raw === null || raw === undefined || String(raw).trim() === '') { clean[key] = null; continue; }
+      if (typeof raw !== 'string' || raw.length > ALLOWED_TEXT_KEYS[key]) {
+        throw new AppError(key + ' deve ser texto de ate ' + ALLOWED_TEXT_KEYS[key] + ' caracteres', 400);
+      }
+      clean[key] = raw.trim();
     }
   }
 

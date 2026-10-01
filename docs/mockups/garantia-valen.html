@@ -1,0 +1,138 @@
+<!DOCTYPE html><html lang="pt-BR"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Garantia nº 000128 — VALEN ELETRÔNICOS</title><style>
+@page{size:A4;margin:14mm}
+*{margin:0;padding:0;box-sizing:border-box}
+html,body{background:#eceef3;color:#14121f;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Arial,sans-serif;font-size:10pt;line-height:1.4}
+:root{--cor:#5b21b6;--ink:#14121f;--mut:#6b6880;--line:#e6e4ee}
+.page{width:182mm;margin:0 auto;background:#fff;color:var(--ink);position:relative}
+@media screen{body{padding:28px 0}.page{padding:14mm;box-shadow:0 8px 40px rgba(20,18,31,.18)}
+.toolbar{position:fixed;top:0;left:0;right:0;background:#1a1a2e;color:#fff;padding:10px 20px;display:flex;align-items:center;justify-content:space-between;z-index:99}
+.toolbar button{background:#7c3aed;color:#fff;border:0;padding:8px 18px;border-radius:6px;font-weight:700;cursor:pointer}
+.toolbar span{font-size:12px;color:#a78bfa}}
+@media print{body{background:#fff}.page{box-shadow:none;padding:0}.toolbar{display:none!important}
+body{-webkit-print-color-adjust:exact;print-color-adjust:exact}}
+
+/* faixa de marca */
+.faixa{height:3mm;background:var(--cor);border-radius:1.5mm 1.5mm 0 0;position:relative;overflow:hidden}
+.faixa::after{content:"";position:absolute;right:-6mm;top:-8mm;width:40mm;height:16mm;background:rgba(255,255,255,.18);transform:skewX(-30deg)}
+
+/* cabecalho */
+.hd{display:flex;align-items:center;gap:5mm;padding:4mm 0 3mm}
+.logo{flex:0 0 auto;width:20mm;height:20mm;object-fit:contain;border-radius:3mm;border:.6pt solid var(--line);background:#fff}
+.logo-fb{display:flex;align-items:center;justify-content:center;border:none;background:var(--cor);color:#fff;font-size:15pt;font-weight:800}
+.hd-info{flex:1;min-width:0}
+.hd-nome{font-size:14pt;font-weight:800;line-height:1.15;color:var(--ink)}
+.hd-sub{font-size:8pt;color:var(--mut);line-height:1.45;margin-top:.8mm}
+.hd-num{flex:0 0 auto;text-align:right}
+.hd-num .rot{font-size:7pt;letter-spacing:1.2pt;text-transform:uppercase;color:var(--mut)}
+.hd-num .num{font-size:15pt;font-weight:800;letter-spacing:.5pt;color:var(--cor);font-variant-numeric:tabular-nums}
+.hd-num .dt{font-size:8pt;color:var(--mut);margin-top:.5mm}
+
+/* heroi */
+.hero{display:flex;align-items:stretch;gap:6mm;border-radius:4mm;padding:5mm 6mm;margin-top:1mm;color:#fff;
+  background:linear-gradient(135deg,var(--cor) 0%,#1b1033 135%);position:relative;overflow:hidden}
+.hero::before{content:"";position:absolute;right:-14mm;bottom:-22mm;width:70mm;height:70mm;border-radius:50%;border:5mm solid rgba(255,255,255,.07)}
+.hero::after{content:"";position:absolute;right:6mm;bottom:-30mm;width:54mm;height:54mm;border-radius:50%;border:3mm solid rgba(255,255,255,.06)}
+.hero-t{flex:1;min-width:0;position:relative;z-index:1}
+.hero-k{font-size:7.5pt;letter-spacing:2pt;text-transform:uppercase;opacity:.75}
+.hero-h{font-size:20pt;font-weight:800;line-height:1.05;margin:1mm 0 2mm;letter-spacing:-.4pt}
+.hero-p{font-size:9pt;opacity:.88;max-width:98mm}
+.hero-q{flex:0 0 auto;position:relative;z-index:1;background:#fff;color:var(--ink);border-radius:3mm;padding:2.5mm 2.5mm 2mm;text-align:center;align-self:center}
+.hero-q svg{display:block;width:26mm;height:26mm}
+.hero-q .q1{font-size:6.5pt;font-weight:800;letter-spacing:1pt;text-transform:uppercase;margin-top:1.2mm;color:var(--cor)}
+.hero-q .q2{font-size:8pt;font-weight:700;letter-spacing:1.5pt;font-variant-numeric:tabular-nums;margin-top:.3mm}
+
+/* itens */
+.sec{margin-top:4mm}
+.sec-t{font-size:7.5pt;font-weight:800;letter-spacing:1.4pt;text-transform:uppercase;color:var(--mut);margin-bottom:2.5mm;display:flex;align-items:center;gap:3mm}
+.sec-t::after{content:"";flex:1;height:.6pt;background:var(--line)}
+.item{display:flex;gap:5mm;align-items:center;border:.8pt solid var(--line);border-left:1.6mm solid var(--cor);border-radius:3mm;padding:3mm 5mm;margin-bottom:2.5mm;break-inside:avoid}
+.item-main{flex:1;min-width:0}
+.item-nome{font-size:11.5pt;font-weight:800;line-height:1.25;overflow-wrap:anywhere}
+.item-nome .qtd{font-weight:600;color:var(--mut)}
+.item-serie{font-size:8.5pt;margin-top:1mm;font-variant-numeric:tabular-nums}
+.item-serie span{font-size:6.5pt;font-weight:800;letter-spacing:1pt;text-transform:uppercase;color:var(--mut);margin-right:1.5mm}
+.linha{display:flex;align-items:center;gap:3mm;margin-top:2.5mm}
+.ponto{display:flex;flex-direction:column;font-size:8.5pt;line-height:1.2}
+.ponto b{font-variant-numeric:tabular-nums}
+.ponto span{font-size:6.5pt;letter-spacing:1pt;text-transform:uppercase;color:var(--mut)}
+.ponto.fim{text-align:right}
+.barra{flex:1;height:1.6mm;border-radius:99px;background:var(--line);position:relative}
+.barra i{position:absolute;inset:0;border-radius:99px;background:var(--cor)}
+.barra::before,.barra::after{content:"";position:absolute;top:50%;width:3.2mm;height:3.2mm;border-radius:50%;background:#fff;border:.9mm solid var(--cor);transform:translateY(-50%)}
+.barra::before{left:-1mm}.barra::after{right:-1mm}
+.item-prazo{flex:0 0 30mm;text-align:center;border-radius:3mm;background:color-mix(in srgb,var(--cor) 9%,#fff);padding:3.5mm 2mm}
+.prazo-n{font-size:16pt;font-weight:800;line-height:1;color:var(--cor)}
+.prazo-r{font-size:7pt;letter-spacing:1pt;text-transform:uppercase;color:var(--mut);margin-top:1.2mm}
+
+/* partes */
+.partes{display:flex;gap:4mm}
+.parte{flex:1;min-width:0;border-radius:3mm;background:#f7f6fb;padding:3mm 5mm}
+.parte .k{font-size:6.5pt;font-weight:800;letter-spacing:1.2pt;text-transform:uppercase;color:var(--mut)}
+.parte .nome{font-size:11pt;font-weight:800;margin:.8mm 0 1.2mm;overflow-wrap:anywhere}
+.parte .l{font-size:8.5pt;color:#3d3a52;display:flex;gap:2mm}
+.parte .l em{font-style:normal;color:var(--mut);min-width:14mm}
+
+/* termos */
+.termos{column-count:2;column-gap:7mm;font-size:6.9pt;line-height:1.34;color:#3d3a52}
+.termos h4{font-size:7.5pt;letter-spacing:1pt;text-transform:uppercase;color:var(--ink);margin:0 0 1.2mm;break-after:avoid}
+.termos p{margin-bottom:1.6mm;text-align:justify}
+.termos ul{margin:0 0 2.5mm 3.2mm}
+.termos li{margin-bottom:1mm;text-align:justify}
+.termos h4:not(:first-child){margin-top:2.5mm}
+
+/* rodape */
+.rodape{margin-top:5mm;padding-top:3mm;border-top:.6pt solid var(--line);display:flex;justify-content:space-between;align-items:center;font-size:7pt;color:var(--mut)}
+.rodape b{color:var(--cor);letter-spacing:.3pt}
+.valid{margin-top:4mm;font-size:7.5pt;color:var(--mut);text-align:center}
+
+/* Impressao P/B: sem fundo escuro nem cor como informacao. A cor da marca
+   vira preto; o heroi vira moldura; tudo continua legivel em laser mono/termica. */
+@media print{
+  :root{--cor:#000;--mut:#444;--line:#999}
+  .faixa{background:#000}
+  .faixa::after{display:none}
+  .hero{background:#fff!important;color:#000;border:1.4pt solid #000}
+  .hero::before,.hero::after{display:none}
+  .hero-q{border:1pt solid #000}
+  .logo-fb{background:#fff;color:#000;border:1.4pt solid #000}
+  .item{border-color:#777;border-left:1.6mm solid #000}
+  .item-prazo{background:#fff;border:1pt solid #000}
+  .prazo-n{color:#000}
+  .barra{background:#bbb}
+  .barra i{background:#000}
+  .barra::before,.barra::after{border-color:#000}
+  .parte{background:#fff;border:.8pt solid #777}
+  .hd-num .num,.rodape b,.hero-q .q1{color:#000}
+}
+
+/* anulada */
+.anulada{position:absolute;top:80mm;left:0;right:0;text-align:center;font-size:54pt;font-weight:900;letter-spacing:6pt;color:rgba(190,18,60,.16);transform:rotate(-16deg);pointer-events:none}
+</style></head><body><div class="toolbar"><span>Certificado de garantia — confira e imprima</span><button onclick="window.print()">Imprimir</button></div><div class="page"><div class="faixa"></div><div class="hd"><div class="logo logo-fb">VE</div><div class="hd-info"><div class="hd-nome">VALEN ELETRÔNICOS</div><div class="hd-sub">CNPJ 58.090.726/0001-42<br>Rua Rui Barbosa, 134 · Centro · Jacareí / SP · CEP 12308-520<br>(12) 97402-1641</div></div><div class="hd-num"><div class="rot">Garantia nº</div><div class="num">000128</div><div class="dt">30/09/2026 · 14:22</div></div></div><div class="hero"><div class="hero-t"><div class="hero-k">Certificado de garantia</div><div class="hero-h">Seus produtos estão protegidos.</div><div class="hero-p">Guarde este documento. Ele comprova a compra e o prazo de cobertura de cada item abaixo.</div></div><div class="hero-q"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 31 31" width="26mm" height="26mm" shape-rendering="crispEdges" role="img" aria-label="QR Code"><rect width="31" height="31" fill="#fff"/><path d="M1 1h7v1h-7zM13 1h4v1h-4zM18 1h3v1h-3zM23 1h7v1h-7zM1 2h1v1h-1zM7 2h1v1h-1zM10 2h1v1h-1zM12 2h7v1h-7zM23 2h1v1h-1zM29 2h1v1h-1zM1 3h1v1h-1zM3 3h3v1h-3zM7 3h1v1h-1zM9 3h1v1h-1zM11 3h1v1h-1zM13 3h2v1h-2zM16 3h1v1h-1zM20 3h1v1h-1zM23 3h1v1h-1zM25 3h3v1h-3zM29 3h1v1h-1zM1 4h1v1h-1zM3 4h3v1h-3zM7 4h1v1h-1zM9 4h3v1h-3zM13 4h1v1h-1zM15 4h2v1h-2zM18 4h1v1h-1zM21 4h1v1h-1zM23 4h1v1h-1zM25 4h3v1h-3zM29 4h1v1h-1zM1 5h1v1h-1zM3 5h3v1h-3zM7 5h1v1h-1zM9 5h1v1h-1zM11 5h1v1h-1zM13 5h1v1h-1zM16 5h2v1h-2zM19 5h3v1h-3zM23 5h1v1h-1zM25 5h3v1h-3zM29 5h1v1h-1zM1 6h1v1h-1zM7 6h1v1h-1zM9 6h1v1h-1zM18 6h1v1h-1zM23 6h1v1h-1zM29 6h1v1h-1zM1 7h7v1h-7zM9 7h1v1h-1zM11 7h1v1h-1zM13 7h1v1h-1zM15 7h1v1h-1zM17 7h1v1h-1zM19 7h1v1h-1zM21 7h1v1h-1zM23 7h7v1h-7zM9 8h1v1h-1zM13 8h1v1h-1zM15 8h1v1h-1zM17 8h1v1h-1zM20 8h1v1h-1zM1 9h1v1h-1zM3 9h5v1h-5zM10 9h4v1h-4zM17 9h3v1h-3zM23 9h5v1h-5zM4 10h3v1h-3zM8 10h1v1h-1zM11 10h6v1h-6zM19 10h3v1h-3zM23 10h3v1h-3zM29 10h1v1h-1zM2 11h2v1h-2zM6 11h2v1h-2zM11 11h1v1h-1zM14 11h4v1h-4zM19 11h1v1h-1zM24 11h2v1h-2zM1 12h4v1h-4zM6 12h1v1h-1zM10 12h2v1h-2zM13 12h2v1h-2zM16 12h1v1h-1zM19 12h3v1h-3zM25 12h2v1h-2zM28 12h1v1h-1zM2 13h1v1h-1zM4 13h1v1h-1zM7 13h2v1h-2zM12 13h2v1h-2zM15 13h2v1h-2zM20 13h1v1h-1zM26 13h2v1h-2zM1 14h3v1h-3zM5 14h1v1h-1zM10 14h3v1h-3zM16 14h5v1h-5zM23 14h3v1h-3zM29 14h1v1h-1zM6 15h2v1h-2zM9 15h1v1h-1zM11 15h3v1h-3zM18 15h1v1h-1zM21 15h2v1h-2zM25 15h3v1h-3zM4 16h2v1h-2zM8 16h1v1h-1zM10 16h1v1h-1zM15 16h1v1h-1zM17 16h2v1h-2zM21 16h5v1h-5zM28 16h1v1h-1zM1 17h1v1h-1zM5 17h1v1h-1zM7 17h6v1h-6zM18 17h3v1h-3zM24 17h1v1h-1zM26 17h2v1h-2zM1 18h1v1h-1zM5 18h2v1h-2zM8 18h2v1h-2zM14 18h3v1h-3zM19 18h7v1h-7zM27 18h1v1h-1zM29 18h1v1h-1zM1 19h1v1h-1zM4 19h7v1h-7zM12 19h1v1h-1zM14 19h3v1h-3zM18 19h2v1h-2zM21 19h2v1h-2zM24 19h2v1h-2zM27 19h1v1h-1zM1 20h1v1h-1zM3 20h3v1h-3zM9 20h3v1h-3zM13 20h2v1h-2zM20 20h2v1h-2zM24 20h2v1h-2zM28 20h1v1h-1zM1 21h1v1h-1zM3 21h2v1h-2zM6 21h3v1h-3zM12 21h2v1h-2zM15 21h1v1h-1zM17 21h9v1h-9zM27 21h3v1h-3zM9 22h2v1h-2zM13 22h1v1h-1zM16 22h1v1h-1zM18 22h2v1h-2zM21 22h1v1h-1zM25 22h5v1h-5zM1 23h7v1h-7zM11 23h1v1h-1zM16 23h6v1h-6zM23 23h1v1h-1zM25 23h3v1h-3zM1 24h1v1h-1zM7 24h1v1h-1zM9 24h2v1h-2zM15 24h1v1h-1zM19 24h3v1h-3zM25 24h1v1h-1zM28 24h1v1h-1zM1 25h1v1h-1zM3 25h3v1h-3zM7 25h1v1h-1zM9 25h1v1h-1zM17 25h3v1h-3zM21 25h5v1h-5zM27 25h3v1h-3zM1 26h1v1h-1zM3 26h3v1h-3zM7 26h1v1h-1zM9 26h1v1h-1zM11 26h3v1h-3zM15 26h3v1h-3zM19 26h4v1h-4zM26 26h2v1h-2zM1 27h1v1h-1zM3 27h3v1h-3zM7 27h1v1h-1zM9 27h1v1h-1zM12 27h3v1h-3zM18 27h2v1h-2zM22 27h7v1h-7zM1 28h1v1h-1zM7 28h1v1h-1zM11 28h2v1h-2zM14 28h1v1h-1zM16 28h1v1h-1zM21 28h1v1h-1zM23 28h2v1h-2zM26 28h1v1h-1zM28 28h1v1h-1zM1 29h7v1h-7zM9 29h1v1h-1zM11 29h2v1h-2zM14 29h1v1h-1zM17 29h4v1h-4zM22 29h4v1h-4zM27 29h1v1h-1z" fill="#000"/></svg><div class="q1">Validar no app Aura</div><div class="q2">K7M4Q9XD</div></div></div><div class="sec"><div class="sec-t">Produtos cobertos</div><div class="item">
+      <div class="item-main">
+        <div class="item-nome">Samsung Galaxy J5 Prime Seminovo 32GB Preto</div>
+        <div class="item-serie"><span>IMEI / Série</span> 356348090961692</div>
+        <div class="linha">
+          <div class="ponto"><b>30/09/2026</b><span>início</span></div>
+          <div class="barra"><i></i></div>
+          <div class="ponto fim"><b>30/09/2027</b><span>vence</span></div>
+        </div>
+      </div>
+      <div class="item-prazo">
+        <div class="prazo-n">1 ano</div>
+        <div class="prazo-r">de garantia</div>
+      </div>
+    </div><div class="item">
+      <div class="item-main">
+        <div class="item-nome">Carregador Turbo USB-C 25W</div>
+        
+        <div class="linha">
+          <div class="ponto"><b>30/09/2026</b><span>início</span></div>
+          <div class="barra"><i></i></div>
+          <div class="ponto fim"><b>29/12/2026</b><span>vence</span></div>
+        </div>
+      </div>
+      <div class="item-prazo">
+        <div class="prazo-n">3 meses</div>
+        <div class="prazo-r">de garantia</div>
+      </div>
+    </div></div><div class="sec"><div class="partes"><div class="parte"><div class="k">Cliente</div><div class="nome">Claudeci Gomes da Silva</div><div class="l"><em>CPF</em>323.971.928-29</div><div class="l"><em>Telefone</em>(12) 98832-7114</div></div><div class="parte"><div class="k">Compra</div><div class="nome">Venda nº 1042</div><div class="l"><em>Emissão</em>30/09/2026 · 14:22</div><div class="l"><em>Valor</em>R$ 335,00</div></div></div></div><div class="sec"><div class="sec-t">Termos</div><div class="termos"><h4>Condições da garantia</h4><p>Os produtos listados neste documento têm garantia contra defeitos de fabricação em uso normal, pelo prazo indicado para cada item, contado a partir da data da compra.</p><p>Esta garantia complementa e não reduz a garantia legal prevista no Código de Defesa do Consumidor (Lei nº 8.078/90).</p><p>Produtos seminovos ou open box são testados antes da entrega, e o cliente é orientado sobre o funcionamento e o que caracteriza mau uso.</p><p>Para acionar a garantia, apresente este documento (ou o QR) e o produto à loja. A loja pode fazer análise técnica antes de confirmar a cobertura.</p><h4>Esta garantia não cobre</h4><ul><li>Danos ou defeitos causados por mau uso, quedas, pancadas, pressão excessiva, oxidação, contato com líquidos, umidade, calor excessivo ou fogo.</li><li>Produtos com número de série, lacres, selos ou etiquetas removidos, adulterados ou violados.</li><li>Avarias estéticas constatadas após a retirada do produto da loja.</li><li>Reparo, abertura ou intervenção realizada por pessoas ou assistências não autorizadas pela loja.</li><li>Defeitos decorrentes de acessórios incompatíveis, danificados ou sem certificação.</li><li>Problemas de software causados por aplicativos de terceiros, vírus, modificações de sistema ou desbloqueio.</li><li>Bloqueios de conta (iCloud, Google, Samsung, Mi) ou de senha, PIN ou biometria vinculados ao usuário.</li><li>Perda de dados, arquivos ou informações pessoais armazenadas no aparelho.</li><li>Falhas por energia elétrica irregular, descargas ou adaptadores inadequados.</li><li>Desgaste natural de componentes (bateria, conectores, botões, alto-falantes, película, capa e acessórios).</li><li>Perda, furto, roubo ou extravio do produto.</li></ul></div></div><div class="rodape"><span>VALEN ELETRÔNICOS · Garantia nº 000128</span><span>emitido com <b>aura.</b> · getaura.com.br</span></div></div></body></html>
