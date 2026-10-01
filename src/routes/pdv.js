@@ -353,10 +353,47 @@ router.get('/scan/:code', async (req, res) => {
 // ===== POST /sale =====
 // 17/08/2026 (F2): corpo extraido em handleSale pra ser reusado pelo
 // POST /sale-com-sinal. `opts.signalSale` liga o desenho da venda com sinal.
+// Desconto manual (contrato do seletor R$ / % do PDV):
+//   { discount_type: 'fixed' | 'percent', discount_value: number }
+// Os campos legados discount_amount e discount_pct continuam aceitos para que
+// versoes anteriores do app possam finalizar vendas durante a atualizacao.
+function resolveManualDiscount(body, subtotal) {
+  const hasType = body.discount_type !== undefined;
+  const hasValue = body.discount_value !== undefined;
+  if (hasType || hasValue) {
+    if (!hasType || !hasValue || !['fixed', 'percent'].includes(body.discount_type)) {
+      return { error: 'Informe o tipo (R$ ou %) e o valor do desconto.' };
+    }
+
+    const value = Number(body.discount_value);
+    if (!Number.isFinite(value) || value < 0) {
+      return { error: 'O valor do desconto deve ser um numero maior ou igual a zero.' };
+    }
+    if (body.discount_type === 'percent' && value > 100) {
+      return { error: 'O desconto percentual nao pode ser maior que 100%.' };
+    }
+
+    const amount = body.discount_type === 'percent'
+      ? Math.round(subtotal * value) / 100
+      : value;
+    return { amount: Math.round(amount * 100) / 100 };
+  }
+
+  // Compatibilidade com o contrato anterior. O valor em reais prevalece se
+  // os dois campos forem enviados, preservando o comportamento ja publicado.
+  const amount = Number(body.discount_amount || 0);
+  const pct = Number(body.discount_pct || 0);
+  if (!Number.isFinite(amount) || !Number.isFinite(pct) || amount < 0 || pct < 0) {
+    return { error: 'O valor do desconto deve ser um numero maior ou igual a zero.' };
+  }
+  if (pct > 100) return { error: 'O desconto percentual nao pode ser maior que 100%.' };
+  return { amount: amount > 0 ? amount : Math.round(subtotal * pct) / 100 };
+}
+
 async function handleSale(req, res, opts = {}) {
   const {
     items, customer_id, employee_id, payment_method,
-    discount_amount, discount_pct, coupon_code, notes, seller_id, payments,
+    coupon_code, notes, seller_id, payments,
     sale_date, seller_name,
   } = req.body;
   if (!items?.length) return res.status(400).json({ error: 'items obrigatorio' });
@@ -492,11 +529,12 @@ async function handleSale(req, res, opts = {}) {
       couponId = coupon.id;
       couponCodeUsed = upperCode;
     }
-    if (discount_amount && parseFloat(discount_amount) > 0) {
-      manualDiscount = parseFloat(discount_amount);
-    } else if (discount_pct && parseFloat(discount_pct) > 0) {
-      manualDiscount = parseFloat((subtotal * parseFloat(discount_pct) / 100).toFixed(2));
+    const manualDiscountResult = resolveManualDiscount(req.body, subtotal);
+    if (manualDiscountResult.error) {
+      await client.query('ROLLBACK');
+      return res.status(400).json({ error: manualDiscountResult.error, code: 'INVALID_MANUAL_DISCOUNT' });
     }
+    manualDiscount = manualDiscountResult.amount;
     // Teto no subtotal: a soma nunca pode produzir total negativo. O front ja
     // faz Math.max(0, ...) na tela -- aqui e a mesma regra do outro lado.
     const discountAmt = Math.min(
