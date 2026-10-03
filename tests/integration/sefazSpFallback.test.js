@@ -85,7 +85,9 @@ function makeDb(opts = {}) {
       if (!hasCols) { const e = new Error('column does not exist'); e.code = '42703'; throw e; }
       return { rows: [] };
     }
-    if (/SELECT \* FROM nfce_config/.test(sql)) return { rows: [CONFIG_ROW] };
+    if (/SELECT \* FROM nfce_config/.test(sql)) return { rows: [{ ...CONFIG_ROW, ...(opts.config || {}) }] };
+    // motivo do bloqueio (engineBlockReason): último certificado da empresa
+    if (/SELECT not_after FROM company_certificates/.test(sql)) return { rows: opts.certs || [] };
     if (/FROM companies WHERE id=/.test(sql)) return { rows: [COMPANY_ROW] };
     // reserva própria
     if (/UPDATE nfce_config SET next_number_sefaz_sp/.test(sql)) {
@@ -155,6 +157,78 @@ const OK_RESULT = {
 beforeEach(() => {
   jest.clearAllMocks();
   engineBreaker.reset();
+  // (a)–(e) descrevem o comportamento COM gateway configurado.
+  process.env.NUVEM_FISCAL_CLIENT_ID = 'test-id';
+  process.env.NUVEM_FISCAL_CLIENT_SECRET = 'test-secret';
+});
+
+afterAll(() => {
+  delete process.env.NUVEM_FISCAL_CLIENT_ID;
+  delete process.env.NUVEM_FISCAL_CLIENT_SECRET;
+});
+
+// 03/10/2026 — produção não tem mais gateway. Caso real: A1 do lojista venceu,
+// a engine deixou de estar apta e a tela mostrava "NUVEM_FISCAL_CLIENT_ID e
+// NUVEM_FISCAL_CLIENT_SECRET nao configurados".
+describe('(f) sem gateway configurado', () => {
+  beforeEach(() => {
+    delete process.env.NUVEM_FISCAL_CLIENT_ID;
+    delete process.env.NUVEM_FISCAL_CLIENT_SECRET;
+  });
+
+  test('A1 vencido → 422 com o motivo real, sem reservar número nem criar emissão', async () => {
+    const db = makeDb({ config: { provider: null }, certs: [{ not_after: '2026-10-03T14:21:00Z' }] });
+    const a = buildApp(db);
+    const res = await supertest(a).post(`/c/${CID}/nfce/emit`).set(auth)
+      .send({ ...EMIT_BODY, sale_id: 'sale-1' });
+
+    expect(res.status).toBe(422);
+    expect(res.body.code).toBe('NFCE_ENGINE_UNAVAILABLE');
+    expect(res.body.error).toMatch(/certificado digital \(A1\) da empresa venceu em 03\/10\/2026/);
+    expect(res.body.error).not.toMatch(/NUVEM/);
+    expect(sefazSp.emitNfce).not.toHaveBeenCalled();
+    expect(nuvemfiscal.emitNfce).not.toHaveBeenCalled();
+    expect(db.state.ownSeriesReserved).toBe(false);
+    expect(db.state.gatewaySeriesReserved).toBe(false);
+    const sqls = db.query.mock.calls.map((c) => c[0]);
+    expect(sqls.some((s) => /INSERT INTO nfce_emissions/.test(s))).toBe(false);
+    // as tentativas antigas em erro dessa venda passam a mostrar o motivo real
+    const fix = db.query.mock.calls.find((c) => /UPDATE nfce_emissions SET error_message=\$1/.test(c[0]));
+    expect(fix[1]).toEqual([res.body.error, CID, 'sale-1', 'nfce']);
+  });
+
+  test('sem certificado nenhum → 422 pedindo o envio', async () => {
+    const a = buildApp(makeDb({ config: { provider: null }, certs: [] }));
+    const res = await supertest(a).post(`/c/${CID}/nfce/emit`).set(auth).send(EMIT_BODY);
+    expect(res.status).toBe(422);
+    expect(res.body.error).toMatch(/Certificado digital \(A1\) nao enviado/);
+  });
+
+  test('THROW da engine → erro da engine, sem tentar o gateway', async () => {
+    sefazSp.emitNfce.mockRejectedValueOnce(new Error('certificado nao decripta'));
+    const db = makeDb();
+    const a = buildApp(db);
+    const res = await supertest(a).post(`/c/${CID}/nfce/emit`).set(auth).send(EMIT_BODY);
+
+    expect(res.status).toBe(502);
+    expect(res.body.error).toBe('Erro ao transmitir nota para SEFAZ-SP: certificado nao decripta');
+    expect(nuvemfiscal.emitNfce).not.toHaveBeenCalled();
+    expect(db.state.gatewaySeriesReserved).toBe(false);
+    expect(db.state.emission.provider_used).toBe('sefaz_sp');
+  });
+
+  test('breaker aberto → continua tentando a engine', async () => {
+    engineBreaker.recordFailure(CID);
+    engineBreaker.recordFailure(CID);
+    expect(engineBreaker.isOpen(CID)).toBe(true);
+    sefazSp.emitNfce.mockResolvedValueOnce(OK_RESULT);
+    const a = buildApp(makeDb());
+    const res = await supertest(a).post(`/c/${CID}/nfce/emit`).set(auth).send(EMIT_BODY);
+
+    expect(res.status).toBe(201);
+    expect(res.body.provider_used).toBe('sefaz_sp');
+    expect(nuvemfiscal.emitNfce).not.toHaveBeenCalled();
+  });
 });
 
 describe('(a) THROW da engine → fallback pro gateway', () => {
