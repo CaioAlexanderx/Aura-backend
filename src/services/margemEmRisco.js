@@ -67,18 +67,43 @@ function situacao(margemPct, piso) {
  * `linhas` vem de `studio_compositions_summary`. Peca sem composicao nao
  * entra: ela nao "ficou" ruim, ela nunca foi medida — misturar as duas
  * faria a lojista perseguir cadastro em vez de preco.
+ *
+ * `taxaPct` (Preco certo, 03/10/2026) e a taxa de custo fixo EM USO do
+ * estudio: a parte de cada venda que vai para aluguel, energia e afins.
+ * Com ela, o que se julga e a margem que SOBRA (margem bruta − taxa), e a
+ * margem bruta segue junto em `margem_bruta_pct` para a tela poder
+ * explicar a diferenca. Sem taxa (ausente ou 0) a lista sai identica a de
+ * antes, campo por campo: quem nao configurou nada nao ve mudanca.
  */
-function pecasEmRisco(linhas, piso) {
+function pecasEmRisco(linhas, piso, taxaPct) {
   const lista = Array.isArray(linhas) ? linhas : [];
+  const t = numero(taxaPct);
+  const taxa = t != null && t > 0 ? t : 0;
   return lista
-    .map((l) => ({
-      product_id: l.product_id,
-      nome: l.product_name,
-      preco: numero(l.product_price),
-      custo: numero(l.total_cost),
-      margem_pct: numero(l.margin_pct),
-      situacao: situacao(l.margin_pct, piso),
-    }))
+    .map((l) => {
+      const bruta = numero(l.margin_pct);
+      if (!taxa) {
+        return {
+          product_id: l.product_id,
+          nome: l.product_name,
+          preco: numero(l.product_price),
+          custo: numero(l.total_cost),
+          margem_pct: bruta,
+          situacao: situacao(l.margin_pct, piso),
+        };
+      }
+      // (1 − taxa − custo/preco) × 100 e a margem bruta menos a taxa.
+      const sobra = bruta == null ? null : Math.round((bruta - taxa) * 100) / 100;
+      return {
+        product_id: l.product_id,
+        nome: l.product_name,
+        preco: numero(l.product_price),
+        custo: numero(l.total_cost),
+        margem_pct: sobra,
+        margem_bruta_pct: bruta,
+        situacao: situacao(sobra, piso),
+      };
+    })
     .filter((p) => p.situacao === 'prejuizo' || p.situacao === 'abaixo')
     .sort((a, b) => (a.margem_pct ?? 0) - (b.margem_pct ?? 0));
 }

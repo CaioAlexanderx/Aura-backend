@@ -15,6 +15,24 @@
 const express = require('express');
 const router  = express.Router({ mergeParams: true }); // company_id = req.params.id
 const db      = require('../config/database');
+const { taxaEmUso } = require('../services/precoCerto');
+
+// Preço certo (03/10/2026): a taxa de custo fixo EM USO do estúdio
+// (studio_settings.taxa_custo_fixo_pct). Ausente = recurso não configurado
+// = 0, e a conta do orçamento sai idêntica à de antes. Falha na leitura
+// também vira 0: orçamento sem a taxa é melhor do que orçamento nenhum.
+async function lerTaxaDeCustoFixo(cid) {
+  try {
+    const { rows } = await db.query(
+      `SELECT COALESCE(studio_settings, '{}'::jsonb) AS s FROM companies WHERE id = $1`,
+      [cid]
+    );
+    return taxaEmUso(rows && rows[0] ? rows[0].s : {});
+  } catch (e) {
+    console.warn('[studioPricing] taxa de custo fixo indisponivel:', e.message);
+    return 0;
+  }
+}
 
 // ─────────────────────────────────────────────────────────────
 // GET /studio/pricing/rules
@@ -215,6 +233,12 @@ router.delete('/pricing/rules/:productId', async (req, res) => {
 // Calcula preço de uma linha de orçamento.
 // Body: { product_id?, quantity, urgency?, overrides?: { unit_price?, unit_cost? } }
 // Retorna: PricingBreakdown { unit_price, breakdown: {...} }
+//
+// Preço certo (03/10/2026): o divisor passa a ser
+//   1 − margem/100 − taxa de custo fixo/100
+// e o breakdown ganha fixed_cost_pct (a taxa em uso) e fixed_cost (quanto
+// do preço unitário final, em R$, vai para o custo fixo). Preço fixo de
+// faixa e override de unit_price continuam mandando no preço.
 // ─────────────────────────────────────────────────────────────
 router.post('/pricing/quote-line', async (req, res) => {
   const cid = req.params.id;
@@ -291,6 +315,8 @@ router.post('/pricing/quote-line', async (req, res) => {
       }
     }
 
+    const fixed_cost_pct = await lerTaxaDeCustoFixo(cid);
+
     // Sem regra e sem custo → retorna zeros (não é erro)
     if (!rule && base_cost === 0) {
       return res.json({
@@ -302,6 +328,8 @@ router.post('/pricing/quote-line', async (req, res) => {
           tier_multiplier: 1,
           margin_pct:      null,
           urgency:         0,
+          fixed_cost_pct:  fixed_cost_pct,
+          fixed_cost:      0,
         },
       });
     }
@@ -345,9 +373,12 @@ router.post('/pricing/quote-line', async (req, res) => {
       // Faixa define preço fixo por unidade
       unit_price = tier_unit_price;
     } else {
-      // Markup sobre custo: preço = custo / (1 - margin/100)
-      // Protege divisão por zero: se margin >= 100, usa custo * 2 (100% markup)
-      const divisor = margin >= 100 ? 0.5 : (1 - margin / 100);
+      // Markup divisor: preço = custo / (1 - margin/100 - taxa de custo fixo/100)
+      // Protege divisão por zero ou negativa: se margem + taxa >= 100, usa
+      // custo * 2 (100% markup) — o mesmo guarda de quando só havia a margem.
+      // Com taxa 0 a expressão é a de antes (x - 0 === x).
+      const livre   = 1 - margin / 100 - fixed_cost_pct / 100;
+      const divisor = livre <= 0 ? 0.5 : livre;
       unit_price = cost_total / divisor;
     }
 
@@ -360,6 +391,10 @@ router.post('/pricing/quote-line', async (req, res) => {
       unit_price = parseFloat(overrides.unit_price) || 0;
     }
 
+    // Quanto deste preço vai para o custo fixo. Sai do preço FINAL (faixa,
+    // urgência e override incluídos): a taxa é percentual do que se cobra.
+    const fixed_cost = unit_price * (fixed_cost_pct / 100);
+
     return res.json({
       unit_price: parseFloat(unit_price.toFixed(2)),
       breakdown: {
@@ -369,6 +404,8 @@ router.post('/pricing/quote-line', async (req, res) => {
         tier_multiplier: tier_multiplier,
         margin_pct:      default_margin_pct,
         urgency:         parseFloat(urgency_val.toFixed(4)),
+        fixed_cost_pct:  fixed_cost_pct,
+        fixed_cost:      parseFloat(fixed_cost.toFixed(4)),
       },
     });
   } catch (e) {
