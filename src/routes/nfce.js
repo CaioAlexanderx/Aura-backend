@@ -184,6 +184,37 @@ async function engineCapable(companyId, config) {
   return ok;
 }
 
+// ── 03/10/2026: o gateway (Nuvem Fiscal) não existe mais em produção. Sem as
+// credenciais, qualquer queda pra ele terminava em "NUVEM_FISCAL_CLIENT_ID e
+// NUVEM_FISCAL_CLIENT_SECRET nao configurados" na tela do lojista —
+// escondendo o motivo real (no caso que originou isto: A1 vencido).
+function gatewayConfigured() {
+  return !!(process.env.NUVEM_FISCAL_CLIENT_ID && process.env.NUVEM_FISCAL_CLIENT_SECRET);
+}
+
+// Por que a emissão própria não pode sair pra esta empresa, em texto que o
+// lojista consegue resolver. Só é chamada quando engineCapable deu false.
+async function engineBlockReason(companyId, config) {
+  const hasCsc = !!(config.csc_id && (config.csc_token_enc || config.csc_token));
+  if (!hasCsc) {
+    return 'CSC (codigo de seguranca do contribuinte) nao configurado. Cadastre em Configuracoes > Nota Fiscal.';
+  }
+  try {
+    const { rows } = await db.query(
+      'SELECT not_after FROM company_certificates WHERE company_id=$1 ORDER BY not_after DESC LIMIT 1',
+      [companyId]
+    );
+    if (!rows.length) {
+      return 'Certificado digital (A1) nao enviado. Envie o certificado em Configuracoes > Nota Fiscal para emitir.';
+    }
+    const venceu = new Date(rows[0].not_after).toLocaleDateString('pt-BR', { timeZone: 'America/Sao_Paulo' });
+    return `O certificado digital (A1) da empresa venceu em ${venceu}. Envie o novo certificado em Configuracoes > Nota Fiscal para voltar a emitir.`;
+  } catch (e) {
+    if (e.code !== '42P01' && e.code !== '42703') throw e;
+    return 'Emissao de nota fiscal indisponivel para esta empresa. Fale com o suporte.';
+  }
+}
+
 // S4.2: grava provider_used/fallback_reason na emissão (defensivo p/ 42703).
 async function persistProviderUsed(emissionId, providerUsed, fallbackReason) {
   if (!(await fallbackColsAvailable())) return; // migration 237 ausente: no-op
@@ -435,7 +466,28 @@ router.post('/emit', requireAuth, requireRole('client','analyst','admin'), async
       && config.provider !== 'nuvemfiscal'
       && (config.provider === 'sefaz_sp' || await engineCapable(req.params.id, config));
     const hasFallbackCols = await fallbackColsAvailable();
-    const breakerOpen = wantSefazSp && hasFallbackCols && engineBreaker.isOpen(req.params.id);
+    const gatewayOn = gatewayConfigured();
+
+    // Sem gateway, NFC-e que não pode sair pela engine não tem pra onde ir:
+    // devolve o motivo real ANTES de reservar número e criar a emissão.
+    const homologStub = config.ambiente === 'homologacao' && process.env.NUVEM_FISCAL_FORCE !== 'true';
+    if (tipo === 'nfce' && !wantSefazSp && !gatewayOn && !homologStub) {
+      const motivo = (await engineBlockReason(req.params.id, config))
+        || 'Emissao de nota fiscal indisponivel para esta empresa. Fale com o suporte.';
+      // A tela da venda mostra o error_message da última tentativa: troca o
+      // texto das que ficaram em erro pra não seguir exibindo o motivo antigo.
+      if (sale_id) {
+        await db.query(
+          `UPDATE nfce_emissions SET error_message=$1
+            WHERE company_id=$2 AND sale_id=$3 AND tipo=$4 AND status='erro'`,
+          [motivo, req.params.id, sale_id, tipo]
+        );
+      }
+      return res.status(422).json({ error: motivo, code: 'NFCE_ENGINE_UNAVAILABLE' });
+    }
+
+    // Breaker aberto desvia pro gateway — sem gateway, segue tentando a engine.
+    const breakerOpen = wantSefazSp && hasFallbackCols && gatewayOn && engineBreaker.isOpen(req.params.id);
     // useSefazSp = de fato vamos tentar a engine (provider próprio, colunas
     // presentes E breaker fechado). Breaker aberto → direto ao gateway.
     let useSefazSp = wantSefazSp && hasFallbackCols && !breakerOpen;
@@ -609,6 +661,9 @@ router.post('/emit', requireAuth, requireRole('client','analyst','admin'), async
             console.error('[nfce] engine SEFAZ-SP falhou (fallback→gateway):',
               engineErr.message, engineErr.payload || '');
 
+            // Sem gateway não há fallback: o erro que interessa é o da engine.
+            if (!gatewayOn) throw engineErr;
+
             useSefazSp = false;
             providerUsed = 'nuvemfiscal';
             fallbackReason = ('engine_error: ' + (engineErr.message || 'erro desconhecido')).slice(0, 500);
@@ -631,6 +686,11 @@ router.post('/emit', requireAuth, requireRole('client','analyst','admin'), async
             provResult = await emitFn(company, buildEmitPayload(serieNF, numeroNF));
           }
         } else {
+          if (!gatewayOn) {
+            throw new Error(tipo === 'nfe'
+              ? 'A emissao de NF-e (modelo 55) de venda ainda nao esta disponivel. Fale com o suporte.'
+              : 'Emissao de nota fiscal indisponivel no momento. Tente novamente em instantes.');
+          }
           const emitFn = tipo==='nfe' ? nuvemfiscal.emitNfe : nuvemfiscal.emitNfce;
           provResult = await emitFn(company, buildEmitPayload(serieNF, numeroNF));
         }
@@ -716,7 +776,9 @@ router.post('/emit', requireAuth, requireRole('client','analyst','admin'), async
         await db.query(`UPDATE nfce_emissions SET status='erro', error_message=$1 WHERE id=$2`, [apiErr.message, emission.id]);
         await persistProviderUsed(emission.id, providerUsed, fallbackReason);
         return res.status(502).json({
-          error: `Erro ao transmitir nota para ${providerLabel}: `+apiErr.message,
+          error: (!useSefazSp && !gatewayOn)
+            ? apiErr.message
+            : `Erro ao transmitir nota para ${providerLabel}: `+apiErr.message,
           payload: apiErr.payload||null, nfce_id: emission.id,
           provider_used: providerUsed, fallback: fallbackReason != null,
         });
