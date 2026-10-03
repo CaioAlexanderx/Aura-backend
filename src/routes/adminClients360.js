@@ -44,6 +44,7 @@ const asyncHandler = require('../utils/asyncHandler');
 const AppError = require('../errors/AppError');
 const { getExtraSeatsMap, setExtraSeatsForCompany } = require('../services/extraSeats');
 const { syncSubscriptionSeatValue } = require('../services/seatSubscription');
+const { classifyLifecycle, RECOVERY_WINDOW_DAYS } = require('../services/clientLifecycle');
 
 const adminOnly = [requireAuth, requireRole('admin')];
 
@@ -164,14 +165,25 @@ router.get('/clients-360', ...adminOnly, asyncHandler(async (req, res) => {
        c.created_at, c.last_active_at, c.tax_regime, c.trial_ends_at,
        c.vertical_active, c.vertical_enabled_at, c.suggested_vertical,
        u.email AS owner_email, u.full_name AS owner_name,
+       COALESCE(NULLIF(u.phone, ''), c.phone) AS owner_phone, u.is_staff AS owner_is_staff,
+       c.is_sandbox, c.access_code_used,
+       (c.asaas_subscription_id IS NOT NULL) AS has_subscription,
        h.score AS health_score, h.risk_level, h.activity_score, h.usage_score, h.payment_score, h.adoption_score,
        (SELECT COUNT(*) FROM transactions WHERE company_id=c.id) AS tx_count,
        (SELECT COUNT(*) FROM products WHERE company_id=c.id) AS prod_count,
        (SELECT COUNT(*) FROM customers WHERE company_id=c.id) AS cust_count,
-       (SELECT COALESCE(SUM(amount),0) FROM transactions WHERE company_id=c.id AND type='income') AS total_revenue
+       (SELECT COUNT(*) FROM sales WHERE company_id=c.id) AS sale_count,
+       (SELECT COALESCE(SUM(amount),0) FROM transactions WHERE company_id=c.id AND type='income') AS total_revenue,
+       la.last_login_at, la.login_days
     FROM companies c
     LEFT JOIN users u ON u.id=c.owner_id
     LEFT JOIN client_health_scores h ON h.company_id=c.id
+    LEFT JOIN LATERAL (
+      SELECT MAX(a.created_at) AS last_login_at,
+             COUNT(DISTINCT (a.created_at AT TIME ZONE 'America/Sao_Paulo')::date) AS login_days
+        FROM audit_log a
+       WHERE a.company_id = c.id AND a.action IN ('login', 'switch_company', 'register')
+    ) la ON true
     WHERE (c.federation_id IS NULL OR c.federation_id = c.id)
     ORDER BY h.score ASC NULLS LAST, c.created_at DESC
   `);
@@ -180,13 +192,18 @@ router.get('/clients-360', ...adminOnly, asyncHandler(async (req, res) => {
   // Pre-migration → mapa vazio → todos default 0.
   const seatsMap = await getExtraSeatsMap(rows.map(r => r.id));
 
+  const now = new Date();
   res.json({
     total: rows.length,
+    recovery_window_days: RECOVERY_WINDOW_DAYS,
     clients: rows.map(r => ({
       ...r,
+      ...classifyLifecycle(r, now),
       tx_count: parseInt(r.tx_count || 0),
       prod_count: parseInt(r.prod_count || 0),
       cust_count: parseInt(r.cust_count || 0),
+      sale_count: parseInt(r.sale_count || 0),
+      login_days: parseInt(r.login_days || 0),
       total_revenue: parseFloat(r.total_revenue || 0),
       health_score: r.health_score ? parseInt(r.health_score) : null,
       extra_seats_granted: seatsMap.get(r.id) || 0,
