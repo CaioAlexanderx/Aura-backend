@@ -58,7 +58,7 @@ const { loadCertificate } = require('./certStore');
 const soap = require('./soapClient');
 const {
   ufToCodigo, isoBR, generateCNF, buildAccessKey44,
-} = require('../nuvemfiscal');
+} = require('./nfeHelpers');
 
 // ---------- endpoints NF-e 55 (serviços versão 4.00) ----------
 

@@ -1,5 +1,5 @@
 const xb = require('../../src/services/sefazSp/xmlBuilder');
-const { calcDvChaveAcesso } = require('../../src/services/nuvemfiscal');
+const { calcDvChaveAcesso } = require('../../src/services/sefazSp/nfeHelpers');
 const { companyDavi, nfceDataVendaTipica } = require('../fixtures/nfceDavi');
 
 const OPTS_HOMOLOG = { tpAmb: 2, cNF: '12345678', dhEmi: '2026-06-10T10:00:00-03:00' };
