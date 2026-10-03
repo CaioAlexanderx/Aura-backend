@@ -32,7 +32,7 @@ function mockSql(saved) {
   db.query.mockImplementation((sql) => {
     const s = String(sql || '');
     if (/FROM company_members/i.test(s)) return Promise.resolve({ rows: [{ role: 'owner' }] });
-    if (/SELECT pdv_settings FROM companies/i.test(s)) return Promise.resolve({ rows: [{ pdv_settings: saved }] });
+    if (/SELECT pdv_settings(, vertical_active)? FROM companies/i.test(s)) return Promise.resolve({ rows: [{ pdv_settings: saved }] });
     return Promise.resolve({ rows: [] });
   });
 }

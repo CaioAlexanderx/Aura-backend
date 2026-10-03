@@ -52,7 +52,7 @@ describe('pdv_settings -- preco no cartao', () => {
   const url = `/api/v1/companies/${cid}/pdv-settings`;
 
   test('GET: desligado e sem % para quem nunca configurou', async () => {
-    mockSql([[/SELECT pdv_settings FROM companies/i, { rows: [{ pdv_settings: { caixa_enabled: true } }] }]]);
+    mockSql([[/SELECT pdv_settings(, vertical_active)? FROM companies/i, { rows: [{ pdv_settings: { caixa_enabled: true } }] }]]);
     const res = await request(app).get(url).set(auth);
     expect(res.status).toBe(200);
     expect(res.body.settings.card_price_enabled).toBe(false);
@@ -60,7 +60,7 @@ describe('pdv_settings -- preco no cartao', () => {
   });
 
   test('PUT: as duas chaves passam pela whitelist e sao gravadas', async () => {
-    mockSql([[/SELECT pdv_settings FROM companies/i, { rows: [{ pdv_settings: { card_fee_enabled: true } }] }]]);
+    mockSql([[/SELECT pdv_settings(, vertical_active)? FROM companies/i, { rows: [{ pdv_settings: { card_fee_enabled: true } }] }]]);
     const res = await request(app).put(url).set(auth)
       .send({ settings: { card_price_enabled: true, card_price_pct: 5.5 } });
     expect(res.status).toBe(200);
@@ -70,28 +70,28 @@ describe('pdv_settings -- preco no cartao', () => {
   });
 
   test('PUT: um null ja salvo nao vira 0 num save de outra chave', async () => {
-    mockSql([[/SELECT pdv_settings FROM companies/i, { rows: [{ pdv_settings: { card_price_enabled: false, card_price_pct: null } }] }]]);
+    mockSql([[/SELECT pdv_settings(, vertical_active)? FROM companies/i, { rows: [{ pdv_settings: { card_price_enabled: false, card_price_pct: null } }] }]]);
     const res = await request(app).put(url).set(auth).send({ settings: { caixa_enabled: true } });
     expect(res.status).toBe(200);
     expect(res.body.settings.card_price_pct).toBeNull();
   });
 
   test('PUT: card_price_pct aceita null/vazio para limpar', async () => {
-    mockSql([[/SELECT pdv_settings FROM companies/i, { rows: [{ pdv_settings: { card_price_pct: 8 } }] }]]);
+    mockSql([[/SELECT pdv_settings(, vertical_active)? FROM companies/i, { rows: [{ pdv_settings: { card_price_pct: 8 } }] }]]);
     const res = await request(app).put(url).set(auth).send({ settings: { card_price_pct: '' } });
     expect(res.status).toBe(200);
     expect(res.body.settings.card_price_pct).toBeNull();
   });
 
   test.each([[-1], [101], ['abc'], [true]])('PUT: card_price_pct=%p e recusado', async (v) => {
-    mockSql([[/SELECT pdv_settings FROM companies/i, { rows: [{ pdv_settings: {} }] }]]);
+    mockSql([[/SELECT pdv_settings(, vertical_active)? FROM companies/i, { rows: [{ pdv_settings: {} }] }]]);
     const res = await request(app).put(url).set(auth).send({ settings: { card_price_pct: v } });
     expect(res.status).toBe(400);
     expect(res.body.error).toMatch(/card_price_pct/);
   });
 
   test('PUT: card_price_enabled so aceita boolean', async () => {
-    mockSql([[/SELECT pdv_settings FROM companies/i, { rows: [{ pdv_settings: {} }] }]]);
+    mockSql([[/SELECT pdv_settings(, vertical_active)? FROM companies/i, { rows: [{ pdv_settings: {} }] }]]);
     const res = await request(app).put(url).set(auth).send({ settings: { card_price_enabled: 'sim' } });
     expect(res.status).toBe(400);
     expect(res.body.error).toMatch(/card_price_enabled/);

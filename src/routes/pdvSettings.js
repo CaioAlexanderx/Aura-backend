@@ -280,18 +280,31 @@ function validateSettings(settings) {
   return clean;
 }
 
+// 03/10/2026 — studio_enabled e consequencia da vertical, nao escolha do
+// lojista. O app salva o objeto inteiro que carregou antes: um PUT com copia
+// antiga (studio_enabled:false, o default do GET) chegou 2s depois do admin
+// ativar a vertical Studio e desligou a chave — a dona caiu em "Modo Studio
+// desativado" e, como o app manda toda empresa Studio pra /studio, ficou sem
+// acesso a nada. Empresa da vertical Studio sempre le e grava true.
+function applyVerticalInvariants(settings, verticalActive) {
+  if (verticalActive === 'studio') settings.studio_enabled = true;
+  return settings;
+}
+
 // GET /companies/:id/pdv-settings
 router.get('/pdv-settings', asyncHandler(async (req, res) => {
   const companyId = req.params.id;
   const { rows } = await pool.query(
-    'SELECT pdv_settings FROM companies WHERE id = $1',
+    'SELECT pdv_settings, vertical_active FROM companies WHERE id = $1',
     [companyId]
   );
   if (!rows.length) throw new AppError('Empresa nao encontrada', 404);
   // Merge defaults com saved: garante que campos novos tenham valor para
   // empresas com pdv_settings antigo, sem precisar migration.
   const saved = rows[0].pdv_settings || {};
-  res.json({ settings: { ...DEFAULT_SETTINGS, ...saved } });
+  res.json({
+    settings: applyVerticalInvariants({ ...DEFAULT_SETTINGS, ...saved }, rows[0].vertical_active),
+  });
 }));
 
 // PUT /companies/:id/pdv-settings
@@ -305,12 +318,15 @@ router.put('/pdv-settings', asyncHandler(async (req, res) => {
   }
 
   const { rows } = await pool.query(
-    'SELECT pdv_settings FROM companies WHERE id = $1',
+    'SELECT pdv_settings, vertical_active FROM companies WHERE id = $1',
     [companyId]
   );
   if (!rows.length) throw new AppError('Empresa nao encontrada', 404);
   const saved = rows[0].pdv_settings || {};
-  const clean = validateSettings({ ...saved, ...(settings || {}) });
+  const clean = applyVerticalInvariants(
+    validateSettings({ ...saved, ...(settings || {}) }),
+    rows[0].vertical_active
+  );
 
   await pool.query(
     'UPDATE companies SET pdv_settings = $1, updated_at = NOW() WHERE id = $2',

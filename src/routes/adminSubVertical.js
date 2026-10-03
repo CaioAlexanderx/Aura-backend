@@ -113,7 +113,7 @@ router.patch('/clients/:cid/sub-vertical', ...adminOnly, asyncHandler(async (req
   // Audit log (best-effort — segue padrao do adminVertical)
   try {
     await pool.query(
-      `INSERT INTO admin_audit_log (actor_user_id, action, target_company_id, payload)
+      `INSERT INTO admin_audit_log (staff_user_id, action, company_id, payload)
        VALUES ($1, $2, $3, $4)`,
       [
         req.user?.id || null,
