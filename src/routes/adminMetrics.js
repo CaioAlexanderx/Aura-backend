@@ -11,6 +11,7 @@ const router = require('express').Router();
 const pool = require('../config/database');
 const { requireAuth, requireRole } = require('../middleware/auth');
 const asyncHandler = require('../utils/asyncHandler');
+const { RECOVERY_WINDOW_DAYS } = require('../services/clientLifecycle');
 
 const adminOnly = [requireAuth, requireRole('admin')];
 
@@ -22,7 +23,7 @@ router.get('/metrics/overview', ...adminOnly, asyncHandler(async (req, res) => {
   const { rows: planCounts } = await pool.query(
     `SELECT plan, COUNT(*) AS total, 
        COUNT(*) FILTER(WHERE billing_status='active') AS paying,
-       COUNT(*) FILTER(WHERE billing_status='trial') AS trial,
+       COUNT(*) FILTER(WHERE billing_status='trial' AND trial_ends_at > NOW()) AS trial,
        COUNT(*) FILTER(WHERE billing_status IN ('pending','overdue')) AS overdue
      FROM companies WHERE is_active=true AND (federation_id IS NULL OR federation_id = id) GROUP BY plan`
   );
@@ -164,24 +165,34 @@ router.get('/metrics/mrr-trend', ...adminOnly, asyncHandler(async (req, res) => 
 router.get('/alerts', ...adminOnly, asyncHandler(async (req, res) => {
   const alerts = [];
 
-  // 1. Trials expirando em <= 3 dias
+  // 1. Trials vencendo em <= 3 dias ou vencidos dentro da janela de
+  //    recuperação. Sem o limite para trás, trial vencido há meses aparecia
+  //    para sempre como "expira HOJE".
   const { rows: trialRows } = await pool.query(
     `SELECT c.id, c.trade_name, c.legal_name, c.trial_ends_at, u.email, u.full_name
      FROM companies c LEFT JOIN users u ON u.id=c.owner_id
      WHERE c.is_active=true AND (c.federation_id IS NULL OR c.federation_id = c.id) AND c.billing_status='trial'
        AND c.trial_ends_at IS NOT NULL
        AND c.trial_ends_at <= NOW() + INTERVAL '3 days'
-     ORDER BY c.trial_ends_at ASC`
+       AND c.trial_ends_at >= NOW() - make_interval(days => $1)
+     ORDER BY c.trial_ends_at ASC`,
+    [RECOVERY_WINDOW_DAYS]
   );
+  const nowMs = Date.now();
   trialRows.forEach(r => {
-    const daysLeft = Math.ceil((new Date(r.trial_ends_at) - new Date()) / 86400000);
+    const diffMs = new Date(r.trial_ends_at).getTime() - nowMs;
+    const expired = diffMs <= 0;
+    const daysLeft = Math.ceil(diffMs / 86400000);
+    const daysSince = Math.floor(-diffMs / 86400000);
     alerts.push({
-      type: 'trial_expiring', priority: 'critical',
+      type: 'trial_expiring', priority: expired ? 'high' : 'critical',
       company_id: r.id, company_name: r.trade_name || r.legal_name,
       contact: r.email, contact_name: r.full_name,
-      message: `Trial expira em ${daysLeft <= 0 ? 'HOJE' : daysLeft + ' dia(s)'}`,
+      message: expired
+        ? (daysSince === 0 ? 'Trial venceu hoje' : `Trial venceu ha ${daysSince} dia(s)`)
+        : `Trial vence em ${daysLeft} dia(s)`,
       expires_at: r.trial_ends_at, days_left: daysLeft,
-      action: 'Contatar para conversao',
+      action: expired ? 'Recuperar antes de arquivar' : 'Contatar para conversao',
     });
   });
 

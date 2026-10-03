@@ -119,7 +119,7 @@ router.get('/metrics/verticals', ...adminOnly, asyncHandler(async (req, res) => 
 router.get('/metrics/funnel', ...adminOnly, asyncHandler(async (req, res) => {
   const { rows: total } = await pool.query('SELECT COUNT(*) AS n FROM users');
   const { rows: withCompany } = await pool.query('SELECT COUNT(DISTINCT owner_id) AS n FROM companies WHERE (federation_id IS NULL OR federation_id = id)');
-  const { rows: trial } = await pool.query(`SELECT COUNT(*) AS n FROM companies WHERE billing_status='trial' AND is_active=true AND (federation_id IS NULL OR federation_id = id)`);
+  const { rows: trial } = await pool.query(`SELECT COUNT(*) AS n FROM companies WHERE billing_status='trial' AND trial_ends_at > NOW() AND is_active=true AND (federation_id IS NULL OR federation_id = id)`);
   const { rows: paying } = await pool.query(`SELECT COUNT(*) AS n FROM companies WHERE billing_status='active' AND is_active=true AND (federation_id IS NULL OR federation_id = id)`);
   const { rows: churned } = await pool.query(`SELECT COUNT(*) AS n FROM companies WHERE (is_active=false OR billing_status='cancelled') AND (federation_id IS NULL OR federation_id = id)`);
 
