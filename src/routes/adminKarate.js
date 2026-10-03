@@ -218,7 +218,7 @@ router.patch('/clients/:cid/karate', ...adminOnly, asyncHandler(async (req, res)
 async function logAudit(client, req, cid, from, to) {
   try {
     await client.query(
-      `INSERT INTO admin_audit_log (actor_user_id, action, target_company_id, payload)
+      `INSERT INTO admin_audit_log (staff_user_id, action, company_id, payload)
        VALUES ($1, $2, $3, $4)`,
       [req.user?.id || null, 'karate_vertical_change', cid, JSON.stringify({ from, to })]
     );
