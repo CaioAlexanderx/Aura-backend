@@ -6,7 +6,7 @@
 // routes/nfce.js + nfceData {items, payments, serie, numero, ...}) — paridade
 // byte-a-byte de semântica com nuvemfiscal.emitNfce (shadow-mode S2.6 diffa).
 //
-// Reusa de services/nuvemfiscal (funções puras, sem I/O):
+// Reusa de sefazSp/nfeHelpers (funções puras, sem I/O):
 //   ufToCodigo, isoBR, generateCNF, buildAccessKey44, validateTpag.
 //
 // Ordem dos elementos segue o XSD leiauteNFe_v4.00 (a ordem IMPORTA:
@@ -24,7 +24,7 @@
 
 const {
   ufToCodigo, isoBR, generateCNF, buildAccessKey44, validateTpag,
-} = require('../nuvemfiscal');
+} = require('./nfeHelpers');
 const { resolveItemIbsCbs } = require('./taxEngine');
 
 const XML_HEADER = '<?xml version="1.0" encoding="UTF-8"?>';

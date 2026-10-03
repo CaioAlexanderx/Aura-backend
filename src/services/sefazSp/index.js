@@ -26,7 +26,7 @@ const contingency = require('./contingency');
 const { getEndpoints } = require('./endpoints');
 const { decryptString } = require('../../utils/secretCrypto');
 
-const { isoBR: soapIsoNow, ufToCodigo } = require('../nuvemfiscal');
+const { isoBR: soapIsoNow, ufToCodigo } = require('./nfeHelpers');
 
 function totalParaQr(nfceData) {
   if (nfceData.total_value !== undefined) return Number(nfceData.total_value);

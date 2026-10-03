@@ -26,7 +26,7 @@ const { XMLParser } = require('fast-xml-parser');
 const { soapEnvelope, postSoap, SefazTransportError } = require('./soapClient');
 const { WSDL_NS } = require('./endpoints');
 const { C14N, ENVELOPED, RSA_SHA1, SHA1 } = require('./signer');
-const { isoBR } = require('../nuvemfiscal');
+const { isoBR } = require('./nfeHelpers');
 
 const NFE_NS = 'http://www.portalfiscal.inf.br/nfe';
 const TP_EVENTO_CANCELAMENTO = '110111';
