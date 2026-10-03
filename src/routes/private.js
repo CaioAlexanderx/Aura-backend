@@ -267,6 +267,7 @@ router.use('/studio', requirePlan('negocio', 'expansao'), require('./studioQuote
 // de studioQuotes (o Studio não tem planos próprios, decisão do PO).
 router.use('/studio', requirePlan('negocio', 'expansao'), require('./studioQuoteVideo'));
 router.use('/studio', requirePlan('negocio', 'expansao'), require('./studioPricing'));   // Fase B: Motor de precificação
+router.use('/studio', requirePlan('negocio', 'expansao'), require('./studioPrecoCerto')); // Preço certo: custo fixo no preço (03/10/2026)
 router.use('/studio', requirePlan('negocio', 'expansao'), require('./studioPayments'));  // Fase C: Sinal / pagamento parcial
 // F0 Visual Engine (02/07/2026): templates visuais 2D/3D globais mantidos pela
 // Aura (CRUD staff-only) + registro de renders com content_hash (base da

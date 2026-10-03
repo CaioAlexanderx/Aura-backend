@@ -31,6 +31,7 @@ const db      = require('../config/database');
 const {
   margemMinima, pecasEmRisco, precoParaOPiso, recadoDoRisco,
 } = require('../services/margemEmRisco');
+const { taxaEmUso, precoSugerido } = require('../services/precoCerto');
 const {
   validarPadraoDoServicoDeArte, aplicarPadraoDoServicoDeArte,
 } = require('../services/servicoDeArtePadrao');
@@ -504,23 +505,34 @@ router.get('/inputs', async function(req, res) {
 // faltava era o AVISO: a lojista sobe o preco da louca, salva, e nada
 // acontece — duas semanas depois descobre no fim do mes que vendeu no
 // prejuizo. Ver services/margemEmRisco.js.
+//
+// Preco certo (03/10/2026): com taxa de custo fixo EM USO, o alerta julga
+// a margem que sobra depois dela e sugere o preco que paga custo + taxa +
+// piso. Sem taxa (ausente ou 0) a resposta e a de antes, campo por campo.
+// A mao de obra da regra de precificacao NAO entra aqui — entrou so no
+// diagnostico (/preco-certo/diagnostico); incluir mudaria o alerta de quem
+// nao configurou nada.
 async function lerRisco(cid) {
   const { rows: cfg } = await db.query(
     `SELECT COALESCE(studio_settings, '{}'::jsonb) AS s FROM companies WHERE id = $1`,
     [cid]
   );
-  const piso = margemMinima(cfg[0] ? cfg[0].s : {});
+  const settings = cfg[0] ? cfg[0].s : {};
+  const piso = margemMinima(settings);
+  const taxa = taxaEmUso(settings);
   const { rows } = await db.query(
     `SELECT product_id, product_name, product_price, total_cost, margin_pct
        FROM studio_compositions_summary
       WHERE company_id = $1 AND is_active = true`,
     [cid]
   );
-  const pecas = pecasEmRisco(rows, piso).map((p) => ({
+  const pecas = pecasEmRisco(rows, piso, taxa).map((p) => ({
     ...p,
-    preco_sugerido: precoParaOPiso(p.custo, piso),
+    preco_sugerido: taxa > 0 ? precoSugerido(p.custo, taxa, piso) : precoParaOPiso(p.custo, piso),
   }));
-  return { piso, pecas, recado: recadoDoRisco(pecas, piso) };
+  const risco = { piso, pecas, recado: recadoDoRisco(pecas, piso) };
+  if (taxa > 0) risco.taxa_em_uso_pct = taxa;
+  return risco;
 }
 
 router.get('/margem/risco', async function(req, res) {
@@ -781,6 +793,10 @@ const ALLOWED_STUDIO_SETTINGS = [
   // propaga para os produtos com art_service_use_store_default = true
   // (ver services/servicoDeArtePadrao.js).
   'art_service_defaults',
+  // Piso de margem da loja (03/10/2026): o alerta de margem e o Preco
+  // certo LIAM esta chave (services/margemEmRisco.js) e nenhuma rota
+  // gravava. Numero de 0 a 95, ou null para voltar ao padrao.
+  'margem_minima_pct',
 ];
 
 router.get('/settings', async function(req, res) {
@@ -807,6 +823,12 @@ router.patch('/settings', async function(req, res) {
   if (Object.keys(filtered).length === 0) {
     console.warn('[studio/settings:PATCH] 400 — body sem chaves permitidas:', Object.keys(patch).join(', '), '| permitidas:', ALLOWED_STUDIO_SETTINGS.join(', '));
     return res.status(400).json({ error: 'nada pra atualizar (chaves permitidas: ' + ALLOWED_STUDIO_SETTINGS.join(', ') + ')' });
+  }
+  if (filtered.margem_minima_pct !== undefined && filtered.margem_minima_pct !== null) {
+    const m = filtered.margem_minima_pct;
+    if (typeof m !== 'number' || !Number.isFinite(m) || m < 0 || m > 95) {
+      return res.status(400).json({ error: 'margem_minima_pct deve ser um número de 0 a 95' });
+    }
   }
   const temPadraoDeArte = filtered.art_service_defaults !== undefined;
   if (temPadraoDeArte) {

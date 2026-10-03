@@ -291,3 +291,6 @@ router.get('/category-map', guard, async (req, res) => {
 });
 
 module.exports = router;
+// O Preço certo do Studio usa o mesmo mapa para dizer quais despesas
+// recorrentes são "Despesas Fixas" (services/precoCerto.js).
+module.exports.DEFAULT_LINE_MAP = DEFAULT_LINE_MAP;
