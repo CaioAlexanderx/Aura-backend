@@ -217,7 +217,9 @@ router.put('/clients/:cid/modules', ...adminOnly, asyncHandler(async (req, res) 
 router.get('/clients', ...adminOnly, asyncHandler(async (req, res) => {
   const { rows } = await pool.query(
     `SELECT c.id, c.trade_name, c.legal_name, c.plan, c.is_active, c.module_overrides,
-            c.created_at, u.email AS owner_email, u.full_name AS owner_name
+            c.created_at, u.email AS owner_email, u.full_name AS owner_name,
+            -- 05/10/2026: frente da empresa (migration 366) pro painel de gestao
+            c.segment, c.segment_source, c.segment_suggested, c.cnae_principal
      FROM companies c LEFT JOIN users u ON u.id = c.owner_id
      WHERE (c.federation_id IS NULL OR c.federation_id = c.id)
      ORDER BY c.created_at DESC`
