@@ -2,7 +2,9 @@
 // A API fora da busca (06/10/2026)
 //
 // O Search Console mostrava api.getaura.com.br/ rastreado. Toda resposta
-// do host da API sai com X-Robots-Tag e /robots.txt pede Disallow: /.
+// do host da API sai com X-Robots-Tag. O /robots.txt LIBERA o rastreio
+// (Allow: /): com Disallow o Google nao le o noindex e a URL ja indexada
+// fica presa como "indexada, mas bloqueada pelo robots.txt".
 // A vitrine do lojista (loja.getaura.com.br e dominio proprio), servida
 // pelo MESMO processo, continua indexavel. E a vitrine Studio nao herda a
 // meta robots que a casca do painel passou a trazer.
@@ -13,7 +15,7 @@
 
 const request = require('supertest');
 const db = require('../src/config/database');
-const { hostForaDaBusca } = require('../src/middleware/foraDaBusca');
+const { hostForaDaBusca, ROBOTS_TXT } = require('../src/middleware/foraDaBusca');
 const shell = require('../src/services/vitrineStudioShell');
 
 let app;
@@ -30,11 +32,13 @@ beforeEach(() => {
 afterEach(() => { jest.restoreAllMocks(); });
 
 describe('host da API', () => {
-  test('GET /robots.txt: 200, text/plain, Disallow: /', async () => {
+  test('GET /robots.txt: 200, text/plain, rastreio liberado', async () => {
     const r = await request(app).get('/robots.txt').set('Host', 'api.getaura.com.br');
     expect(r.status).toBe(200);
     expect(r.headers['content-type']).toMatch(/^text\/plain/);
-    expect(r.text).toBe('User-agent: *\nDisallow: /\n');
+    const regras = r.text.split('\n').filter((l) => l.trim() && !l.startsWith('#'));
+    expect(regras).toEqual(['User-agent: *', 'Allow: /']);
+    expect(r.text).not.toMatch(/^\s*Disallow/im);
     expect(r.headers['x-robots-tag']).toBe('noindex, nofollow');
   });
 
@@ -65,9 +69,9 @@ describe('vitrine do lojista continua indexavel', () => {
     expect(r.headers['x-robots-tag']).toBeUndefined();
   });
 
-  test('loja.getaura.com.br/robots.txt nao recebe o Disallow da API', async () => {
+  test('loja.getaura.com.br/robots.txt nao recebe o robots.txt da API', async () => {
     const r = await request(app).get('/robots.txt').set('Host', 'loja.getaura.com.br');
-    expect(r.text).not.toBe('User-agent: *\nDisallow: /\n');
+    expect(r.text).not.toBe(ROBOTS_TXT);
     expect(r.headers['x-robots-tag']).toBeUndefined();
   });
 

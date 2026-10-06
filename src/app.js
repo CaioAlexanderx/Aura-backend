@@ -23,8 +23,9 @@ initSentry();
 app.use(Sentry.Handlers.requestHandler());
 
 // ── API fora da busca (06/10/2026) ─────────────────────
-// X-Robots-Tag: noindex, nofollow em toda resposta e GET /robots.txt com
-// Disallow: / — so no host da API. A vitrine (loja.getaura.com.br e
+// X-Robots-Tag: noindex, nofollow em toda resposta e GET /robots.txt
+// liberando o rastreio (o Google precisa rastrear para ler o noindex) —
+// so no host da API. A vitrine (loja.getaura.com.br e
 // dominio proprio do lojista) continua indexavel. Regra completa em
 // middleware/foraDaBusca.js.
 app.use(foraDaBusca);
