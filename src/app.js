@@ -9,6 +9,7 @@ const { Sentry, initSentry } = require('./config/sentry');
 const { sentryContext, sentryError } = require('./middleware/sentryContext');
 const { validateRuntimeEnv } = require('./config/env');
 const { customDomainMiddleware } = require('./middleware/customDomain');
+const { foraDaBusca } = require('./middleware/foraDaBusca');
 const { montarJsonDeUpload } = require('./middleware/jsonDeUpload');
 
 const env = validateRuntimeEnv();
@@ -20,6 +21,13 @@ app.set('trust proxy', 1);
 // ── Sentry ─────────────────────────────────────────
 initSentry();
 app.use(Sentry.Handlers.requestHandler());
+
+// ── API fora da busca (06/10/2026) ─────────────────────
+// X-Robots-Tag: noindex, nofollow em toda resposta e GET /robots.txt com
+// Disallow: / — so no host da API. A vitrine (loja.getaura.com.br e
+// dominio proprio do lojista) continua indexavel. Regra completa em
+// middleware/foraDaBusca.js.
+app.use(foraDaBusca);
 
 // ── Custom domain → storefront rewrite (antes do CORS e rotas) ─────────
 // Mapeia Host headers de domínios customizados (ex: www.davicalcados2.com.br)
