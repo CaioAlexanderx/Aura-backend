@@ -395,9 +395,27 @@ function comCabecalhoDaLoja(casca, cabecalho) {
  * COPIA da casca, nunca na guardada em `_cache` — senao a proxima loja
  * (ou a proxima peca) sairia com o titulo desta.
  */
+/**
+ * Tira a meta robots que vem do app.
+ *
+ * Desde 06/10/2026 a casca do app sai com
+ * `<meta name="robots" content="noindex, nofollow">`: o PAINEL
+ * (app.getaura.com.br) nao deve aparecer na busca. A loja deve. O
+ * comCabecalhoDaLoja ja tira essa meta, mas so quando ha cabecalho — se
+ * as metatags da loja falharem (cabecalho vazio), a vitrine sairia com o
+ * noindex do painel. Aqui sai sempre; o noindex que a loja quiser (sacola,
+ * checkout, link com token) vem do proprio cabecalho, depois.
+ */
+function semRobotsDoApp(html) {
+  return String(html).replace(/<meta\s+name="robots"[^>]*>\s*/gi, '');
+}
+
 async function montarVitrineStudio(slug, cabecalho = '', { forcarCasca = false } = {}) {
   try {
-    const casca = comCabecalhoDaLoja(apontarParaOApp(await buscarCasca({ forcar: forcarCasca })), cabecalho);
+    const casca = comCabecalhoDaLoja(
+      semRobotsDoApp(apontarParaOApp(await buscarCasca({ forcar: forcarCasca }))),
+      cabecalho,
+    );
     return casca.replace('</head>', () => recadoParaOApp(slug) + scriptDeAutocura() + '</head>');
   } catch (err) {
     console.warn('[vitrineStudio] casca indisponivel:', err.message);
@@ -467,6 +485,8 @@ module.exports = {
   THREE_DO_JSDELIVR,
   // Previa do link (BE-1, 25/09/2026).
   metatagsDaVitrineStudio, comCabecalhoDaLoja, precoEmReais, textoCurto, fotoDaPeca,
+  // Meta robots do painel fora da loja (06/10/2026).
+  semRobotsDoApp,
   // Casca sem bundle velho (incidente de 28/09/2026).
   buscarCasca, entryDaCasca, conferirEntry, scriptDeAutocura,
   VALIDADE_MS, VALIDACAO_MS, INTERVALO_FORCADA_MS, CAMINHO_DO_ENTRY,
