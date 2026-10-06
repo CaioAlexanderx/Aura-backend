@@ -37,6 +37,8 @@ const { refundCreditSale } = require('../services/credit/refund');
 // Quais idempotency_key amarram um lancamento a uma venda — e de que origem
 // ('pdv' = recebeu na hora / 'credit' = A Receber do crediario).
 const { resolveSaleLink, extractSaleId } = require('../utils/saleLink');
+// 06/10/2026: chave "vender sem estoque" — ver cabecalho do util.
+const { vendaSemEstoqueLiberada } = require('../utils/vendaSemEstoque');
 
 // Quanto ja foi devolvido/trocado por item da venda (troca_returned_items).
 // Best-effort: em deploy parcial a tabela pode nao existir (42P01) -> tudo 0.
@@ -286,7 +288,8 @@ router.post('/transactions/:tx_id/sale-items', asyncHandler(async (req, res) => 
       if (varRes.rows[0].is_active === false) throw new AppError('Variante inativa', 400);
       variant = varRes.rows[0];
       const varStock = parseFloat(variant.stock_qty || 0);
-      if (varStock < qty) {
+      // 06/10/2026: a chave so e consultada quando o saldo falta.
+      if (varStock < qty && !(await vendaSemEstoqueLiberada(client, companyId))) {
         throw new AppError('Estoque insuficiente. Disponivel: ' + varStock + ' un', 400);
       }
       // Sobrescreve preco se cliente nao mandou e variant tem override
@@ -296,7 +299,7 @@ router.post('/transactions/:tx_id/sale-items', asyncHandler(async (req, res) => 
     } else {
       // Validacao de estoque do produto (so se nao for variante, ja que produto pai pode ser ignorado)
       const prodStock = parseFloat(product.stock_qty || 0);
-      if (prodStock < qty) {
+      if (prodStock < qty && !(await vendaSemEstoqueLiberada(client, companyId))) {
         throw new AppError('Estoque insuficiente. Disponivel: ' + prodStock + ' un', 400);
       }
     }
@@ -308,15 +311,18 @@ router.post('/transactions/:tx_id/sale-items', asyncHandler(async (req, res) => 
     const itemTotal = parseFloat((qty * effectivePrice).toFixed(2));
 
     // 5. Decrementa estoque (variant tem prioridade)
+    // 06/10/2026: GREATEST(0, ...) como no Caixa (pdv.js). Com a trava de
+    // saldo valendo o piso nunca e atingido; com "vender sem estoque" ligado
+    // ele impede o saldo negativo.
     if (variant) {
       await client.query(
-        `UPDATE product_variants SET stock_qty = COALESCE(stock_qty, 0) - $1, updated_at = NOW()
+        `UPDATE product_variants SET stock_qty = GREATEST(0, COALESCE(stock_qty, 0) - $1), updated_at = NOW()
          WHERE id = $2`,
         [qty, variant_id]
       );
     } else {
       await client.query(
-        `UPDATE products SET stock_qty = COALESCE(stock_qty, 0) - $1, updated_at = NOW()
+        `UPDATE products SET stock_qty = GREATEST(0, COALESCE(stock_qty, 0) - $1), updated_at = NOW()
          WHERE id = $2 AND company_id = $3`,
         [qty, product_id, companyId]
       );

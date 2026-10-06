@@ -10,7 +10,8 @@
 //         cash_tender_modal_enabled, studio_enabled, studio_kds_enabled,
 //         studio_gallery_enabled, studio_approval_enabled, food_mode_enabled,
 //         food_nfce_manual_enabled, food_comanda_print_enabled,
-//         card_fee_enabled, os_enabled, otica_enabled, card_price_enabled
+//         card_fee_enabled, os_enabled, otica_enabled, card_price_enabled,
+//         allow_sale_without_stock
 //   STRING (enum): studio_approval_mode (wa_me | whatsapp_business)
 //   NUMBER: service_fee_pct, food_service_fee_pct,
 //           card_fee_credit_pct, card_fee_debit_pct
@@ -62,6 +63,11 @@ const ALLOWED_BOOL_KEYS = [
   'matcon_round_to_package',
   'matcon_club_enabled',
   'matcon_lots_enabled',
+  // 06/10/2026 — vender sem estoque. Loja que nao controla saldo (ou acabou
+  // de importar o cadastro com tudo zerado) vende mesmo assim; o saldo para
+  // em zero, nunca fica negativo. Desligado por padrao. Leitura em
+  // utils/vendaSemEstoque.js (Caixa e lancamento de venda no Financeiro).
+  'allow_sale_without_stock',
 ];
 
 // 22/09/2026 — Matcon: lista de unidades habilitadas ("Minha loja vende
@@ -132,6 +138,8 @@ const DEFAULT_SETTINGS = {
   // 12/05/2026: modal de troco em venda dinheiro vem ativado por padrao.
   // Operadores batutos podem desligar em Configuracoes > PDV.
   cash_tender_modal_enabled: true,
+  // 06/10/2026 — desligado = a trava de "Estoque insuficiente" de sempre.
+  allow_sale_without_stock:  false,
   studio_enabled:            false,
   studio_kds_enabled:        false,
   studio_gallery_enabled:    false,
