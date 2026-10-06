@@ -70,6 +70,8 @@ const { hasSaleNumberColumn, saleNumberSelect } = require('../utils/saleNumber')
 const { findOwnerScopedCustomer } = require('../utils/customerScope');
 // 23/09/2026 (Matcon M1): ganchos da venda — ver cabecalho do servico.
 const matconSaleHooks = require('../services/matconSaleHooks');
+// 06/10/2026: chave "vender sem estoque" — ver cabecalho do util.
+const { vendaSemEstoqueLiberada } = require('../utils/vendaSemEstoque');
 
 const fmt = (v) => parseFloat(v || 0).toFixed(2);
 const SP_DATE_NOW = "(NOW() AT TIME ZONE 'America/Sao_Paulo')::date";
@@ -449,6 +451,10 @@ async function handleSale(req, res, opts = {}) {
     let subtotal = 0;
     const enrichedItems = [];
     const productNames = [];
+    // 06/10/2026 (vender sem estoque): consultada no maximo uma vez por venda,
+    // e so quando falta saldo em algum item — venda com estoque nao paga a ida
+    // ao banco. undefined = ainda nao consultada.
+    let semEstoqueLiberado;
     for (const item of items) {
       const qty = parseFloat(item.quantity);
       const unitPrice = parseFloat(item.unit_price);
@@ -487,11 +493,17 @@ async function handleSale(req, res, opts = {}) {
             }
           }
           if (!sale_date && stockAvailable < qty) {
-            await client.query('ROLLBACK');
-            return res.status(409).json({
-              error: `Estoque insuficiente para "${stockLabel}". Disponivel: ${stockAvailable}`,
-              product_id: item.product_id, variant_id: item.variant_id || null,
-            });
+            if (semEstoqueLiberado === undefined) {
+              semEstoqueLiberado = await vendaSemEstoqueLiberada(client, req.params.id);
+            }
+            if (!semEstoqueLiberado) {
+              await client.query('ROLLBACK');
+              return res.status(409).json({
+                error: `Estoque insuficiente para "${stockLabel}". Disponivel: ${stockAvailable}`,
+                product_id: item.product_id, variant_id: item.variant_id || null,
+              });
+            }
+            // Liberado: a baixa la embaixo usa GREATEST(0, ...), o saldo para em zero.
           }
         }
       }
