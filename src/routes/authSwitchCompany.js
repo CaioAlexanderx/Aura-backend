@@ -36,7 +36,7 @@ router.get('/companies', requireAuth, async (req, res) => {
     const { rows } = await db.query(
       `SELECT
          c.id, c.trade_name, c.legal_name, c.cnpj,
-         c.plan, c.is_primary, c.vertical_active, c.logo_url,
+         c.plan, c.is_primary, c.vertical_active, c.logo_url, c.segment,
          c.billing_status, c.trial_ends_at,
          CASE
            WHEN c.owner_id = $1 THEN 'owner'
@@ -65,6 +65,7 @@ router.get('/companies', requireAuth, async (req, res) => {
         plan: c.plan,
         is_primary: c.is_primary,
         vertical: c.vertical_active,
+        segment: c.segment || null, // 05/10/2026: frente da empresa (366)
         logo_url: c.logo_url,
         billing_status: c.billing_status,
         trial_active:
@@ -180,7 +181,7 @@ router.post('/switch-company', requireAuth, async (req, res) => {
          c.id, c.legal_name, c.trade_name, c.plan, c.cnpj,
          c.vertical_active, c.is_primary, c.module_overrides,
          c.billing_status, c.trial_ends_at, c.ai_enabled, c.ai_consent_at,
-         c.logo_url, c.onboarding_step, c.access_code_used,
+         c.logo_url, c.onboarding_step, c.access_code_used, c.segment,
          CASE
            WHEN c.owner_id = $2 THEN 'owner'
            ELSE cm.role_label
@@ -258,6 +259,7 @@ router.post('/switch-company', requireAuth, async (req, res) => {
         cnpj: company.cnpj,
         plan: company.plan,
         vertical: company.vertical_active,
+        segment: company.segment || null, // 05/10/2026: frente da empresa (366)
         is_primary: company.is_primary,
         module_overrides: company.module_overrides || {},
         billing_status: company.billing_status,

@@ -77,7 +77,8 @@ afterEach(() => { db.query.mockReset(); warn.mockRestore(); });
 
 describe('admin_audit_log — colunas do INSERT', () => {
   test('(1) troca de vertical grava vertical_change', async () => {
-    const audit = mockDb({ id: CID, plan: 'essencial', trade_name: 'Loja', vertical_active: null, pdv_settings: {} });
+    // Negocio: desde 05/10/2026 Studio no Essencial e recusado (409).
+    const audit = mockDb({ id: CID, plan: 'negocio', trade_name: 'Loja', vertical_active: null, pdv_settings: {} });
 
     const res = await request(makeApp())
       .patch('/admin/clients/' + CID + '/vertical')

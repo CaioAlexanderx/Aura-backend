@@ -10,6 +10,7 @@ const router  = require('express').Router({ mergeParams: true });
 const db      = require('../config/database');
 const { requireAuth } = require('../middleware/auth');
 const { lookupCNPJ, validateCNPJ, sanitizeCNPJ } = require('../services/cnpj');
+const { suggestSegmentFromCnae, normalizeCnae } = require('../services/segment');
 
 let redis = null;
 try { redis = require('../config/redis').default || require('../config/redis'); } catch (_) {}
@@ -52,7 +53,18 @@ router.post('/cnpj-lookup', async (req, res) => {
         situation: data.rf_situation,
       });
     }
-    res.json(data);
+    // 05/10/2026: frente sugerida pelo CNAE para o passo "Qual e o seu
+    // ramo?" do cadastro. Calculada aqui (e nao no servico) para valer
+    // tambem para o que ja esta no cache de 24h. Os campos de antes ficam:
+    // cnae_principal continua o objeto {code, description}; os novos sao
+    // cnae_codigo/cnae_descricao (strings) e suggested_segment.
+    const principal = data.cnae_principal || null;
+    res.json({
+      ...data,
+      cnae_codigo: normalizeCnae(principal),
+      cnae_descricao: (principal && typeof principal === 'object' ? principal.description : '') || '',
+      suggested_segment: suggestSegmentFromCnae(principal, data.cnaes_secundarios),
+    });
   } catch (e) {
     const status = e.message.includes('não encontrado') ? 404
                  : e.message.includes('Limite')         ? 429 : 500;

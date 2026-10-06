@@ -100,6 +100,8 @@ router.use('/obligations', require('./fiscalPdf'));
 router.use('/', require('./obligationsReport'));
 router.use('/guides', require('./guides'));
 router.use('/checklist', require('./checklist').checklistRouter);
+// 05/10/2026: primeiros passos da frente (companies.segment, migration 366).
+router.use('/onboarding', require('./onboardingFirstSteps'));
 router.use('/onboarding', require('./onboarding'));
 router.use('/export', require('./exportReports'));
 router.use('/', require('./importData'));

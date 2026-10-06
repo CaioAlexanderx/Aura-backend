@@ -72,6 +72,13 @@
 // company, o cadastro de dojo para em 409 (em vez de "entrar" na empresa
 // alheia como o fluxo de varejo faz) — a ligacao com o registro da
 // federacao acontece depois, no aceite.
+//
+// ── Frente no cadastro (2026-10-05) ─────────────────────────
+// /auth/register aceita { segment, segment_source, extras, cnae_principal,
+// cnae_descricao, segment_suggested } (services/segment.js). So vale em
+// empresa NOVA de cadastro self-service (self_serve=true ou codigo COMECAR);
+// a frente nasce ligada na mesma transacao. Sem segment: fluxo identico.
+// login/me/register expoem company.segment (no corpo, nao no JWT).
 // ============================================================
 const router  = require('express').Router();
 const bcrypt  = require('bcrypt');
@@ -86,6 +93,7 @@ const { issueVerification } = require('./verification');
 const { resolveKarateContext } = require('../config/karateRoles');
 const { getExtraSeatsForCompany, getExtraSeatsMap } = require('../services/extraSeats');
 const { appModeDoCabecalho } = require('../utils/appMode');
+const { applySegment, isValidSegment, normalizeCnae, ALLOWED_EXTRAS } = require('../services/segment');
 
 const env        = validateRuntimeEnv();
 const JWT_SECRET = env.JWT_SECRET;
@@ -105,6 +113,49 @@ const PLAN_RANK = { essencial: 1, negocio: 2, expansao: 3, personalizado: 4 };
 // filiacao; nenhuma outra vertical tem essa dependencia.
 const SELF_SERVE_VERTICALS = new Set(['karate_dojo']);
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+// 05/10/2026 — frente escolhida no cadastro ("Qual e o seu ramo?").
+// Entrada publica: tudo whitelist e tamanho curto. 'staff' NUNCA vem do
+// cliente (vira 'user'). Plano nao e escolhido aqui. Devolve
+// { error } ou { value: null } (sem frente: fluxo de hoje) ou
+// { value: { segment, extras, source, meta } }.
+const CLIENT_SEGMENT_SOURCES = ['cnae', 'landing', 'user'];
+function parseSignupSegment(body) {
+  const raw = body.segment;
+  if (raw === undefined || raw === null || raw === '') return { value: null };
+  if (typeof raw !== 'string' || raw.length > 20 || !isValidSegment(raw.trim().toLowerCase())) {
+    return { error: 'Ramo de atividade invalido', code: 'SEGMENT_INVALID' };
+  }
+  const segment = raw.trim().toLowerCase();
+
+  let extras = [];
+  if (body.extras !== undefined && body.extras !== null) {
+    if (!Array.isArray(body.extras) || body.extras.length > ALLOWED_EXTRAS.length + 2 ||
+        body.extras.some((e) => typeof e !== 'string' || !ALLOWED_EXTRAS.includes(e))) {
+      return { error: 'Recurso extra invalido', code: 'EXTRAS_INVALID' };
+    }
+    extras = Array.from(new Set(body.extras));
+  }
+
+  const source = (typeof body.segment_source === 'string' && CLIENT_SEGMENT_SOURCES.includes(body.segment_source))
+    ? body.segment_source : 'user';
+
+  const sug = typeof body.segment_suggested === 'string' ? body.segment_suggested.trim().toLowerCase() : '';
+  const desc = typeof body.cnae_descricao === 'string' ? body.cnae_descricao.trim().slice(0, 200) : '';
+  return {
+    value: {
+      segment,
+      extras,
+      source,
+      meta: {
+        segment_suggested: isValidSegment(sug) ? sug : null,
+        // aceita "4774-1/00", "4774100" ou o objeto {code, description} da consulta
+        cnae_principal: normalizeCnae(body.cnae_principal),
+        cnae_descricao: desc || null,
+      },
+    },
+  };
+}
 
 function signAccessToken(payload) {
   return jwt.sign({ ...payload, type: 'access' }, JWT_SECRET, { expiresIn: ACCESS_TTL });
@@ -151,7 +202,7 @@ async function resolveDefaultContext(userId, dbConn) {
             c.id, c.legal_name, c.plan, c.onboarding_step,
             c.trial_ends_at, c.module_overrides, c.billing_status,
             c.access_code_used, c.vertical_active, c.vertical, c.ai_enabled, c.ai_consent_at,
-            c.federation_id,
+            c.federation_id, c.segment,
             c.is_primary, c.created_at,
             CASE
               WHEN c.owner_id = $1 THEN 'owner'
@@ -218,6 +269,8 @@ function shapeCompany(company, fallbackMemberRole) {
     access_code_used: !!(company.access_code_used),
     vertical_active: company.vertical_active || null,
     vertical: company.vertical || null,
+    // 05/10/2026: frente da empresa (migration 366). null = legado.
+    segment: company.segment || null,
     ai_enabled: !!(company.ai_enabled),
     ai_consent_at: company.ai_consent_at || null,
     member_role,
@@ -231,6 +284,7 @@ function shapeCompany(company, fallbackMemberRole) {
 router.post('/register', async (req, res) => {
   const { name, email, password, company_name, phone, cnpj, access_code, terms_accepted, terms_version, self_serve, vertical, federation_id } = req.body;
   const isSelfServe = (self_serve === true || self_serve === 'true');
+  const isComecarCode = typeof access_code === 'string' && access_code.toUpperCase().trim() === 'COMECAR';
 
   if (!name || !email || !password) return res.status(400).json({ error: 'Campos obrigatorios: name, email, password' });
   // Aceite dos Termos obrigatorio — registrado para fins de auditoria juridica (migration 114)
@@ -251,6 +305,14 @@ router.post('/register', async (req, res) => {
     });
   }
   const isDojoSignup = requestedVertical === 'karate_dojo';
+
+  // 05/10/2026: frente escolhida no cadastro (opcional). Sem `segment` no
+  // body nada roda e o fluxo e identico ao de antes.
+  const parsedSegment = parseSignupSegment(req.body || {});
+  if (parsedSegment.error) {
+    return res.status(400).json({ error: parsedSegment.error, code: parsedSegment.code });
+  }
+  const signupSegment = parsedSegment.value;
   const dojoFederationId = (typeof federation_id === 'string') ? federation_id.trim() : '';
   if (isDojoSignup && !company_name) {
     return res.status(400).json({
@@ -324,12 +386,13 @@ router.post('/register', async (req, res) => {
     let isNewCompany = false;
     let memberRole = 'owner';
     let skipCompany = !company_name;
+    let segmentState = null;
 
     if (!skipCompany && cnpj) {
       const cleanCnpj = cnpj.replace(/\D/g, '');
       if (cleanCnpj.length === 14 || cleanCnpj.length === 11) {
         const { rows: existingCompanies } = await client.query(
-          'SELECT id, legal_name, trade_name, plan, onboarding_step, trial_ends_at, module_overrides, billing_status, access_code_used, vertical_active, vertical, ai_enabled, ai_consent_at, federation_id FROM companies WHERE cnpj = $1',
+          'SELECT id, legal_name, trade_name, plan, onboarding_step, trial_ends_at, module_overrides, billing_status, access_code_used, vertical_active, vertical, ai_enabled, ai_consent_at, federation_id, segment FROM companies WHERE cnpj = $1',
           [cleanCnpj]
         );
         if (existingCompanies.length > 0) {
@@ -371,10 +434,25 @@ router.post('/register', async (req, res) => {
       const { rows: [newCompany] } = await client.query(
         `INSERT INTO companies (owner_id, legal_name, trade_name, plan, onboarding_step, trial_ends_at, access_code_used, cnpj, phone, vertical, vertical_active, federation_id)
          VALUES ($1, $2, $2, $3, 'cnpj', $4, $5, $6, $7, $8, $8, $9)
-         RETURNING id, legal_name, trade_name, plan, onboarding_step, trial_ends_at, module_overrides, access_code_used, vertical_active, vertical, ai_enabled, ai_consent_at, federation_id`,
+         RETURNING id, legal_name, trade_name, plan, onboarding_step, trial_ends_at, module_overrides, access_code_used, vertical_active, vertical, ai_enabled, ai_consent_at, federation_id, segment`,
         [user.id, company_name.trim(), plan, trialEndsAt, access_code || null, cnpj ? cnpj.replace(/\D/g, '') : null, phone || null, newVertical, newFederationId]
       );
       company = newCompany;
+
+      // 05/10/2026: a frente escolhida ja nasce ligada — na MESMA transacao.
+      // So em empresa NOVA de cadastro self-service (self_serve ou codigo
+      // COMECAR); dojo ignora. Quem entra como vendedor de CNPJ existente
+      // nao chega aqui (company ja veio do SELECT acima).
+      if (signupSegment && !isDojoSignup && (isSelfServe || isComecarCode)) {
+        const state = await applySegment(client, company.id, {
+          segment: signupSegment.segment,
+          extras: signupSegment.extras,
+          source: signupSegment.source,
+          meta: signupSegment.meta,
+        });
+        company = { ...company, segment: state.segment, vertical_active: state.vertical_active };
+        segmentState = state;
+      }
     }
 
     if (company) {
@@ -446,6 +524,9 @@ router.post('/register', async (req, res) => {
         billing_status: company.billing_status || null,
         access_code_used: !!(company.access_code_used),
         vertical_active: company.vertical_active || null,
+        segment: company.segment || null,
+        // 05/10/2026: o que a frente ligou (so quando o cadastro aplicou uma).
+        segment_flags: segmentState ? segmentState.flags : null,
         ai_enabled: !!(company.ai_enabled),
         ai_consent_at: company.ai_consent_at || null,
         member_role: memberRole,
@@ -466,6 +547,10 @@ router.post('/register', async (req, res) => {
     });
   } catch (err) {
     await client.query('ROLLBACK');
+    // 05/10/2026: Studio pedido num codigo de plano que nao o suporta.
+    if (err && err.code === 'STUDIO_PLAN_REQUIRED') {
+      return res.status(409).json({ error: err.message, code: err.code });
+    }
     // Corrida SELECT-then-INSERT (duplo submit / retry de rede): a unique
     // constraint de users.email vira 409 honesto em vez de 500 generico.
     if (err.code === '23505' && /users.*email|email.*users/i.test(err.constraint || err.detail || '')) {
@@ -614,7 +699,7 @@ router.post('/me', requireAuth, async (req, res) => {
         `SELECT c.id, c.legal_name, c.plan, c.onboarding_step,
                 c.trial_ends_at, c.module_overrides, c.billing_status,
                 c.access_code_used, c.vertical_active, c.vertical, c.ai_enabled, c.ai_consent_at,
-                c.federation_id,
+                c.federation_id, c.segment,
                 CASE
                   WHEN c.owner_id = $1 THEN 'owner'
                   ELSE COALESCE(cm.role_label, 'member')
