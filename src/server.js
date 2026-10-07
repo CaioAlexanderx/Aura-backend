@@ -152,6 +152,12 @@ function startServer() {
     // switch STUDIO_QUOTE_VIDEO_EXPIRY_ENABLED=false.
     const { initOrcamentoVideoExpiryJob } = require('./jobs/orcamentoVideoExpiryJob');
     initOrcamentoVideoExpiryJob();
+
+    // Assinatura (367): lembrete de fatura agendado — banner com o Pix no
+    // sininho do cliente no dia marcado e aviso para a Aura se a fatura
+    // vencer sem pagamento. A cada 30 min, 8h–20h BRT.
+    const { initLembreteDeFaturaJob } = require('./jobs/lembreteDeFaturaJob');
+    initLembreteDeFaturaJob();
   });
 }
 
