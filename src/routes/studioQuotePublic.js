@@ -38,6 +38,7 @@ async function orcamentoMatcon(token) {
               (q.valid_until < ${SP_TODAY}) AS vencido,
               q.customer_name, q.items, q.total, q.responded_at, q.response_note,
               c.trade_name, c.legal_name,
+              c.logo_url AS company_logo_url, c.phone AS company_phone,
               dc.site_name, dc.logo_url, dc.primary_color, dc.secondary_color,
               dc.font_family,
               dc.whatsapp AS dc_whatsapp, dc.phone AS dc_phone, dc.instagram
@@ -64,7 +65,12 @@ function respostaMatcon(q) {
   }, 0) * 100) / 100;
   const total = parseFloat(q.total) || 0;
   const status = q.status === 'open' && q.vencido ? 'expired' : (STATUS_PUBLICO_MATCON[q.status] || 'expired');
-  const waDigits = String(q.dc_whatsapp || q.dc_phone || '').replace(/\D/g, '') || null;
+  // 07/10/2026: loja de material quase nunca tem Loja Virtual (a marca do
+  // digital_channel_config), entao logo e WhatsApp caiam sempre em vazio —
+  // a logo que o lojista sobe em Configuracoes (companies.logo_url) nunca
+  // aparecia no link. A marca da Loja Virtual continua na frente quando
+  // existe; sem ela, vale o cadastro da empresa.
+  const waDigits = String(q.dc_whatsapp || q.dc_phone || q.company_phone || '').replace(/\D/g, '') || null;
   const primeiro = String(q.customer_name || '').trim().split(/\s+/)[0] || null;
   return {
     token:      q.public_token,
@@ -75,7 +81,7 @@ function respostaMatcon(q) {
     expires_at: q.valid_until + 'T23:59:59-03:00',
     shop: {
       name:            q.site_name || q.trade_name || q.legal_name || 'Loja',
-      logo_url:        q.logo_url || null,
+      logo_url:        q.logo_url || q.company_logo_url || null,
       primary_color:   q.primary_color || null,
       secondary_color: q.secondary_color || null,
       font_family:     q.font_family || 'classic',
