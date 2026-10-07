@@ -27,6 +27,8 @@ router.use('/pdv', require('./pdv-summary-patch'));
 router.use('/pdv', require('./scanner'));
 router.use('/pdv', require('./pdv'));
 router.use('/', require('./pdvSettings'));
+// 07/10/2026: o cliente (dono/admin) troca a propria frente — PATCH /segment.
+router.use('/', require('./companySegment'));
 router.use('/caixa', require('./caixa'));
 // 31/08/2026 — Ordem de Servico (migration 313). Gate por pdv_settings.os_enabled
 // dentro do proprio router, so na escrita.
