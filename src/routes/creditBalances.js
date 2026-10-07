@@ -14,6 +14,8 @@
 const router = require('express').Router({ mergeParams: true });
 const db = require('../config/database');
 const overdueRule = require('../services/credit/overdue');
+// 07/10/2026: "em aberto" e saldo > 0 OU parcela aberta (Valen / jackson ICL).
+const { listBalanceRows } = require('../services/credit/balanceList');
 
 // Carencia do SINAL de atraso: late_grace_days so vale quando a loja cobra
 // encargos (late_charges_enabled). Defensivo: se a tabela/colunas nao existirem,
@@ -49,25 +51,7 @@ router.get('/balances', async (req, res) => {
   const q = req.query.q ? String(req.query.q).trim() : '';
   try {
     await assertCrediarioEnabled(req.params.id);
-    const conditions = ['cb.company_id = $1'];
-    const params = [req.params.id];
-    let i = 2;
-    if (onlyOpen) conditions.push('cb.balance > 0');
-    if (q) {
-      conditions.push(`(c.name ILIKE $${i} OR c.phone ILIKE $${i} OR c.cpf_cnpj ILIKE $${i})`);
-      params.push(`%${q}%`);
-      i++;
-    }
-    const { rows } = await db.query(
-      `SELECT c.id, c.name, c.phone, c.cpf_cnpj,
-              cb.balance, cb.total_debited, cb.total_paid, cb.last_activity_at
-         FROM customer_credit_balances cb
-         JOIN customers c ON c.id = cb.customer_id
-        WHERE ${conditions.join(' AND ')}
-        ORDER BY cb.balance DESC, cb.last_activity_at DESC NULLS LAST
-        LIMIT 500`,
-      params
-    );
+    const { rows } = await listBalanceRows(db, req.params.id, { onlyOpen, q });
 
     // Atraso pela REGRA UNICA (services/credit/overdue.js): data + carencia +
     // tolerancia de residuo + parcela retroativa vira "a conferir". Nunca le
@@ -117,6 +101,10 @@ router.get('/balances', async (req, res) => {
         total_debited: parseFloat(r.total_debited) || 0,
         total_paid: parseFloat(r.total_paid) || 0,
         last_activity_at: r.last_activity_at,
+        // Quanto ha em parcelas abertas, e se isso passa do saldo do razao
+        // (debito apagado com parcela viva).
+        open_installments: parseFloat(r.open_installments) || 0,
+        ledger_mismatch: (parseFloat(r.open_installments) || 0) - (parseFloat(r.balance) || 0) > 0.009,
         overdue:             (overdueByCustomer[r.id] || {}).overdue || false,
         next_due_date:       (overdueByCustomer[r.id] || {}).next_due_date || null,
         // Vencimento mais antigo que REALMENTE conta como atraso (ja com carencia
