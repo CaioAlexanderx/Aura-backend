@@ -24,8 +24,15 @@
 //   outro        nada
 // Extras: so ['os'] -> os_enabled = true.
 //
-// NUNCA desliga nada, exceto chamado por staff com `disable` explicito ou
-// trocando a frente de studio para outra (desativa a vertical Studio).
+// NUNCA desliga nada, exceto:
+//   - chamado por staff com `disable` explicito ou trocando a frente de
+//     studio para outra (desativa a vertical Studio);
+//   - `replacePrevious` (07/10/2026 — o cliente troca a propria frente em
+//     Configuracoes, PATCH /companies/:id/segment): desliga a flag propria
+//     da frente anterior (matcon_enabled / otica_enabled), desativa a
+//     vertical ao sair do Studio e, se `extras` vier como lista VAZIA
+//     explicita, desliga os_enabled (o extra). Sem `extras`, os_enabled fica
+//     como esta.
 //
 // CNAEs conferidos na API oficial do IBGE (servicodados.ibge.gov.br/api/v2/
 // cnae/subclasses/<codigo>) em 05/10/2026. So entra codigo conferido.
@@ -51,6 +58,9 @@ const FLAG_BY_SEGMENT = {
 };
 const FLAG_BY_EXTRA = { os: 'os_enabled' };
 const FLAG_BY_DISABLE = { matcon: 'matcon_enabled', otica: 'otica_enabled', os: 'os_enabled' };
+// Flag que pertence so a frente (some quando a frente muda). os_enabled fica
+// de fora de proposito: e o extra "Ordem de Servico", que vale em qualquer frente.
+const OWN_FLAG_BY_SEGMENT = { matcon: 'matcon_enabled', otica: 'otica_enabled' };
 
 // Subclasse CNAE (7 digitos) -> frente. Descricoes oficiais do IBGE.
 const CNAE_SUBCLASS_SEGMENT = {
@@ -199,7 +209,9 @@ function shapeState(row) {
 //   source   — 'cnae' | 'landing' | 'user' | 'staff'
 //   disable  — so com source 'staff': subconjunto de ['matcon','otica','os']
 //   meta     — { segment_suggested, cnae_principal, cnae_descricao } (opcional)
-async function applySegment(client, companyId, { segment, extras = [], source = 'user', disable = [], meta = null } = {}) {
+//   replacePrevious — troca de frente: desliga o que era so da frente anterior
+//              (ver cabecalho). `extras` undefined = nao mexe em os_enabled.
+async function applySegment(client, companyId, { segment, extras, source = 'user', disable = [], meta = null, replacePrevious = false } = {}) {
   if (!isValidSegment(segment)) throw new AppError('Frente invalida. Use uma de: ' + SEGMENTS.join(', '), 400);
   if (!SEGMENT_SOURCES.includes(source)) throw new AppError('Origem da frente invalida', 400);
   const extrasList = Array.isArray(extras) ? extras : [];
@@ -222,14 +234,22 @@ async function applySegment(client, companyId, { segment, extras = [], source = 
   for (const f of turnOff) {
     if (turnOn.has(f)) throw new AppError('Nao da para ligar e desligar o mesmo recurso (' + f + ')', 400);
   }
+  if (replacePrevious) {
+    const ownPrev = company.segment !== segment ? OWN_FLAG_BY_SEGMENT[company.segment] : null;
+    if (ownPrev && !turnOn.has(ownPrev)) turnOff.add(ownPrev);
+    // Lista vazia explicita = "sem Ordem de Servico". Assistencia vive de OS:
+    // ali a frente manda e o extra vazio nao desliga.
+    if (Array.isArray(extras) && extras.length === 0 && !turnOn.has('os_enabled')) turnOff.add('os_enabled');
+  }
 
   if (segment === 'studio') {
     if (!canHaveStudio(company.plan)) throw studioPlanError(company.plan);
     if (company.vertical_active !== 'studio') {
       await setCompanyVertical(client, companyId, 'studio', company.vertical_active);
     }
-  } else if (company.vertical_active === 'studio' && source === 'staff') {
-    // Troca explicita da equipe saindo do Studio: desativa a vertical.
+  } else if (company.vertical_active === 'studio' && (source === 'staff' || replacePrevious)) {
+    // Troca explicita (equipe, ou o cliente em Configuracoes) saindo do
+    // Studio: desativa a vertical.
     await setCompanyVertical(client, companyId, null, 'studio');
   }
 
