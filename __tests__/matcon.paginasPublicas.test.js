@@ -87,6 +87,39 @@ describe('GET /orcamento/:token — orcamento Matcon', () => {
     expect(res.body.status).toBe(publico);
   });
 
+  test('sem Loja Virtual: logo e WhatsApp vem do cadastro da empresa', async () => {
+    db.query.mockImplementation((sql) => Promise.resolve({
+      rows: /FROM matcon_quotes q/i.test(String(sql))
+        ? [matconQuote({
+            logo_url: null, dc_whatsapp: null, dc_phone: null,
+            company_logo_url: 'https://cdn.exemplo/empresa.jpeg', company_phone: '(22) 99985-7277',
+          })]
+        : [],
+    }));
+    const res = await request(app).get(`/orcamento/${TOKEN}`);
+    expect(res.status).toBe(200);
+    expect(res.body.shop.logo_url).toBe('https://cdn.exemplo/empresa.jpeg');
+    expect(res.body.shop.whatsapp).toBe('22999857277');
+    // a consulta precisa pedir as duas colunas da empresa
+    const sql = String(callsMatching(db.query, /FROM matcon_quotes q/i)[0][0]);
+    expect(sql).toMatch(/c\.logo_url AS company_logo_url/);
+    expect(sql).toMatch(/c\.phone AS company_phone/);
+  });
+
+  test('com Loja Virtual: a marca de la continua na frente', async () => {
+    db.query.mockImplementation((sql) => Promise.resolve({
+      rows: /FROM matcon_quotes q/i.test(String(sql))
+        ? [matconQuote({
+            logo_url: 'https://cdn.exemplo/loja.png',
+            company_logo_url: 'https://cdn.exemplo/empresa.jpeg', company_phone: '(22) 99985-7277',
+          })]
+        : [],
+    }));
+    const res = await request(app).get(`/orcamento/${TOKEN}`);
+    expect(res.body.shop.logo_url).toBe('https://cdn.exemplo/loja.png');
+    expect(res.body.shop.whatsapp).toBe('1133334444');
+  });
+
   test('token de ninguem: 404 de sempre', async () => {
     db.query.mockResolvedValue({ rows: [] });
     const res = await request(app).get(`/orcamento/${TOKEN}`);
