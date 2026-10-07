@@ -508,8 +508,12 @@ async function fechar(companyId, userId, dinheiroContado, observacao = null) {
   };
 }
 
+// LEITURA SEM GATE (07/10/2026): historico e detalhe mostram o que ja foi
+// fechado mesmo com caixa_enabled desligado. A loja que desligou a chave
+// depois de fechar caixas levava 403 aqui, e a aba "Fechamentos de caixa"
+// — que consulta cada empresa do grupo — virava erro por inteiro. O gate
+// continua em abrir, status e fechar.
 async function getHistorico(companyId, { limit = 20, offset = 0, de, ate } = {}) {
-  await assertCaixaEnabled(companyId);
 
   const params = [companyId, limit, offset];
   const dateFilter = [];
@@ -572,8 +576,6 @@ async function getHistorico(companyId, { limit = 20, offset = 0, de, ate } = {})
 }
 
 async function getSessao(companyId, sessaoId) {
-  await assertCaixaEnabled(companyId);
-
   const { rows } = await pool.query(
     `SELECT
        cs.*,
