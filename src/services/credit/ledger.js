@@ -13,8 +13,17 @@ const SP_DATE_NOW = "(NOW() AT TIME ZONE 'America/Sao_Paulo')::date";
 
 // Expr SQL p/ backdate: converte o param (YYYY-MM-DD) num timestamptz ao
 // meio-dia em America/Sao_Paulo. Se o param for NULL, cai em NOW().
+//
+// 07/10/2026: ao meio-dia somam-se os segundos (com microssegundo) do NOW()
+// da transacao. Dois recebimentos retroativos para o mesmo dia ficavam com o
+// MESMO instante (12:00:00.000000) e o desfazer (undoPayment) nao conseguia
+// dizer qual linha do Financeiro era de qual pagamento. O dia continua o
+// informado; so o instante passa a ser unico por transacao. Dentro de um
+// mesmo applyPayment todas as ocorrencias continuam iguais entre si (NOW() e
+// fixo na transacao), que e o que o desfazer compara.
 const BACKDATE_TS = (p) =>
-  `COALESCE((${p}::date + time '12:00') AT TIME ZONE 'America/Sao_Paulo', NOW())`;
+  `COALESCE((${p}::date + time '12:00') AT TIME ZONE 'America/Sao_Paulo'
+            + (NOW() - date_trunc('minute', NOW())), NOW())`;
 
 // --- Vinculo do recebivel com o cliente (24/08/2026) ---------------------
 //
