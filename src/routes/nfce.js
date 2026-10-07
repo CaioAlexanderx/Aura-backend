@@ -824,7 +824,7 @@ router.get('/', requireAuth, async (req, res) => {
                 xml_url, pdf_url, qr_code, url_consulta,
                 authorized_at, cancelled_at, created_at, error_message,
                 rejection_code, tp_emis, provider_used, fallback_reason
-           FROM nfce_emissions ${where} ORDER BY numero DESC LIMIT 100`,
+           FROM nfce_emissions ${where} ORDER BY created_at DESC, id DESC LIMIT 100`,
         params
       ));
     } catch (e) {
@@ -835,7 +835,7 @@ router.get('/', requireAuth, async (req, res) => {
                 xml_url, pdf_url, qr_code, url_consulta,
                 authorized_at, cancelled_at, created_at, error_message,
                 rejection_code, tp_emis
-           FROM nfce_emissions ${where} ORDER BY numero DESC LIMIT 100`,
+           FROM nfce_emissions ${where} ORDER BY created_at DESC, id DESC LIMIT 100`,
         params
       ));
     }
