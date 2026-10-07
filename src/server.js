@@ -106,6 +106,11 @@ function startServer() {
     const { initCreditCollectionAutoJob } = require('./jobs/creditCollectionAutoJob');
     initCreditCollectionAutoJob();
 
+    // Alarme diário (8h BRT): parcela aberta acima do saldo do crediário.
+    // Só leitura e só fala quando acha — services/credit/integrity.js.
+    const { initCreditIntegrityJob } = require('./jobs/creditIntegrityJob');
+    initCreditIntegrityJob();
+
     // FASE 8: parabéns de aniversário pelo WhatsApp — diário 9h30 BRT
     // (meia hora DEPOIS da régua do crediário, para cobrança e parabéns
     // do mesmo cliente não saírem no mesmo minuto). Kill switch

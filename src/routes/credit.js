@@ -1541,7 +1541,32 @@ router.post('/manual-entry', async (req, res) => {
       }
     }
 
-    // 3. Create debit transaction
+    // 3. Resolve termos: valor explicito > carne (terms_snapshot) > config loja > default
+    const config  = await creditLedger._getOrCreatePlanConfig(client, companyId);
+    const period  = creditLedger.resolvePeriod(
+      period_unit  || accountTerms?.period_unit,
+      period_count || accountTerms?.period_count,
+      config
+    );
+    const effectiveRate =
+      interest_rate !== undefined && interest_rate !== null
+        ? parseFloat(interest_rate)
+        : parseFloat(accountTerms?.interest_rate != null ? accountTerms.interest_rate : config?.interest_rate) || 0;
+
+    // 13/08/2026 (feedback Caio): juros total FLAT sobre o valor do lancamento,
+    // independente do numero de parcelas -- ANTES multiplicava por n (juros
+    // linear por parcela), o que fazia o juros total escalar com o parcelamento
+    // e confundia o lojista/cliente (ex: 10% em 10x cobrava 100% de juros).
+    // Agora: total_com_juros = valor * (1 + taxa), sempre, seja 1x ou 50x.
+    const totalWithInterest = effectiveRate > 0
+      ? parseFloat((total * (1 + effectiveRate)).toFixed(2))
+      : total;
+
+    // 4. Create debit transaction
+    // 07/10/2026: o debito leva o total COM juros -- o mesmo que as parcelas
+    // somam. Antes ia so o principal: R$1.000 a 30% nascia com saldo de
+    // R$1.000 e parcela de R$1.300, e o cliente que pagava tudo terminava
+    // com "credito" de R$300 (caso Kaio Cesar; a 367 acerta os antigos).
     // 13/08/2026: idempotency_key + ON CONFLICT DO NOTHING -- se outra
     // requisicao com a MESMA key venceu a corrida entre o check acima e este
     // INSERT (ex.: 2 retries quase simultaneos), aborta esta tx sem criar
@@ -1556,7 +1581,7 @@ router.post('/manual-entry', async (req, res) => {
                  COALESCE(($6::date + time '12:00') AT TIME ZONE 'America/Sao_Paulo', NOW()), $7, $8)
          ON CONFLICT (idempotency_key) DO NOTHING
          RETURNING *`,
-        [companyId, custId, total, notes, req.user?.id || null, entryDate, resolvedAccountId, idempotencyKey]
+        [companyId, custId, totalWithInterest, notes, req.user?.id || null, entryDate, resolvedAccountId, idempotencyKey]
       );
       if (!txRows.length) {
         await client.query('ROLLBACK');
@@ -1580,33 +1605,14 @@ router.post('/manual-entry', async (req, res) => {
            VALUES ($1, $2, 'debit', $3, $4, 'manual', $5,
                    COALESCE(($6::date + time '12:00') AT TIME ZONE 'America/Sao_Paulo', NOW()))
            RETURNING *`,
-          [companyId, custId, total, notes, req.user?.id || null, entryDate]
+          [companyId, custId, totalWithInterest, notes, req.user?.id || null, entryDate]
         );
         transaction = txRows[0];
         resolvedAccountId = null;
       } else throw e;
     }
 
-    // 4. Resolve termos: valor explicito > carne (terms_snapshot) > config loja > default
-    const config  = await creditLedger._getOrCreatePlanConfig(client, companyId);
-    const period  = creditLedger.resolvePeriod(
-      period_unit  || accountTerms?.period_unit,
-      period_count || accountTerms?.period_count,
-      config
-    );
-    const effectiveRate =
-      interest_rate !== undefined && interest_rate !== null
-        ? parseFloat(interest_rate)
-        : parseFloat(accountTerms?.interest_rate != null ? accountTerms.interest_rate : config?.interest_rate) || 0;
-
-    // 13/08/2026 (feedback Caio): juros total FLAT sobre o valor do lancamento,
-    // independente do numero de parcelas -- ANTES multiplicava por n (juros
-    // linear por parcela), o que fazia o juros total escalar com o parcelamento
-    // e confundia o lojista/cliente (ex: 10% em 10x cobrava 100% de juros).
-    // Agora: total_com_juros = valor * (1 + taxa), sempre, seja 1x ou 50x.
-    const totalWithInterest = effectiveRate > 0
-      ? parseFloat((total * (1 + effectiveRate)).toFixed(2))
-      : total;
+    // 5. Parcelas: o total com juros (passo 3) dividido em n.
     const baseAmount = Math.floor((totalWithInterest / n) * 100) / 100;
     const remainder  = Math.round((totalWithInterest - baseAmount * n) * 100) / 100;
 
@@ -1616,7 +1622,6 @@ router.post('/manual-entry', async (req, res) => {
       return d.toISOString().split('T')[0];
     })();
 
-    // 5. Criar parcelas
     const createdInstallments = [];
     for (let i = 1; i <= n; i++) {
       const instAmount = i === n ? baseAmount + remainder : baseAmount;

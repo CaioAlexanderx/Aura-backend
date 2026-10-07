@@ -76,6 +76,31 @@ describe('POST /credit/manual-entry', () => {
     expect(trecho).toContain('transactionId: transaction.id');
     expect(ROTA).toMatch(/INSERT INTO credit_installments \(\$\{cols\}, account_id, transaction_id\)/);
   });
+
+  // 07/10/2026 (Kaio Cesar): o débito ia pelo principal e as parcelas com
+  // juros -- R$1.000 a 30% nascia com saldo de R$1.000 e parcela de R$1.300.
+  test('debita o total com juros, o mesmo valor que as parcelas somam', () => {
+    const trecho = trechoDaRota("router.post('/manual-entry'");
+    const inserts = trecho.split('INSERT INTO customer_credit_transactions').slice(1);
+    expect(inserts).toHaveLength(2); // caminho normal + fallback 42703
+    for (const ins of inserts) {
+      const params = ins.slice(0, ins.indexOf(']'));
+      expect(params).toContain('custId, totalWithInterest, notes');
+      expect(params).not.toMatch(/custId, total, notes/);
+    }
+    // e as parcelas saem do mesmo número
+    expect(trecho).toContain('Math.floor((totalWithInterest / n) * 100) / 100');
+    // calculado ANTES do débito
+    expect(trecho.indexOf('const totalWithInterest')).toBeLessThan(trecho.indexOf('INSERT INTO customer_credit_transactions'));
+  });
+
+  test('desfazer acréscimo de renegociação é recusado pelo serviço', () => {
+    const fonte = fs.readFileSync(
+      path.join(__dirname, '..', 'src/services/credit/undoManualEntry.js'), 'utf8');
+    expect(fonte).toContain("tx.source === 'reschedule'");
+    expect(fonte).toContain('RESCHEDULE_ADJUSTMENT');
+    expect(fonte.indexOf('RESCHEDULE_ADJUSTMENT')).toBeLessThan(fonte.indexOf('DELETE FROM customer_credit_transactions'));
+  });
 });
 
 describe('migration 324', () => {

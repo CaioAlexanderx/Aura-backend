@@ -26,6 +26,8 @@
 //      que sobrar fica como credito no ledger -- exatamente o que o saldo da
 //      view customer_credit_balances passa a dizer.
 //   4. So entao o debito e apagado.
+//   5. Acrescimo de renegociacao (source='reschedule') NAO e desfeito aqui:
+//      409 RESCHEDULE_ADJUSTMENT (07/10/2026).
 // ============================================================
 'use strict';
 
@@ -185,6 +187,17 @@ async function undoManualEntry(client, { companyId, transactionId }) {
     throw httpError(
       'So um lancamento manual de debito pode ser desfeito por aqui.',
       409, 'NOT_MANUAL_DEBIT'
+    );
+  }
+
+  // 07/10/2026 (Valen / jackson ICL): o acrescimo de uma renegociacao e o
+  // que faz o saldo acompanhar o cronograma novo. Apaga-lo deixava as
+  // parcelas renegociadas inteiras e o saldo menor que elas -- o cliente
+  // chegava a sumir da lista de em aberto. Para mudar o total, renegocia-se.
+  if (tx.source === 'reschedule') {
+    throw httpError(
+      'Este lancamento e o acrescimo de uma renegociacao. Para mudar o total, renegocie o carne de novo.',
+      409, 'RESCHEDULE_ADJUSTMENT'
     );
   }
 

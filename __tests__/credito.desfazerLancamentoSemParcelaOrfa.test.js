@@ -14,8 +14,8 @@
 //   3. legado com data retroativa: o grupo de parcelas achado pela soma
 //   4. cobertura já aplicada não some: volta ao FIFO da outra parcela aberta
 //   5. pagamento não pode ser desfeito por aqui (409 NOT_MANUAL_DEBIT)
-//   6. acréscimo de renegociação (source='reschedule') não arrasta o
-//      cronograma novo junto
+//   6. acréscimo de renegociação (source='reschedule') não é desfeito por
+//      aqui (409 RESCHEDULE_ADJUSTMENT, 07/10/2026)
 //
 // Mesmo padrão de credito.recebivelSaldoParcial.test.js: conecta direto no
 // Postgres, tudo dentro de UMA transação revertida no afterAll — zero resíduo.
@@ -255,19 +255,26 @@ describe('undoManualEntry', () => {
     expect(await saldo(cid)).toBe(60);
   });
 
-  test('6. acréscimo de renegociação não arrasta o cronograma novo', async () => {
+  test('6. acréscimo de renegociação não é desfeito: saldo segue batendo com o cronograma', async () => {
+    // 07/10/2026 (Valen / jackson ICL): até aqui o acréscimo era apagado e o
+    // cronograma renegociado ficava inteiro -- parcelas somando mais que o
+    // saldo, e o cliente saía da lista de em aberto.
     const cid = await cliente('Renegociacao');
     const t0 = '2026-08-01T14:00:00Z';
+    await debito(cid, 200, { createdAt: '2026-07-01T14:00:00Z' });
     // applyReschedule grava o cronograma novo e o delta no mesmo NOW().
     const delta = await debito(cid, 30, { source: 'reschedule', createdAt: t0 });
     const p1 = await parcela(cid, 115, { createdAt: t0, number: 1, total: 2 });
     const p2 = await parcela(cid, 115, { createdAt: t0, number: 2, total: 2, dueDate: '2027-01-01' });
 
-    const r = await undoManualEntry(client, { companyId, transactionId: delta.id });
+    await expect(
+      undoManualEntry(client, { companyId, transactionId: delta.id })
+    ).rejects.toMatchObject({ status: 409, code: 'RESCHEDULE_ADJUSTMENT' });
 
-    expect(r.cancelled_installments).toBe(0);
+    expect(await debitoExiste(delta.id)).toBe(true);
     expect((await parcelaLida(p1)).status).toBe('pending');
     expect((await parcelaLida(p2)).status).toBe('pending');
+    expect(await abertoNasParcelas(cid)).toBe(await saldo(cid));
   });
 
   test('lançamento inexistente: 404', async () => {
