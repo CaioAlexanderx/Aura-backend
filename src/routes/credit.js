@@ -4,6 +4,7 @@
 // POST   /companies/:id/credit/customer/:cid/payment
 // POST   /companies/:id/credit/customer/:cid/accounts   (F3)
 // DELETE /companies/:id/credit/transaction/:txid
+// DELETE /companies/:id/credit/payments/:txid            (desfazer recebimento, 07/10/2026)
 // POST   /companies/:id/credit/manual-entry
 // GET    /companies/:id/credit/customers/:cid/history    (B1)
 // GET    /companies/:id/credit/customers/:cid/payments/preview (B3)
@@ -37,6 +38,7 @@ const creditLedger = require('../services/creditLedger');
 const { MAX_INSTALLMENTS_CEILING } = require('../services/credit/terms');
 const overdueRule  = require('../services/credit/overdue');  // .ymd: due_date das linhas de applied como 'AAAA-MM-DD' (15/09/2026)
 const { undoManualEntry } = require('../services/credit/undoManualEntry');
+const { undoPayment }     = require('../services/credit/undoPayment');
 // 16/09/2026: cliente cadastrado em outra loja do mesmo dono tambem vale
 // (src/utils/customerScope.js -- incidente Davi / Mary Lucy).
 const { findOwnerScopedCustomer, CUSTOMER_NOT_FOUND_BODY } = require('../utils/customerScope');
@@ -786,6 +788,35 @@ router.delete('/transaction/:txid', async (req, res) => {
     }
     console.error('[credit] delete tx error:', err.message);
     res.status(500).json({ error: 'Erro ao desfazer lancamento' });
+  } finally {
+    client.release();
+  }
+});
+
+// DELETE /payments/:txid -- desfaz um recebimento (duplicidade, 07/10/2026).
+//
+// Caso Valen / jackson ICL: o pagamento de R$260 entrou duas vezes e a
+// segunda linha foi revertida por SQL a mao. Perdao em vez de bloqueio: o
+// segundo recebimento igual nao e barrado (parcela a parcela do mesmo valor e
+// uso legitimo); o lojista desfaz pela timeline dentro de 24h. Tudo em UMA
+// transacao (src/services/credit/undoPayment.js): parcelas, encargos,
+// Financeiro, caixa e so entao o razao.
+router.delete('/payments/:txid', async (req, res) => {
+  const companyId = req.params.id;
+  const client = await db.connect();
+  try {
+    await client.query('BEGIN');
+    const result = await undoPayment(client, { companyId, transactionId: req.params.txid });
+    await creditLedger._updateCreditUsed(client, companyId, result.customer_id);
+    await client.query('COMMIT');
+    res.json(result);
+  } catch (err) {
+    try { await client.query('ROLLBACK'); } catch (_) {}
+    if (err.status && err.code) {
+      return res.status(err.status).json({ error: err.message, code: err.code });
+    }
+    console.error('[credit] undo payment error:', err.message);
+    res.status(500).json({ error: 'Erro ao desfazer recebimento' });
   } finally {
     client.release();
   }
