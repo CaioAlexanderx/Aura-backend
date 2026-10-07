@@ -18,6 +18,8 @@
 //   5. sem distribuição gravada: 409 PAYMENT_WITHOUT_ALLOCATIONS
 //   6. idempotência: segundo DELETE → 404
 //   7. crédito de troca e débito não passam por aqui (409)
+//   8. dois recebimentos retroativos no mesmo dia têm instantes distintos;
+//      desfazer o segundo não toca o primeiro
 //
 // Mesmo padrão de credito.desfazerLancamentoSemParcelaOrfa.test.js: tudo
 // dentro de UMA transação revertida no afterAll — zero resíduo. O pool do app
@@ -205,21 +207,23 @@ async function pagamentoExiste(txid) {
 
 // Dentro de UMA transacao o NOW() e o mesmo para todos os pagamentos; em
 // producao cada recebimento tem o seu instante. Empurra um pagamento (e o
-// que ele gravou no Financeiro e no caixa) uma hora para tras.
+// que ele gravou no Financeiro e no caixa, no instante dele) uma hora para tras.
 async function envelhecer(txid) {
   await client.query(
-    `UPDATE transactions t SET paid_at = NOW() - interval '1 hour'
-      WHERE t.company_id = $1 AND t.paid_at = NOW()
+    `UPDATE transactions t SET paid_at = p.created_at - interval '1 hour'
+       FROM customer_credit_transactions p
+      WHERE p.id = $2 AND t.company_id = $1 AND t.paid_at = p.created_at
         AND t.idempotency_key LIKE 'pdv-credit-receivable-%'`,
-    [companyId]
+    [companyId, txid]
   );
   await client.query(
-    `UPDATE sale_payments SET created_at = NOW() - interval '1 hour'
-      WHERE company_id = $1 AND created_at = NOW()`,
-    [companyId]
+    `UPDATE sale_payments sp SET created_at = p.created_at - interval '1 hour'
+       FROM customer_credit_transactions p
+      WHERE p.id = $2 AND sp.company_id = $1 AND sp.created_at = p.created_at`,
+    [companyId, txid]
   );
   await client.query(
-    `UPDATE customer_credit_transactions SET created_at = NOW() - interval '1 hour' WHERE id = $1`,
+    `UPDATE customer_credit_transactions SET created_at = created_at - interval '1 hour' WHERE id = $1`,
     [txid]
   );
 }
@@ -394,6 +398,41 @@ describe('undoPayment', () => {
       undoPayment(client, { companyId, transactionId: tx })
     ).rejects.toMatchObject({ status: 404, code: 'NOT_FOUND' });
     expect(await saldo(cid)).toBe(40);
+  });
+
+  test('8. dois recebimentos retroativos no mesmo dia: cada um com o seu instante, desfaz so o segundo', async () => {
+    // Antes de 07/10/2026 os dois ficavam em 12:00:00.000000 do dia informado e
+    // o Financeiro nao sabia qual linha era de qual pagamento.
+    const cid  = await cliente('Retroativos Mesmo Dia');
+    const sale = await venda(cid, 300, { installments: 3 });
+    const ontem = new Date(Date.now() - 86400000).toLocaleDateString('en-CA', { timeZone: 'America/Sao_Paulo' });
+    const r1 = await ledger.applyPayment(client, { companyId, customerId: cid, amount: 100, method: 'pix', paidAt: ontem });
+    await envelhecer(r1.transaction.id);
+    const r2 = await ledger.applyPayment(client, { companyId, customerId: cid, amount: 100, method: 'pix', paidAt: ontem });
+
+    const { rows: inst } = await client.query(
+      `SELECT created_at::time(0) AS hora,
+              (created_at AT TIME ZONE 'America/Sao_Paulo')::date::text AS dia,
+              EXTRACT(SECOND FROM created_at) > 0 AS tem_segundos
+         FROM customer_credit_transactions WHERE id = $1`, [r2.transaction.id]
+    );
+    expect(inst[0].dia).toBe(ontem);
+    expect(inst[0].tem_segundos).toBe(true);
+
+    // Retroativo de ontem fica ao meio-dia de ontem: depois do meio-dia de hoje
+    // ja passou das 24h. A janela aqui e so para o teste nao depender da hora.
+    const r = await undoPayment(client, { companyId, transactionId: r2.transaction.id, windowHours: 48 });
+
+    expect(r).toMatchObject({ new_balance: 200, installments_reopened: 1, financeiro_reverted: 1 });
+    const ps = await parcelas(cid);
+    expect(ps[0]).toMatchObject({ status: 'paid', covered: 100 });
+    expect(ps[1]).toMatchObject({ status: 'pending', covered: 0 });
+    expect(await recebiveis(sale)).toEqual([
+      expect.objectContaining({ status: 'confirmed', amount: 100, rest: false }),
+      expect.objectContaining({ status: 'pending', category: 'Crediario - A Receber', amount: 200, rest: true }),
+    ]);
+    expect(await caixa(sale)).toBe(100);
+    expect(await pagamentoExiste(r1.transaction.id)).toBe(true);
   });
 
   test('7. credito de troca e debito nao passam por aqui', async () => {
