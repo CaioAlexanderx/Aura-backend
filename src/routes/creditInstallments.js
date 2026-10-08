@@ -222,6 +222,20 @@ router.get('/customers/:cid/profile', async (req, res) => {
     // F2: termos resolvidos (reutilizados pelo engine de encargos abaixo)
     const terms = creditLedger.resolveTerms(profile, config);
 
+    // 08/10/2026: saldo do razao para a condicao 5 da regra de atraso (parcela
+    // orfa nao e atraso). null = sem linha na view = nunca deveu.
+    let ledgerBalance = 0;
+    try {
+      const bal = await client.query(
+        `SELECT balance FROM customer_credit_balances WHERE company_id = $1 AND customer_id = $2`,
+        [companyId, customerId]
+      );
+      ledgerBalance = bal.rows[0] ? (parseFloat(bal.rows[0].balance) || 0) : 0;
+    } catch (e) {
+      if (e.code !== '42P01' && e.code !== '42703') throw e;
+      ledgerBalance = null; // sem a view nao ha como saber: segue so pelas parcelas
+    }
+
     // Hub F1.4: score_label e available_limit
     const creditScore = parseInt(profile.credit_score) || 500;
     const creditLimit = Number(profile.credit_limit || 0);
@@ -241,11 +255,12 @@ router.get('/customers/:cid/profile', async (req, res) => {
         const remaining = parseFloat((parseFloat(i.amount_due) - parseFloat(i.covered_amount || 0)).toFixed(2));
         const lc = creditLedger.computeLateCharges(i, terms, config);
         // Regra UNICA de atraso -- nunca derive atraso de `status` (congela).
-        const cls = overdueRule.classifyInstallment(i, config);
+        const cls = overdueRule.classifyInstallment(i, config, undefined, { ledgerBalance });
         return {
           ...i,
           is_overdue:    cls.is_overdue,
           needs_review:  cls.needs_review,
+          no_ledger_debt: cls.no_ledger_debt,
           days_late:     cls.days_late,
           account_id:    i.account_id || null,
           remaining,
@@ -737,14 +752,29 @@ router.get('/installments', async (req, res) => {
     }
     const lateTerms = creditLedger.resolveTerms(lateProfile, lateConfig);
 
+    // 08/10/2026: saldo do razao por cliente (condicao 5). Uma consulta por
+    // request; sem a view a classificacao segue so pelas parcelas.
+    let saldoPorCliente = null;
+    try {
+      const bal = await pool.query(
+        `SELECT customer_id, balance FROM customer_credit_balances WHERE company_id = $1`, [companyId]
+      );
+      saldoPorCliente = {};
+      for (const b of bal.rows) saldoPorCliente[b.customer_id] = parseFloat(b.balance) || 0;
+    } catch (e) {
+      if (e.code !== '42P01' && e.code !== '42703') throw e;
+    }
+
     const data = r.rows.map(row => {
       const remaining = parseFloat((parseFloat(row.amount_due) - parseFloat(row.covered_amount || 0)).toFixed(2));
       const lc = creditLedger.computeLateCharges(row, lateTerms, lateConfig);
-      const cls = overdueRule.classifyInstallment(row, lateConfig);
+      const ledgerBalance = saldoPorCliente ? (saldoPorCliente[row.customer_id] || 0) : null;
+      const cls = overdueRule.classifyInstallment(row, lateConfig, undefined, { ledgerBalance });
       return {
         ...row,
         is_overdue:    cls.is_overdue,
         needs_review:  cls.needs_review,
+        no_ledger_debt: cls.no_ledger_debt,
         days_late:     cls.days_late,
         late_fee:      lc.late_fee,
         late_interest: lc.late_interest,
@@ -1084,8 +1114,10 @@ router.get('/dashboard', async (req, res) => {
 
     // Regra UNICA de atraso: os KPIs pararam de contar `status='overdue'` cru
     // (que so sincroniza quando alguem abre esta tela) e passaram a usar a
-    // mesma expressao de GET /credit/balances e da ficha.
-    const isOverdue  = overdueRule.overdueSql({ graceDays: dashGrace });
+    // mesma expressao de GET /credit/balances e da ficha. 08/10/2026: com a
+    // condicao 5 (companyParam) -- parcela orfa nao entra em "Vencido" nem em
+    // "Clientes em atraso" (na Valen eram R$27 mil de parcelas sem divida).
+    const isOverdue  = overdueRule.overdueSql({ graceDays: dashGrace, companyParam: '$1' });
     const isToReview = overdueRule.toReviewSql({});
     const kpis = await pool.query(
       `SELECT
@@ -1123,7 +1155,7 @@ router.get('/dashboard', async (req, res) => {
        LEFT JOIN customers c ON c.id=ci.customer_id
        LEFT JOIN customer_credit_profiles ccp
          ON ccp.customer_id=ci.customer_id AND ccp.company_id=ci.company_id
-       WHERE ci.company_id=$1 AND ${overdueRule.overdueSql({ alias: 'ci', graceDays: dashGrace })}
+       WHERE ci.company_id=$1 AND ${overdueRule.overdueSql({ alias: 'ci', graceDays: dashGrace, companyParam: '$1' })}
        GROUP BY ci.customer_id, c.name, c.phone, ccp.credit_score, ccp.status
        ORDER BY total_overdue DESC LIMIT 20`,
       [companyId]
@@ -1199,7 +1231,7 @@ router.get('/dashboard/aging', async (req, res) => {
     // Residuo de centavos e carne historico ainda dentro da janela de
     // conferencia ficam em 'a_vencer' -- senao o mapa de risco pinta de
     // vermelho quem esta em dia. Passada a janela, o historico entra nas faixas.
-    const agingOverdue = overdueRule.overdueSql({ graceDays: agingGrace });
+    const agingOverdue = overdueRule.overdueSql({ graceDays: agingGrace, companyParam: '$1' });
     const r = await pool.query(
       `SELECT
          CASE

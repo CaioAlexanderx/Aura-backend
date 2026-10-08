@@ -43,6 +43,20 @@
 //                  sendo digitalizado -- a loja ganha REVIEW_WINDOW_DAYS para
 //                  conferir e dar baixa. Depois disso, conta como atraso.
 //
+// Relato Valen (08/10/2026): clientes SEM DIVIDA pintados de "Em atraso".
+// O debito tinha sido apagado do razao (Excluir antigo, pre 10/09) e as
+// parcelas ficaram vivas; a lista passou a mostrar quem tem parcela aberta
+// (07/10, Aura-backend#791) e a regra, que so olhava credit_installments,
+// acendeu atraso para quem o razao diz que nao deve nada (R$0,00 ou saldo
+// negativo na linha, pill vermelha ao lado). Mesma raiz do relato de 18/08:
+// duas fontes de verdade -- o razao diz SE deve, as parcelas dizem QUANDO.
+// Daqui em diante vale a quinta condicao:
+//
+//   5. COM DIVIDA   o razao (customer_credit_balances) tem saldo > 0 para o
+//                   cliente. Parcela aberta sem divida no razao nao e atraso
+//                   nem cobranca: e inconsistencia a conferir (a lista marca
+//                   ledger_mismatch e o app mostra "Conferir").
+//
 // O status persistido continua existindo (indices, relatorios legados), mas
 // NENHUMA leitura de atraso deve depender dele. Sempre use daqui.
 // =============================================================
@@ -62,6 +76,35 @@ const REVIEW_WINDOW_DAYS = 7;
 /** Hoje no dia-calendario de America/Sao_Paulo, como expressao SQL. */
 const SP_TODAY = "(NOW() AT TIME ZONE 'America/Sao_Paulo')::date";
 
+/**
+ * Saldo minimo no razao para o cliente contar como devedor. E o mesmo corte
+ * do ledger_mismatch da lista (services/credit/balanceList.js).
+ */
+const LEDGER_MIN_DEBT = 0.009;
+
+/**
+ * Expressao SQL booleana "este cliente deve no razao?" (condicao 5).
+ *
+ * Com `companyParam` (ex.: '$1', o placeholder que ja carrega a empresa na
+ * consulta de quem chama) sai como IN hashado -- a view de saldo e calculada
+ * UMA vez por consulta, nao uma vez por parcela. Sem ele, cai no EXISTS
+ * correlacionado, correto em qualquer consulta mas mais caro.
+ */
+function ledgerDebtSql(opts) {
+  const o = opts || {};
+  const p = o.alias ? o.alias + '.' : '';
+  if (o.companyParam) {
+    return `${p}customer_id IN (
+      SELECT cb_atraso.customer_id FROM customer_credit_balances cb_atraso
+       WHERE cb_atraso.company_id = ${o.companyParam} AND cb_atraso.balance > ${LEDGER_MIN_DEBT})`;
+  }
+  return `EXISTS (
+      SELECT 1 FROM customer_credit_balances cb_atraso
+       WHERE cb_atraso.customer_id = ${p}customer_id
+         AND cb_atraso.company_id = ${p}company_id
+         AND cb_atraso.balance > ${LEDGER_MIN_DEBT})`;
+}
+
 /** Carencia de ENCARGOS da loja -- a mesma que services/credit/lateCharges usa. */
 function resolveGraceDays(config) {
   const g = Number(config?.late_grace_days);
@@ -80,12 +123,16 @@ function signalGraceDays(config) {
 /**
  * Expressao SQL booleana "esta parcela esta EM ATRASO?".
  * @param {object}  opts
- * @param {string}  opts.alias      prefixo da tabela (ex.: 'ci'). Default: sem prefixo.
- * @param {number}  opts.graceDays  carencia do sinal (use signalGraceDays(config)).
- *                                  Omitido = 0: sem config na mao, o padrao e
- *                                  sinalizar, nunca esconder.
- * @param {number}  opts.tolerance  residuo tolerado em R$.
- * @param {number}  opts.reviewDays janela de conferencia da parcela retroativa.
+ * @param {string}  opts.alias        prefixo da tabela (ex.: 'ci'). Default: sem prefixo.
+ * @param {number}  opts.graceDays    carencia do sinal (use signalGraceDays(config)).
+ *                                    Omitido = 0: sem config na mao, o padrao e
+ *                                    sinalizar, nunca esconder.
+ * @param {number}  opts.tolerance    residuo tolerado em R$.
+ * @param {number}  opts.reviewDays   janela de conferencia da parcela retroativa.
+ * @param {string}  opts.companyParam placeholder da empresa na consulta ('$1'):
+ *                                    liga a condicao 5 na forma barata (IN).
+ * @param {boolean} opts.ledger       false desliga a condicao 5 (so para quem
+ *                                    PRECISA ver parcela orfa, ex.: integridade).
  */
 function overdueSql(opts) {
   const o = opts || {};
@@ -93,6 +140,8 @@ function overdueSql(opts) {
   const grace = Number.isFinite(o.graceDays) ? Math.floor(o.graceDays) : 0;
   const tol = Number.isFinite(o.tolerance) ? o.tolerance : RESIDUE_TOLERANCE;
   const win = Number.isFinite(o.reviewDays) ? Math.floor(o.reviewDays) : REVIEW_WINDOW_DAYS;
+  const ledger = o.ledger === false ? '' : `
+    AND ${ledgerDebtSql({ alias: o.alias, companyParam: o.companyParam })}`;
   return `(
     ${p}status IN ('pending','overdue')
     AND (${p}amount_due - COALESCE(${p}covered_amount, 0)) > ${tol}
@@ -100,7 +149,7 @@ function overdueSql(opts) {
     AND (
       ${p}due_date >= (${p}created_at AT TIME ZONE 'America/Sao_Paulo')::date
       OR (${p}created_at AT TIME ZONE 'America/Sao_Paulo')::date < (${SP_TODAY} - ${win})
-    )
+    )${ledger}
   )`;
 }
 
@@ -146,11 +195,16 @@ function daysBetween(fromYmd, toYmd) {
  * Versao JS da mesma regra -- para enriquecer payloads ja carregados.
  * Espelha overdueSql/toReviewSql bit a bit. Nunca lanca.
  *
- * @returns {{ is_overdue: boolean, needs_review: boolean, days_late: number, remaining: number }}
+ * @param {object} [opts]
+ * @param {number|null} [opts.ledgerBalance] saldo do cliente no razao. Quando
+ *   vem (numero) e nao passa de LEDGER_MIN_DEBT, a parcela nao e atraso nem
+ *   "a conferir": e orfa (no_ledger_debt). Omitido/null = sem informacao,
+ *   a regra segue so pelas parcelas (comportamento de quem nao tem o saldo).
+ * @returns {{ is_overdue: boolean, needs_review: boolean, no_ledger_debt: boolean, days_late: number, remaining: number }}
  *   days_late e o atraso REAL em dias (sem carencia), so para exibicao.
  */
-function classifyInstallment(inst, config, asOf) {
-  const out = { is_overdue: false, needs_review: false, days_late: 0, remaining: 0 };
+function classifyInstallment(inst, config, asOf, opts) {
+  const out = { is_overdue: false, needs_review: false, no_ledger_debt: false, days_late: 0, remaining: 0 };
   try {
     const status = inst && inst.status;
     const remaining = Math.round(
@@ -158,6 +212,14 @@ function classifyInstallment(inst, config, asOf) {
     ) / 100;
     out.remaining = remaining;
     if (status !== 'pending' && status !== 'overdue') return out;
+
+    const ledgerBalance = opts && opts.ledgerBalance;
+    if (typeof ledgerBalance === 'number' && Number.isFinite(ledgerBalance) && ledgerBalance <= LEDGER_MIN_DEBT) {
+      out.no_ledger_debt = true;
+      const due0 = ymd(inst?.due_date);
+      if (due0) out.days_late = Math.max(0, daysBetween(due0, todaySp(asOf)));
+      return out;
+    }
 
     const due = ymd(inst?.due_date);
     if (!due) return out;
@@ -190,9 +252,11 @@ module.exports = {
   DEFAULT_GRACE_DAYS,
   RESIDUE_TOLERANCE,
   REVIEW_WINDOW_DAYS,
+  LEDGER_MIN_DEBT,
   SP_TODAY,
   resolveGraceDays,
   signalGraceDays,
+  ledgerDebtSql,
   overdueSql,
   toReviewSql,
   classifyInstallment,

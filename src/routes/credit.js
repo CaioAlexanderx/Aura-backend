@@ -391,7 +391,9 @@ router.get('/customer/:cid', async (req, res) => {
       // GET /credit/balances e do dashboard. Antes daqui saia atraso por data
       // pura enquanto a ficha usava status cru: carne "Em dia" + topo
       // "Em atraso" no mesmo cliente (relato Valen/livia aline, 18/08/2026).
-      const accIsOverdue  = overdueRule.overdueSql({ graceDays: overdueRule.signalGraceDays(lateConfig) });
+      // 08/10/2026: companyParam liga a condicao 5 (divida no razao) -- carne
+      // orfao nao pinta a ficha de "Em atraso".
+      const accIsOverdue  = overdueRule.overdueSql({ graceDays: overdueRule.signalGraceDays(lateConfig), companyParam: '$1' });
       const accToReview   = overdueRule.toReviewSql({});
       const { rows: instRows } = await db.query(
         `SELECT account_id,
@@ -493,13 +495,24 @@ router.get('/customer/:cid', async (req, res) => {
       console.error('[credit] group_open error:', goErr.message);
     }
 
+    // 08/10/2026 (Valen): quanto ha em parcelas abertas e se isso passa do
+    // saldo do razao. Com divergencia o app mostra "Conferir" em vez de
+    // "Em atraso" / "Em dia" -- e a classificacao de cada parcela abaixo
+    // recebe o saldo (condicao 5), igual a lista.
+    const ledgerBalance = parseFloat(b.balance) || 0;
+    const openInstallmentsTotal = Math.round(installmentRows.reduce((acc, i) => {
+      return acc + Math.max(0, (parseFloat(i.amount_due) || 0) - (parseFloat(i.covered_amount) || 0));
+    }, 0) * 100) / 100;
+
     res.json({
       customer:          cust[0],
       group_open:        groupOpen,
-      balance:           parseFloat(b.balance) || 0,
+      balance:           ledgerBalance,
       total_debited:     parseFloat(b.total_debited) || 0,
       total_paid:        parseFloat(b.total_paid) || 0,
       last_activity_at:  b.last_activity_at || null,
+      open_installments_total: openInstallmentsTotal,
+      ledger_mismatch:   openInstallmentsTotal - ledgerBalance > overdueRule.LEDGER_MIN_DEBT,
       accounts,
       transactions: txs.map(t => ({
         id: t.id, sale_id: t.sale_id, type: t.type,
@@ -513,11 +526,12 @@ router.get('/customer/:cid', async (req, res) => {
         // Regra UNICA: o consumidor NUNCA deve olhar `status` para decidir
         // atraso -- ele so e sincronizado quando alguem abre o dashboard e
         // fica congelado no meio tempo.
-        const cls = overdueRule.classifyInstallment(i, lateConfig);
+        const cls = overdueRule.classifyInstallment(i, lateConfig, undefined, { ledgerBalance });
         return {
           id: i.id,
           is_overdue:          cls.is_overdue,
           needs_review:        cls.needs_review,
+          no_ledger_debt:      cls.no_ledger_debt,
           days_late:           cls.days_late,
           installment_number:  i.installment_number,
           total_installments:  i.total_installments,
