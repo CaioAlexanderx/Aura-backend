@@ -29,6 +29,7 @@ const db = require('../../config/database');
 const waOutbox = require('../waOutbox');
 const addons = require('../addons');
 const collectionNotice = require('./collectionNotice');
+const overdueRule = require('./overdue');
 
 // Canal do histórico. 'whatsapp' continua sendo a pista MANUAL (wa.me);
 // 'whatsapp_auto' é o que saiu pela fila paga — separar os dois é o que
@@ -127,7 +128,8 @@ function parseRules(raw) {
 // lados com a mesma conta (days -3 → vence daqui a 3 dias; days 3 →
 // venceu há 3 dias). Saldo = amount_due - covered_amount: parcela já
 // coberta pelo FIFO não é cobrada, mesmo que o status ainda não tenha
-// virado.
+// virado. 08/10/2026: nem parcela de quem não deve no razão (débito
+// apagado, parcela órfã) — cobrar quem não deve é pior que não cobrar.
 async function loadInstallmentsForRule(companyId, { today, days }) {
   try {
     const { rows } = await db.query(
@@ -144,6 +146,7 @@ async function loadInstallmentsForRule(companyId, { today, days }) {
           AND ci.status IN ('pending','overdue')
           AND (ci.amount_due - COALESCE(ci.covered_amount, 0)) > 0
           AND ci.due_date = (COALESCE($2::date, (NOW() AT TIME ZONE 'America/Sao_Paulo')::date) - $3::int)
+          AND ${overdueRule.ledgerDebtSql({ alias: 'ci', companyParam: '$1' })}
         ORDER BY ci.due_date ASC, ci.id ASC`,
       [companyId, today || null, days]
     );
@@ -355,6 +358,8 @@ async function runAll(today = null) {
 }
 
 module.exports = {
+  // 08/10/2026: exposta para o teste da condicao 5 (parcela orfa nao e cobrada).
+  _loadInstallmentsForRule: loadInstallmentsForRule,
   CHANNEL_AUTO,
   RULE_TEMPLATE_MAP,
   TEMPLATE_LEMBRETE,

@@ -54,14 +54,16 @@ router.get('/balances', async (req, res) => {
     const { rows } = await listBalanceRows(db, req.params.id, { onlyOpen, q });
 
     // Atraso pela REGRA UNICA (services/credit/overdue.js): data + carencia +
-    // tolerancia de residuo + parcela retroativa vira "a conferir". Nunca le
-    // credit_installments.status como fonte de atraso.
+    // tolerancia de residuo + parcela retroativa vira "a conferir" + divida no
+    // razao (08/10/2026: parcela orfa nao acende atraso -- a linha sai com
+    // overdue=false e ledger_mismatch=true, e o app mostra "Conferir"). Nunca
+    // le credit_installments.status como fonte de atraso.
     const overdueByCustomer = {};
     try {
       const ids = rows.map((r) => r.id);
       if (ids.length) {
         const graceDays = await loadGraceDays(req.params.id);
-        const isOverdue = overdueRule.overdueSql({ graceDays });
+        const isOverdue = overdueRule.overdueSql({ graceDays, companyParam: '$1' });
         const isToReview = overdueRule.toReviewSql({});
         const { rows: oiRows } = await db.query(
           `SELECT customer_id,
