@@ -12,7 +12,11 @@
 //
 // O que este modulo garante, dentro de UMA transacao do chamador:
 //   1. So type='payment' com payment_method <> 'crediario_credito' (o credito
-//      de troca tem outros efeitos) e dentro da janela UNDO_WINDOW_HOURS.
+//      de troca tem outros efeitos). SEM PRAZO por padrao (08/10/2026, Looks
+//      da Jenny): a janela de 24h contava de created_at, que no pagamento
+//      retroativo e a data INFORMADA -- um recebimento lancado hoje com data
+//      de tres dias atras ja nascia fora da janela, e erro de balcao so e
+//      visto dias depois. `windowHours` continua aceito por quem quiser prazo.
 //   2. Cada parcela da distribuicao (credit_payment_allocations, migration 335)
 //      devolve o principal que este pagamento pos nela: covered_amount volta,
 //      'paid' reabre como 'pending' (ou 'overdue' pela regra unica de
@@ -34,7 +38,10 @@
 const { overdueSql, signalGraceDays } = require('./overdue');
 const { _recalculateScore } = require('./score');
 
-/** Janela em que um recebimento ainda pode ser desfeito pela tela. */
+/**
+ * Janela (horas) para quem pedir prazo explicitamente via `windowHours`.
+ * O padrao do undoPayment e SEM prazo (ver o cabecalho).
+ */
 const UNDO_WINDOW_HOURS = 24;
 
 const round2 = (n) => Math.round((Number(n) || 0) * 100) / 100;
@@ -195,14 +202,16 @@ async function revertReceivables(client, companyId, tx, principalTotal) {
 // ---------------------------------------------------------------
 // undoPayment -- DENTRO de uma transacao do chamador.
 // ---------------------------------------------------------------
-async function undoPayment(client, { companyId, transactionId, windowHours = UNDO_WINDOW_HOURS }) {
+async function undoPayment(client, { companyId, transactionId, windowHours = null }) {
+  const hours = Number(windowHours);
+  const comPrazo = windowHours !== null && windowHours !== undefined && Number.isFinite(hours) && hours > 0;
   const { rows: txRows } = await client.query(
     `SELECT id, customer_id, type, amount, payment_method, created_at,
-            created_at < NOW() - ($3::int * interval '1 hour') AS too_old
+            ($4::boolean AND created_at < NOW() - ($3::int * interval '1 hour')) AS too_old
        FROM customer_credit_transactions
       WHERE id = $1 AND company_id = $2
       FOR UPDATE`,
-    [transactionId, companyId, Math.max(0, Math.floor(Number(windowHours) || 0))]
+    [transactionId, companyId, comPrazo ? Math.floor(hours) : 0, comPrazo]
   );
   if (!txRows.length) {
     throw httpError('Recebimento nao encontrado', 404, 'NOT_FOUND');

@@ -39,6 +39,7 @@ const { MAX_INSTALLMENTS_CEILING } = require('../services/credit/terms');
 const overdueRule  = require('../services/credit/overdue');  // .ymd: due_date das linhas de applied como 'AAAA-MM-DD' (15/09/2026)
 const { undoManualEntry } = require('../services/credit/undoManualEntry');
 const { undoPayment }     = require('../services/credit/undoPayment');
+const { editPayment }     = require('../services/credit/editPayment');
 // 16/09/2026: cliente cadastrado em outra loja do mesmo dono tambem vale
 // (src/utils/customerScope.js -- incidente Davi / Mary Lucy).
 const { findOwnerScopedCustomer, CUSTOMER_NOT_FOUND_BODY } = require('../utils/customerScope');
@@ -812,9 +813,10 @@ router.delete('/transaction/:txid', async (req, res) => {
 // Caso Valen / jackson ICL: o pagamento de R$260 entrou duas vezes e a
 // segunda linha foi revertida por SQL a mao. Perdao em vez de bloqueio: o
 // segundo recebimento igual nao e barrado (parcela a parcela do mesmo valor e
-// uso legitimo); o lojista desfaz pela timeline dentro de 24h. Tudo em UMA
-// transacao (src/services/credit/undoPayment.js): parcelas, encargos,
-// Financeiro, caixa e so entao o razao.
+// uso legitimo); o lojista desfaz pela timeline, sem prazo (08/10/2026: o erro
+// de balcao so e visto dias depois). Tudo em UMA transacao
+// (src/services/credit/undoPayment.js): parcelas, encargos, Financeiro, caixa
+// e so entao o razao.
 router.delete('/payments/:txid', async (req, res) => {
   const companyId = req.params.id;
   const client = await db.connect();
@@ -831,6 +833,68 @@ router.delete('/payments/:txid', async (req, res) => {
     }
     console.error('[credit] undo payment error:', err.message);
     res.status(500).json({ error: 'Erro ao desfazer recebimento' });
+  } finally {
+    client.release();
+  }
+});
+
+// PATCH /payments/:txid -- edita um recebimento (08/10/2026, Looks da Jenny).
+//
+// Body: { amount?, method?, paid_at?, customer_id? } -- so o que muda.
+// Editar e desfazer + relancar na MESMA transacao
+// (src/services/credit/editPayment.js): valor, dia e cliente decidem em quais
+// parcelas o pagamento cai, entao nao existe UPDATE no pagamento. O id muda;
+// a resposta traz o novo (transaction_id) e o antigo.
+router.patch('/payments/:txid', async (req, res) => {
+  const companyId = req.params.id;
+  const b = req.body || {};
+  const changes = {};
+  if (b.amount !== undefined)      changes.amount = b.amount;
+  if (b.method !== undefined)      changes.method = b.method;
+  if (b.paid_at !== undefined)     changes.paid_at = b.paid_at;
+  if (b.customer_id !== undefined) changes.customer_id = b.customer_id;
+
+  try {
+    await assertCrediarioEnabled(companyId);
+  } catch (err) {
+    return res.status(err.status || 500).json({ error: err.message, code: err.code });
+  }
+
+  const client = await db.connect();
+  try {
+    await client.query('BEGIN');
+
+    let activeSessaoId = null;
+    try {
+      const sessRes = await client.query(
+        `SELECT id FROM caixa_sessoes WHERE company_id = $1 AND status = 'aberta' LIMIT 1`,
+        [companyId]
+      );
+      activeSessaoId = sessRes?.rows?.[0]?.id || null;
+    } catch (_) {}
+
+    const result = await editPayment(client, {
+      companyId,
+      transactionId: req.params.txid,
+      changes,
+      createdBy:     req.user?.id || null,
+      sessaoId:      activeSessaoId,
+      findCustomer:  (c, cid, custId) => findOwnerScopedCustomer(c, cid, custId, 'id, name'),
+      loadContext:   loadLateChargesContext,
+    });
+    if (result.moved) {
+      await creditLedger._updateCreditUsed(client, companyId, result.previous_customer_id);
+    }
+    await creditLedger._updateCreditUsed(client, companyId, result.customer_id);
+    await client.query('COMMIT');
+    res.json(result);
+  } catch (err) {
+    try { await client.query('ROLLBACK'); } catch (_) {}
+    if (err.status && err.code) {
+      return res.status(err.status).json({ error: err.message, code: err.code });
+    }
+    console.error('[credit] edit payment error:', err.message);
+    res.status(500).json({ error: 'Erro ao editar recebimento' });
   } finally {
     client.release();
   }
@@ -973,6 +1037,49 @@ async function fetchHistoryItems(companyId, saleIds) {
   }
 }
 
+// Parcelas que cada pagamento da pagina cobriu (credit_payment_allocations,
+// migration 335), com o carne de cada uma. E o que deixa a timeline mostrar
+// "este pagamento quitou a 1/3 e abateu R$34 da conta anterior" -- e o que
+// habilita Editar/Remover: sem distribuicao gravada (pagamento anterior a
+// 335) nao ha como desfazer automaticamente. Defensivo 42P01/42703 com cache.
+let historyAllocationsAvailable = true;
+async function fetchHistoryAllocations(companyId, paymentIds) {
+  if (!paymentIds.length || !historyAllocationsAvailable) return {};
+  try {
+    const { rows } = await db.query(
+      `SELECT a.transaction_id, a.installment_id, a.principal_paid, a.charges_paid, a.status_after,
+              i.installment_number, i.total_installments, i.due_date, i.account_id, i.sale_id,
+              ca.name AS account_name
+         FROM credit_payment_allocations a
+         JOIN credit_installments i ON i.id = a.installment_id
+         LEFT JOIN credit_accounts ca ON ca.id = i.account_id
+        WHERE a.company_id = $1 AND a.transaction_id = ANY($2::uuid[])
+        ORDER BY i.due_date ASC, i.installment_number ASC`,
+      [companyId, paymentIds]
+    );
+    const map = {};
+    for (const r of rows) {
+      if (!map[r.transaction_id]) map[r.transaction_id] = [];
+      map[r.transaction_id].push({
+        installment_id:     r.installment_id,
+        number:             r.installment_number || null,
+        total_installments: r.total_installments || null,
+        due_date:           overdueRule.ymd(r.due_date),
+        account_id:         r.account_id || null,
+        account_name:       r.account_name || null,
+        from_sale:          !!r.sale_id,
+        principal_paid:     parseFloat(r.principal_paid) || 0,
+        charges_paid:       parseFloat(r.charges_paid) || 0,
+        status_after:       r.status_after || null,
+      });
+    }
+    return map;
+  } catch (e) {
+    if (e.code === '42P01' || e.code === '42703') { historyAllocationsAvailable = false; return {}; }
+    throw e;
+  }
+}
+
 router.get('/customers/:cid/history', async (req, res) => {
   const companyId  = req.params.id;
   const customerId = req.params.cid;
@@ -1025,6 +1132,8 @@ router.get('/customers/:cid/history', async (req, res) => {
       page.filter(r => r.type === 'debit' && r.sale_id).map(r => r.sale_id)
     )];
     const itemsBySale = await fetchHistoryItems(companyId, purchaseSaleIds);
+    const paymentIds = page.filter(r => creditHistoryEventType(r) === 'payment').map(r => r.id);
+    const allocationsByPayment = await fetchHistoryAllocations(companyId, paymentIds);
 
     const events = page.map(r => {
       const eventType = creditHistoryEventType(r);
@@ -1039,7 +1148,12 @@ router.get('/customers/:cid/history', async (req, res) => {
         sale_id:     r.sale_id || null,
         account_id:  r.account_id || null,
         items:       eventType === 'purchase' ? (itemsBySale[r.sale_id] || []) : null,
-        payment:     eventType === 'payment' ? { method: r.payment_method || null } : null,
+        // 08/10/2026: parcelas que o pagamento cobriu + se da para editar/remover.
+        payment:     eventType === 'payment' ? {
+          method:      r.payment_method || null,
+          allocations: allocationsByPayment[r.id] || [],
+          can_edit:    (allocationsByPayment[r.id] || []).length > 0,
+        } : null,
         meta,
       };
     });
