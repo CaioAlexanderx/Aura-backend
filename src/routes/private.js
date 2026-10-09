@@ -45,6 +45,10 @@ router.use('/otica', require('./otica'));
 // pdv_settings.matcon_enabled dentro do router, so na escrita, sem
 // requirePlan no prefixo (modules.js: as rotas matcon dependem so do toggle).
 router.use('/matcon', require('./matconPurchases'));
+// 09/10/2026 — Comandas do Caixa (migration 368): consumo pendurado num numero
+// e cobrado no fim. Gate por pdv_settings.comanda_enabled dentro do router,
+// so na escrita, sem requirePlan no prefixo (e do Caixa, plano Essencial).
+router.use('/comandas', require('./comandas'));
 // 23/09/2026 — Matcon M3: Profissionais Parceiros (migration 353). Mesmo
 // desenho da Otica: gate por pdv_settings.matcon_enabled dentro do router,
 // so na escrita, sem requirePlan no prefixo.

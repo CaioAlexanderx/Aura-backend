@@ -70,6 +70,8 @@ const { hasSaleNumberColumn, saleNumberSelect } = require('../utils/saleNumber')
 const { findOwnerScopedCustomer } = require('../utils/customerScope');
 // 23/09/2026 (Matcon M1): ganchos da venda — ver cabecalho do servico.
 const matconSaleHooks = require('../services/matconSaleHooks');
+// 09/10/2026 (migration 368): venda com `comanda_id` fecha a comanda do Caixa.
+const comandaSaleHooks = require('../services/comandaSaleHooks');
 // 06/10/2026: chave "vender sem estoque" — ver cabecalho do util.
 const { vendaSemEstoqueLiberada } = require('../utils/vendaSemEstoque');
 
@@ -761,6 +763,19 @@ async function handleSale(req, res, opts = {}) {
     });
     if (matconResult) sale.quote_id = matconResult.quote_id;
 
+    // Comandas (368): venda que cobra uma comanda (body.comanda_id) fecha a
+    // comanda aqui dentro. Sem comanda_id nao faz nada. Comanda ja fechada ou
+    // de outra loja reverte a venda inteira (cobrar duas vezes e pior).
+    const comandaResult = await comandaSaleHooks.afterSaleInsert(client, {
+      companyId: req.params.id,
+      sale,
+      body: req.body,
+    });
+    if (comandaResult) {
+      sale.comanda_id = comandaResult.comanda_id;
+      sale.comanda_number = comandaResult.comanda_number;
+    }
+
     await client.query('COMMIT');
 
     const { rows: saleItems } = await db.query(
@@ -1092,6 +1107,8 @@ router.delete('/sale/:saleId', async (req, res) => {
     // Matcon M1: entregas da venda saem da esteira; o orcamento volta a
     // poder virar pedido. Venda sem Matcon: so a sondagem da tabela.
     await matconSaleHooks.afterSaleCancel(client, { companyId: req.params.id, saleId: req.params.saleId });
+    // Comandas (368): a comanda que esta venda fechou volta a ficar aberta.
+    await comandaSaleHooks.afterSaleCancel(client, { companyId: req.params.id, saleId: req.params.saleId });
     await client.query('COMMIT');
     res.json({ ok: true, cancelled: req.params.saleId, items_restored: items.filter(i => i.product_id).length, amount_reversed: parseFloat(sale.total_amount) });
   } catch (e) {

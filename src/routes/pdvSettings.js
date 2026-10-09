@@ -68,6 +68,9 @@ const ALLOWED_BOOL_KEYS = [
   // em zero, nunca fica negativo. Desligado por padrao. Leitura em
   // utils/vendaSemEstoque.js (Caixa e lancamento de venda no Financeiro).
   'allow_sale_without_stock',
+  // 09/10/2026 — Comandas do Caixa (migration 368). Liga "Adicionar a
+  // comanda" e "Fechar comanda" no Caixa. Desligado por padrao.
+  'comanda_enabled',
 ];
 
 // 22/09/2026 — Matcon: lista de unidades habilitadas ("Minha loja vende
@@ -140,6 +143,7 @@ const DEFAULT_SETTINGS = {
   cash_tender_modal_enabled: true,
   // 06/10/2026 — desligado = a trava de "Estoque insuficiente" de sempre.
   allow_sale_without_stock:  false,
+  comanda_enabled:           false,
   studio_enabled:            false,
   studio_kds_enabled:        false,
   studio_gallery_enabled:    false,

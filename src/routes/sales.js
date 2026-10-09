@@ -70,6 +70,7 @@ const creditLedger = require('../services/creditLedger');
 const { cancelDevolucao, activeReturnsOf } = require('../services/credit/refund');
 const { hasSaleNumberColumn, saleNumberSelect } = require('../utils/saleNumber');
 const matconSaleHooks = require('../services/matconSaleHooks');
+const comandaSaleHooks = require('../services/comandaSaleHooks');
 
 // Lancamento financeiro da venda, pra UI abrir "Editar lancamento".
 //
@@ -721,6 +722,8 @@ router.post('/:sale_id/cancel', asyncHandler(async (req, res) => {
     // Matcon M1: entregas da venda saem da esteira; o orcamento que virou
     // esta venda volta a poder virar pedido (continua approved).
     const matconUndo = await matconSaleHooks.afterSaleCancel(client, { companyId: companyId, saleId: saleId });
+    // Comandas (368): a comanda que esta venda fechou volta a ficar aberta.
+    await comandaSaleHooks.afterSaleCancel(client, { companyId: companyId, saleId: saleId });
 
     await client.query('COMMIT');
     res.json({
