@@ -1046,7 +1046,9 @@ let historyAllocationsAvailable = true;
 async function fetchHistoryAllocations(companyId, paymentIds) {
   if (!paymentIds.length || !historyAllocationsAvailable) return {};
   try {
-    const { rows } = await db.query(
+    // A timeline nunca cai por causa desta consulta: resposta sem linhas (ou
+    // sem `rows`) e so "pagamento sem distribuicao".
+    const res = await db.query(
       `SELECT a.transaction_id, a.installment_id, a.principal_paid, a.charges_paid, a.status_after,
               i.installment_number, i.total_installments, i.due_date, i.account_id, i.sale_id,
               ca.name AS account_name
@@ -1057,6 +1059,7 @@ async function fetchHistoryAllocations(companyId, paymentIds) {
         ORDER BY i.due_date ASC, i.installment_number ASC`,
       [companyId, paymentIds]
     );
+    const rows = (res && res.rows) || [];
     const map = {};
     for (const r of rows) {
       if (!map[r.transaction_id]) map[r.transaction_id] = [];
