@@ -54,10 +54,19 @@ describe('GET /companies/:id/credit/customers/:cid/history', () => {
     db.query.mockResolvedValueOnce({ rows: [ // sale_items do purchase
       { sale_id: saleId, product_name: 'Tenis Runner', quantity: '1', unit_price: '150.00', total_price: '150.00' },
     ]});
+    // 08/10/2026: parcelas que o pagamento cobriu (credit_payment_allocations).
+    // Consultadas so para eventos `payment` -- o credito de troca fica de fora.
+    db.query.mockResolvedValueOnce({ rows: [
+      { transaction_id: '00000000-0000-0000-0000-0000000000e3', installment_id: '00000000-0000-0000-0000-0000000000f1',
+        principal_paid: '50.00', charges_paid: '0.00', status_after: 'pending',
+        installment_number: 1, total_installments: 3, due_date: new Date('2026-07-10T00:00:00.000Z'),
+        account_id: null, sale_id: saleId, account_name: null },
+    ]});
 
     const res = await request(app).get(base).set(auth);
     expect(res.status).toBe(200);
     expect(res.body.events).toHaveLength(4);
+    expect(db.query.mock.calls[db.query.mock.calls.length - 1][1][1]).toEqual(['00000000-0000-0000-0000-0000000000e3']);
     expect(res.body.next_cursor).toBeNull();
 
     const [purchase, payment, exchange, manual] = res.body.events;
@@ -73,7 +82,16 @@ describe('GET /companies/:id/credit/customers/:cid/history', () => {
 
     expect(payment.type).toBe('payment');
     expect(payment.amount).toBe(-50);
-    expect(payment.payment).toEqual({ method: 'pix' });
+    expect(payment.payment).toEqual({
+      method: 'pix',
+      can_edit: true,
+      allocations: [{
+        installment_id: '00000000-0000-0000-0000-0000000000f1',
+        number: 1, total_installments: 3, due_date: '2026-07-10',
+        account_id: null, account_name: null, from_sale: true,
+        principal_paid: 50, charges_paid: 0, status_after: 'pending',
+      }],
+    });
     expect(payment.items).toBeNull();
 
     expect(exchange.type).toBe('exchange_credit');

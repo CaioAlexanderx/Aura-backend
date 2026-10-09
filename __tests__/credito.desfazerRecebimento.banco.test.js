@@ -351,7 +351,7 @@ describe('undoPayment', () => {
     );
   });
 
-  test('4. fora da janela de 24h: 409 e nada muda', async () => {
+  test('4. janela e opt-in: com windowHours 24 recusa, sem ela desfaz', async () => {
     const cid  = await cliente('Pagamento Velho');
     const sale = await venda(cid, 80);
     const tx   = await pagamento(cid, 80);
@@ -360,7 +360,7 @@ describe('undoPayment', () => {
     );
 
     await expect(
-      undoPayment(client, { companyId, transactionId: tx })
+      undoPayment(client, { companyId, transactionId: tx, windowHours: 24 })
     ).rejects.toMatchObject({ status: 409, code: 'PAYMENT_TOO_OLD' });
 
     expect(await pagamentoExiste(tx)).toBe(true);
@@ -368,8 +368,8 @@ describe('undoPayment', () => {
     expect(await caixa(sale)).toBe(80);
     expect(await saldo(cid)).toBe(0);
 
-    // A janela e configuravel: com 48h o mesmo pagamento passa.
-    const r = await undoPayment(client, { companyId, transactionId: tx, windowHours: 48 });
+    // Padrao (08/10/2026): sem prazo -- o mesmo pagamento de 25h atras passa.
+    const r = await undoPayment(client, { companyId, transactionId: tx });
     expect(r.undone).toBe(true);
     expect(await saldo(cid)).toBe(80);
   });
