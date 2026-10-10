@@ -32,7 +32,7 @@ const sqlDas = (calls) => calls.map(([sql]) => sql.replace(/\s+/g, ' '));
 describe('GET /pdv/scan/:code · produto compartilhado pelo grupo', () => {
   it('acha a variante de um produto da Matriz bipada na loja filha', async () => {
     db.query.mockImplementation(async (sql) => {
-      if (/FROM product_variants pv/.test(sql) && /pv\.barcode=\$2/.test(sql)) {
+      if (/FROM product_variants pv/.test(sql) && /pv\.barcode=ANY\(\$2::text\[\]\)/.test(sql)) {
         return { rows: [{ id: 'prod-matriz', name: 'Vizzano Tênis Samba 1430', price: '249.99',
           variant_id: 'var-39', sku_suffix: '39', price_override: null, stock_company_id: 'matriz-1' }] };
       }
@@ -75,5 +75,30 @@ describe('GET /pdv/scan/:code · produto compartilhado pelo grupo', () => {
     const [sql, params] = db.query.mock.calls[0];
     expect(sql.replace(/\s+/g, ' ')).toContain(REGRA_DO_GRUPO);
     expect(params[0]).toBe(VILLA);
+  });
+
+  // 10/10/2026: vinha da cópia morta do /scan em pdv.js, removida.
+  it('UPC-A de 12 dígitos também procura o EAN-13 com zero na frente, e vice-versa', async () => {
+    db.query.mockResolvedValue({ rows: [] });
+    await request(app).get(`/companies/${VILLA}/pdv/scan/012345678905`);
+    expect(db.query.mock.calls[0][1][1]).toEqual(['012345678905', '0012345678905']);
+    expect(db.query.mock.calls[1][1][1]).toEqual(['012345678905', '0012345678905']);
+    // SKU e sugestão textual continuam com o código como veio
+    expect(db.query.mock.calls[2][1][1]).toBe('012345678905');
+
+    db.query.mockClear();
+    await request(app).get(`/companies/${VILLA}/pdv/scan/0789123456789`);
+    expect(db.query.mock.calls[0][1][1]).toEqual(['0789123456789', '789123456789']);
+
+    db.query.mockClear();
+    await request(app).get(`/companies/${VILLA}/pdv/scan/${CODIGO}`);
+    expect(db.query.mock.calls[0][1][1]).toEqual([CODIGO]);
+  });
+
+  it('o /scan/:code existe em um lugar só: pdv.js não tem mais a cópia', () => {
+    const fs = require('fs');
+    const path = require('path');
+    const pdv = fs.readFileSync(path.join(__dirname, '../src/routes/pdv.js'), 'utf8');
+    expect(pdv).not.toMatch(/router\.get\(\s*['"]\/scan\/:code['"]/);
   });
 });
