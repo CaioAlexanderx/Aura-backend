@@ -401,3 +401,16 @@ describe('Carnê A4 — helpers', () => {
     expect(formatVencimento({})).toBe('—');
   });
 });
+
+describe('telefone com máscara', () => {
+  test('cadastro só com dígitos sai formatado no cabeçalho e no cliente', () => {
+    const html = buildCarneA4Html({
+      company: { trade_name: 'Loja', phone: '6681573761' },
+      customer: { name: 'Cliente', phone: '5566996456351' },
+      groups: [],
+    });
+    expect(html).toContain('(66) 8157-3761');
+    expect(html).toContain('(66) 99645-6351');
+    expect(html).not.toContain('6681573761');
+  });
+});

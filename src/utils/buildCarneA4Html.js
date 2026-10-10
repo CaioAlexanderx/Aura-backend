@@ -60,6 +60,17 @@ function formatCnpj(cnpj) {
   return `${d.slice(0, 2)}.${d.slice(2, 5)}.${d.slice(5, 8)}/${d.slice(8, 12)}-${d.slice(12)}`;
 }
 
+// Telefone com máscara (10/10/2026): o cadastro guarda só dígitos e o cabeçalho
+// saía '6681573761'. Mesmo formato do buildWarrantyHtml; fora de 10/11 dígitos
+// sai como foi cadastrado.
+function formatPhone(v) {
+  let d = String(v || '').replace(/D/g, '');
+  if (d.length > 11 && d.startsWith('55')) d = d.slice(2);
+  if (d.length === 11) return `(${d.slice(0, 2)}) ${d.slice(2, 7)}-${d.slice(7)}`;
+  if (d.length === 10) return `(${d.slice(0, 2)}) ${d.slice(2, 6)}-${d.slice(6)}`;
+  return String(v || '');
+}
+
 // Documento do cliente: 11 dígitos é CPF, 14 é CNPJ; qualquer outra coisa sai
 // como foi cadastrada (melhor um documento sem máscara do que um errado).
 function formatDocumento(doc) {
@@ -224,13 +235,13 @@ function buildCarneA4Html({ company, brand = {}, customer, groups = [], carneNam
   const endereco = temRua ? enderecoEstruturado : (String(company.address || '').trim() || enderecoEstruturado);
 
   const contatoLoja = [
-    company.phone ? escapeHtml(company.phone) : null,
+    company.phone ? escapeHtml(formatPhone(company.phone)) : null,
     company.cnpj ? 'CNPJ ' + escapeHtml(formatCnpj(company.cnpj)) : null,
   ].filter(Boolean).join(' &middot; ');
 
   const doc = customer.cpf_cnpj ? formatDocumento(customer.cpf_cnpj) : null;
   const contatoCliente = [
-    customer.phone ? escapeHtml(customer.phone) : null,
+    customer.phone ? escapeHtml(formatPhone(customer.phone)) : null,
     doc && doc.valor ? escapeHtml(doc.rotulo) + ' ' + escapeHtml(doc.valor) : null,
   ].filter(Boolean).join(' &middot; ');
 
