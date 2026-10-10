@@ -23,6 +23,14 @@ async function comCardPrice(rodar) {
   }
 }
 
+// 10/10/2026 — produto compartilhado pelo grupo (is_group_shared). A Villa
+// Branca da Davi Calçados vende o catálogo da Matriz: o Estoque lista esses
+// produtos (products.js), mas o bipe no Caixa só procurava em
+// p.company_id=$1 e respondia "não achei" para TODOS eles. Mesma regra do
+// pdv.js: o produto é da própria loja OU da dona do grupo e compartilhado.
+const DA_LOJA_OU_DO_GRUPO =
+  `(p.company_id=$1 OR (p.company_id=c.billing_owner_company_id AND p.is_group_shared=TRUE))`;
+
 // GET /companies/:id/pdv/scan/:code
 // Lookup chamado pelo PDV ao receber código escaneado (jsQR / leitor USB)
 router.get('/scan/:code', requireAuth, async (req, res) => {
@@ -35,7 +43,7 @@ router.get('/scan/:code', requireAuth, async (req, res) => {
     let { rows } = await comCardPrice((cp) => db.query(
       `SELECT p.id, p.name, p.description, p.price, p.cost_price,
               p.stock_qty, p.barcode, p.barcode_format, p.category,
-              p.sku, p.is_active, p.unit${cp},
+              p.sku, p.is_active, p.unit, p.company_id AS stock_company_id${cp},
               COALESCE(json_agg(
                 json_build_object(
                   'id', pv.id, 'sku_suffix', pv.sku_suffix,
@@ -48,8 +56,9 @@ router.get('/scan/:code', requireAuth, async (req, res) => {
                 )
               ) FILTER (WHERE pv.id IS NOT NULL), '[]') AS variants
        FROM products p
+       JOIN companies c ON c.id=$1
        LEFT JOIN product_variants pv ON pv.product_id=p.id AND pv.is_active=TRUE
-       WHERE p.company_id=$1 AND p.barcode=$2 AND p.is_active=TRUE
+       WHERE ${DA_LOJA_OU_DO_GRUPO} AND p.barcode=$2 AND p.is_active=TRUE
        GROUP BY p.id
        LIMIT 1`,
       [company_id, cleanCode]
@@ -59,12 +68,13 @@ router.get('/scan/:code', requireAuth, async (req, res) => {
     // 2. Match por barcode de variante
     const { rows: varRows } = await comCardPrice((cp) => db.query(
       `SELECT p.id, p.name, p.price, p.cost_price, p.stock_qty,
-              p.barcode, p.category, p.sku, p.is_active, p.unit${cp},
+              p.barcode, p.category, p.sku, p.is_active, p.unit, p.company_id AS stock_company_id${cp},
               pv.id AS variant_id, pv.sku_suffix, pv.price_override,
               pv.stock_qty AS variant_stock
        FROM product_variants pv
        JOIN products p ON p.id=pv.product_id
-       WHERE p.company_id=$1 AND pv.barcode=$2 AND pv.is_active=TRUE AND p.is_active=TRUE
+       JOIN companies c ON c.id=$1
+       WHERE ${DA_LOJA_OU_DO_GRUPO} AND pv.barcode=$2 AND pv.is_active=TRUE AND p.is_active=TRUE
        LIMIT 1`,
       [company_id, cleanCode]
     ));
@@ -80,18 +90,20 @@ router.get('/scan/:code', requireAuth, async (req, res) => {
     // 3. Match por SKU
     ({ rows } = await comCardPrice((cp) => db.query(
       `SELECT p.id, p.name, p.price, p.cost_price, p.stock_qty,
-              p.barcode, p.category, p.sku, p.is_active, p.unit${cp}
+              p.barcode, p.category, p.sku, p.is_active, p.unit, p.company_id AS stock_company_id${cp}
        FROM products p
-       WHERE p.company_id=$1 AND p.sku=$2 AND p.is_active=TRUE LIMIT 1`,
+       JOIN companies c ON c.id=$1
+       WHERE ${DA_LOJA_OU_DO_GRUPO} AND p.sku=$2 AND p.is_active=TRUE LIMIT 1`,
       [company_id, cleanCode]
     )));
     if (rows.length) return res.json({ match: 'exact', source: 'sku', product: rows[0] });
 
     // 4. Busca textual por nome/SKU (retorna até 8 sugestões)
     ({ rows } = await comCardPrice((cp) => db.query(
-      `SELECT p.id, p.name, p.price, p.stock_qty, p.barcode, p.sku, p.category, p.unit${cp}
+      `SELECT p.id, p.name, p.price, p.stock_qty, p.barcode, p.sku, p.category, p.unit, p.company_id AS stock_company_id${cp}
        FROM products p
-       WHERE p.company_id=$1 AND p.is_active=TRUE
+       JOIN companies c ON c.id=$1
+       WHERE ${DA_LOJA_OU_DO_GRUPO} AND p.is_active=TRUE
          AND (p.name ILIKE $2 OR p.sku ILIKE $2)
        ORDER BY p.name LIMIT 8`,
       [company_id, `%${cleanCode}%`]
@@ -119,9 +131,10 @@ router.post('/scan/batch', requireAuth, async (req, res) => {
   if (!codes?.length) return res.status(400).json({ error: 'codes obrigatório' });
   try {
     const { rows } = await comCardPrice((cp) => db.query(
-      `SELECT p.id, p.name, p.price, p.cost_price, p.stock_qty, p.barcode, p.sku, p.category, p.unit${cp}
+      `SELECT p.id, p.name, p.price, p.cost_price, p.stock_qty, p.barcode, p.sku, p.category, p.unit, p.company_id AS stock_company_id${cp}
        FROM products p
-       WHERE p.company_id=$1 AND p.is_active=TRUE
+       JOIN companies c ON c.id=$1
+       WHERE ${DA_LOJA_OU_DO_GRUPO} AND p.is_active=TRUE
          AND (p.barcode=ANY($2) OR p.sku=ANY($2))`,
       [req.params.id, codes]
     ));
