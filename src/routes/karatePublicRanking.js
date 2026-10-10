@@ -12,15 +12,11 @@
 
 const router = require('express').Router();
 const db = require('../config/database');
+const { resolveFederationId } = require('../services/karateFederationSlug');
 
 async function resolveFederation(slugOrId) {
-  let fedId = null;
-  const r = await db.query(
-    `SELECT company_id FROM digital_channel_config WHERE slug = $1 LIMIT 1`,
-    [slugOrId]
-  );
-  if (r.rows.length) fedId = r.rows[0].company_id;
-  if (!fedId && /^[0-9a-fA-F-]{36}$/.test(slugOrId)) fedId = slugOrId;
+  // digital_channel_config.slug → UUID → companies.slug (karateFederationSlug).
+  const fedId = await resolveFederationId(slugOrId);
   if (!fedId) return null;
   const c = await db.query(
     `SELECT id, COALESCE(trade_name, legal_name) AS name,

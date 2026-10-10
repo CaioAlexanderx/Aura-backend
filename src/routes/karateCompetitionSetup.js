@@ -527,12 +527,35 @@ router.patch('/competitions/:cid/areas/:areaId', ...guards.staffWrite(), async (
 
 // ── DELETE /competitions/:cid/areas/:areaId ─────────────────
 // FK das categorias é ON DELETE SET NULL — as categorias do koto excluído
-// voltam para "não alocadas" (nunca somem do evento).
+// voltam para "não alocadas" (nunca somem do evento). Koto com categorias
+// atribuídas responde 409 AREA_HAS_CATEGORIES (a ordem do dia montada se
+// perderia sem aviso); ?force=1 confirma: desvincula e apaga.
 router.delete('/competitions/:cid/areas/:areaId', ...guards.staffWrite(), async (req, res) => {
   const { id: federationId, cid, areaId } = req.params;
+  const force = ['1', 'true'].includes(String(req.query.force || '').toLowerCase());
   try {
     const comp = await findCompetition(federationId, cid);
     if (!comp) return res.status(404).json({ error: 'Competição não encontrada', code: 'NOT_FOUND' });
+    if (!force) {
+      let count = 0;
+      try {
+        const c = await db.query(
+          `SELECT COUNT(*)::int AS n FROM karate_competition_categories
+            WHERE area_id = $1 AND competition_id = $2`,
+          [areaId, cid]
+        );
+        count = c.rows[0] ? Number(c.rows[0].n) || 0 : 0;
+      } catch (e) {
+        if (e.code !== '42703') throw e; // 297 pendente: sem area_id, nada alocado
+      }
+      if (count > 0) {
+        return res.status(409).json({
+          error: `Este koto tem ${count} categoria(s) atribuída(s). Ao excluir, elas voltam para "não alocadas".`,
+          code: 'AREA_HAS_CATEGORIES',
+          count,
+        });
+      }
+    }
     const del = await db.query(
       `DELETE FROM karate_competition_areas WHERE id = $1 AND competition_id = $2 RETURNING id`,
       [areaId, cid]

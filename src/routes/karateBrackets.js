@@ -170,6 +170,32 @@ async function attachPresence(client, catId, entries) {
   }
 }
 
+// Ausência CONFIRMADA (no_show_at, migration 305) das inscrições da
+// categoria. Roda sob SAVEPOINT porque é chamada dentro de transação: um
+// 42703 (305 pendente) sem savepoint abortaria o resto do request. Com a
+// coluna ausente devolve conjunto vazio = comportamento de antes.
+async function loadNoShowEntryIds(client, catId) {
+  if (!HAS_CHECKIN) return new Set();
+  await client.query('SAVEPOINT kata_no_show');
+  try {
+    const r = await client.query(
+      `SELECT id FROM karate_competition_entries
+        WHERE category_id = $1 AND no_show_at IS NOT NULL`,
+      [catId]
+    );
+    await client.query('RELEASE SAVEPOINT kata_no_show');
+    return new Set(r.rows.map((row) => row.id));
+  } catch (err) {
+    try { await client.query('ROLLBACK TO SAVEPOINT kata_no_show'); } catch (_) { /* noop */ }
+    if (err.code === '42703' || err.code === '42P01') {
+      HAS_CHECKIN = false;
+      console.warn('[karateBrackets] no_show_at ausente (migração 305 pendente) — avanço do kata sem ausências');
+      return new Set();
+    }
+    throw err;
+  }
+}
+
 let HAS_TEAM_ENTRIES = true;
 async function loadEntries(client, catId, federationId) {
   if (HAS_TEAM_ENTRIES) {
@@ -522,7 +548,7 @@ router.post(
     // P1 (296): kata em CHAVE 1x1 por bandeiras - quando 'hantei_tree', a
     // categoria de kata gera a MESMA arvore do kumite (aka/shiro/hantei) em
     // vez de bateria de notas. So vale para modalidades de kata.
-    const kataMode = req.body.kata_mode === 'hantei_tree' ? 'hantei_tree' : null;
+    const requestedKataMode = req.body.kata_mode === 'hantei_tree' ? 'hantei_tree' : null;
 
     const client = await db.connect();
     try {
@@ -536,7 +562,10 @@ router.post(
 
       // Kata: por padrao gera so a ordem de apresentacao (bateria de notas);
       // com kata_mode='hantei_tree' cai no caminho da ARVORE (P1/296).
-      const isKata = NOTAS_MODALITIES.includes(cat.modality) && kataMode !== 'hantei_tree';
+      const isKata = NOTAS_MODALITIES.includes(cat.modality) && requestedKataMode !== 'hantei_tree';
+      // Bateria de notas grava 'score_rounds' explícito (NULL segue sendo
+      // lido como bateria nas chaves antigas). Árvore pedida = 'hantei_tree'.
+      const kataMode = isKata ? 'score_rounds' : requestedKataMode;
 
       const inscritos = await loadEntries(client, catId, federationId);
       const pendingPaymentCount = await countPendingPayment(client, cid, catId);
@@ -622,6 +651,7 @@ router.post(
         return res.json({
           bracket_id: bracketId,
           modality: cat.modality,
+          kata_mode: kataMode,
           status: 'draft',
           seed: drawSeed,
           options,
@@ -772,7 +802,12 @@ const finalizeHandler = async (req, res) => {
 
       // ── deriva o pódio ──
       let placements = [];
-      if (bracketRow.kata_mode === 'score_rounds') {
+      // Mesmo critério do GET/advance: modalidade de notas é bateria, salvo
+      // kata_mode='hantei_tree'. NULL (chaves anteriores à gravação de
+      // 'score_rounds' no generate) também é bateria — migration 296.
+      const isNotas = NOTAS_MODALITIES.includes(bracketRow.modality)
+        && bracketRow.kata_mode !== 'hantei_tree';
+      if (isNotas) {
         // Ranking pela cascata real (total cortado → +menor → +maior);
         // `notas` é da 303 — fallback 42703 mantém o ranking por nota.
         let scRows;
@@ -1659,18 +1694,30 @@ const kataAdvanceHandler = async (req, res) => {
         throw e;
       }
 
-      if (elimRows.some(r => r.nota === null)) {
+      // Atleta SEM nota com ausência confirmada (no_show_at) não bloqueia:
+      // está eliminado automaticamente. O 422 vale só para quem está
+      // presente ou sem informação e ainda não recebeu nota. Quem tem nota
+      // lançada se apresentou — entra no ranking normalmente.
+      const unscored = elimRows.filter((r) => r.nota === null);
+      const noShowIds = unscored.length ? await loadNoShowEntryIds(client, catId) : new Set();
+      const absentRows = unscored.filter((r) => noShowIds.has(r.entry_id));
+      if (absentRows.length < unscored.length) {
         await client.query('ROLLBACK');
         return res.status(422).json({ error: 'Todos os atletas devem ter nota da eliminatória antes de avançar', code: 'VALIDATION_ERROR' });
       }
 
-      elimRows = elimRows
+      const ranked = elimRows
+        .filter((r) => r.nota !== null)
         .map((r) => ({ ...r, nota: parseFloat(r.nota) }))
         .sort(kataScoring.compareKata);
+      if (!ranked.length) {
+        await client.query('ROLLBACK');
+        return res.status(422).json({ error: 'Nenhum atleta presente com nota na eliminatória.', code: 'VALIDATION_ERROR' });
+      }
 
-      const n = Math.min(advanceCount, elimRows.length);
-      const advancing = elimRows.slice(0, n);
-      const eliminated = elimRows.slice(n);
+      const n = Math.min(advanceCount, ranked.length);
+      const advancing = ranked.slice(0, n);
+      const eliminated = ranked.slice(n);
 
       // EMPATE PERSISTENTE cruzando a linha de corte → novo kata (decisão
       // humana). O avanço acontece mesmo assim (nunca bloqueia); a mesa
@@ -1698,7 +1745,7 @@ const kataAdvanceHandler = async (req, res) => {
           [bracketRow.id, row.entry_id]
         );
       }
-      for (const row of eliminated) {
+      for (const row of [...eliminated, ...absentRows]) {
         await client.query(
           `UPDATE karate_kata_scores SET advances=false WHERE bracket_id=$1 AND entry_id=$2 AND phase='eliminatoria'`,
           [bracketRow.id, row.entry_id]
@@ -1709,6 +1756,8 @@ const kataAdvanceHandler = async (req, res) => {
       res.json({
         advanced: n,
         eliminated: elimRows.length - n,
+        absent: absentRows.length,
+        absent_entry_ids: absentRows.map(r => r.entry_id),
         advancing_entry_ids: advancing.map(r => r.entry_id),
         tie_break_needed: tieBreakNeeded,
       });
