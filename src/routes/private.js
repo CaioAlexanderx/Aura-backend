@@ -190,6 +190,9 @@ router.use('/credit', requirePlan('negocio', 'expansao'), require('./creditRefun
 router.use('/credit', requirePlan('negocio', 'expansao'), require('./creditUnify'));
 // Item 2 (16/06/2026): renegociacao de parcelas -- GET+POST /credit/customers/:cid/accounts/:accountId/reschedule
 router.use('/credit', requirePlan('negocio', 'expansao'), require('./creditReschedule'));
+// 10/10/2026: juntar carnes -- GET+POST /credit/customers/:cid/accounts/merge
+// ('merge' e segmento fixo: nao colide com /accounts/:accountId/unify|reschedule, que tem um segmento a mais).
+router.use('/credit', requirePlan('negocio', 'expansao'), require('./creditMerge'));
 // F2-2B (29/05/2026): preview 360 + quick-customer
 router.use('/credit', requirePlan('negocio', 'expansao'), require('./creditPreview'));
 // F2-2D (29/05/2026): a receber crediario no Financeiro

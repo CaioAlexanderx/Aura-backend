@@ -223,6 +223,13 @@ async function undoManualEntry(client, { companyId, transactionId }) {
     client, companyId, tx.customer_id, tx.account_id || null, freed
   );
 
+  // 10/10/2026: o lancamento desfeito era a unica coisa do carne dele (carne
+  // novo por lancamento) -> o carne sai da ficha em vez de ficar aberto e
+  // vazio. Com pagamento ou parcela paga ele fica (carneAuto.cancelEmptyCarnes).
+  if (tx.account_id) {
+    await require('./carneAuto').cancelEmptyCarnes(client, { companyId, accountIds: [tx.account_id] });
+  }
+
   const { rows: bal } = await client.query(
     `SELECT balance FROM customer_credit_balances
       WHERE customer_id = $1 AND company_id = $2`,

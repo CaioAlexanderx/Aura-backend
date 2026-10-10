@@ -43,6 +43,9 @@ const { editPayment }     = require('../services/credit/editPayment');
 // 16/09/2026: cliente cadastrado em outra loja do mesmo dono tambem vale
 // (src/utils/customerScope.js -- incidente Davi / Mary Lucy).
 const { findOwnerScopedCustomer, CUSTOMER_NOT_FOUND_BODY } = require('../utils/customerScope');
+// 10/10/2026: um carne por compra -- detalhe por carne na ficha e nome automatico.
+const carneSummary = require('../services/credit/carneSummary');
+const carneAuto    = require('../services/credit/carneAuto');
 
 async function assertCrediarioEnabled(companyId) {
   const { rows } = await db.query(
@@ -444,12 +447,15 @@ router.get('/customer/:cid', async (req, res) => {
       // Conta geral (legado: transacoes sem account_id)
       const legacyBal  = balMap['__legacy__'];
       const legacyInst = instMap['__legacy__'];
-      if (legacyBal && parseFloat(legacyBal.balance) !== 0) {
+      // 10/10/2026: tambem entra quando ha parcela aberta sem carne, mesmo com
+      // o saldo do grupo zerado -- com um carne por compra o pagamento livre
+      // (account_id nulo) pode zerar esta conta sem ter quitado estas parcelas.
+      if ((legacyBal && parseFloat(legacyBal.balance) !== 0) || parseInt(legacyInst?.open_count || 0) > 0) {
         accounts.unshift({
           id:            null,
           name:          'Conta geral',
           status:        'open',
-          balance:       parseFloat(legacyBal.balance),
+          balance:       parseFloat(legacyBal?.balance || 0),
           open_count:    parseInt(legacyInst?.open_count || 0),
           next_due_date: legacyInst?.next_due_date ? String(legacyInst.next_due_date).split('T')[0] : null,
           overdue:         legacyInst?.overdue || false,
@@ -464,6 +470,51 @@ router.get('/customer/:cid', async (req, res) => {
         console.error('[credit] accounts fetch error:', accErr.message);
       }
       accounts = [];
+    }
+
+    // 10/10/2026 -- um cartao por carne na ficha. Campos NOVOS em cada item de
+    // `accounts` (nada removido nem renomeado):
+    //   purchases[] / purchases_total  o que foi comprado (linhas do papel)
+    //   total_amount / refunded_total  debitos e devolucoes do carne
+    //   total_count / paid_count       "N de M pagas" (canceladas fora)
+    //   paid_installments[]            numero, vencimento, pago em, valor
+    //   open_remaining                 resto das parcelas abertas
+    //   unscheduled                    saldo sem parcela (venda 1x/fiado)
+    //   remaining                      QUANTO FALTA = open_remaining + unscheduled
+    //   created_at, merged_from[]      carnes que foram juntados neste
+    // `balance` continua sendo o razao por account_id -- e NAO e "quanto
+    // falta": o pagamento livre fica sem carne (services/credit/carneSummary.js).
+    // Carne cancelado (ficou vazio) ou juntado em outro sai da lista.
+    // Opcional: falha aqui devolve os campos zerados, nunca derruba a ficha.
+    try {
+      const ctx = await carneSummary.loadCarneContext(db, req.params.id, req.params.cid, { withItems: true });
+      const detail = carneSummary.summarizeCarnes(ctx);
+      const accById = {};
+      for (const a of ctx.accounts) accById[a.id] = a;
+
+      accounts = accounts.filter(a => a.id == null || !carneSummary.isHiddenAccount(accById[a.id]));
+
+      const semCarne = detail[carneSummary.NO_ACCOUNT_KEY];
+      if (!accounts.some(a => a.id == null) && semCarne && semCarne.remaining > 0.005) {
+        accounts.unshift({
+          id: null, name: 'Conta geral', status: 'open', balance: 0,
+          open_count: 0, next_due_date: null, overdue: false, to_review_count: 0,
+          period_unit: null, period_count: null,
+        });
+      }
+      for (const a of accounts) {
+        Object.assign(a, detail[a.id || carneSummary.NO_ACCOUNT_KEY] || carneSummary.emptyDetail(), {
+          created_at:  a.id ? (accById[a.id]?.created_at || null) : null,
+          merged_from: a.id
+            ? ctx.accounts.filter(o => o.merged_into_account_id === a.id).map(o => ({ id: o.id, name: o.name }))
+            : [],
+        });
+      }
+    } catch (detErr) {
+      console.error('[credit] carne detail error:', detErr.message);
+      for (const a of accounts) {
+        if (a.purchases === undefined) Object.assign(a, carneSummary.emptyDetail(), { created_at: null, merged_from: [] });
+      }
     }
 
     // 16/09/2026: saldo em aberto da MESMA cliente nas outras lojas do dono.
@@ -1591,6 +1642,10 @@ router.post('/manual-entry', async (req, res) => {
     period_count,
     account_id,
     new_account_name,
+    // 10/10/2026: `new_account: true` sem nome -> o backend nomeia sozinho
+    // ("Lancamento de DD/MM"). Sem account_id, sem nome e sem a flag o
+    // lancamento continua indo para a Conta geral, como o app de hoje espera.
+    new_account,
   } = req.body || {};
 
   const total = parseFloat(amount);
@@ -1674,7 +1729,15 @@ router.post('/manual-entry', async (req, res) => {
     let resolvedAccountId = account_id || null;
     let accountTerms = null;
 
-    if (!resolvedAccountId && new_account_name) {
+    const wantsNewAccount = new_account === true || new_account === 'true';
+    if (!resolvedAccountId && wantsNewAccount && !String(new_account_name || '').trim()) {
+      // Nome automatico, sem colidir com carne aberto do mesmo cliente. Se a
+      // tabela faltar (deploy parcial) segue na Conta geral, como abaixo.
+      const novo = await carneAuto.createAutoCarne(client, {
+        companyId, customerId: custId, prefix: 'Lançamento', date: entryDate || null,
+      });
+      resolvedAccountId = novo ? novo.id : null;
+    } else if (!resolvedAccountId && new_account_name) {
       // Criar novo carne inline
       try {
         const { rows: newAccRows } = await client.query(

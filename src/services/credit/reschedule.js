@@ -359,4 +359,9 @@ async function reduceReceivables(client, companyId, customerId, amount) {
   }
 }
 
-module.exports = { computeReschedulePlan, applyReschedule, loadOpenInstallments, sumRemaining, getUnscheduledBalance };
+module.exports = {
+  computeReschedulePlan, applyReschedule, loadOpenInstallments, sumRemaining, getUnscheduledBalance,
+  // 10/10/2026: a juncao de carnes (mergeCarnes.js) lanca o delta do total do
+  // MESMO jeito da renegociacao -- reusa em vez de copiar.
+  insertLedger, reduceReceivables,
+};

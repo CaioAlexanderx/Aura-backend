@@ -8,6 +8,7 @@ const { resolvePeriod, dueDateForIndex, resolveTerms, round2, MAX_INSTALLMENTS_C
 const { computeLateCharges } = require('./lateCharges');
 const { scoreLabel, scoreWarning, _recalculateScore } = require('./score');
 const { computeUnifyPlan } = require('./unify');
+const carneAuto = require('./carneAuto');
 
 const SP_DATE_NOW = "(NOW() AT TIME ZONE 'America/Sao_Paulo')::date";
 
@@ -967,11 +968,16 @@ async function cancelCreditSale(client, { companyId, saleId }) {
   );
   const customerId = saleRows[0]?.customer_id;
 
-  await client.query(
+  // 10/10/2026: RETURNING * (e nao "RETURNING account_id") de proposito -- a
+  // coluna pode faltar em deploy parcial e o cancelamento nao pode quebrar por
+  // isso. Serve para saber de qual carne a venda saiu (ver o fim da funcao).
+  const delDebit = await client.query(
     `DELETE FROM customer_credit_transactions
-     WHERE sale_id = $1 AND company_id = $2 AND type = 'debit'`,
+     WHERE sale_id = $1 AND company_id = $2 AND type = 'debit'
+     RETURNING *`,
     [saleId, companyId]
   );
+  const saleAccountIds = ((delDebit && delDebit.rows) || []).map(r => r.account_id).filter(Boolean);
 
   await client.query(
     `DELETE FROM transactions
@@ -994,11 +1000,18 @@ async function cancelCreditSale(client, { companyId, saleId }) {
     [saleId, companyId]
   );
 
+  // 10/10/2026 (um carne por compra): a venda cancelada era a unica coisa do
+  // carne dela -> o carne sai da ficha em vez de ficar aberto e vazio. Se o
+  // carne ja recebeu pagamento ou tem parcela paga, fica (carneAuto).
+  const cancelledAccountIds = await carneAuto.cancelEmptyCarnes(client, {
+    companyId, accountIds: saleAccountIds,
+  });
+
   if (customerId) {
     await _updateCreditUsed(client, companyId, customerId);
   }
 
-  return { ok: true };
+  return { ok: true, cancelled_account_ids: cancelledAccountIds };
 }
 
 async function getCustomerCreditPreview(companyId, customerId) {
