@@ -13,6 +13,8 @@
 //   recurso remoto em documento de impressão: QR Pix via qrInline local
 //   (era api.qrserver.com) e QRs do carnê inline (era cdnjs/qrcodejs).
 //   Mesmo tratamento do back#391 (DANFE) — pendência declarada lá.
+// 10/10/2026: carnê ganha "O que foi comprado" por carnê, pagas separadas
+//   das a pagar, e o formato A4 com a marca da loja (?format=a4).
 // ============================================================
 const express = require('express');
 const router  = express.Router({ mergeParams: true });
@@ -26,6 +28,8 @@ const { findOwnerScopedCustomer, CUSTOMER_NOT_FOUND_BODY } = require('../utils/c
 const { qrInlineSvg } = require('../utils/qrInline');
 const { buildServiceOrderHtml } = require('../utils/buildServiceOrderHtml');
 const { buildWarrantyHtml } = require('../utils/buildWarrantyHtml');
+const { buildCarneA4Html, classifyInstallments } = require('../utils/buildCarneA4Html');
+const { purchasesByGroup, NO_ACCOUNT_KEY } = require('../services/credit/carnePurchases');
 
 const NUVEM_URL = process.env.NUVEM_FISCAL_URL || 'https://api.sandbox.nuvemfiscal.com.br';
 
@@ -539,20 +543,49 @@ router.get('/danfe/devolucao/:saleId', requireAuth, async (req, res) => {
 // 18/07/2026: QRs renderizados server-side via qrInline (SVG embutido) —
 //   antes dependiam do qrcodejs via cdnjs (recurso remoto em documento de
 //   impressão). Disparo via autoPrintScript, não window.onload.
+//
+// 10/10/2026:
+//   - ?format=a4 -> folha A4 com a marca da loja (utils/buildCarneA4Html.js):
+//     logo, endereço, resumo Comprou/Já pagou/Falta pagar e cada parcela a
+//     pagar como cupom destacável. Sem o parâmetro (ou ?format=thermal) sai
+//     o cupom de sempre — a bobina de quem já imprime não muda de desenho.
+//   - Os dois formatos ganham "O que foi comprado" por carnê
+//     (services/credit/carnePurchases.js) e separam parcelas pagas das a
+//     pagar. Parcela CANCELADA sai do papel: antes ela entrava no "Saldo em
+//     aberto" do carnê e ganhava até bloco Pix (status != 'paid').
+//   - "Atrasada" passa a sair da DATA (vencimento < hoje em São Paulo), não
+//     do status persistido, que fica congelado (services/credit/overdue.js).
 // ============================================================
 router.get('/credit/:cid/carne', requireAuth, async (req, res) => {
   const companyId  = req.params.id;
   const customerId = req.params.cid;
+  const formatA4   = String(req.query.format || '').toLowerCase() === 'a4';
 
   try {
     // 1. Dados da empresa (companies NÃO tem coluna `name`)
-    const { rows: companyRows } = await db.query(
-      `SELECT COALESCE(trade_name, legal_name) AS display_name,
-              legal_name, trade_name, cnpj, phone,
-              address_city, address_state
-         FROM companies WHERE id = $1`,
-      [companyId]
-    );
+    // 10/10/2026: o A4 precisa de logo e endereço completo. Se alguma dessas
+    // colunas faltar neste ambiente (42703), cai no SELECT de sempre — o
+    // carnê sai sem logo/endereço, que é melhor do que não sair.
+    let companyRows;
+    try {
+      ({ rows: companyRows } = await db.query(
+        `SELECT COALESCE(trade_name, legal_name) AS display_name,
+                legal_name, trade_name, cnpj, phone, logo_url, address,
+                address_street, address_number, address_district,
+                address_city, address_state
+           FROM companies WHERE id = $1`,
+        [companyId]
+      ));
+    } catch (e) {
+      if (e.code !== '42703') throw e;
+      ({ rows: companyRows } = await db.query(
+        `SELECT COALESCE(trade_name, legal_name) AS display_name,
+                legal_name, trade_name, cnpj, phone,
+                address_city, address_state
+           FROM companies WHERE id = $1`,
+        [companyId]
+      ));
+    }
     if (!companyRows.length) return res.status(404).json({ error: 'Empresa nao encontrada' });
     const company = companyRows[0];
 
@@ -579,7 +612,10 @@ router.get('/credit/:cid/carne', requireAuth, async (req, res) => {
     try {
       const r = await db.query(
         `SELECT id, installment_number, total_installments,
-                amount_due, covered_amount, due_date, status, account_id
+                amount_due, covered_amount, due_date, status, account_id,
+                paid_at,
+                to_char(due_date, 'DD/MM/YYYY') AS due_date_br,
+                (due_date < (NOW() AT TIME ZONE 'America/Sao_Paulo')::date) AS past_due
            FROM credit_installments
           WHERE customer_id = $1 AND company_id = $2
           ORDER BY due_date ASC`,
@@ -592,7 +628,10 @@ router.get('/credit/:cid/carne', requireAuth, async (req, res) => {
         try {
           const r = await db.query(
             `SELECT id, installment_number, total_installments,
-                    amount_due, covered_amount, due_date, status
+                    amount_due, covered_amount, due_date, status,
+                    paid_at,
+                    to_char(due_date, 'DD/MM/YYYY') AS due_date_br,
+                    (due_date < (NOW() AT TIME ZONE 'America/Sao_Paulo')::date) AS past_due
                FROM credit_installments
               WHERE customer_id = $1 AND company_id = $2
               ORDER BY due_date ASC`,
@@ -604,6 +643,9 @@ router.get('/credit/:cid/carne', requireAuth, async (req, res) => {
         console.warn('[print/carne] installments warn:', instErr.message);
       }
     }
+    // 10/10/2026: cancelada não vai para o papel (nem cronograma, nem saldo,
+    // nem Pix). Filtrada aqui para os dois formatos partirem da mesma lista.
+    allInstallments = allInstallments.filter(i => i.status !== 'cancelled');
 
     // 5. Carnês cadastrados
     let accounts = [];
@@ -617,6 +659,35 @@ router.get('/credit/:cid/carne', requireAuth, async (req, res) => {
       accounts = accRows;
     } catch (e) {
       if (e.code !== '42P01' && e.code !== '42703') console.warn('[print/carne] accounts warn:', e.message);
+    }
+
+    // 5b. ?account=<uuid> | none — imprime UM carnê só (10/10/2026).
+    //     O produto passa a criar um carnê por compra e a ficha imprime carnê
+    //     a carnê. Sem o parâmetro, saem todos os grupos do cliente (como
+    //     sempre). Com ele, TUDO no papel passa a ser do carnê:
+    //       - só as parcelas (e as compras) daquele grupo;
+    //       - "saldo" e o Pix "pagar tudo de uma vez" = soma do PRINCIPAL
+    //         restante (amount_due - covered_amount) das parcelas a pagar do
+    //         carnê — a mesma soma dos Pix por parcela impressos acima dele.
+    //         Não dá para usar customer_credit_balances aqui: a view é o
+    //         saldo do CLIENTE no razão, não do carnê.
+    //     O carnê é conferido na lista já filtrada por empresa + cliente
+    //     (passo 5): UUID inválido, carnê de outro cliente ou de outra
+    //     empresa -> 404, sem distinguir os casos.
+    let onlyAccount = null; // { key, name }
+    const accountParam = req.query.account != null ? String(req.query.account).trim() : '';
+    if (accountParam) {
+      if (accountParam.toLowerCase() === 'none') {
+        onlyAccount = { key: NO_ACCOUNT_KEY, name: 'Sem carnê' };
+      } else {
+        const acc = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(accountParam)
+          ? accounts.find(a => String(a.id).toLowerCase() === accountParam.toLowerCase())
+          : null;
+        if (!acc) return res.status(404).json({ error: 'Carne nao encontrado', code: 'CREDIT_ACCOUNT_NOT_FOUND' });
+        onlyAccount = { key: acc.id, name: acc.name };
+      }
+      allInstallments = allInstallments.filter(i => (i.account_id || NO_ACCOUNT_KEY) === onlyAccount.key);
+      totalBalance = classifyInstallments(allInstallments).open.reduce((s, i) => s + i.remaining, 0);
     }
 
     // 6. Chave Pix da loja (digital_channel_config). Captura pixSetup p/ reuso
@@ -649,7 +720,9 @@ router.get('/credit/:cid/carne', requireAuth, async (req, res) => {
             amount:          totalBalance > 0 ? totalBalance : undefined,
             beneficiaryName: pixSetup.name,
             beneficiaryCity: pixSetup.city,
-            txid:            `CRED${customerId.replace(/-/g, '').slice(0, 20)}`,
+            // Carnê avulso: txid do carnê, para a loja achar no extrato
+            // qual carnê aquele Pix quitou.
+            txid:            `CRED${String(onlyAccount && onlyAccount.key !== NO_ACCOUNT_KEY ? onlyAccount.key : customerId).replace(/-/g, '').slice(0, 20)}`,
           });
         }
       }
@@ -657,14 +730,81 @@ router.get('/credit/:cid/carne', requireAuth, async (req, res) => {
       if (e.code !== '42P01' && e.code !== '42703') console.warn('[print/carne] pix warn:', e.message);
     }
 
+    // 6b. "O que foi comprado" (10/10/2026). A parcela muitas vezes não
+    //     aponta para a venda (sale_id nulo: vendeu no Caixa, parcelou na
+    //     renegociação); quem sabe o produto é o DÉBITO do razão. A escolha
+    //     de quais débitos cada carnê cobre é função pura em
+    //     services/credit/carnePurchases.js.
+    //     Escopo: company_id da URL, como as parcelas acima — a dívida é da
+    //     loja que vendeu, mesmo quando o cadastro é de outra loja do dono
+    //     (utils/customerScope.js). Venda cancelada não entra.
+    //     Tolerante a schema: sem a tabela/coluna o carnê sai sem a lista.
+    let purchases = {};
+    if (allInstallments.length) {
+      try {
+        let debitRows;
+        try {
+          ({ rows: debitRows } = await db.query(
+            `SELECT t.id, t.sale_id, t.account_id, t.amount, t.notes, t.created_at
+               FROM customer_credit_transactions t
+               LEFT JOIN sales s ON s.id = t.sale_id AND s.company_id = t.company_id
+              WHERE t.customer_id = $1 AND t.company_id = $2 AND t.type = 'debit'
+                AND COALESCE(s.status, 'active') <> 'cancelled'
+              ORDER BY t.created_at DESC
+              LIMIT 500`,
+            [customerId, companyId]
+          ));
+        } catch (e) {
+          if (e.code !== '42703') throw e;
+          // account_id ainda não existe no razão — tudo é "Sem carnê".
+          ({ rows: debitRows } = await db.query(
+            `SELECT t.id, t.sale_id, t.amount, t.notes, t.created_at
+               FROM customer_credit_transactions t
+              WHERE t.customer_id = $1 AND t.company_id = $2 AND t.type = 'debit'
+              ORDER BY t.created_at DESC
+              LIMIT 500`,
+            [customerId, companyId]
+          ));
+          debitRows = debitRows.map(d => ({ ...d, account_id: null }));
+        }
+
+        const saleIds = [...new Set(debitRows.map(d => d.sale_id).filter(Boolean))];
+        const itemsBySale = {};
+        if (saleIds.length) {
+          try {
+            const { rows: itemRows } = await db.query(
+              `SELECT si.sale_id,
+                      COALESCE(si.product_name_snapshot, p.name) AS product_name,
+                      si.quantity, si.unit_price, si.total_price
+                 FROM sale_items si
+                 JOIN sales s ON s.id = si.sale_id AND s.company_id = $2
+                 LEFT JOIN products p ON p.id = si.product_id
+                WHERE si.sale_id = ANY($1::uuid[])
+                ORDER BY si.sale_id, si.id`,
+              [saleIds, companyId]
+            );
+            for (const it of itemRows) {
+              (itemsBySale[it.sale_id] = itemsBySale[it.sale_id] || []).push(it);
+            }
+          } catch (e) {
+            // Sem os itens a compra ainda aparece, numa linha só (valor do débito).
+            if (e.code !== '42P01' && e.code !== '42703') console.warn('[print/carne] sale items warn:', e.message);
+          }
+        }
+        purchases = purchasesByGroup({ installments: allInstallments, debits: debitRows, itemsBySale });
+      } catch (e) {
+        if (e.code !== '42P01' && e.code !== '42703') console.warn('[print/carne] purchases warn:', e.message);
+      }
+    }
+
     // 7. Montar grupos de parcelas por carnê
     // Agrupa: account_id null → "Sem carnê"
     const accountMap = {};
     for (const acc of accounts) accountMap[acc.id] = acc;
 
-    const groups = {}; // key: account_id ou '__none__'
+    const groups = {}; // key: account_id ou NO_ACCOUNT_KEY ('__none__')
     for (const inst of allInstallments) {
-      const key = inst.account_id || '__none__';
+      const key = inst.account_id || NO_ACCOUNT_KEY;
       if (!groups[key]) groups[key] = [];
       groups[key].push(inst);
     }
@@ -672,15 +812,80 @@ router.get('/credit/:cid/carne', requireAuth, async (req, res) => {
     // Ordem: carnês cadastrados primeiro, depois "Sem carnê"
     const orderedKeys = [
       ...accounts.map(a => a.id),
-      ...(groups['__none__'] ? ['__none__'] : []),
+      ...(groups[NO_ACCOUNT_KEY] ? [NO_ACCOUNT_KEY] : []),
     ].filter(k => groups[k]);
 
-    function statusLabel(s) {
-      // 14/09/2026: so preto. Impressora termica transforma cor e cinza em
-      // pontilhado claro — o status saia apagado no papel.
-      if (s === 'paid') return 'Paga';
-      if (s === 'overdue') return '<strong>Atrasada</strong>';
-      return 'Pendente';
+    // 3T3: Pix por parcela (só em aberto, com valor de PRINCIPAL restante).
+    // 10/10/2026: extraído para os dois formatos gerarem o MESMO copia-e-cola.
+    function installmentPix(inst, remaining) {
+      if (!pixSetup || !(remaining > 0.005)) return null;
+      return buildStaticBrCode({
+        pixKey:          pixSetup.pixKey,
+        amount:          remaining,
+        beneficiaryName: pixSetup.name,
+        beneficiaryCity: pixSetup.city,
+        txid:            `CRED${String(inst.id).replace(/-/g, '').slice(0, 20)}`,
+      });
+    }
+
+    // ── Formato A4: a rota só consulta e despacha (builder puro) ──
+    if (formatA4) {
+      // Marca do lojista: mesma fonte da OS e da vitrine. Best-effort.
+      let brand = {};
+      try {
+        const { rows } = await db.query(
+          `SELECT logo_url, primary_color
+             FROM digital_channel_config WHERE company_id = $1`,
+          [companyId]
+        );
+        if (rows.length) brand = rows[0];
+      } catch (e) {
+        if (e.code !== '42P01' && e.code !== '42703') console.warn('[print/carne] brand warn:', e.message);
+      }
+
+      const a4Groups = orderedKeys.map((key) => {
+        const acc = key === NO_ACCOUNT_KEY ? null : accountMap[key];
+        return {
+          key,
+          name: acc ? acc.name : 'Sem carnê',
+          closed: !!acc && acc.status === 'closed',
+          purchases: purchases[key] || null,
+          installments: groups[key].map((inst) => {
+            const remaining = Math.max(0, parseFloat(inst.amount_due) - parseFloat(inst.covered_amount || 0));
+            const aberta = inst.status !== 'paid' && remaining > 0.005;
+            return { ...inst, pix_payload: aberta ? installmentPix(inst, remaining) : null };
+          }),
+        };
+      });
+
+      res.setHeader('Content-Type', 'text/html; charset=utf-8');
+      return res.send(buildCarneA4Html({
+        company,
+        brand,
+        customer,
+        groups: a4Groups,
+        // Carnê avulso: o nome dele vai no cabeçalho (com um grupo só o
+        // builder não imprime título de grupo).
+        carneName: onlyAccount && onlyAccount.key !== NO_ACCOUNT_KEY ? onlyAccount.name : null,
+        // Como o térmico: abre direto no diálogo. ?autoprint=0 só mostra.
+        autoprint: req.query.autoprint !== '0',
+      }));
+    }
+
+    // 14/09/2026: so preto. Impressora termica transforma cor e cinza em
+    // pontilhado claro — o status saia apagado no papel.
+    // 10/10/2026: só as parcelas a pagar passam por aqui (as pagas têm tabela
+    // própria), e o atraso vem da data (`late`, ver classifyInstallments).
+    function statusLabel(inst) {
+      return inst.late ? '<strong>Atrasada</strong>' : 'Pendente';
+    }
+
+    // Instante (timestamptz) -> dia em São Paulo. Para "pago em" e data da compra.
+    function fmtDaySP(d) {
+      if (!d) return '—';
+      const dt = new Date(d);
+      if (isNaN(dt.getTime())) return '—';
+      return dt.toLocaleDateString('pt-BR', { timeZone: 'America/Sao_Paulo' });
     }
 
     function fmtDate(d) {
@@ -698,26 +903,68 @@ router.get('/credit/:cid/carne', requireAuth, async (req, res) => {
     } else {
       for (const key of orderedKeys) {
         const instList = groups[key] || [];
-        const acc = key === '__none__' ? null : accountMap[key];
+        const acc = key === NO_ACCOUNT_KEY ? null : accountMap[key];
         const accName = acc ? acc.name : 'Sem carne';
         const accStatus = acc ? acc.status : null;
-        const accBalance = instList
-          .filter(i => i.status !== 'paid')
-          .reduce((s, i) => s + Math.max(0, parseFloat(i.amount_due) - parseFloat(i.covered_amount || 0)), 0);
+        // 10/10/2026: pagas separadas das a pagar (canceladas já saíram da lista).
+        const { paid: paidList, open: openList } = classifyInstallments(instList);
+        const accBalance = openList.reduce((s, i) => s + i.remaining, 0);
 
-        const rowsHTML = instList.map(inst => {
-          const remaining = Math.max(0, parseFloat(inst.amount_due) - parseFloat(inst.covered_amount || 0));
+        // "O que foi comprado" neste carnê.
+        const compras = purchases[key];
+        let comprasHTML = '';
+        if (compras && compras.lines.length) {
+          const linhas = compras.lines.map(l => `<tr>
+            <td style="padding:3px 4px">${fmtDaySP(l.date)}</td>
+            <td style="padding:3px 4px">${l.quantity && l.quantity !== 1 ? esc(String(l.quantity).replace('.', ',')) + 'x ' : ''}${esc(l.description)}</td>
+            <td style="padding:3px 4px;text-align:right">R$${fmt(l.amount)}</td>
+          </tr>`).join('');
+          comprasHTML = `
+            <div style="font-weight:bold;font-size:12px;margin:6px 0 2px">O que foi comprado</div>
+            <table style="width:100%;border-collapse:collapse;font-size:12px">
+              <thead>
+                <tr style="border-bottom:1px solid #000">
+                  <th style="text-align:left;padding:3px 4px">Data</th>
+                  <th style="text-align:left;padding:3px 4px">Produto</th>
+                  <th style="text-align:right;padding:3px 4px">Valor</th>
+                </tr>
+              </thead>
+              <tbody>${linhas}</tbody>
+            </table>`;
+        }
+
+        // Parcelas pagas: sem Pix, com a data do pagamento.
+        let pagasHTML;
+        if (paidList.length) {
+          const linhas = paidList.map(inst => `<tr>
+            <td style="padding:3px 4px">${inst.installment_number}/${inst.total_installments}</td>
+            <td style="padding:3px 4px">${fmtDate(inst.due_date)}</td>
+            <td style="padding:3px 4px">${fmtDaySP(inst.paid_at)}</td>
+            <td style="padding:3px 4px;text-align:right">R$${fmt(inst.amount_due)}</td>
+          </tr>`).join('');
+          pagasHTML = `
+            <table style="width:100%;border-collapse:collapse;font-size:12px">
+              <thead>
+                <tr style="border-bottom:1px solid #000">
+                  <th style="text-align:left;padding:3px 4px">Parcela</th>
+                  <th style="text-align:left;padding:3px 4px">Vencimento</th>
+                  <th style="text-align:left;padding:3px 4px">Pago em</th>
+                  <th style="text-align:right;padding:3px 4px">Valor</th>
+                </tr>
+              </thead>
+              <tbody>${linhas}</tbody>
+            </table>`;
+        } else {
+          pagasHTML = '<div style="font-size:12px;padding:3px 4px">Nenhuma parcela paga.</div>';
+        }
+
+        const rowsHTML = openList.map(inst => {
+          const remaining = inst.remaining;
 
           // 3T3: Pix por parcela (so em aberto, com valor de PRINCIPAL restante).
           let pixRow = '';
-          if (pixSetup && inst.status !== 'paid' && remaining > 0.005) {
-            const instPix = buildStaticBrCode({
-              pixKey:          pixSetup.pixKey,
-              amount:          remaining,
-              beneficiaryName: pixSetup.name,
-              beneficiaryCity: pixSetup.city,
-              txid:            `CRED${String(inst.id).replace(/-/g, '').slice(0, 20)}`,
-            });
+          const instPix = installmentPix(inst, remaining);
+          if (instPix) {
             pixRow = `<tr><td colspan="5" style="padding:2px 4px 10px">
               <div style="border:1px solid #000;padding:6px;page-break-inside:avoid">
                 <div style="font-size:11px;font-weight:bold;margin-bottom:3px">
@@ -735,16 +982,13 @@ router.get('/credit/:cid/carne', requireAuth, async (req, res) => {
             <td style="padding:3px 4px">${inst.installment_number}/${inst.total_installments}</td>
             <td style="padding:3px 4px">${fmtDate(inst.due_date)}</td>
             <td style="padding:3px 4px;text-align:right">R$${fmt(inst.amount_due)}</td>
-            <td style="padding:3px 4px;text-align:right">${inst.status !== 'paid' ? 'R$' + fmt(remaining) : '—'}</td>
-            <td style="padding:3px 4px;text-align:center">${statusLabel(inst.status)}</td>
+            <td style="padding:3px 4px;text-align:right">R$${fmt(remaining)}</td>
+            <td style="padding:3px 4px;text-align:center">${statusLabel(inst)}</td>
           </tr>${pixRow}`;
         }).join('');
 
-        accountsHTML += `
-          <div style="margin-bottom:16px">
-            <div style="font-weight:bold;font-size:13px;margin-bottom:4px">
-              ${esc(accName)}${accStatus === 'closed' ? ' <span style="font-size:11px">(encerrado)</span>' : ''}
-            </div>
+        const aPagarHTML = openList.length
+          ? `
             <table style="width:100%;border-collapse:collapse;font-size:12px">
               <thead>
                 <tr style="border-bottom:1px solid #000">
@@ -756,7 +1000,19 @@ router.get('/credit/:cid/carne', requireAuth, async (req, res) => {
                 </tr>
               </thead>
               <tbody>${rowsHTML}</tbody>
-            </table>
+            </table>`
+          : '<div style="font-size:12px;padding:3px 4px">Nenhuma parcela a pagar.</div>';
+
+        accountsHTML += `
+          <div style="margin-bottom:16px">
+            <div style="font-weight:bold;font-size:13px;margin-bottom:4px">
+              ${esc(accName)}${accStatus === 'closed' ? ' <span style="font-size:11px">(encerrado)</span>' : ''}
+            </div>
+            ${comprasHTML}
+            <div style="font-weight:bold;font-size:12px;margin:6px 0 2px">Parcelas pagas</div>
+            ${pagasHTML}
+            <div style="font-weight:bold;font-size:12px;margin:6px 0 2px">Parcelas a pagar</div>
+            ${aPagarHTML}
             <div style="text-align:right;font-size:12px;margin-top:4px">
               Saldo em aberto: <strong>R$${fmt(accBalance)}</strong>
             </div>
@@ -770,7 +1026,7 @@ router.get('/credit/:cid/carne', requireAuth, async (req, res) => {
       const balLabel = totalBalance > 0 ? ` — R$ ${fmt(totalBalance)}` : '';
       pixHTML = `
         <div style="border:1px solid #000;padding:10px;margin-top:12px;page-break-inside:avoid">
-          <div style="font-weight:bold;font-size:13px;margin-bottom:6px">Pagar tudo de uma vez via Pix${balLabel}</div>
+          <div style="font-weight:bold;font-size:13px;margin-bottom:6px">${onlyAccount ? 'Pagar este carne de uma vez via Pix' : 'Pagar tudo de uma vez via Pix'}${balLabel}</div>
           <div style="font-size:11px;margin-bottom:6px">
             Copie o codigo abaixo ou escaneie o QR Code com o app do seu banco.
           </div>
@@ -847,7 +1103,7 @@ router.get('/credit/:cid/carne', requireAuth, async (req, res) => {
   ${accountsHTML}
   <div class="divider"></div>
   <div style="text-align:right;font-size:13px;font-weight:bold;margin-bottom:8px">
-    SALDO TOTAL EM ABERTO: R$${fmt(totalBalance)}
+    ${onlyAccount ? 'SALDO DESTE CARNE' : 'SALDO TOTAL EM ABERTO'}: R$${fmt(totalBalance)}
   </div>
   ${pixHTML}
   <div class="divider"></div>
