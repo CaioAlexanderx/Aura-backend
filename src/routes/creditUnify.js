@@ -19,6 +19,8 @@ const db     = require('../config/database');
 const creditLedger = require('../services/creditLedger');
 // 16/09/2026: cliente de outra loja do mesmo dono tambem vale (utils/customerScope.js).
 const { findOwnerScopedCustomer, CUSTOMER_NOT_FOUND_BODY } = require('../utils/customerScope');
+// 10/10/2026: um carne por compra -- ver adoptSaleIntoCarne abaixo.
+const carneAuto = require('../services/credit/carneAuto');
 
 // Helper copiado de creditRefund.js (padrao canonico de checagem do modulo).
 async function assertCrediarioEnabled(companyId) {
@@ -118,6 +120,54 @@ async function loadOpenInstallments(companyId, customerId, accountId) {
     }
     throw err;
   }
+}
+
+// ---------------------------------------------------------------
+// adoptSaleIntoCarne (10/10/2026)
+//
+// O Caixa unifica em dois passos: POST /pdv/sale (so o debito) e depois este
+// POST /unify com o sale_id. Desde hoje a venda sem credit_account_id nasce
+// num carne NOVO. O app que ja manda credit_account_id na venda nao precisa
+// de nada aqui; o app antigo (bundle em cache) nao manda, e a venda que a
+// lojista quis JUNTAR ficaria com o debito num carne "Compra de DD/MM" vazio
+// de parcelas, ao lado do carne unificado.
+//
+// Entao a unificacao ADOTA a venda: o debito (e o estorno, se houver) passa
+// para o carne alvo, as parcelas abertas que a venda tenha gerado no carne de
+// origem sao canceladas (o cronograma unificado ja cobre o valor) e o carne de
+// origem, se ficou vazio, sai da ficha.
+//
+// Protegido por SAVEPOINT: falha aqui nao desfaz a unificacao.
+// ---------------------------------------------------------------
+async function adoptSaleIntoCarne(client, { companyId, customerId, saleId, accountId }) {
+  if (!saleId) return null;
+  return carneAuto.withSavepoint(client, 'unify_adota_venda', async () => {
+    const { rows } = await client.query(
+      `SELECT DISTINCT account_id FROM customer_credit_transactions
+        WHERE sale_id = $1 AND company_id = $2 AND customer_id = $3 AND type = 'debit'`,
+      [saleId, companyId, customerId]
+    );
+    const fromIds = rows.map(r => r.account_id).filter(id => id && id !== accountId);
+    if (!fromIds.length) return null;
+
+    await client.query(
+      `UPDATE customer_credit_transactions
+          SET account_id = $4
+        WHERE sale_id = $1 AND company_id = $2 AND customer_id = $3
+          AND account_id = ANY($5::uuid[])`,
+      [saleId, companyId, customerId, accountId, fromIds]
+    );
+    await client.query(
+      `UPDATE credit_installments
+          SET status = 'cancelled', covered_amount = 0, updated_at = NOW()
+        WHERE sale_id = $1 AND company_id = $2
+          AND account_id = ANY($3::uuid[])
+          AND status IN ('pending', 'overdue')`,
+      [saleId, companyId, fromIds]
+    );
+    const cancelled = await carneAuto.cancelEmptyCarnes(client, { companyId, accountIds: fromIds });
+    return { from_account_ids: fromIds, cancelled_account_ids: cancelled };
+  });
 }
 
 // ---------------------------------------------------------------
@@ -232,8 +282,11 @@ router.post('/customers/:cid/accounts/:accountId/unify', async (req, res) => {
       saleId,
     });
 
+    // 10/10/2026: a venda unificada sai do carne automatico em que nasceu.
+    const adopted = await adoptSaleIntoCarne(client, { companyId, customerId, saleId, accountId });
+
     await client.query('COMMIT');
-    return res.status(200).json(result);
+    return res.status(200).json(adopted ? { ...result, adopted_sale: adopted } : result);
   } catch (err) {
     try { await client.query('ROLLBACK'); } catch (_) {}
     console.error('[creditUnify] apply error:', err.code, err.message);

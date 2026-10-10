@@ -64,6 +64,8 @@ const router      = require('express').Router({ mergeParams: true });
 const db          = require('../config/database');
 const trocaV2     = require('../services/trocaV2');
 const { createCreditSale, cancelCreditSale } = require('../services/creditLedger');
+// 10/10/2026: um carne por compra (services/credit/carneAuto.js).
+const carneAuto = require('../services/credit/carneAuto');
 const { checkCouponOwner } = require('../services/couponPolicy');
 const { hasSaleNumberColumn, saleNumberSelect } = require('../utils/saleNumber');
 // 16/09/2026: cliente de outra loja do mesmo dono vale (utils/customerScope.js).
@@ -661,13 +663,50 @@ async function handleSale(req, res, opts = {}) {
     // Hub F1.4.1: createCreditSale barra bloqueio MANUAL (status=blocked) lancando
     //   erro com .statusCode=422 / .code='CUSTOMER_BLOCKED' -> propagado abaixo no
     //   catch. Score NUNCA bloqueia: vira creditSaleResult.warnings[].
+    //
+    // 10/10/2026 -- um carne por compra. A venda no crediario passa a nascer
+    // num carne proprio ("Compra de DD/MM"), com o debito e as parcelas dela.
+    // Antes nenhuma venda do Caixa caia em carne: tudo ia para "Sem carne".
+    //   - body.credit_account_id: a lojista escolheu JUNTAR a venda a um carne
+    //     que ja existe (fluxo de unificar). Ai nao nasce carne novo; o debito
+    //     ja entra no carne escolhido. Carne de outro cliente/loja ou fechado
+    //     e erro explicito (422), nunca troca silenciosa.
+    //   - sem o campo: carne novo. Se a criacao falhar (schema antigo, erro
+    //     qualquer) a venda SEGUE sem carne -- ver carneAuto.withSavepoint.
+    //   - venda com sinal (Studio) fica fora: o saldo da encomenda e baixado
+    //     pelo card do pedido (applyPayment com saleId), nao e fiado de ficha.
     let creditSaleResult = null;
+    let creditAccount = null; // { id, name, created }
+    if (creditAmount > 0 && !opts.signalSale) {
+      const chosenAccountId = req.body?.credit_account_id || null;
+      if (chosenAccountId) {
+        const acc = await carneAuto.findCustomerCarne(client, {
+          companyId: req.params.id, customerId, accountId: chosenAccountId,
+        });
+        if (acc === null || (acc && acc.status !== 'open')) {
+          await client.query('ROLLBACK');
+          return res.status(422).json({
+            error: acc ? 'Este carne ja foi fechado. Escolha outro ou venda em carne novo.'
+                       : 'Carne nao encontrado para este cliente.',
+            code: acc ? 'CREDIT_ACCOUNT_CLOSED' : 'CREDIT_ACCOUNT_NOT_FOUND',
+          });
+        }
+        // undefined = nao deu para conferir (tabela ausente): segue sem carne.
+        if (acc) creditAccount = { id: acc.id, name: acc.name, created: false };
+      } else {
+        const novo = await carneAuto.createAutoCarne(client, {
+          companyId: req.params.id, customerId, prefix: 'Compra', date: sale_date || null,
+        });
+        if (novo) creditAccount = { id: novo.id, name: novo.name, created: true };
+      }
+    }
     if (creditAmount > 0) {
       creditSaleResult = await createCreditSale(client, {
         companyId:    req.params.id,
         customerId,
         saleId:       sale.id,
         amount:       creditAmount,
+        accountId:    creditAccount ? creditAccount.id : null,
         // F2: o saldo do sinal e sempre 1x na data combinada, com juros ZERO
         // explicito -- e reserva, nao financiamento. Sem o 0 explicito o saldo
         // herdaria o juros do crediario da empresa (ver ledger.js).
@@ -793,6 +832,12 @@ async function handleSale(req, res, opts = {}) {
         new_balance: parseFloat(bal[0]?.balance || 0),
         // Hub F1.4.1: aviso de score NAO-impeditivo (vazio quando nao ha aviso).
         warnings: creditSaleResult?.warnings || [],
+        // 10/10/2026: carne em que a venda entrou (null = sem carne).
+        // account_created=false quando a lojista juntou a um carne existente.
+        account_id:      creditAccount ? creditAccount.id : null,
+        account_name:    creditAccount ? creditAccount.name : null,
+        account_created: creditAccount ? creditAccount.created : false,
+        installments:    creditSaleResult?.schedule || [],
       };
     }
     res.status(201).json({
