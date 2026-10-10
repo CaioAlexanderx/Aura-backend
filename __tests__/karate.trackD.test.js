@@ -221,6 +221,7 @@ describe('POST /public/karate/:slug/portal/verify-otp', () => {
 
   it('404 quando federação não encontrada', (done) => {
     db.query.mockResolvedValueOnce({ rows: [] }); // resolveFederation: slug não existe
+    db.query.mockResolvedValueOnce({ rows: [] }); // fallback companies.slug: também não existe
     request(app)
       .post('/public/karate/inexistente/portal/verify-otp')
       .send({ cpf: '12345678900', code: '000000' })

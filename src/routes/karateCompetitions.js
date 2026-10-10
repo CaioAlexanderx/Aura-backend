@@ -12,7 +12,8 @@
 // Categorias:
 //   GET   /competitions/:cid/categories
 //   POST  /competitions/:cid/categories           — (staffWrite)
-//   PATCH /competitions/:cid/categories/:catId    — (staffWrite)
+//   PATCH /competitions/:cid/categories/:catId    — (staffWrite; 409 BRACKET_EXISTS p/ modality/sex com chave)
+//   DELETE /competitions/:cid/categories/:catId   — (staffWrite; 409 CATEGORY_IN_USE com inscrição/chave)
 //
 // Inscrições / Resultados:
 //   GET   /competitions/:cid/entries              — lista (filtro category_id)
@@ -146,6 +147,21 @@ async function findCompetition(federationId, cid) {
   return r.rows[0] || null;
 }
 
+// Categorias da competição com a divisão RESOLVIDA (nome) + contagem de
+// inscritos. Compartilhado pelo detalhe e pela lista de categorias.
+const CATEGORIES_SQL = `
+  SELECT cat.id, cat.name, cat.modality, cat.min_age, cat.max_age,
+         cat.belt_min, cat.belt_max, cat.sex, cat.weight_class,
+         cat.max_entries, cat.fee_amount, cat.division_id, cat.group_label,
+         d.name AS division_name,
+         COUNT(e.id)::int AS entry_count
+    FROM karate_competition_categories cat
+    LEFT JOIN karate_competition_divisions d ON d.id = cat.division_id
+    LEFT JOIN karate_competition_entries e ON e.category_id = cat.id
+   WHERE cat.competition_id = $1
+   GROUP BY cat.id, d.name
+   ORDER BY cat.created_at ASC`;
+
 // ── GET /competitions/:cid ──
 router.get('/competitions/:cid', ...guards.read(), async (req, res) => {
   const { id: federationId, cid } = req.params;
@@ -153,18 +169,7 @@ router.get('/competitions/:cid', ...guards.read(), async (req, res) => {
     const comp = await findCompetition(federationId, cid);
     if (!comp) return res.status(404).json({ error: 'Competição não encontrada', code: 'NOT_FOUND' });
 
-    const cats = await db.query(
-      `SELECT cat.id, cat.name, cat.modality, cat.min_age, cat.max_age,
-              cat.belt_min, cat.belt_max, cat.sex, cat.weight_class,
-              cat.max_entries, cat.fee_amount, cat.division_id, cat.group_label,
-              COUNT(e.id)::int AS entry_count
-       FROM karate_competition_categories cat
-       LEFT JOIN karate_competition_entries e ON e.category_id = cat.id
-       WHERE cat.competition_id = $1
-       GROUP BY cat.id
-       ORDER BY cat.created_at ASC`,
-      [cid]
-    );
+    const cats = await db.query(CATEGORIES_SQL, [cid]);
 
     // B3 — o header do admin mostrava "0 inscritos": a resposta do detalhe
     // nunca trouxe um total no nível raiz, só por categoria (categories[].
@@ -183,6 +188,9 @@ router.get('/competitions/:cid', ...guards.read(), async (req, res) => {
       // findCompetition faz SELECT * — os campos existem quando a 294 está
       // aplicada; pré-migração vêm undefined e caem nos defaults abaixo.
       pricing_config: comp.pricing_config || {},
+      // P2 mesário (migration 301): pontos por colocação que o finalize da
+      // chave grava nas inscrições. SELECT * — pré-301 vem undefined.
+      results_config: comp.results_config || {},
       conference_published_at: comp.conference_published_at || null,
       brackets_published_at: comp.brackets_published_at || null,
       rectification_deadline: comp.rectification_deadline || null,
@@ -195,6 +203,11 @@ router.get('/competitions/:cid', ...guards.read(), async (req, res) => {
         sex: c.sex, weight_class: c.weight_class || null,
         max_entries: c.max_entries != null ? c.max_entries : null,
         fee_amount: c.fee_amount != null ? c.fee_amount : null,
+        // Divisão/grupo: o modal de edição do app abre com o que vem aqui —
+        // sem estes campos ele mostrava "Sem divisão" e, ao salvar, zerava.
+        division_id: c.division_id || null,
+        division_name: c.division_name || null,
+        group_label: c.group_label || null,
         entry_count: c.entry_count,
       })),
     });
@@ -203,6 +216,32 @@ router.get('/competitions/:cid', ...guards.read(), async (req, res) => {
     res.status(500).json({ error: 'Erro ao carregar competição' });
   }
 });
+
+// Valida results_config: { points_by_placement: { "1".."8": inteiro >= 0 } }.
+// null limpa a configuração. Devolve { value } normalizado ou { error }.
+const PLACEMENT_KEYS = ['1', '2', '3', '4', '5', '6', '7', '8'];
+function parseResultsConfig(raw) {
+  if (raw === null) return { value: null };
+  if (typeof raw !== 'object' || Array.isArray(raw)) {
+    return { error: 'results_config deve ser um objeto com points_by_placement' };
+  }
+  const pbp = raw.points_by_placement;
+  if (!pbp || typeof pbp !== 'object' || Array.isArray(pbp)) {
+    return { error: 'results_config.points_by_placement deve ser um objeto (ex.: {"1":9,"2":6,"3":3})' };
+  }
+  const points = {};
+  for (const [key, val] of Object.entries(pbp)) {
+    if (!PLACEMENT_KEYS.includes(key)) {
+      return { error: `Colocação inválida em points_by_placement: "${key}". Use de "1" a "8".` };
+    }
+    const n = typeof val === 'string' && val.trim() !== '' ? Number(val) : val;
+    if (typeof n !== 'number' || !Number.isInteger(n) || n < 0) {
+      return { error: `Pontos da colocação ${key} devem ser um inteiro maior ou igual a 0.` };
+    }
+    points[key] = n;
+  }
+  return { value: Object.assign({}, raw, { points_by_placement: points }) };
+}
 
 // ── PATCH /competitions/:cid ──
 router.patch('/competitions/:cid', ...guards.staffWrite(), async (req, res) => {
@@ -217,6 +256,18 @@ router.patch('/competitions/:cid', ...guards.staffWrite(), async (req, res) => {
       values.push(req.body[field]);
       idx++;
     }
+  }
+  // results_config (migration 301): pontos por colocação que o finalize da
+  // chave aplica. Salvar NÃO recalcula categorias já finalizadas.
+  const hasResultsConfig = req.body.results_config !== undefined;
+  if (hasResultsConfig) {
+    const parsed = parseResultsConfig(req.body.results_config);
+    if (parsed.error) {
+      return res.status(422).json({ error: parsed.error, code: 'VALIDATION_ERROR' });
+    }
+    updates.push(`results_config = $${idx}::jsonb`);
+    values.push(parsed.value === null ? null : JSON.stringify(parsed.value));
+    idx++;
   }
   if (req.body.status !== undefined) {
     const VALID = ['draft', 'open', 'closed', 'cancelled'];
@@ -239,7 +290,7 @@ router.patch('/competitions/:cid', ...guards.staffWrite(), async (req, res) => {
       `UPDATE karate_competitions SET ${updates.join(', ')}
        WHERE id = $${idx} AND federation_id = $${idx + 1}
        RETURNING id, federation_id, name, season, event_date, location,
-                 circuit_round, fee_amount, status, updated_at`,
+                 circuit_round, fee_amount, status, updated_at${hasResultsConfig ? ', results_config' : ''}`,
       values
     );
     if (!result.rows.length) {
@@ -247,6 +298,9 @@ router.patch('/competitions/:cid', ...guards.staffWrite(), async (req, res) => {
     }
     res.json(result.rows[0]);
   } catch (err) {
+    if (err.code === '42703' && hasResultsConfig) {
+      return res.status(503).json({ error: 'Pontuação por colocação indisponível (migração 301 pendente)', code: 'SCHEMA_PENDING' });
+    }
     console.error('[karateCompetitions] patch error:', err.message);
     res.status(500).json({ error: 'Erro ao atualizar competição' });
   }
@@ -285,18 +339,7 @@ router.get('/competitions/:cid/categories', ...guards.read(), async (req, res) =
   try {
     const comp = await findCompetition(federationId, cid);
     if (!comp) return res.status(404).json({ error: 'Competição não encontrada', code: 'NOT_FOUND' });
-    const { rows } = await db.query(
-      `SELECT cat.id, cat.name, cat.modality, cat.min_age, cat.max_age,
-              cat.belt_min, cat.belt_max, cat.sex, cat.weight_class,
-              cat.max_entries, cat.fee_amount, cat.division_id, cat.group_label,
-              COUNT(e.id)::int AS entry_count
-       FROM karate_competition_categories cat
-       LEFT JOIN karate_competition_entries e ON e.category_id = cat.id
-       WHERE cat.competition_id = $1
-       GROUP BY cat.id
-       ORDER BY cat.created_at ASC`,
-      [cid]
-    );
+    const { rows } = await db.query(CATEGORIES_SQL, [cid]);
     res.json(rows);
   } catch (err) {
     console.error('[karateCompetitions] categories list error:', err.message);
@@ -313,6 +356,24 @@ async function divisionBelongs(cid, divisionId) {
     [divisionId, cid]
   );
   return rows.length > 0;
+}
+
+// COUNT tolerante a tabela ausente (migração pendente = 0 linhas).
+async function countRowsSafe(sql, params) {
+  try {
+    const { rows } = await db.query(sql, params);
+    return rows[0] ? Number(rows[0].n) || 0 : 0;
+  } catch (e) {
+    if (e.code === '42P01') return 0;
+    throw e;
+  }
+}
+
+// Existe linha em karate_brackets para a categoria? (183 pendente = não)
+async function categoryHasBracket(catId) {
+  return (await countRowsSafe(
+    `SELECT COUNT(*)::int AS n FROM karate_brackets WHERE category_id = $1`, [catId]
+  )) > 0;
 }
 
 // ── POST /competitions/:cid/categories ──
@@ -405,6 +466,27 @@ router.patch('/competitions/:cid/categories/:catId', ...guards.staffWrite(), asy
       return res.status(422).json({ error: 'division_id não pertence a esta competição', code: 'DIVISION_NOT_FOUND' });
     }
 
+    // Chave gerada amarra modalidade e sexo: a chave (árvore × bateria de
+    // notas) e o pódio já finalizado dependem deles. Os demais campos seguem
+    // editáveis. Só bloqueia quando o valor MUDA (o modal reenvia tudo).
+    if (req.body.modality !== undefined || req.body.sex !== undefined) {
+      const cur = await db.query(
+        `SELECT modality, sex FROM karate_competition_categories WHERE id = $1 AND competition_id = $2 LIMIT 1`,
+        [catId, cid]
+      );
+      if (!cur.rows.length) {
+        return res.status(404).json({ error: 'Categoria não encontrada', code: 'NOT_FOUND' });
+      }
+      const changes = (req.body.modality !== undefined && req.body.modality !== cur.rows[0].modality)
+        || (req.body.sex !== undefined && req.body.sex !== cur.rows[0].sex);
+      if (changes && (await categoryHasBracket(catId))) {
+        return res.status(409).json({
+          error: 'Esta categoria já tem chave gerada. Para trocar modalidade ou sexo, exclua a chave primeiro.',
+          code: 'BRACKET_EXISTS',
+        });
+      }
+    }
+
     const result = await db.query(
       `UPDATE karate_competition_categories SET ${updates.join(', ')}
        WHERE id = $${idx} AND competition_id = $${idx + 1}
@@ -419,6 +501,64 @@ router.patch('/competitions/:cid/categories/:catId', ...guards.staffWrite(), asy
   } catch (err) {
     console.error('[karateCompetitions] patch category error:', err.message);
     res.status(500).json({ error: 'Erro ao atualizar categoria' });
+  }
+});
+
+// ── DELETE /competitions/:cid/categories/:catId ──
+// Só apaga categoria VAZIA: sem inscrições (qualquer status — retirada
+// também carrega histórico/pagamento), sem equipes e sem chave. As FKs
+// filhas são ON DELETE CASCADE, então sem este guard a exclusão levaria
+// inscrições e resultados junto. O vínculo com koto é area_id na própria
+// categoria (FK para karate_competition_areas) e some com a linha.
+router.delete('/competitions/:cid/categories/:catId', ...guards.staffWrite(), async (req, res) => {
+  const { id: federationId, cid, catId } = req.params;
+  try {
+    const comp = await findCompetition(federationId, cid);
+    if (!comp) return res.status(404).json({ error: 'Competição não encontrada', code: 'NOT_FOUND' });
+
+    const cat = await db.query(
+      `SELECT id FROM karate_competition_categories WHERE id = $1 AND competition_id = $2 LIMIT 1`,
+      [catId, cid]
+    );
+    if (!cat.rows.length) return res.status(404).json({ error: 'Categoria não encontrada', code: 'NOT_FOUND' });
+
+    const entryCount = await countRowsSafe(
+      `SELECT COUNT(*)::int AS n FROM karate_competition_entries WHERE category_id = $1`, [catId]
+    );
+    const teamCount = await countRowsSafe(
+      `SELECT COUNT(*)::int AS n FROM karate_competition_teams WHERE category_id = $1`, [catId]
+    );
+    const hasBracket = await categoryHasBracket(catId);
+
+    if (entryCount > 0 || teamCount > 0 || hasBracket) {
+      const motivos = [];
+      if (entryCount > 0) motivos.push(`${entryCount} inscrição(ões)`);
+      if (teamCount > 0) motivos.push(`${teamCount} equipe(s)`);
+      if (hasBracket) motivos.push('chave gerada');
+      return res.status(409).json({
+        error: `Não é possível excluir a categoria: ela tem ${motivos.join(' e ')}. Remova antes de excluir.`,
+        code: 'CATEGORY_IN_USE',
+        entry_count: entryCount,
+        team_count: teamCount,
+        has_bracket: hasBracket,
+      });
+    }
+
+    const del = await db.query(
+      `DELETE FROM karate_competition_categories WHERE id = $1 AND competition_id = $2 RETURNING id`,
+      [catId, cid]
+    );
+    if (!del.rows.length) return res.status(404).json({ error: 'Categoria não encontrada', code: 'NOT_FOUND' });
+    res.json({ deleted: true, id: catId });
+  } catch (err) {
+    if (err.code === '23503') {
+      return res.status(409).json({
+        error: 'Não é possível excluir a categoria: há registros vinculados a ela.',
+        code: 'CATEGORY_IN_USE',
+      });
+    }
+    console.error('[karateCompetitions] delete category error:', err.message);
+    res.status(500).json({ error: 'Erro ao excluir categoria' });
   }
 });
 
