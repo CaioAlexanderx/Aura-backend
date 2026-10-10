@@ -413,4 +413,16 @@ describe('telefone com máscara', () => {
     expect(html).toContain('(66) 99645-6351');
     expect(html).not.toContain('6681573761');
   });
+
+  // 10/10/2026: a regex saiu como /D/g (sem a barra) — só tirava a letra "D".
+  // Passava com cadastro só de dígitos e deixava cru o telefone já pontuado.
+  test('cadastro já pontuado ou com +55 também sai na máscara', () => {
+    const html = buildCarneA4Html({
+      company: { trade_name: 'Loja', phone: '66 8157-3761' },
+      customer: { name: 'Cliente', phone: '+55 (66) 9 9645-6351' },
+      groups: [],
+    });
+    expect(html).toContain('(66) 8157-3761');
+    expect(html).toContain('(66) 99645-6351');
+  });
 });

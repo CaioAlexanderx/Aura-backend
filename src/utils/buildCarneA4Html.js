@@ -64,7 +64,7 @@ function formatCnpj(cnpj) {
 // saía '6681573761'. Mesmo formato do buildWarrantyHtml; fora de 10/11 dígitos
 // sai como foi cadastrado.
 function formatPhone(v) {
-  let d = String(v || '').replace(/D/g, '');
+  let d = String(v || '').replace(/\D/g, '');
   if (d.length > 11 && d.startsWith('55')) d = d.slice(2);
   if (d.length === 11) return `(${d.slice(0, 2)}) ${d.slice(2, 7)}-${d.slice(7)}`;
   if (d.length === 10) return `(${d.slice(0, 2)}) ${d.slice(2, 6)}-${d.slice(6)}`;
