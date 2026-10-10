@@ -31,12 +31,23 @@ async function comCardPrice(rodar) {
 const DA_LOJA_OU_DO_GRUPO =
   `(p.company_id=$1 OR (p.company_id=c.billing_owner_company_id AND p.is_group_shared=TRUE))`;
 
+// O mesmo código de barras pode estar gravado como UPC-A (12 dígitos) e ser
+// lido como EAN-13 (com um zero na frente), ou o contrário. Vinha da cópia
+// do /scan/:code em pdv.js, que nunca respondeu (removida em 10/10/2026).
+function variacoesDoCodigo(code) {
+  const alts = new Set([code]);
+  if (/^\d{12}$/.test(code)) alts.add('0' + code);
+  if (/^\d{13}$/.test(code) && code.startsWith('0')) alts.add(code.slice(1));
+  return [...alts];
+}
+
 // GET /companies/:id/pdv/scan/:code
 // Lookup chamado pelo PDV ao receber código escaneado (jsQR / leitor USB)
 router.get('/scan/:code', requireAuth, async (req, res) => {
   const { id: company_id, code } = req.params;
   const cleanCode = (code || '').trim();
   if (!cleanCode) return res.status(400).json({ error: 'Código não informado' });
+  const alts = variacoesDoCodigo(cleanCode);
 
   try {
     // 1. Match exato por barcode
@@ -58,10 +69,10 @@ router.get('/scan/:code', requireAuth, async (req, res) => {
        FROM products p
        JOIN companies c ON c.id=$1
        LEFT JOIN product_variants pv ON pv.product_id=p.id AND pv.is_active=TRUE
-       WHERE ${DA_LOJA_OU_DO_GRUPO} AND p.barcode=$2 AND p.is_active=TRUE
+       WHERE ${DA_LOJA_OU_DO_GRUPO} AND p.barcode=ANY($2::text[]) AND p.is_active=TRUE
        GROUP BY p.id
        LIMIT 1`,
-      [company_id, cleanCode]
+      [company_id, alts]
     ));
     if (rows.length) return res.json({ match: 'exact', source: 'barcode', product: rows[0] });
 
@@ -74,9 +85,9 @@ router.get('/scan/:code', requireAuth, async (req, res) => {
        FROM product_variants pv
        JOIN products p ON p.id=pv.product_id
        JOIN companies c ON c.id=$1
-       WHERE ${DA_LOJA_OU_DO_GRUPO} AND pv.barcode=$2 AND pv.is_active=TRUE AND p.is_active=TRUE
+       WHERE ${DA_LOJA_OU_DO_GRUPO} AND pv.barcode=ANY($2::text[]) AND pv.is_active=TRUE AND p.is_active=TRUE
        LIMIT 1`,
-      [company_id, cleanCode]
+      [company_id, alts]
     ));
     if (varRows.length) {
       return res.json({

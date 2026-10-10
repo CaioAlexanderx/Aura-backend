@@ -209,15 +209,15 @@ describe('produtos -- card_price', () => {
 // ────────────────────────────────────────────────────────────
 describe('GET /pdv/scan -- card_price junto do preco', () => {
   test('match por barcode traz card_price', async () => {
-    mockSql([[/p\.barcode=\$2/i, { rows: [{ id: 'p1', name: 'Camisa', price: '100.00', card_price: '110.00', variants: [] }] }]]);
+    mockSql([[/p\.barcode=ANY\(\$2/i, { rows: [{ id: 'p1', name: 'Camisa', price: '100.00', card_price: '110.00', variants: [] }] }]]);
     const res = await request(app).get(`/api/v1/companies/${cid}/pdv/scan/7891000315507`).set(auth);
     expect(res.status).toBe(200);
-    expect(chamadas(/p\.barcode=\$2/i)[0][0]).toMatch(/p\.card_price/);
+    expect(chamadas(/p\.barcode=ANY\(\$2/i)[0][0]).toMatch(/p\.card_price/);
     expect(res.body.product.card_price).toBe('110.00');
   });
 
   test('base sem a 351: repete a consulta sem a coluna e o bipe funciona', async () => {
-    mockSql([[/p\.barcode=\$2/i, (s) => (/card_price/.test(s)
+    mockSql([[/p\.barcode=ANY\(\$2/i, (s) => (/card_price/.test(s)
       ? Promise.reject(erro42703())
       : Promise.resolve({ rows: [{ id: 'p1', name: 'Camisa', price: '100.00', variants: [] }] }))]]);
     const res = await request(app).get(`/api/v1/companies/${cid}/pdv/scan/7891000315507`).set(auth);
