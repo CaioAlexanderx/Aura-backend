@@ -31,13 +31,30 @@ function formatCNPJ(cnpj) {
   return c.replace(/^(\d{2})(\d{3})(\d{3})(\d{4})(\d{2})$/, '$1.$2.$3/$4-$5');
 }
 
-// ── Detecção de tipo pela natureza jurídica ────────────────────
-// Natureza 2135 = MEI — Microempreendedor Individual
-function detectRegimeFromNature(legalNatureCode) {
-  if (!legalNatureCode) return null;
-  const code = String(legalNatureCode).replace(/\D/g,'');
-  if (code === '2135') return 'mei';
-  return 'simples_nacional'; // padrão para demais PJ pequenas
+// ── Regime tributário pela Receita ─────────────────────────────
+// 12/10/2026: até aqui o regime vinha da natureza jurídica — 2135 virava
+// "mei" e todo o resto "simples_nacional". Dois erros: 2135 é "Empresário
+// (Individual)", que inclui EI no Simples e fora dele (Luciano Messias
+// ficou "mei" sendo Simples), e LTDA fora do Simples virava Simples
+// (Sheid Mania, Infortech, Pefect House). Clientes reclamaram.
+//
+// O cnpj.ws devolve o bloco `simples` ({ simples: 'Sim'|'Não', mei:
+// 'Sim'|'Não', datas }). É a fonte: MEI é optante do SIMEI; Simples é
+// optante do Simples; fora do Simples a Receita não diz se é Presumido ou
+// Real — sugerimos Presumido e marcamos `regime_confirmar` para a tela
+// pedir confirmação. Sem o bloco, cai na heurística de porte.
+function regimeDaReceita(rf) {
+  const simples = rf && rf.simples ? rf.simples : null;
+  const sim = (v) => String(v || '').trim().toLowerCase() === 'sim';
+  const nao = (v) => String(v || '').trim().toLowerCase() === 'não' || String(v || '').trim().toLowerCase() === 'nao';
+  if (simples && (sim(simples.mei) || sim(simples.simples) || nao(simples.simples))) {
+    if (sim(simples.mei)) return { regime: 'mei', fonte: 'receita', confirmar: false };
+    if (sim(simples.simples)) return { regime: 'simples_nacional', fonte: 'receita', confirmar: false };
+    return { regime: 'lucro_presumido', fonte: 'receita', confirmar: true };
+  }
+  const porte = String((rf && rf.porte && rf.porte.descricao) || '').toUpperCase();
+  if (porte === 'DEMAIS') return { regime: 'lucro_presumido', fonte: 'estimado', confirmar: true };
+  return { regime: 'simples_nacional', fonte: 'estimado', confirmar: true };
 }
 
 // Detecta vertical sugerido pelo CNAE principal
@@ -81,7 +98,7 @@ async function lookupCNPJ(cnpj, redis) {
   if (!validateCNPJ(cleaned)) throw new Error('CNPJ inválido');
 
   // Cache Redis 24h
-  const cacheKey = `cnpj:ws:${cleaned}`;
+  const cacheKey = `cnpj:ws:v2:${cleaned}`; // v2 (12/10/2026): regime pela Receita
   if (redis) {
     try {
       const cached = await redis.get(cacheKey);
@@ -103,6 +120,7 @@ async function lookupCNPJ(cnpj, redis) {
 
   const rf  = body;
   const est = rf.estabelecimento || {};
+  const sim = (v) => String(v || '').trim().toLowerCase() === 'sim';
 
   // Códigos normalizados
   const cnaeCode = (est.atividade_principal?.subclasse || '').replace(/\D/g, '');
@@ -143,9 +161,13 @@ async function lookupCNPJ(cnpj, redis) {
       description: c.descricao || '',
     })),
     // Detecções automáticas
-    suggested_regime:   detectRegimeFromNature(natCode),
+    suggested_regime:   regimeDaReceita(rf).regime,
+    regime_fonte:       regimeDaReceita(rf).fonte,
+    regime_confirmar:   regimeDaReceita(rf).confirmar,
+    simples_optante:    sim(rf.simples && rf.simples.simples),
+    mei_optante:        sim(rf.simples && rf.simples.mei),
     suggested_vertical: detectVerticalFromCNAE(cnaeCode),
-    is_mei:             natCode === '2135',
+    is_mei:             sim(rf.simples && rf.simples.mei),
     is_active:          (est.situacao_cadastral || '').toUpperCase() === 'ATIVA',
   };
 
@@ -158,10 +180,10 @@ async function lookupCNPJ(cnpj, redis) {
 }
 
 module.exports = {
+  regimeDaReceita,
   sanitizeCNPJ,
   validateCNPJ,
   formatCNPJ,
-  detectRegimeFromNature,
   detectVerticalFromCNAE,
   lookupCNPJ,
 };
