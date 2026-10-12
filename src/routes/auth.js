@@ -282,8 +282,13 @@ function shapeCompany(company, fallbackMemberRole) {
 
 // POST /api/v1/auth/register
 router.post('/register', async (req, res) => {
-  const { name, email, password, company_name, phone, cnpj, access_code, terms_accepted, terms_version, self_serve, vertical, federation_id } = req.body;
+  const { name, email, password, company_name, phone, cnpj, access_code, terms_accepted, terms_version, self_serve, vertical, federation_id, tax_regime } = req.body;
   const isSelfServe = (self_serve === true || self_serve === 'true');
+  // 12/10/2026: o regime que o cadastro detectou pela Receita vem no corpo e
+  // é gravado na empresa nova. Antes ninguém gravava e TODO cadastro ficava
+  // com o default da coluna (simples_nacional) — 148 de 149 empresas.
+  const REGIMES = ['mei', 'simples_nacional', 'lucro_presumido', 'lucro_real'];
+  const regimeDoCadastro = REGIMES.includes(tax_regime) ? tax_regime : null;
   const isComecarCode = typeof access_code === 'string' && access_code.toUpperCase().trim() === 'COMECAR';
 
   if (!name || !email || !password) return res.status(400).json({ error: 'Campos obrigatorios: name, email, password' });
@@ -432,10 +437,10 @@ router.post('/register', async (req, res) => {
       const newVertical = isDojoSignup ? 'karate_dojo' : null;
       const newFederationId = isDojoSignup ? dojoFederationId : null;
       const { rows: [newCompany] } = await client.query(
-        `INSERT INTO companies (owner_id, legal_name, trade_name, plan, onboarding_step, trial_ends_at, access_code_used, cnpj, phone, vertical, vertical_active, federation_id)
-         VALUES ($1, $2, $2, $3, 'cnpj', $4, $5, $6, $7, $8, $8, $9)
-         RETURNING id, legal_name, trade_name, plan, onboarding_step, trial_ends_at, module_overrides, access_code_used, vertical_active, vertical, ai_enabled, ai_consent_at, federation_id, segment`,
-        [user.id, company_name.trim(), plan, trialEndsAt, access_code || null, cnpj ? cnpj.replace(/\D/g, '') : null, phone || null, newVertical, newFederationId]
+        `INSERT INTO companies (owner_id, legal_name, trade_name, plan, onboarding_step, trial_ends_at, access_code_used, cnpj, phone, vertical, vertical_active, federation_id, tax_regime)
+         VALUES ($1, $2, $2, $3, 'cnpj', $4, $5, $6, $7, $8, $8, $9, COALESCE($10::tax_regime, 'simples_nacional'::tax_regime))
+         RETURNING id, legal_name, trade_name, plan, onboarding_step, trial_ends_at, module_overrides, access_code_used, vertical_active, vertical, ai_enabled, ai_consent_at, federation_id, segment, tax_regime`,
+        [user.id, company_name.trim(), plan, trialEndsAt, access_code || null, cnpj ? cnpj.replace(/\D/g, '') : null, phone || null, newVertical, newFederationId, regimeDoCadastro]
       );
       company = newCompany;
 
