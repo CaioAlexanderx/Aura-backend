@@ -145,6 +145,12 @@ function startServer() {
     const { initPlantaoJob } = require('./jobs/plantaoJob');
     initPlantaoJob();
 
+    // RESUMO DA MADRUGADA (376): às 8h BRT manda por e-mail o que chegou no
+    // WhatsApp da Aura entre 21h e 8h. Dormente sem AURA_COMPANY_ID; kill
+    // switch RESUMO_MADRUGADA_ENABLED=false.
+    const { initResumoDaMadrugadaJob } = require('./jobs/resumoDaMadrugadaJob');
+    initResumoDaMadrugadaJob();
+
     // Loja online (315): Pix vencido sem pagamento — tick 10min. É o único
     // evento do sino sem gancho de fluxo: ninguém "faz" um Pix expirar.
     const { initPixExpiradoJob } = require('./jobs/lojaPixExpiradoJob');

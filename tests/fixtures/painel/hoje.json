@@ -727,7 +727,7 @@
       "id": "contatos",
       "titulo": "Contatos",
       "grupo": "operacao",
-      "valor": 2,
+      "valor": 6,
       "unidade": "na semana",
       "variacao": {
         "d7": null,
@@ -735,36 +735,78 @@
       },
       "serie": [
         {
-          "rotulo": "31/08",
+          "rotulo": "30/09",
+          "dia": "2026-09-30",
           "valor": 0
         },
         {
-          "rotulo": "07/09",
+          "rotulo": "01/10",
+          "dia": "2026-10-01",
           "valor": 0
         },
         {
-          "rotulo": "14/09",
+          "rotulo": "02/10",
+          "dia": "2026-10-02",
           "valor": 0
         },
         {
-          "rotulo": "21/09",
-          "valor": 1
+          "rotulo": "03/10",
+          "dia": "2026-10-03",
+          "valor": 0
         },
         {
-          "rotulo": "28/09",
+          "rotulo": "04/10",
+          "dia": "2026-10-04",
           "valor": 0
         },
         {
           "rotulo": "05/10",
+          "dia": "2026-10-05",
+          "valor": 1
+        },
+        {
+          "rotulo": "06/10",
+          "dia": "2026-10-06",
+          "valor": 0
+        },
+        {
+          "rotulo": "07/10",
+          "dia": "2026-10-07",
+          "valor": 0
+        },
+        {
+          "rotulo": "08/10",
+          "dia": "2026-10-08",
+          "valor": 1
+        },
+        {
+          "rotulo": "09/10",
+          "dia": "2026-10-09",
+          "valor": 0
+        },
+        {
+          "rotulo": "10/10",
+          "dia": "2026-10-10",
+          "valor": 0
+        },
+        {
+          "rotulo": "11/10",
+          "dia": "2026-10-11",
           "valor": 2
         },
         {
           "rotulo": "12/10",
-          "valor": 0
+          "dia": "2026-10-12",
+          "valor": 1
+        },
+        {
+          "rotulo": "13/10",
+          "dia": "2026-10-13",
+          "valor": 2
         }
       ],
-      "resumo": "Último: 11/10, formulário do site",
-      "fonte": "sales_leads (source 'site', 'site_partial')"
+      "resumo": "Último: 13/10, WhatsApp",
+      "fonte": "hub_messages/hub_conversations (WhatsApp da Aura) + sales_leads (source 'site', 'site_partial')"
     },
     {
       "id": "frentes",
@@ -850,6 +892,14 @@
       "detalhe": "Rejeição 327: CFOP inválido",
       "verbo": "Ver",
       "bloco": "fiscal"
+    },
+    {
+      "tipo": "contato_sem_resposta",
+      "company_id": null,
+      "titulo": "+55 12 98888-0077 sem resposta há 3 h 30 min",
+      "detalhe": "WhatsApp +55 12 98888-0077 · https://wa.me/5512988880077 · Aurinha já respondeu",
+      "verbo": "Responder",
+      "bloco": "contatos"
     }
   ]
 }

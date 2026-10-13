@@ -62,13 +62,16 @@ async function gravadosDoDia() {
 let doDia;
 
 beforeAll(async () => {
+  // O número da Aura está ligado neste arquivo: o bloco Contatos, o alerta e a
+  // ficha da conversa leem o hub (dados em fakePainelDb.hub*).
+  process.env.AURA_COMPANY_ID = fake.AURA_COMPANY;
   jest.useFakeTimers({ now: fake.AGORA, doNotFake: ['nextTick', 'setImmediate', 'setTimeout', 'setInterval', 'clearTimeout', 'clearInterval', 'queueMicrotask'] });
   jest.spyOn(console, 'warn').mockImplementation(() => {});
   jest.spyOn(console, 'error').mockImplementation(() => {});
   doDia = await gravadosDoDia();
   db.query.mockReset();
 });
-afterAll(() => { jest.useRealTimers(); jest.restoreAllMocks(); });
+afterAll(() => { delete process.env.AURA_COMPANY_ID; jest.useRealTimers(); jest.restoreAllMocks(); });
 afterEach(() => db.query.mockReset());
 
 // Banco com o dia já calculado pelo job.
@@ -82,7 +85,7 @@ function comDiaGravado() {
 describe('acesso', () => {
   test('sem token → 401; cliente comum → 403', async () => {
     expect((await request(makeApp()).get('/admin/painel/hoje')).status).toBe(401);
-    for (const [metodo, url] of [['get', '/hoje'], ['get', '/blocos/pagantes'], ['get', '/layout'], ['put', '/layout'], ['post', '/recalcular'], ['get', `/clientes/${fake.id(1)}/ficha`]]) {
+    for (const [metodo, url] of [['get', '/hoje'], ['get', '/blocos/pagantes'], ['get', '/layout'], ['put', '/layout'], ['post', '/recalcular'], ['get', `/clientes/${fake.id(1)}/ficha`], ['get', `/contatos/${fake.conv(1)}`]]) {
       expect((await api(metodo, url, cliente)).status).toBe(403);
     }
     expect(db.query).not.toHaveBeenCalled();
@@ -102,8 +105,11 @@ describe('GET /admin/painel/hoje', () => {
     for (const b of res.body.blocos) {
       expect(Object.keys(b).sort()).toEqual(['fonte', 'grupo', 'id', 'resumo', 'serie', 'titulo', 'unidade', 'valor', 'variacao']);
     }
-    // só leitura: 2 consultas, nenhum bloco recalculado
-    expect(db.query).toHaveBeenCalledTimes(2);
+    // só leitura: 2 consultas do painel + a leitura do hub para o alerta de
+    // contato (que depende do relógio e por isso não vem gravado)
+    const sqls = db.query.mock.calls.map((c) => c[0]);
+    expect(sqls.filter((q) => !q.includes('-- contatos:'))).toHaveLength(2);
+    expect(sqls.filter((q) => q.includes('-- contatos:')).length).toBeGreaterThan(0);
     expect(escritas).toHaveLength(0);
     conferir('hoje', res.body);
   });
@@ -151,7 +157,7 @@ describe('GET /admin/painel/hoje', () => {
     expect(bloco('fiscal').variacao).toEqual({ d7: null, d30: null });
   });
 
-  test('alertas: os quatro tipos, cada um apontando loja, verbo e bloco', async () => {
+  test('alertas: os cinco tipos, cada um apontando loja, verbo e bloco', async () => {
     comDiaGravado();
     const { body } = await api('get', '/hoje');
     expect(body.alertas).toEqual([
@@ -159,7 +165,31 @@ describe('GET /admin/painel/hoje', () => {
       { tipo: 'trial_com_venda_vencendo', company_id: fake.id(5), titulo: 'Ótica Visão: trial com venda vence amanhã', detalhe: '3 vendas no trial', verbo: 'Oferecer', bloco: 'trials_degrau' },
       { tipo: 'pagamento_sem_loja', company_id: null, titulo: 'R$ 140,83 recebido sem loja vinculada', detalhe: 'Asaas · 12/10', verbo: 'Vincular', bloco: 'receita' },
       { tipo: 'nfce_rejeitada', company_id: fake.id(2), titulo: 'Mercado Bela Vista: 1 NFC-e rejeitada em 7 dias', detalhe: 'Rejeição 327: CFOP inválido', verbo: 'Ver', bloco: 'fiscal' },
+      // 05:30 → 09:00 BRT: 3h30 sem resposta humana (a Aurinha já respondeu)
+      { tipo: 'contato_sem_resposta', company_id: null, titulo: '+55 12 98888-0077 sem resposta há 3 h 30 min', detalhe: 'WhatsApp +55 12 98888-0077 · https://wa.me/5512988880077 · Aurinha já respondeu', verbo: 'Responder', bloco: 'contatos' },
     ]);
+  });
+
+  test('alerta de contato vale o de agora, não o gravado às 06h', async () => {
+    // O que o job das 06h gravou não tem contato (de madrugada não se avisa):
+    // o /hoje de 09h BRT traz o contato mesmo assim.
+    const dados = fake.dadosPadrao();
+    dados.gravados = doDia.gravados;
+    dados.alertasGravados = doDia.alertas.filter((a) => a.tipo !== 'contato_sem_resposta');
+    fake.ligar(db.query, dados);
+    const { body } = await api('get', '/hoje');
+    expect(body.alertas.filter((a) => a.tipo === 'contato_sem_resposta')).toHaveLength(1);
+
+    // à noite o alerta some (a Aurinha está de plantão); o resto continua
+    jest.setSystemTime(new Date('2026-10-14T00:30:00.000Z')); // 21h30 BRT
+    try {
+      fake.ligar(db.query, dados);
+      const noite = await api('get', '/hoje');
+      expect(noite.body.alertas.map((a) => a.tipo)).not.toContain('contato_sem_resposta');
+      expect(noite.body.alertas).toHaveLength(body.alertas.length - 1);
+    } finally {
+      jest.setSystemTime(fake.AGORA);
+    }
   });
 });
 
@@ -294,6 +324,62 @@ describe('GET /admin/painel/clientes/:cid/ficha', () => {
   });
 });
 
+describe('GET /admin/painel/contatos/:conversaId', () => {
+  test('conversa inteira: telefone completo, link, empresa, quem respondeu e mensagens — fixture contatos.conversa.json', async () => {
+    fake.ligar(db.query);
+    const res = await api('get', `/contatos/${fake.conv(1)}`);
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({
+      conversa_id: fake.conv(1),
+      canal: 'whatsapp',
+      telefone: '5511999900002',
+      telefone_formatado: '+55 11 99990-0002',
+      telefone_mascarado: '+55 11 *****-0002',
+      link_whatsapp: 'https://wa.me/5511999900002',
+      nome: 'Renata Lima',
+      empresa: { company_id: fake.id(2), nome: 'Mercado Bela Vista' },
+    });
+    expect(res.body.contato_atual).toMatchObject({ situacao: 'humano', situacao_rotulo: 'Caio', espera_min: 510 });
+    expect(res.body.mensagens.map((m) => [m.direcao, m.autor])).toEqual([
+      ['recebida', 'cliente'], ['enviada', 'aurinha'], ['enviada', 'humano'],
+    ]);
+    // sempre do tenant Aura, só WhatsApp
+    const consulta = db.query.mock.calls.find((c) => c[0].replace(/\s+/g, ' ').includes('-- contatos:conversa '));
+    expect(consulta[1]).toEqual([fake.conv(1), fake.AURA_COMPANY]);
+    conferir('contatos.conversa', res.body);
+  });
+
+  test('conversa que ainda espera resposta: aponta desde quando', async () => {
+    fake.ligar(db.query);
+    const { body } = await api('get', `/contatos/${fake.conv(2)}`);
+    expect(body.nome).toBeNull();
+    expect(body.empresa).toBeNull();
+    expect(body.contato_atual).toMatchObject({
+      situacao: 'aurinha', espera_min: null, sem_resposta_humana_desde: '2026-10-13T08:30:00.000Z',
+    });
+  });
+
+  test('id que não é de conversa da Aura (ou não é uuid) → 404', async () => {
+    fake.ligar(db.query);
+    expect((await api('get', `/contatos/${fake.conv(9)}`)).status).toBe(404);
+    db.query.mockClear();
+    expect((await api('get', '/contatos/nao-e-uuid')).status).toBe(404);
+    expect(db.query).not.toHaveBeenCalled();
+  });
+
+  test('número da Aura não ligado (sem AURA_COMPANY_ID) → 404 e nenhuma consulta', async () => {
+    fake.ligar(db.query);
+    const anterior = process.env.AURA_COMPANY_ID;
+    delete process.env.AURA_COMPANY_ID;
+    try {
+      expect((await api('get', `/contatos/${fake.conv(1)}`)).status).toBe(404);
+      expect(db.query).not.toHaveBeenCalled();
+    } finally {
+      process.env.AURA_COMPANY_ID = anterior;
+    }
+  });
+});
+
 describe('GET e PUT /admin/painel/layout', () => {
   test('sem layout salvo: todos os blocos, visíveis, na ordem padrão — fixture layout.get.json', async () => {
     fake.ligar(db.query);
@@ -422,8 +508,9 @@ describe('passo diário — gravação idempotente', () => {
     expect(apaga.params[1]).toEqual([
       `pagante_anual_vencendo:${fake.id(1)}`, `trial_com_venda_vencendo:${fake.id(5)}`,
       'pagamento_sem_loja:w4', `nfce_rejeitada:${fake.id(2)}`,
+      `contato_sem_resposta:${fake.conv(2)}`,
     ]);
-    expect(JSON.parse(grava.params[1])).toHaveLength(4);
+    expect(JSON.parse(grava.params[1])).toHaveLength(5);
   });
 
   test('hojeBRT: 02h UTC ainda é o dia anterior em Brasília', () => {
