@@ -586,6 +586,113 @@ async function enqueue({
   return { queued: status === 'pending', id: rows[0].id, status, reason: skipReason };
 }
 
+// ── Origem HUB (375) ────────────────────────────────────────
+// Mensagem de uma conversa do hub (Aurinha de plantão ou resposta humana
+// pelo painel) → telefone do cliente. Diferenças para o enqueue() da
+// régua, todas de propósito:
+//  - a janela de 24h vem da CONVERSA (hub_conversations.last_inbound_at),
+//    não de wa_contacts: o hub não passa por touchInbound, porque as
+//    palavras de opt-out ("cancelar", "parar") são justamente o que um
+//    cliente de SUPORTE diz — não pode virar descadastro de marketing;
+//  - sem opt-out e sem teto por contato (2/dia): é conversa iniciada pelo
+//    cliente, cada resposta é uma inbound, e o dedupeKey por inbound já
+//    impede duas respostas à mesma fala. Continuam valendo telefone
+//    inválido para a Meta, pausa da fila e o teto diário da empresa;
+//  - fora das 24h só sai TEMPLATE aprovado. Sem template (ou sem
+//    aprovação) a linha NÃO é descartada: fica 'pending' com o motivo em
+//    skip_reason e next_attempt_at = 'infinity' — o dispatcher não a
+//    pega, e quem abrir a fila lê por que ela está parada.
+function windowOpenAt(lastInboundAt) {
+  return !!(lastInboundAt && Date.now() - new Date(lastInboundAt).getTime() < WINDOW_MS);
+}
+
+async function enqueueHub({
+  companyId, conversationId, toPhone, textBody,
+  sourceType = 'aurinha', sourceId = null, dedupeKey = null,
+  lastInboundAt = null, template = null,
+}) {
+  const phone = normalizePhone(toPhone);
+  if (!phone) return { queued: false, reason: 'TELEFONE_INVALIDO' };
+  if (!conversationId || !textBody) return { queued: false, reason: 'DADOS_INCOMPLETOS' };
+
+  let kind = 'text';
+  let templateName = null;
+  let templateLanguage = 'pt_BR';
+  let status = 'pending';
+  let skipReason = null;
+  let held = false;
+
+  if (!windowOpenAt(lastInboundAt)) {
+    if (template && template.nome) {
+      kind = 'template';
+      templateName = template.nome;
+      templateLanguage = template.idioma || 'pt_BR';
+      if (!(await isTemplateApproved(companyId, templateName, templateLanguage))) {
+        held = true; skipReason = 'TEMPLATE_NAO_APROVADO';
+      }
+    } else {
+      held = true; skipReason = 'JANELA_FECHADA_SEM_TEMPLATE';
+    }
+  }
+
+  if (!held) {
+    const contact = await getContact(companyId, phone).catch(() => null);
+    if (contact && contact.invalid_at) {
+      status = 'skipped'; skipReason = 'TELEFONE_INVALIDO_META';
+    }
+    if (status === 'pending') {
+      const pauseReason = await loadPauseReason(companyId);
+      if (pauseReason) {
+        status = 'skipped';
+        skipReason = pauseReason === 'QUALIDADE_BAIXA' ? 'QUALIDADE_BAIXA' : 'PAUSADO';
+      }
+    }
+    if (status === 'pending') {
+      const n = await countToday(companyId, {});
+      if (n >= dailyCap()) { status = 'skipped'; skipReason = 'LIMITE_DIARIO'; }
+    }
+  }
+
+  try {
+    const { rows } = await db.query(
+      `-- wa:outbox-enqueue-hub
+       INSERT INTO wa_outbox
+         (company_id, to_phone, kind, template_name, template_language,
+          text_body, status, skip_reason, source_type, source_id, dedupe_key,
+          hub_conversation_id, next_attempt_at)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,
+               CASE WHEN $13::boolean THEN 'infinity'::timestamptz ELSE NOW() END)
+       ON CONFLICT (dedupe_key) WHERE dedupe_key IS NOT NULL DO NOTHING
+       RETURNING id, status`,
+      [companyId, phone, kind, templateName, templateLanguage, textBody,
+       status, skipReason, sourceType, sourceId, dedupeKey, conversationId, held]
+    );
+    if (!rows.length) return { queued: false, reason: 'DUPLICADO' };
+    return { queued: status === 'pending' && !held, id: rows[0].id, status, reason: skipReason, held };
+  } catch (e) {
+    // 375 pendente: sem a coluna não há "origem hub" — nada é gravado.
+    if (e.code === '42703') return { queued: false, reason: 'SCHEMA_PENDENTE' };
+    throw e;
+  }
+}
+
+// Conversa do hub no momento do envio (janela e quem está no comando).
+// 42P01/42703 → null: sem o hub, o item cai no caminho das lojas.
+async function loadHubConversation(conversationId) {
+  try {
+    const { rows } = await db.query(
+      `-- wa:hub-conv
+       SELECT last_inbound_at, status, ultima_mensagem_humana_em
+         FROM hub_conversations WHERE id = $1 LIMIT 1`,
+      [conversationId]
+    );
+    return rows[0] || null;
+  } catch (e) {
+    if (e.code === '42P01' || e.code === '42703') return null;
+    throw e;
+  }
+}
+
 // Simula as guardas 1 (telefone inválido), OPT_OUT, 2 (template) e 3
 // (pausa) de UM possível envio, SEM GRAVAR NADA — usado pelo
 // GET /whatsapp/preview para mostrar quem seria pulado hoje sem gastar
@@ -766,16 +873,36 @@ async function processBatch(limit = 20) {
         continue;
       }
       // Reforço das regras NO ENVIO (estado pode ter mudado na fila).
+      // Origem HUB (375): a janela é a da conversa, não a de wa_contacts, e
+      // opt-out de marketing não se aplica a atendimento (ver enqueueHub).
+      const hubConv = row.hub_conversation_id
+        ? await loadHubConversation(row.hub_conversation_id) : null;
       const contact = await getContact(row.company_id, row.to_phone);
-      if (contact && contact.opted_out_at) {
+      if (!hubConv && contact && contact.opted_out_at) {
         await markRow(row.id, { status: 'skipped', skip_reason: 'OPT_OUT' });
         out.skipped++;
         continue;
       }
-      if (row.kind === 'text' && !windowOpen(contact)) {
+      if (row.kind === 'text'
+          && !(hubConv ? windowOpenAt(hubConv.last_inbound_at) : windowOpen(contact))) {
         await markRow(row.id, { status: 'skipped', skip_reason: 'JANELA_FECHADA' });
         out.skipped++;
         continue;
+      }
+      if (hubConv && row.source_type === 'aurinha') {
+        // A equipe assumiu a conversa, ou um humano já respondeu depois que
+        // a resposta entrou na fila: a Aurinha não fala por cima.
+        const assumida = hubConv.status !== 'ia' && hubConv.status !== 'precisa_humano';
+        const humanoRespondeu = hubConv.ultima_mensagem_humana_em
+          && new Date(hubConv.ultima_mensagem_humana_em) > new Date(row.created_at);
+        if (assumida || humanoRespondeu) {
+          await markRow(row.id, {
+            status: 'skipped',
+            skip_reason: humanoRespondeu ? 'HUMANO_RESPONDEU' : 'CONVERSA_NAO_IA',
+          });
+          out.skipped++;
+          continue;
+        }
       }
       // ── Reforço 2b: repete as guardas 1, 2 e 3 do enqueue — o estado
       // pode ter mudado enquanto o item esperava na fila (a Meta marcou
@@ -839,6 +966,26 @@ async function processBatch(limit = 20) {
       const wamid = resp && resp.messages && resp.messages[0] && resp.messages[0].id || null;
       await markRow(row.id, { status: 'sent', wa_message_id: wamid, last_error: null });
       out.sent++;
+
+      // Origem HUB: o espelho é a thread da conversa (hub_messages, 375) —
+      // é também o que reconhece o eco do próprio envio como "não humano".
+      if (row.hub_conversation_id) {
+        db.query(
+          `INSERT INTO hub_messages
+             (company_id, conversation_id, channel, direction, author, external_message_id, content, metadata)
+           VALUES ($1,$2,'whatsapp','outbound',$3,$4,$5,$6)
+           ON CONFLICT (company_id, channel, external_message_id)
+             WHERE external_message_id IS NOT NULL DO NOTHING`,
+          [row.company_id, row.hub_conversation_id,
+           row.source_type === 'humano' ? 'humano' : 'aurinha', wamid,
+           row.text_body || `[template ${row.template_name}]`,
+           JSON.stringify({ outbox_id: row.id, source_type: row.source_type })]
+        ).catch(() => {});
+        db.query(
+          `UPDATE hub_conversations SET last_message_at = NOW(), updated_at = NOW() WHERE id = $1`,
+          [row.hub_conversation_id]
+        ).catch(() => {});
+      }
 
       // Log espelho em wa_messages (039) — best-effort.
       db.query(
@@ -925,7 +1072,8 @@ async function applyTemplateStatus(companyId, { name, language, status, metaTemp
 module.exports = {
   normalizePhone, touchInbound, touchOutboundHuman, windowOpen, getContact, decryptToken,
   isTokenError, markTokenInvalid, clearTokenInvalid, connectionState,
-  enqueue, processBatch, simulate, applyStatusUpdate, applyTemplateStatus,
+  enqueue, enqueueHub, processBatch, simulate, applyStatusUpdate, applyTemplateStatus,
+  windowOpenAt,
   // Guardas de custo (Fase 2) — expostas para o GET /whatsapp/preview e
   // para os testes de guarda.
   dailyCap, perPhoneDailyCap, countToday, isTemplateApproved, loadPauseReason,
