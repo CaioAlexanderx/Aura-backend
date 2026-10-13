@@ -134,6 +134,12 @@ function startServer() {
     const { initIgDispatcher } = require('./jobs/igDispatcherJob');
     initIgDispatcher();
 
+    // AURINHA DE PLANTAO (375): reavalia a cada 60s as conversas do WhatsApp
+    // da Aura que esperam resposta (de dia, 15 min pelo humano). Dormente
+    // sem AURA_COMPANY_ID; kill switch PLANTAO_ENABLED=false.
+    const { initPlantaoJob } = require('./jobs/plantaoJob');
+    initPlantaoJob();
+
     // Loja online (315): Pix vencido sem pagamento — tick 10min. É o único
     // evento do sino sem gancho de fluxo: ninguém "faz" um Pix expirar.
     const { initPixExpiradoJob } = require('./jobs/lojaPixExpiradoJob');

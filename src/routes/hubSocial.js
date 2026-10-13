@@ -18,11 +18,17 @@ const express = require('express');
 const router = express.Router({ mergeParams: true });
 const db = require('../config/database');
 const igOutbox = require('../services/igOutbox');
+const waOutbox = require('../services/waOutbox');
+const hubWhatsapp = require('../services/hubWhatsapp');
 
 const CATEGORIES = ['produto', 'troca', 'entrega', 'pagamento', 'novidades'];
 const STATUSES = ['ia', 'precisa_humano', 'humano', 'resolvida'];
 
 function isMissingSchema(e) { return e && (e.code === '42P01' || e.code === '42703'); }
+
+// hub_messages nasce na 375 (WhatsApp da Aura). Enquanto a migration não
+// subiu, a lista de conversas cai no SQL de antes (cache module-level).
+let _hubMessagesOk = true;
 
 async function logEvent(companyId, conversationId, type, detail, userId) {
   await db.query(
@@ -46,20 +52,32 @@ router.get('/conversations', async (req, res) => {
     if (category && CATEGORIES.includes(category)) { vals.push(category); where.push(`c.category = $${vals.length}`); }
     vals.push(limit);
 
-    const { rows } = await db.query(
-      `-- hub:conversations
+    const listSql = (preview) => `-- hub:conversations
        SELECT c.id, c.channel, c.external_id, c.customer_id, c.customer_name,
               c.status, c.category, c.handoff_reason, c.last_inbound_at, c.last_message_at,
-              (SELECT content FROM ig_messages m
-                WHERE m.conversation_id = c.id ORDER BY m.created_at DESC LIMIT 1) AS last_message_preview,
+              ${preview} AS last_message_preview,
               (SELECT COUNT(*)::int FROM ig_outbox o
                 WHERE o.conversation_id = c.id AND o.status = 'pending_approval') AS pending_approvals
          FROM hub_conversations c
         WHERE ${where.join(' AND ')}
         ORDER BY c.last_message_at DESC NULLS LAST
-        LIMIT $${vals.length}`,
-      vals
-    );
+        LIMIT $${vals.length}`;
+    const igPreview = `(SELECT content FROM ig_messages m
+                WHERE m.conversation_id = c.id ORDER BY m.created_at DESC LIMIT 1)`;
+    const waPreview = `(SELECT content FROM hub_messages hm
+                WHERE hm.conversation_id = c.id ORDER BY hm.created_at DESC LIMIT 1)`;
+    let rows;
+    if (_hubMessagesOk) {
+      try {
+        ({ rows } = await db.query(listSql(`COALESCE(${igPreview}, ${waPreview})`), vals));
+      } catch (e) {
+        // 375 pendente: hub_messages ainda não existe — volta ao SQL de antes
+        // em vez de zerar a lista de todas as lojas.
+        if (!isMissingSchema(e)) throw e;
+        _hubMessagesOk = false;
+      }
+    }
+    if (!rows) ({ rows } = await db.query(listSql(igPreview), vals));
 
     // Contadores para os chips do app (sempre do conjunto todo, sem filtro)
     const { rows: counts } = await db.query(
@@ -88,13 +106,21 @@ router.get('/conversations/:convId/messages', async (req, res) => {
     );
     if (!conv.length) return res.status(404).json({ error: 'Conversa não encontrada' });
 
-    const { rows: messages } = await db.query(
-      `SELECT id, direction, content, status, created_at, metadata->>'source_type' AS source_type
-         FROM ig_messages
-        WHERE conversation_id = $1
-        ORDER BY created_at ASC LIMIT 200`,
-      [convId]
-    );
+    const { rows: messages } = conv[0].channel === 'whatsapp'
+      ? await db.query(
+        `SELECT id, direction, content, author, created_at, metadata->>'source_type' AS source_type
+           FROM hub_messages
+          WHERE conversation_id = $1
+          ORDER BY created_at ASC LIMIT 200`,
+        [convId]
+      )
+      : await db.query(
+        `SELECT id, direction, content, status, created_at, metadata->>'source_type' AS source_type
+           FROM ig_messages
+          WHERE conversation_id = $1
+          ORDER BY created_at ASC LIMIT 200`,
+        [convId]
+      );
     // Sugestões da Aurinha aguardando aprovação aparecem no fim da thread
     const { rows: pending } = await db.query(
       `SELECT id, text_body, edited_body, status, source_type, created_at
@@ -177,7 +203,7 @@ router.post('/conversations/:convId/reply', async (req, res) => {
     );
     if (!rows.length) return res.status(404).json({ error: 'Conversa não encontrada' });
     const conv = rows[0];
-    if (conv.channel !== 'instagram') {
+    if (conv.channel !== 'instagram' && conv.channel !== 'whatsapp') {
       return res.status(400).json({ error: 'Canal ainda não suportado para envio' });
     }
     if (!igOutbox.windowOpen(conv.last_inbound_at)) {
@@ -185,6 +211,20 @@ router.post('/conversations/:convId/reply', async (req, res) => {
         error: 'Janela de 24h fechada — a Meta só aceita resposta até 24h após a última mensagem do cliente.',
         code: 'JANELA_FECHADA',
       });
+    }
+    if (conv.channel === 'whatsapp') {
+      // Origem hub (375): vai pela wa_outbox com a janela da conversa.
+      const enq = await waOutbox.enqueueHub({
+        companyId: cid, conversationId: convId, toPhone: conv.external_id,
+        textBody: text, sourceType: 'humano', sourceId: req.user?.id || null,
+        lastInboundAt: conv.last_inbound_at,
+      });
+      if (enq.reason === 'SCHEMA_PENDENTE') {
+        return res.status(409).json({ error: 'Hub ainda não disponível (migration pendente)' });
+      }
+      // O humano falou: a Aurinha não entra por cima nem repete.
+      await hubWhatsapp.marcarRespostaHumana(cid, convId, req.user?.id || null);
+      return res.json({ ok: true, outbox_id: enq.id || null, status: enq.status || null });
     }
     const enq = await igOutbox.enqueue({
       companyId: cid, conversationId: convId, toIgId: conv.external_id,

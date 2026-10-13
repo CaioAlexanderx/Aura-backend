@@ -10,6 +10,7 @@ const db = require('../config/database');
 const { validateWebhookSignature } = require('../utils/webhook');
 const waOutbox = require('../services/waOutbox');
 const customerConsent = require('../services/customerConsent');
+const hubWhatsapp = require('../services/hubWhatsapp');
 
 // Sem fallback hardcoded (era 'aura_whatsapp_verify_2026' — token previsível).
 // O verify token PRECISA vir do ambiente; sem ele, a verificação da Meta falha.
@@ -98,6 +99,19 @@ router.post('/', async (req, res) => {
           );
           if (rows.length) companyId = rows[0].id;
         }
+
+        // ── Aurinha de plantão (375): o número da própria Aura cai no hub.
+        // Dormente sem AURA_COMPANY_ID (resolveTenant nem consulta o banco);
+        // as lojas seguem o fluxo de sempre. Com tenant, companyId passa a
+        // ser o da Aura mesmo que companies.wa_phone_number_id não esteja
+        // preenchido — status e qualidade do número seguem no fluxo comum.
+        let hubTenant = null;
+        try {
+          hubTenant = await hubWhatsapp.resolveTenant(phoneNumberId);
+        } catch (e) {
+          console.error('[WA-WEBHOOK] hub tenant error:', e.message);
+        }
+        if (hubTenant) companyId = hubTenant.companyId;
 
         // ── ONDA 5b: aprovação/rejeição de template (o campo
         // message_template_status_update já está assinado na Meta).
@@ -208,6 +222,11 @@ router.post('/', async (req, res) => {
             const echoes = value.message_echoes || [];
             for (const echo of echoes) {
               if (!companyId) continue;
+              // Hub (375): o Caio respondeu pelo celular — mensagem humana.
+              if (hubTenant) {
+                await hubWhatsapp.registrarEcho(hubTenant, echo)
+                  .catch((e) => console.error('[WA-WEBHOOK] hub echo error:', e.message));
+              }
               const toPhone = waOutbox.normalizePhone(echo.to) || echo.to;
               const content = echo.text?.body || echo.caption || `[${echo.type || 'mensagem'}]`;
               try {
@@ -280,6 +299,16 @@ router.post('/', async (req, res) => {
         const messages = value.messages || [];
         for (const msg of messages) {
           if (!companyId) continue;
+          // Hub (375): mensagem para o número da Aura vira conversa do hub.
+          // Fica FORA de wa_contacts/consentimento de propósito: "cancelar"
+          // e "parar" em atendimento são assunto de suporte, não opt-out.
+          if (hubTenant) {
+            const contato = (value.contacts || []).find((c) => c && c.wa_id === msg.from);
+            await hubWhatsapp.registrarInbound(hubTenant, msg, {
+              nome: (contato && contato.profile && contato.profile.name) || null,
+            }).catch((e) => console.error('[WA-WEBHOOK] hub inbound error:', e.message));
+            continue;
+          }
           const content = msg.text?.body || msg.caption || `[${msg.type}]`;
           await db.query(
             `INSERT INTO wa_messages (company_id, direction, wa_message_id, from_phone, content, status, metadata)
