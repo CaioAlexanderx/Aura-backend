@@ -11,8 +11,9 @@
 //         studio_gallery_enabled, studio_approval_enabled, food_mode_enabled,
 //         food_nfce_manual_enabled, food_comanda_print_enabled,
 //         card_fee_enabled, os_enabled, otica_enabled, card_price_enabled,
-//         allow_sale_without_stock
-//   STRING (enum): studio_approval_mode (wa_me | whatsapp_business)
+//         allow_sale_without_stock, comanda_enabled, vale_troca_enabled (true)
+//   STRING (enum): studio_approval_mode (wa_me | whatsapp_business),
+//                  label_design (classico | editorial)
 //   NUMBER: service_fee_pct, food_service_fee_pct,
 //           card_fee_credit_pct, card_fee_debit_pct
 //   NUMBER OU NULL (percentual 0-100): card_price_pct
@@ -71,6 +72,10 @@ const ALLOWED_BOOL_KEYS = [
   // 09/10/2026 — Comandas do Caixa (migration 368). Liga "Adicionar a
   // comanda" e "Fechar comanda" no Caixa. Desligado por padrao.
   'comanda_enabled',
+  // 13/10/2026 — vale-troca por QR no cupom (aura-app#1056). Ligado por
+  // padrao: era a unica preferencia do Caixa guardada so no navegador,
+  // entao nao valia em outro aparelho da loja.
+  'vale_troca_enabled',
 ];
 
 // 22/09/2026 — Matcon: lista de unidades habilitadas ("Minha loja vende
@@ -82,6 +87,10 @@ const ALLOWED_STRING_ARRAY_KEYS = {
 // String enum: studio_approval_mode pode ser "wa_me" ou "whatsapp_business"
 const ALLOWED_STRING_KEYS = {
   studio_approval_mode: ['wa_me', 'whatsapp_business'],
+  // 13/10/2026 — desenho da etiqueta (independe do label_size, que e o
+  // formato do papel). 'classico' = o de sempre; 'editorial' = o novo
+  // desenho. Nao aceita null: sem escolha e 'classico' (ver DEFAULT_SETTINGS).
+  label_design: ['classico', 'editorial'],
 };
 
 // 24/09/2026 — modelo de etiqueta escolhido pela loja (aura-app
@@ -144,6 +153,9 @@ const DEFAULT_SETTINGS = {
   // 06/10/2026 — desligado = a trava de "Estoque insuficiente" de sempre.
   allow_sale_without_stock:  false,
   comanda_enabled:           false,
+  // 13/10/2026 — ligado = o cupom leva o QR do vale-troca (comportamento
+  // que a loja ja tinha antes de a preferencia ter chave propria).
+  vale_troca_enabled:        true,
   studio_enabled:            false,
   studio_kds_enabled:        false,
   studio_gallery_enabled:    false,
@@ -180,6 +192,7 @@ const DEFAULT_SETTINGS = {
   label_offset_mm:           0,
   label_cols:                3,
   label_size:                null,
+  label_design:              'classico',
   warranty_terms:            null,
 };
 
