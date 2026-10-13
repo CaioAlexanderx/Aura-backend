@@ -50,6 +50,12 @@ function dadosPadrao() {
       { company_id: id(7), produtos: '0', vendas: '0', checkout_em: ts('2026-10-09') },
       { company_id: id(8), produtos: '85', vendas: '31', checkout_em: null },
     ],
+    // trial contado da primeira venda: a Ótica já vendeu, a Tech Assist não
+    // (as demais não aparecem aqui = 'fixo')
+    trialModo: [
+      { company_id: id(5), trial_mode: 'primeira_venda', trial_started_by_sale_at: ts('2026-10-07') },
+      { company_id: id(7), trial_mode: 'primeira_venda', trial_started_by_sale_at: null },
+    ],
     vendasPeriodo: [
       { company_id: id(1), vendas: '4', ultima: ts('2026-09-21') },
       { company_id: id(2), vendas: '120', ultima: ts('2026-10-12') },
@@ -328,6 +334,14 @@ function responder(dados, escritas, sql, params = []) {
   if (s.startsWith('INSERT INTO client_health_scores')) return escrever('client_health_scores');
   if (s.startsWith('INSERT INTO aura_revenue_snapshot')) return escrever('aura_revenue_snapshot');
   if (s.includes('FROM aura_revenue_snapshot')) return dados.snapshots;
+
+  // ── modo do trial (migration 379): painel (company_id) e clients-360 (id) ──
+  if (s.includes('trial_started_by_sale_at')) {
+    const ids = [].concat(params[0] || []);
+    return dados.trialModo
+      .filter((t) => ids.includes(t.company_id))
+      .map((t) => (s.includes('AS company_id') ? { ...t } : { id: t.company_id, trial_mode: t.trial_mode, trial_started_by_sale_at: t.trial_started_by_sale_at }));
+  }
 
   // ── blocos ──
   if (s.includes('FROM products p WHERE p.company_id = c.id')) {

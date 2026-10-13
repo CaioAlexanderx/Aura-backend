@@ -243,6 +243,8 @@ router.patch('/clients/:cid/extend-trial', ...adminOnly, asyncHandler(async (req
 
   // 13/10/2026: a regra mora em services/trialExtension.js (a Aurinha de
   // plantão usa a mesma). Vencido/sem data conta de hoje; ativo soma ao fim.
+  // Ela também marca trial_mode = 'fixo' (marcarTrialFixo): a data dada aqui
+  // vale como está — a primeira venda não a encurta.
   const ext = await estenderTrial({ companyId: cid, days: n });
   if (!ext) throw new AppError('Empresa nao encontrada', 404);
   const previousEnds = ext.previousEnds;
@@ -269,6 +271,7 @@ router.patch('/clients/:cid/extend-trial', ...adminOnly, asyncHandler(async (req
     trial_ends_at: newEnds.toISOString(),
     previous_trial_ends_at: previousEnds ? previousEnds.toISOString() : null,
     days_added: n,
+    trial_mode: 'fixo',
   });
 }));
 

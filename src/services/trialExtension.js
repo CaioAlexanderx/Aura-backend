@@ -7,11 +7,13 @@
 //
 // Trial ainda no futuro → soma N dias ao fim atual. Vencido ou sem data →
 // conta a partir de agora. Quem chama grava a auditoria (admin_audit_log no
-// admin, audit_log na Aurinha): aqui só a regra e o UPDATE.
+// admin, audit_log na Aurinha): aqui só a regra, o UPDATE e o trial_mode =
+// 'fixo' (toda extensão é uma data escrita à mão — trialRegra.js).
 // ============================================================
 'use strict';
 
 const pool = require('../config/database');
+const { marcarTrialFixo } = require('./trialRegra');
 
 const DIA_MS = 24 * 60 * 60 * 1000;
 
@@ -35,6 +37,10 @@ async function estenderTrial({ companyId, days, now = new Date() }) {
     `UPDATE companies SET trial_ends_at = $1, updated_at = NOW() WHERE id = $2`,
     [newEnds, companyId]
   );
+  // A data estendida vale como está: sem isto a primeira venda de uma conta
+  // 'primeira_venda' encurtaria a extensão (services/trialRegra.js). Query
+  // separada e que nunca lança — coluna da 379 ausente não derruba a extensão.
+  await marcarTrialFixo(companyId);
 
   return { previousEnds, newEnds, billingStatus: current[0].billing_status, daysAdded: days };
 }

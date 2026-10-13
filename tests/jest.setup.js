@@ -62,3 +62,13 @@ jest.mock('../src/services/trialFunnel', () => ({
   touchCompanyActivity: jest.fn(() => false),
   recordCheckoutViewed: jest.fn(async () => false),
 }));
+
+// 13/10/2026: trial contado da primeira venda. O gancho da venda (POST
+// /pdv/sale) e o "virou fixo" (cupom de dias gratis, estender trial) fazem um
+// UPDATE a mais em db.query — mesmo problema acima. No-op aqui; os testes da
+// regra usam jest.unmock('../src/services/trialRegra').
+jest.mock('../src/services/trialRegra', () => ({
+  ...jest.requireActual('../src/services/trialRegra'),
+  iniciarTrialPelaPrimeiraVenda: jest.fn(async () => ({ iniciou: false })),
+  marcarTrialFixo: jest.fn(async () => false),
+}));

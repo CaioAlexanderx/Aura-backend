@@ -494,6 +494,8 @@ describe('estender_trial — uma vez por conta, só teste vencido ou a vencer', 
     expect(world.audit[0]).toMatchObject({ company_id: LOJA, action: 'aurinha.trial_estendido' });
     expect(world.audit[0].metadata).toMatchObject({ dias: 7, telefone: FONE, vinculo: 'dono', conversa_id: 'conv-1' });
     expect(eventos('ferramenta_suporte')[0].detail).toMatchObject({ ferramenta: 'estender_trial', ok: true, company_id: LOJA });
+    // a extensão vira data fixa: a primeira venda não a encurta (trialRegra, 379)
+    expect(require('../src/services/trialRegra').marcarTrialFixo).toHaveBeenCalledWith(LOJA);
   });
 
   it('teste a vencer (2 dias): soma 7 ao fim atual', async () => {

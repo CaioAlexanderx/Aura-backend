@@ -17,13 +17,14 @@ jest.mock('../../src/services/asaasClient', () => ({
 const request = require('supertest');
 const jwt     = require('jsonwebtoken');
 
-let app, db, asaas, promocoes, getTotalValue;
+let app, db, asaas, promocoes, getTotalValue, trialRegra;
 beforeAll(() => {
   ({ app } = require('../../src/index'));
   db = require('../../src/config/database');
   ({ asaas } = require('../../src/services/asaasClient'));
   promocoes = require('../../src/services/promocoes');
   ({ getTotalValue } = require('../../src/services/billingPricing'));
+  trialRegra = require('../../src/services/trialRegra'); // marcarTrialFixo e' jest.fn (jest.setup)
 });
 
 const SECRET = 'aura-test-secret-2026';
@@ -126,6 +127,9 @@ describe('aplicacao automatica no /subscribe (sem cupom informado)', () => {
     // billing_status='trial' + trial_ends_at = 01/12 (o app segue liberado ate la)
     const upd = calls.find((c) => c.sql.includes("billing_status='trial'"));
     expect(upd.params.slice(0, 4)).toEqual(['negocio', 'sub_1', 'monthly', '2026-12-01']);
+    // 13/10: a data da promocao vale como esta — a conta deixa o modo
+    // primeira_venda (senao a 1a venda encurtaria 01/12 para venda + 7 dias)
+    expect(trialRegra.marcarTrialFixo).toHaveBeenCalledWith(cid);
 
     // registrado em coupon_redemptions: periodo gratis, nada cobrado agora
     const red = redemptionOf(calls);
@@ -165,6 +169,7 @@ describe('aplicacao automatica no /subscribe (sem cupom informado)', () => {
     expect(res.body.charged_now).toBe(0);
     expect(res.body.coupon).toMatchObject({ code: 'PRIMEIROMES', automatic: true, discount_amount: cheio });
     expect(redemptionOf(calls)).toBeDefined();
+    expect(trialRegra.marcarTrialFixo).toHaveBeenCalledWith(cid);
   });
 
   test('anual: primeira parcela (novembro) some; endDate do anual segue o informado', async () => {
@@ -225,6 +230,26 @@ describe('cupom informado prevalece', () => {
     expect(red.params[3]).toBe('SHEID50');
     expect(calls.filter((c) => c.sql.includes('INSERT INTO coupon_redemptions'))).toHaveLength(1);
     expect(res.body.coupon).toMatchObject({ code: 'SHEID50', automatic: false });
+    // cupom so de desconto nao escreve trial_ends_at: o modo do trial fica como esta
+    expect(trialRegra.marcarTrialFixo).not.toHaveBeenCalled();
+  });
+
+  test('cupom de dias gratis (30 dias, cartao): escreve trial_ends_at e a conta vira fixa', async () => {
+    setNow(NO_PRAZO);
+    const indica30 = { ...sheid50Row(), id: 'ac-30', code: 'INDICA30', discount_pct: 0, trial_days: 30 };
+    const calls = arrangeDb({ codes: { PRIMEIROMES: promoRow(), INDICA30: indica30 } });
+    arrangeAsaas();
+
+    const res = await subscribe({
+      plan: 'negocio', billing_type: 'CREDIT_CARD', cycle: 'monthly', access_code: 'INDICA30', credit_card_token: 'tok',
+    });
+
+    expect(res.status).toBe(201);
+    expect(res.body.charged_now).toBe(0);
+    const upd = calls.find((c) => c.sql.includes("billing_status='trial'"));
+    expect(upd.params[3]).toBe(res.body.trial_ends_at);   // trial_ends_at continua escrito como antes
+    expect(upd.sql).not.toContain('trial_mode');          // fora do UPDATE da cobranca (42703 nao derruba)
+    expect(trialRegra.marcarTrialFixo).toHaveBeenCalledWith(cid);
   });
 
   test('cupom informado invalido NAO cai na promocao: 400', async () => {
@@ -264,6 +289,7 @@ describe('quando NAO aplica: cobra normal', () => {
     expect(res.body.coupon).toBeNull();
     expect(redemptionOf(calls)).toBeUndefined();
     expect(queriedCode(calls, 'PRIMEIROMES')).toBe(false);
+    expect(trialRegra.marcarTrialFixo).not.toHaveBeenCalled();
   });
 
   test('empresa com assinatura anterior (ja paga): cobra normal', async () => {
