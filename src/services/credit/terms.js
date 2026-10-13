@@ -35,13 +35,76 @@ function resolvePeriod(unit, count, config) {
   return { unit: u, count: c };
 }
 
+// 13/10/2026: a soma de meses agora e feita em UTC e FICA no ultimo dia do mes
+// quando o dia da primeira parcela nao existe la (31/01 + 1 mes = 28/02, nao
+// 03/03). Antes, `setMonth` estourava para o mes seguinte: 30/01 gerava 02/03 e
+// 30/03, e fevereiro ficava sem parcela. Para dias 1..28 o resultado e o mesmo
+// de sempre. Cada parcela e calculada a partir da PRIMEIRA data (nao da
+// anterior), entao 31/01 -> 28/02 -> 31/03 e nao 28/02 -> 28/03.
 function dueDateForIndex(firstDueStr, unit, count, idx) {
   const d = new Date(firstDueStr);
   const step = (parseInt(count, 10) || 1) * idx;
-  if (unit === 'week') d.setDate(d.getDate() + 7 * step);
-  else if (unit === 'day') d.setDate(d.getDate() + step);
-  else d.setMonth(d.getMonth() + step);
-  return d.toISOString().split('T')[0];
+  if (unit === 'week' || unit === 'day') {
+    d.setUTCDate(d.getUTCDate() + (unit === 'week' ? 7 : 1) * step);
+    return d.toISOString().split('T')[0];
+  }
+  const total = d.getUTCMonth() + step;
+  const lastDay = new Date(Date.UTC(d.getUTCFullYear(), total + 1, 0)).getUTCDate();
+  const day = Math.min(d.getUTCDate(), lastDay);
+  return new Date(Date.UTC(d.getUTCFullYear(), total, day)).toISOString().split('T')[0];
+}
+
+// ─── Primeira parcela (13/10/2026) ────────────────────
+// Vender em dezembro para a primeira parcela cair em janeiro. A data e livre
+// dentro de uma janela: nem no passado, nem alem de FIRST_DUE_MAX_DAYS a frente.
+// O teto e um so (a tela le em GET /credit/plan-config). A validacao vale para
+// POST /credit/installments; /pdv/sale e /credit/manual-entry aceitam o mesmo
+// campo sem esta janela porque lancam venda retroativa (sale_date/entry_date).
+const FIRST_DUE_MAX_DAYS = 90;
+
+function todayBrt(now = Date.now()) {
+  return new Date(now - 3 * 3600000).toISOString().slice(0, 10);
+}
+
+function isoAddDays(iso, n) {
+  const [y, m, d] = iso.split('-').map(Number);
+  return new Date(Date.UTC(y, m - 1, d + n)).toISOString().slice(0, 10);
+}
+
+// Mesmo "um mes depois" do default de /manual-entry e do PDV, mas ancorado em
+// Brasilia e preso ao fim do mes.
+function defaultFirstDueDate(today = todayBrt()) {
+  return dueDateForIndex(today, 'month', 1, 1);
+}
+
+// @returns { ok:true, date:'YYYY-MM-DD' }
+//        | { ok:false, status, code, error, ...extras }
+function validateFirstDueDate(raw, { today = todayBrt(), maxDays = FIRST_DUE_MAX_DAYS } = {}) {
+  const s = typeof raw === 'string' ? raw.trim().slice(0, 10) : '';
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(s);
+  const real = m && new Date(Date.UTC(+m[1], +m[2] - 1, +m[3])).toISOString().slice(0, 10) === s;
+  if (!real) {
+    return {
+      ok: false, status: 400, code: 'FIRST_DUE_DATE_INVALID',
+      error: 'first_due_date invalido. Use o formato YYYY-MM-DD.',
+    };
+  }
+  if (s < today) {
+    return {
+      ok: false, status: 422, code: 'FIRST_DUE_DATE_PAST',
+      error: 'A primeira parcela nao pode vencer no passado.',
+      today,
+    };
+  }
+  const maxDate = isoAddDays(today, maxDays);
+  if (s > maxDate) {
+    return {
+      ok: false, status: 422, code: 'FIRST_DUE_DATE_TOO_FAR',
+      error: `A primeira parcela pode vencer em ate ${maxDays} dias (${maxDate}).`,
+      max_days: maxDays, max_date: maxDate,
+    };
+  }
+  return { ok: true, date: s };
 }
 
 // ─── F2: resolveTerms ──────────────────────
@@ -98,4 +161,7 @@ module.exports = {
   resolvePeriod,
   dueDateForIndex,
   resolveTerms,
+  FIRST_DUE_MAX_DAYS,
+  validateFirstDueDate,
+  defaultFirstDueDate,
 };

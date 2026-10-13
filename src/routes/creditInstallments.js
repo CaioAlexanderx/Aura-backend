@@ -34,6 +34,15 @@
  *     (fallback: pix_link legado gravado na parcela).
  *   - Link fake pagar.getaura.com.br APOSENTADO: parcelas novas gravam pix_link NULL;
  *     o QR e gerado no FRONTEND a partir do payload (react-native-qrcode-svg).
+ * Primeira parcela em janeiro (13/10/2026):
+ *   - POST /installments: first_due_date e OPCIONAL (default: hoje + 1 mes).
+ *     Informado, nao pode ser passado nem passar de first_due_date_max_days (90)
+ *     a frente (422 FIRST_DUE_DATE_PAST / FIRST_DUE_DATE_TOO_FAR). As demais
+ *     parcelas seguem period_unit/period_count a partir dela. Resposta traz
+ *     first_due_date e due_dates[].
+ *   - GET /plan-config devolve first_due_date_max_days.
+ *   - /pdv/sale e /credit/manual-entry ja aceitavam first_due_date (venda
+ *     retroativa) e seguem sem a janela.
  */
 
 const express = require('express');
@@ -495,7 +504,9 @@ router.get('/plan-config', async (req, res) => {
         config = r.rows[0] || null;
       } else throw e;
     }
-    res.json(config || {});
+    // 13/10/2026: janela da primeira parcela (vender em dezembro, 1a parcela
+    // em janeiro). O teto e constante unica (services/credit/terms).
+    res.json({ ...(config || {}), first_due_date_max_days: creditLedger.FIRST_DUE_MAX_DAYS });
   } catch (err) {
     res.status(500).json({ error: err.message });
   } finally { client.release(); }
@@ -594,10 +605,27 @@ router.put('/plan-config', async (req, res) => {
 //     e gerado on-demand via GET /installments/:iid/pix.
 router.post('/installments', async (req, res) => {
   const companyId = req.params.id;
-  const { customer_id, sale_id, total_amount, installments, first_due_date,
+  const { customer_id, sale_id, total_amount, installments,
           period_unit, period_count, account_id } = req.body;
-  if (!customer_id || !total_amount || !installments || !first_due_date) {
-    return res.status(400).json({ error: 'customer_id, total_amount, installments e first_due_date sao obrigatorios.' });
+  if (!customer_id || !total_amount || !installments) {
+    return res.status(400).json({ error: 'customer_id, total_amount e installments sao obrigatorios.' });
+  }
+  // 13/10/2026: first_due_date e OPCIONAL. Sem ele a primeira parcela vence 1
+  // mes depois de hoje (mesmo default de /manual-entry e do PDV). Com ele:
+  // nao pode estar no passado nem alem de FIRST_DUE_MAX_DAYS (90) dias a frente
+  // -- vender em dezembro com a primeira parcela em janeiro. As demais parcelas
+  // seguem a periodicidade a partir dela.
+  let firstDue;
+  if (req.body.first_due_date === undefined || req.body.first_due_date === null || req.body.first_due_date === '') {
+    firstDue = creditLedger.defaultFirstDueDate();
+  } else {
+    const chk = creditLedger.validateFirstDueDate(req.body.first_due_date);
+    if (!chk.ok) {
+      const { status, ...body } = chk;
+      delete body.ok;
+      return res.status(status).json(body);
+    }
+    firstDue = chk.date;
   }
   const n = parseInt(installments);
   const total = parseFloat(total_amount);
@@ -649,7 +677,7 @@ router.post('/installments', async (req, res) => {
     const createdInstallments = [];
     for (let i = 1; i <= n; i++) {
       const amount     = i === n ? baseAmount + remainder : baseAmount;
-      const dueDateStr = creditLedger.dueDateForIndex(first_due_date, period.unit, period.count, i - 1);
+      const dueDateStr = creditLedger.dueDateForIndex(firstDue, period.unit, period.count, i - 1);
       let row;
       try {
         const ins = await client.query(
@@ -687,7 +715,16 @@ router.post('/installments', async (req, res) => {
     }
     await creditLedger._updateCreditUsed(client, companyId, customer_id);
     await client.query('COMMIT');
-    res.status(201).json({ installments: createdInstallments, warnings });
+    // due_dates: as datas como texto (YYYY-MM-DD), sem depender de como o driver
+    // serializa a coluna DATE de cada parcela.
+    const dueDates = createdInstallments.map((r) =>
+      (r.due_date instanceof Date ? r.due_date.toISOString() : String(r.due_date || '')).slice(0, 10));
+    res.status(201).json({
+      installments: createdInstallments,
+      first_due_date: firstDue,
+      due_dates: dueDates,
+      warnings,
+    });
   } catch (err) {
     await client.query('ROLLBACK');
     console.error('POST /credit/installments', err.message);
