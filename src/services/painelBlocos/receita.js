@@ -5,10 +5,15 @@
 // bloco diz qual fonte usou e mostra as duas somas lado a lado. "Recebido" é
 // dinheiro que entrou (RECEIVED/CONFIRMED), uma vez por cobrança, com os
 // pagamentos sem loja marcados.
+//
+// A lista "Conferência com o extrato" é a dupla checagem contra o banco: o
+// OFX anexado em /admin/painel/ofx (migration 373) casado com os repasses da
+// Asaas, mês a mês. Mês sem extrato diz "sem extrato".
 'use strict';
 
 const b = require('./_base');
 const { calcularMrr, ROTULO_FONTE } = require('../receita');
+const { conferenciaPorMes } = require('../conciliacaoOfx');
 
 const MESES = ['Jan', 'Fev', 'Mar', 'Abr', 'Mai', 'Jun', 'Jul', 'Ago', 'Set', 'Out', 'Nov', 'Dez'];
 const rotuloMes = (ym) => MESES[parseInt(String(ym).slice(5, 7), 10) - 1] || ym;
@@ -122,6 +127,29 @@ async function calcular({ hoje, periodo = 30, db = b.pool, empresas, mrr: mrrPro
   };
   const recebidoMes = somaDoMes(mesAtual);
   const recebidoAnterior = somaDoMes(mesAnterior);
+
+  // Asaas × banco, do mês mais novo para o mais antigo. Os dois meses que o
+  // bloco já calculou entram como estão: o número da tabela é o do indicador.
+  const chaveDoPagamento = (p) => ({ chave: p.pagamento_id || p.log_id, valor: p.valor });
+  const conferencia = (await conferenciaPorMes({
+    db,
+    hoje,
+    meses: 6,
+    recebidos: {
+      [mesAtual]: recebidoMes.pagamentos.map(chaveDoPagamento),
+      [mesAnterior]: recebidoAnterior.pagamentos.map(chaveDoPagamento),
+    },
+  })).reverse();
+  const linhasConferencia = conferencia.map((c) => ({
+    mes: c.mes,
+    mes_rotulo: `${c.rotulo}/${c.mes.slice(0, 4)}`,
+    asaas: c.asaas,
+    banco: c.banco,
+    diferenca: c.diferenca,
+    status: c.status,
+    detalhe: c.detalhe,
+    extrato_id: c.extratos.length ? c.extratos[c.extratos.length - 1].id : null,
+  }));
   const notaRecebido = (r) => b.plural(r.n, 'pagamento', 'pagamentos')
     + (r.sem_loja ? ` · ${r.sem_loja} sem loja (${b.brl(r.total_sem_loja)})` : '');
 
@@ -185,6 +213,9 @@ async function calcular({ hoje, periodo = 30, db = b.pool, empresas, mrr: mrrPro
   if (mrr.sem_cobranca.clientes) {
     avisos.push(`${b.plural(mrr.sem_cobranca.clientes, 'pagante', 'pagantes')} sem cobrança registrada (${b.brl(mrr.sem_cobranca.mrr_potencial)} fora do MRR)`);
   }
+  for (const c of conferencia) {
+    if (c.status === 'pendências') avisos.push(`Extrato de ${c.rotulo.toLowerCase()}: ${c.detalhe}`);
+  }
   if (semLoja) avisos.push(`${b.plural(semLoja, 'pagamento', 'pagamentos')} sem loja vinculada desde ${rotuloMes(mesAnterior).toLowerCase()}`);
 
   return b.montarBloco({
@@ -209,6 +240,11 @@ async function calcular({ hoje, periodo = 30, db = b.pool, empresas, mrr: mrrPro
       b.lista('Sem cobrança registrada', [b.colLoja(), b.col('plano', 'Plano'), b.col('ciclo', 'Ciclo'), b.col('mrr', 'Valor de tabela', 'moeda')], linhas.filter((l) => !l.tem_cobranca)),
       b.lista(`Recebido em ${rotuloMes(mesAtual).toLowerCase()}`, COLUNAS_PAGAMENTO, recebidoMes.pagamentos),
       b.lista(`Recebido em ${rotuloMes(mesAnterior).toLowerCase()}`, COLUNAS_PAGAMENTO, recebidoAnterior.pagamentos),
+      b.lista(
+        'Conferência com o extrato',
+        [b.col('mes_rotulo', 'Mês'), b.col('asaas', 'Asaas', 'moeda'), b.col('banco', 'Banco', 'moeda'), b.col('diferenca', 'Diferença', 'moeda'), b.col('status', 'Situação')],
+        linhasConferencia
+      ),
       b.lista('Assinaturas na Asaas sem empresa', [b.col('assinatura', 'Assinatura'), b.col('cliente_asaas', 'Cliente na Asaas'), b.col('descricao', 'Descrição'), b.col('mrr', 'MRR', 'moeda'), b.col('proximo_vencimento', 'Próximo vencimento', 'data')], semEmpresa),
       b.lista('Assinaturas ativas fora do MRR', [b.col('motivo', 'Motivo'), b.colLoja(), b.col('mrr', 'MRR', 'moeda'), b.col('proximo_vencimento', 'Próximo vencimento', 'data')], foraDoMrr),
       b.lista(`Eventos da Asaas · ${periodo} dias`, [b.col('quando', 'Quando', 'data_hora'), b.colLoja(), b.col('evento', 'Evento'), b.col('valor', 'Valor', 'moeda')], linhasEventos),

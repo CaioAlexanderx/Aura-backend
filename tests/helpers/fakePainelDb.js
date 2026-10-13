@@ -157,6 +157,17 @@ function dadosPadrao() {
       { id: 'w0b', company_id: id(1), event: 'PAYMENT_RECEIVED', processed_at: ts('2026-09-14', '09:00'), mes_recebido: '2026-09', valor: '140.83', pagamento_id: 'pay_00b', cliente_asaas: 'cus_000001', vencimento: '2026-09-14' },
       { id: 'w0a', company_id: id(2), event: 'PAYMENT_RECEIVED', processed_at: ts('2026-09-05', '09:00'), mes_recebido: '2026-09', valor: '169.00', pagamento_id: 'pay_00a', cliente_asaas: 'cus_000002', vencimento: '2026-09-05' },
     ],
+    // conferência com o extrato (migration 373): pagamentos de meses mais antigos
+    // e o extrato de setembro (2 créditos casados com a Asaas, 1 sem pagamento).
+    asaasConferencia: [],
+    extratos: [
+      {
+        id: '7', mes: '2026-09', nome_arquivo: 'extrato-setembro.ofx', importado_em: ts('2026-10-02', '12:00'),
+        total_creditos: '359.83', linhas: 4,
+        conciliados_n: '2', conciliados_valor: '309.83', pendentes_n: '1', pendentes_valor: '50.00', ignorados_n: '0',
+      },
+    ],
+    extratoCasados: [{ conciliado_com: 'pay_00a' }, { conciliado_com: 'pay_00b' }],
     asaasSemLoja: [{ id: 'w4', processed_at: ts('2026-10-12', '13:10'), valor: '140.83' }],
     // linhas de 7 e 30 dias atrás, para a variação
     anteriores: [
@@ -232,6 +243,10 @@ function responder(dados, escritas, sql, params = []) {
   }
   if (s.includes('FROM painel_layout')) return dados.layout ? [dados.layout] : [];
 
+  // ── extrato OFX × Asaas (migration 373) ──
+  if (s.includes('FROM aura_extratos e')) return dados.extratos;
+  if (s.includes('FROM aura_extrato_lancamentos')) return dados.extratoCasados;
+
   // ── ficha (antes das consultas genéricas das mesmas tabelas) ──
   if (s.includes("(SELECT 'venda' AS tipo")) return dados.ficha.linhaDoTempo;
   if (s.includes('ck ON true')) return dados.ficha.cliente && (!params[0] || params[0] === dados.ficha.cliente.id) ? [{ ...dados.ficha.cliente }] : [];
@@ -269,6 +284,7 @@ function responder(dados, escritas, sql, params = []) {
     return dados.funil.filter((f) => params[0].includes(f.company_id));
   }
   if (s.includes('FROM webhook_logs')) {
+    if (s.includes('AS mes_conf')) return dados.asaasConferencia;
     if (s.includes('AS mes_recebido')) return dados.asaasRecebidos;
     if (s.includes('AS mes')) return dados.asaasPorMes;
     if (s.includes('company_id IS NULL')) return dados.asaasSemLoja;
