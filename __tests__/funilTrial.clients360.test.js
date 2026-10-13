@@ -48,7 +48,7 @@ const ROWS = [
     prod_count: '0', sale_count: '0', first_sale_at: null, checkout_viewed_at: null, checkout_views: '0' },
 ];
 
-function arrangeDb({ caixaError = null, importError = null } = {}) {
+function arrangeDb({ caixaError = null, importError = null, trialError = null } = {}) {
   db.query.mockImplementation(async (sql) => {
     const s = sql.replace(/\s+/g, ' ');
     if (s.includes('FROM companies c') && s.includes('ck ON true')) return { rows: ROWS.map((r) => ({ ...r })) };
@@ -61,6 +61,11 @@ function arrangeDb({ caixaError = null, importError = null } = {}) {
       return { rows: [{ company_id: 'c-parcial', imported_rows: '180' }] };
     }
     if (s.includes('extra_seats_granted')) return { rows: [] };
+    // 13/10/2026: modo do trial (migration 379) — só a Loja Completa é do modo novo.
+    if (s.includes('trial_started_by_sale_at')) {
+      if (trialError) throw trialError;
+      return { rows: [{ id: 'c-completo', trial_mode: 'primeira_venda', trial_started_by_sale_at: iso(-8) }] };
+    }
     throw new Error('SQL inesperado: ' + s);
   });
 }
@@ -92,6 +97,18 @@ describe('GET /admin/clients-360 — funil do trial', () => {
     expect(completo.ativacao).toEqual({ importou: true, abriu_caixa: false, vendeu: true, viu_checkout: true });
 
     expect(byId(res.body, 'c-zero').ativacao).toEqual({ importou: false, abriu_caixa: false, vendeu: false, viu_checkout: false });
+
+    // 13/10/2026: modo do trial e quando a primeira venda o iniciou
+    expect(completo.trial_mode).toBe('primeira_venda');
+    expect(completo.started_by_sale_at).toBeTruthy();
+    expect(parcial).toMatchObject({ trial_mode: 'fixo', started_by_sale_at: null });
+  });
+
+  test('colunas do modo do trial ausentes (42703): todo mundo fixo, lista inteira', async () => {
+    arrangeDb({ trialError: Object.assign(new Error('column "trial_mode" does not exist'), { code: '42703' }) });
+    const res = await get();
+    expect(res.status).toBe(200);
+    expect(res.body.clients.map((c) => [c.trial_mode, c.started_by_sale_at])).toEqual([['fixo', null], ['fixo', null], ['fixo', null]]);
   });
 
   test('SQL: checkout.viewed e primeira venda no SELECT principal; importação só de produtos', async () => {

@@ -93,6 +93,7 @@ const { issueVerification } = require('./verification');
 const { resolveKarateContext } = require('../config/karateRoles');
 const { getExtraSeatsForCompany, getExtraSeatsMap } = require('../services/extraSeats');
 const { appModeDoCabecalho } = require('../utils/appMode');
+const trialRegra = require('../services/trialRegra');
 const { applySegment, isValidSegment, normalizeCnae, ALLOWED_EXTRAS } = require('../services/segment');
 
 const env        = validateRuntimeEnv();
@@ -370,8 +371,13 @@ router.post('/register', async (req, res) => {
 
     // Cadastro self-service (site /comecar e app /cadastro): sem codigo de acesso,
     // trial padrao Negocio 7 dias. Cadastros internos (sem a flag) seguem essencial.
+    // 13/10/2026: o trial do self-service passa a contar da PRIMEIRA VENDA
+    // (services/trialRegra). O INSERT abaixo ainda nasce com os 7 dias fixos;
+    // logo depois ligarPrimeiraVendaNoCadastro troca pelo teto de 15 dias e
+    // liga trial_mode='primeira_venda'. Codigo de acesso, convite e dojo
+    // seguem 'fixo'.
     if (!access_code && isSelfServe) {
-      plan = 'negocio'; trialDays = 7; codeType = 'self_serve';
+      plan = 'negocio'; trialDays = trialRegra.DIAS_FIXO_LEGADO; codeType = 'self_serve';
     }
 
     const isStaff = email.toLowerCase().trim().endsWith('@getaura.com.br');
@@ -392,6 +398,7 @@ router.post('/register', async (req, res) => {
     let memberRole = 'owner';
     let skipCompany = !company_name;
     let segmentState = null;
+    let trialInfo = null;
 
     if (!skipCompany && cnpj) {
       const cleanCnpj = cnpj.replace(/\D/g, '');
@@ -443,6 +450,18 @@ router.post('/register', async (req, res) => {
         [user.id, company_name.trim(), plan, trialEndsAt, access_code || null, cnpj ? cnpj.replace(/\D/g, '') : null, phone || null, newVertical, newFederationId, regimeDoCadastro]
       );
       company = newCompany;
+
+      // 13/10/2026: self-service sem codigo (e que nao e dojo) entra no modo
+      // primeira_venda. Sem as colunas da migration 379 volta null e os 7
+      // dias fixos do INSERT ficam valendo.
+      if (codeType === 'self_serve' && !isDojoSignup) {
+        const modo = await trialRegra.ligarPrimeiraVendaNoCadastro(client, company.id);
+        if (modo) {
+          company = { ...company, trial_ends_at: modo.trial_ends_at };
+          trialInfo = trialRegra.montarTrial({ ...company, ...modo });
+          trialDays = trialRegra.TETO_DIAS;
+        }
+      }
 
       // 05/10/2026: a frente escolhida ja nasce ligada — na MESMA transacao.
       // So em empresa NOVA de cadastro self-service (self_serve ou codigo
@@ -526,6 +545,8 @@ router.post('/register', async (req, res) => {
         module_overrides: company.module_overrides || {},
         trial_active: !!(company.trial_ends_at),
         trial_ends_at: company.trial_ends_at,
+        // 13/10/2026: mesmo bloco do /auth/me (services/trialRegra).
+        trial: trialInfo || trialRegra.montarTrial(company),
         billing_status: company.billing_status || null,
         access_code_used: !!(company.access_code_used),
         vertical_active: company.vertical_active || null,
@@ -737,6 +758,18 @@ router.post('/me', requireAuth, async (req, res) => {
     const extraSeatsP = buscaEmpresa
       ? getExtraSeatsMap([jwtCompanyId]).catch(() => new Map())
       : null;
+    // 13/10/2026: modo do trial (migration 379). Consulta a parte e por
+    // ultimo: coluna ausente ou qualquer falha vira 'fixo' sem derrubar o
+    // /me, e a ordem das quatro consultas acima nao muda.
+    const trialP = buscaEmpresa
+      ? Promise.resolve()
+        .then(() => db.query(
+          'SELECT trial_mode, trial_started_by_sale_at, created_at FROM companies WHERE id = $1',
+          [jwtCompanyId]
+        ))
+        .then((r) => (r && r.rows && r.rows[0]) || {})
+        .catch(() => ({}))
+      : null;
     // Se a resposta sair antes (404, ou erro no usuario), as outras ainda
     // podem rejeitar depois: sem isto viravam unhandledRejection.
     for (const p of [companyP, countP]) if (p) p.catch(() => {});
@@ -761,7 +794,13 @@ router.post('/me', requireAuth, async (req, res) => {
     let companyOut = null;
     if (company) {
       const extraMap = await extraSeatsP;
-      companyOut = { ...shapeCompany(company, memberRole), extra_seats_granted: extraMap.get(company.id) || 0 };
+      const trialCols = await trialP;
+      companyOut = {
+        ...shapeCompany(company, memberRole),
+        extra_seats_granted: extraMap.get(company.id) || 0,
+        // { mode, ends_at, started_by_sale_at, dias_restantes, teto_em, ... }
+        trial: trialRegra.montarTrial({ ...company, ...trialCols }),
+      };
     }
 
     res.json({

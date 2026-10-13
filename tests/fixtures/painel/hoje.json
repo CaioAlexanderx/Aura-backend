@@ -42,7 +42,7 @@
         }
       ],
       "resumo": "1 vencido · 1 assinou",
-      "fonte": "companies, products, sales, audit_log (checkout.viewed)"
+      "fonte": "companies (trial_mode), products, sales, audit_log (checkout.viewed)"
     },
     {
       "id": "receita",

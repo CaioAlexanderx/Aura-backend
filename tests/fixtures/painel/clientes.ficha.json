@@ -48,6 +48,8 @@
     "caixa_sessions": 14,
     "last_caixa_at": "2026-09-21T15:00:00.000Z",
     "imported_rows": 0,
+    "trial_mode": "fixo",
+    "started_by_sale_at": null,
     "extra_seats_granted": 0,
     "ativacao": {
       "importou": true,

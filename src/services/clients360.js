@@ -64,6 +64,19 @@ async function getFunnelMaps(ids) {
   return { caixaMap, importMap };
 }
 
+async function getTrialModeMap(ids) {
+  const map = new Map();
+  if (!ids.length) return map;
+  const rows = await optionalRows(
+    `SELECT id, trial_mode, trial_started_by_sale_at
+       FROM companies
+      WHERE id = ANY($1)`,
+    [ids]
+  );
+  for (const r of rows) map.set(r.id, r);
+  return map;
+}
+
 async function listarClients360({ companyId = null } = {}) {
   // Gestão Aura lista apenas CLIENTES reais. Dojôs de federação são dados
   // internos (companies com federation_id != id), não contas-cliente — só
@@ -111,7 +124,13 @@ async function listarClients360({ companyId = null } = {}) {
   // Pre-migration → mapa vazio → todos default 0.
   const seatsMap = await getExtraSeatsMap(rows.map(r => r.id));
   // 12/10/2026: degraus do funil que vivem em tabelas fora do SELECT principal.
-  const { caixaMap, importMap } = await getFunnelMaps(rows.map(r => r.id));
+  // 13/10/2026: modo do trial (migration 379). Fora do SELECT principal para
+  // a coluna ausente virar 'fixo' em vez de derrubar a lista; em paralelo com
+  // o funil para não somar uma ida ao banco.
+  const [{ caixaMap, importMap }, trialMap] = await Promise.all([
+    getFunnelMaps(rows.map(r => r.id)),
+    getTrialModeMap(rows.map(r => r.id)),
+  ]);
 
 
   const now = new Date();
@@ -131,6 +150,8 @@ async function listarClients360({ companyId = null } = {}) {
       ...r,
       ...classifyLifecycle(r, now),
       ...funnel,
+      trial_mode: (trialMap.get(r.id) || {}).trial_mode || 'fixo',
+      started_by_sale_at: (trialMap.get(r.id) || {}).trial_started_by_sale_at || null,
       tx_count: parseInt(r.tx_count || 0),
       cust_count: parseInt(r.cust_count || 0),
       login_days: parseInt(r.login_days || 0),
