@@ -21,7 +21,17 @@ const TZ = 'America/Sao_Paulo';
 
 const NOME = `COALESCE(c.name, c.trade_name, c.legal_name)`;
 const TELEFONE = `COALESCE(NULLIF(u.phone, ''), c.phone)`;
-const SEM_INTERNAS = `COALESCE(c.email, '') NOT ILIKE '%@getaura.com.br'`;
+// 13/10/2026: a empresa de teste do bipe sintético (CANARY_COMPANY_ID) também
+// sai. A conta Aura de teste tem e-mail @gmail.com e estava dentro do
+// universo como "pagante"; sem esta linha a venda sintética contaria como
+// venda da plataforma se um estorno falhasse. O id só entra na consulta se
+// for um UUID — a constante vira SQL.
+const ID_CANARY = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+  .test(String(process.env.CANARY_COMPANY_ID || '').trim())
+  ? String(process.env.CANARY_COMPANY_ID).trim().toLowerCase()
+  : null;
+const SEM_INTERNAS = `COALESCE(c.email, '') NOT ILIKE '%@getaura.com.br'`
+  + (ID_CANARY ? ` AND c.id <> '${ID_CANARY}'::uuid` : '');
 
 // Acesso da loja: login direto ou troca de loja (grupo multi-CNPJ entra numa
 // e troca para a outra — o login em si fica gravado sem empresa).

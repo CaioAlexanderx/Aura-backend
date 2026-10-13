@@ -157,6 +157,14 @@ function startServer() {
     const { initResumoDaMadrugadaJob } = require('./jobs/resumoDaMadrugadaJob');
     initResumoDaMadrugadaJob();
 
+    // BIPE SINTETICO (378): a cada 5 min bipa, vende, consulta e cancela na
+    // empresa de teste pelo caminho HTTP real e avisa por e-mail quando o
+    // Caixa para (o /health fica verde nesses casos). Dormente sem
+    // CANARY_COMPANY_ID/CANARY_USER_ID/CANARY_BARCODE; kill switch
+    // CANARY_ENABLED=false.
+    const { initCanaryJob } = require('./jobs/canaryJob');
+    initCanaryJob();
+
     // Loja online (315): Pix vencido sem pagamento — tick 10min. É o único
     // evento do sino sem gancho de fluxo: ninguém "faz" um Pix expirar.
     const { initPixExpiradoJob } = require('./jobs/lojaPixExpiradoJob');
