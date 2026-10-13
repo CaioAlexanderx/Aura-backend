@@ -109,6 +109,38 @@ describe('calcularMrr', () => {
     expect(r.pagantes).toBe(3);
     expect(r.sem_cobranca.lojas.map((l) => l.nome)).toEqual(['Cortesia']);
   });
+
+  // 13/10/2026 — pedido da Financeiro, validado pelo Caio: teste, filial paga
+  // pela matriz e dojô sem assinatura própria não são receita da Aura.
+  test('fonte padrão deixa de fora teste, filial paga pela matriz e dojô sem assinatura', async () => {
+    db.query.mockResolvedValue({ rows: [] });
+    await calcularMrr({ db });
+    const sql = db.query.mock.calls[0][0];
+    // conta de teste
+    expect(sql).toContain('c.is_sandbox IS NOT TRUE');
+    // filial: o plano é pago por OUTRA empresa
+    expect(sql).toMatch(/NOT \(c\.billing_owner_company_id IS NOT NULL AND c\.billing_owner_company_id <> c\.id\)/);
+    // dojô de federação sem assinatura própria; dojô com assinatura continua
+    expect(sql).toMatch(/NOT \(c\.asaas_subscription_id IS NULL\s+AND c\.federation_id IS NOT NULL AND c\.federation_id <> c\.id\)/);
+  });
+
+  test('os três filtros ficam no mesmo WHERE da fonte, antes do ORDER BY', async () => {
+    db.query.mockResolvedValue({ rows: [] });
+    await calcularMrr({ db });
+    const sql = db.query.mock.calls[0][0];
+    const where = sql.slice(sql.indexOf('WHERE'), sql.indexOf('ORDER BY'));
+    expect(where).toContain('is_sandbox');
+    expect(where).toContain('billing_owner_company_id');
+    expect(where).toContain('federation_id');
+  });
+});
+
+describe('universo dos blocos do painel', () => {
+  test('SEM_INTERNAS tira conta de teste (is_sandbox) além de @getaura.com.br', () => {
+    const { SEM_INTERNAS } = require('../../src/services/painelBlocos/_base');
+    expect(SEM_INTERNAS).toContain("NOT ILIKE '%@getaura.com.br'");
+    expect(SEM_INTERNAS).toContain('c.is_sandbox IS NOT TRUE');
+  });
 });
 
 describe('gravarSnapshot', () => {

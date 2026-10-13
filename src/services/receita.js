@@ -51,6 +51,20 @@ function contratoDeTabela(plan, ciclo) {
 }
 
 // Fonte atual: o cadastro (companies) + preço de tabela.
+//
+// 13/10/2026 (pedido da Financeiro, validado pelo Caio): três grupos de
+// empresas ativas NÃO são receita da Aura e ficam fora do MRR e da linha
+// "sem cobrança registrada":
+//   1. conta de teste (is_sandbox) — Aura de teste, JKA Teste e os dojôs de
+//      teste da JKA;
+//   2. filial cujo plano é pago por outra empresa (billing_owner_company_id
+//      diferente do próprio id) — a Villa Branca, cobrada na Matriz;
+//   3. dojô de federação SEM assinatura própria (federation_id diferente do
+//      próprio id e asaas_subscription_id nulo) — BASSAI DAI, KANO DOJO e
+//      SHOBUKAN SÃO PAULO. Dojô com assinatura própria continua no MRR.
+// A empresa continua existindo e usando o produto; só deixa de contar como
+// pagante contábil. Para voltar a contar uma delas, mude o cadastro (tire a
+// marca de teste, dê assinatura ou tire o dono da cobrança), não este filtro.
 async function fonteCompanies({ db = pool } = {}) {
   const { rows } = await db.query(
     `SELECT c.id AS company_id,
@@ -63,6 +77,10 @@ async function fonteCompanies({ db = pool } = {}) {
        LEFT JOIN users u ON u.id = c.owner_id
       WHERE c.billing_status = 'active'
         AND COALESCE(c.email, '') NOT ILIKE '%@getaura.com.br'
+        AND c.is_sandbox IS NOT TRUE
+        AND NOT (c.billing_owner_company_id IS NOT NULL AND c.billing_owner_company_id <> c.id)
+        AND NOT (c.asaas_subscription_id IS NULL
+                 AND c.federation_id IS NOT NULL AND c.federation_id <> c.id)
       ORDER BY 2`
   );
   const seats = await getExtraSeatsMap(rows.map((r) => r.company_id));
