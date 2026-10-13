@@ -33,6 +33,9 @@ module.exports = {
   _getOrCreatePlanConfig:   ledger._getOrCreatePlanConfig,
   resolvePeriod:            terms.resolvePeriod,
   dueDateForIndex:          terms.dueDateForIndex,
+  FIRST_DUE_MAX_DAYS:       terms.FIRST_DUE_MAX_DAYS,
+  validateFirstDueDate:     terms.validateFirstDueDate,
+  defaultFirstDueDate:      terms.defaultFirstDueDate,
   // Item 3 (13/06/2026): unificacao de carne
   computeUnifyPlan:         require('./credit/unify').computeUnifyPlan,
   applyUnify:               ledger.applyUnify,

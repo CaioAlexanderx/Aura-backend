@@ -101,6 +101,12 @@ function startServer() {
     const { initExpenseDueReminderJob } = require('./jobs/expenseDueReminderJob');
     initExpenseDueReminderJob();
 
+    // 13/10/2026: placar do dia no WhatsApp do dono — 21h BRT para a loja que
+    // nao fecha caixa (quem fecha recebe no fechamento). Kill switch
+    // PLACAR_DO_DIA_ENABLED=false.
+    const { initPlacarDoDiaJob } = require('./jobs/placarDoDiaJob');
+    initPlacarDoDiaJob();
+
     // F3c: régua de cobrança do dojô (dojô→aluno) — diário ~9h10 BRT
     const { initDojoReminderScheduler } = require('./jobs/dojoReminderScheduler');
     initDojoReminderScheduler();

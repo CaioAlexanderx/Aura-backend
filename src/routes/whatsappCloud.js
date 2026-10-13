@@ -37,6 +37,7 @@ const customerConsent = require('../services/customerConsent');
 const wa = require('../services/whatsapp');
 const addons = require('../services/addons');
 const quota = require('../services/marketing/marketingQuota');
+const placarDoDia = require('../services/placarDoDia');
 const { asaasRequest } = require('../services/asaasClient');
 const { encrypt } = require('../services/dojoBaasCrypto');
 
@@ -512,7 +513,7 @@ async function loadBillingTemplate(companyId) {
 async function loadTemplatesReady(companyId) {
   const nomes = [
     billingTemplateName(), 'parcela_lembrete', 'parcela_atraso',
-    'reativacao_cupom', 'aniversario_cupom',
+    'reativacao_cupom', 'aniversario_cupom', placarDoDia.TEMPLATE_NAME,
   ];
   const out = {};
   for (const nome of nomes) {
@@ -752,6 +753,11 @@ const TEMPLATE_PRESETS = {
   // O footer com "responda SAIR" não é decoração: marketing sem saída
   // visível é o caminho mais curto para a pessoa marcar como spam e
   // derrubar a qualidade do número da loja.
+  // Placar do dia (13/10/2026): resumo de fim de dia para o DONO. UTILITY —
+  // e informacao da propria conta do destinatario, nao promocao. O texto
+  // vive em services/placarDoDia (quem tambem monta os parametros).
+  placar_dia: { ...placarDoDia.TEMPLATE },
+
   reativacao_cupom: {
     name: 'reativacao_cupom',
     language: 'pt_BR',

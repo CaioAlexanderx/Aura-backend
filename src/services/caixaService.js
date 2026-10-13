@@ -494,6 +494,14 @@ async function fechar(companyId, userId, dinheiroContado, observacao = null) {
     closedAt
   );
 
+  // Placar do dia no WhatsApp do dono (13/10/2026). Fire-and-forget: o
+  // fechamento ja esta gravado e a resposta nao espera a fila. Desligado por
+  // padrao; sem WhatsApp vira audit 'placar.sem_canal' e segue.
+  try {
+    require('./placarDoDia').dispararNoFechamento(companyId, { closedAt })
+      .catch(() => {});
+  } catch (_) { /* placar nunca derruba o fechamento */ }
+
   // sessao_label: '#' + 5 primeiros chars do UUID (estavel + curto)
   const sessao_label = '#' + String(sessao.id).replace(/-/g, '').slice(0, 5).toUpperCase();
 
