@@ -116,6 +116,8 @@ router.use('/sales/analytics', require('./salesAnalytics'));
 router.use('/sales', require('./sales'));
 router.use('/reviews', require('./reviews').reviewsRouter);
 router.use('/modules', require('./modules'));
+// 13/10/2026 (migration 374): assento de temporada — GET/POST/DELETE /billing/seat-pass
+router.use('/billing/seat-pass', require('./seatPass'));
 router.use('/billing', require('./billing'));
 router.use('/support', require('./support'));
 router.use('/customers', require('./customers'));
