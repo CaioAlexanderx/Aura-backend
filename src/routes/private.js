@@ -301,4 +301,8 @@ router.use('/marketing', requirePlan('negocio', 'expansao'), require('./marketin
 // Sem requirePlan, igual a ./products.
 router.use('/suppliers', require('./suppliers'));
 
+// 13/10/2026 — Estoque › O que vai faltar (Black Friday). Só leitura de
+// vendas e estoque; sem requirePlan, igual a ./products.
+router.use('/estoque', require('./estoqueRuptura'));
+
 module.exports = router;

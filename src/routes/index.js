@@ -78,6 +78,8 @@ router.use('/admin/lead-views', require('./adminLeadViews'));
 router.use('/admin/painel/asaas', require('./adminPainelAsaas'));
 // Extrato OFX da conta da Aura × repasses da Asaas (migration 373).
 router.use('/admin/painel/ofx', require('./adminPainelOfx'));
+// O que vai faltar por loja (ao vivo, sem linha do job): antes do prefixo.
+router.use('/admin/painel/ruptura', require('./adminPainelRuptura'));
 router.use('/admin/painel', require('./adminPainel'));
 
 router.use('/webhooks/asaas',     require('./webhookAsaas'));
