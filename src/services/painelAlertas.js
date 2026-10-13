@@ -34,11 +34,12 @@ async function calcularAlertas({ hoje, db = b.pool, empresas } = {}) {
     b.ultimaVendaPorLoja(db),
     b.opcional(
       db,
-      `SELECT id, processed_at, NULLIF(payload->'payment'->>'value', '')::numeric AS valor
+      `SELECT DISTINCT ON (COALESCE(${b.PAGAMENTO_ASAAS}->>'id', id::text))
+              id, processed_at, NULLIF(${b.PAGAMENTO_ASAAS}->>'value', '')::numeric AS valor
          FROM webhook_logs
-        WHERE provider = 'asaas' AND event = 'PAYMENT_RECEIVED' AND company_id IS NULL
+        WHERE provider = 'asaas' AND event IN ${b.EVENTOS_PAGOS} AND company_id IS NULL
           AND processed_at >= ${b.desde(JANELA_SEM_LOJA_DIAS)}
-        ORDER BY processed_at DESC`,
+        ORDER BY COALESCE(${b.PAGAMENTO_ASAAS}->>'id', id::text), processed_at`,
       [hoje]
     ),
     b.opcional(
@@ -89,7 +90,9 @@ async function calcularAlertas({ hoje, db = b.pool, empresas } = {}) {
     });
   }
 
-  // 3. Pagamento recebido na Asaas sem loja vinculada.
+  // 3. Pagamento recebido na Asaas sem loja vinculada (um por cobrança; some
+  //    quando alguém vincula em /admin/painel/asaas/orfaos).
+  semLoja.sort((x, y) => new Date(y.processed_at) - new Date(x.processed_at));
   for (const p of semLoja) {
     alertas.push({
       tipo: 'pagamento_sem_loja',

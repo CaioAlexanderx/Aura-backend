@@ -12,10 +12,16 @@
 //     addons_mensal,    // acessos extras, já por mês
 //     tem_cobranca }    // existe assinatura na Asaas para esta loja?
 //
-// Hoje a fonte é fonteCompanies: empresas com billing_status='active' e os
-// preços de tabela (services/billingPricing.js). Quando a leitura das
-// assinaturas da Asaas existir, ela entra como outra fonte devolvendo o mesmo
-// formato — calcularMrr({ fonte }) — e o job não muda.
+// Duas fontes:
+//   fonteAsaas     (services/receitaAsaas.js) as assinaturas ativas na Asaas,
+//                  com o valor que ela cobra de verdade. É a fonte padrão
+//                  quando há ASAAS_API_KEY.
+//   fonteCompanies empresas com billing_status='active' e os preços de tabela
+//                  (services/billingPricing.js). É o que sobra quando a Asaas
+//                  não responde — e o resultado avisa (`aviso`).
+//
+// calcularMrr() devolve sempre as duas somas lado a lado em `comparativo`
+// ({ asaas, tabela }): é a dupla checagem da receita.
 //
 // Pagante sem asaas_subscription_id conta como pagante, mas o valor dele NÃO
 // entra no MRR: vai para a linha "sem cobrança registrada". Somar ali era
@@ -100,6 +106,7 @@ function normalizarMrr(assinaturas) {
       mrr: round2(mrrPlano + addons),
       tem_cobranca: !!a.tem_cobranca,
     };
+    if (a.asaas_subscription_id) linha.asaas_subscription_id = a.asaas_subscription_id;
     linhas.push(linha);
 
     // Pagante conta sempre; o dinheiro só quando há cobrança registrada.
@@ -138,8 +145,53 @@ function normalizarMrr(assinaturas) {
   };
 }
 
-async function calcularMrr({ db = pool, fonte = fonteCompanies } = {}) {
-  return normalizarMrr(await fonte({ db }));
+const ROTULO_FONTE = {
+  asaas: 'Asaas (assinaturas ativas, anual ÷ 12)',
+  companies: 'companies + tabela de preços (anual ÷ 12)',
+};
+
+// Uma fonte devolve a lista de assinaturas ou { assinaturas, ...extras }.
+const linhasDe = (r) => (Array.isArray(r) ? r : (r && r.assinaturas) || []);
+
+// Com `fonte` explícita, usa só ela (e não consulta mais nada). Sem, tenta a
+// Asaas e cai para o cadastro; o cadastro é calculado sempre, para comparar.
+async function calcularMrr({ db = pool, fonte } = {}) {
+  if (fonte) return normalizarMrr(linhasDe(await fonte({ db })));
+
+  const cadastro = await fonteCompanies({ db });
+  const tabela = normalizarMrr(cadastro);
+  const comparativo = {
+    asaas: null,
+    tabela: tabela.mrr_total,
+    // tudo que o cadastro chama de pagante, com ou sem cobrança registrada
+    tabela_todos_pagantes: round2(tabela.mrr_total + tabela.sem_cobranca.mrr_potencial),
+  };
+  const semAsaas = (aviso) => ({
+    ...tabela, fonte: 'companies', fonte_rotulo: ROTULO_FONTE.companies, aviso, comparativo,
+    sem_empresa: [], fora_do_mrr: [], duplicadas: [],
+  });
+
+  if (!process.env.ASAAS_API_KEY) return semAsaas(null);
+
+  let lido;
+  try {
+    lido = await require('./receitaAsaas').fonteAsaas({ db, cadastro });
+  } catch (err) {
+    console.error('[receita] Asaas não respondeu, MRR pela tabela de preços:', err.message);
+    return semAsaas(`A Asaas não respondeu (${err.message}): MRR calculado pela tabela de preços.`);
+  }
+  const mrr = normalizarMrr(lido.assinaturas);
+  comparativo.asaas = mrr.mrr_total;
+  return {
+    ...mrr,
+    fonte: 'asaas',
+    fonte_rotulo: ROTULO_FONTE.asaas,
+    aviso: null,
+    comparativo,
+    sem_empresa: lido.sem_empresa,
+    fora_do_mrr: lido.fora_do_mrr,
+    duplicadas: lido.duplicadas,
+  };
 }
 
 // Grava o mês corrente (reference_month = dia 1). Só mexe em clients_* e
@@ -172,6 +224,7 @@ async function gravarSnapshot({ db = pool, hoje, mrr }) {
 
 module.exports = {
   PLANOS,
+  ROTULO_FONTE,
   contratoDeTabela,
   fonteCompanies,
   normalizarMrr,

@@ -56,6 +56,20 @@
 //   Isso preserva a reconciliacao de billing legitima mesmo se
 //   ASAAS_WEBHOOK_SECRET cair/for removido por engano, sem reabrir o buraco
 //   de forjar eventos direto no body.
+//
+// FIX (13/10/2026) — next_billing_date ficava um ciclo para tras:
+//   O UPDATE gravava next_billing_date = payment.dueDate, ou seja, o
+//   vencimento da cobranca que ACABOU DE SER PAGA, nao o proximo (Encanto
+//   Presentes ficou em 15/09, Finesse em 08/08, Davi Villa Branca em 18/06).
+//   Agora o proximo vencimento vem da propria Asaas (services/asaasAssinaturas
+//   -> proximoVencimento: cobranca pendente mais proxima ou nextDueDate da
+//   assinatura) e so e gravado em pagamento efetivo. Se a Asaas nao responder,
+//   next_billing_date fica como estava — o dueDate do pagamento NUNCA mais
+//   entra nessa coluna.
+//
+//   No mesmo dia: pagamento que nao acha empresa passou a ser gravado em
+//   webhook_logs com company_id NULL (antes so saia no console). E o que
+//   alimenta o alerta "pagamento sem loja" e GET /admin/painel/asaas/orfaos.
 // ATENCAO: quando operando sem segredo, o log fica MUITO barulhento de
 // proposito (WARN por requisicao) — ninguem deve poder dizer que "nao viu".
 //
@@ -78,6 +92,7 @@ const notify  = require('../services/digitalOrderNotifications');
 const lojaEvents = require('../services/lojaEvents');
 const { asaas } = require('../services/asaasClient');
 const marketingQuota = require('../services/marketing/marketingQuota');
+const { proximoVencimento } = require('../services/asaasAssinaturas');
 
 const ASAAS_WEBHOOK_TOKEN = process.env.ASAAS_WEBHOOK_SECRET;
 
@@ -221,6 +236,11 @@ var ASAAS_STATUS_TO_ORDER_PAYMENT = {
   CHARGEBACK_REQUESTED: 'chargeback',
 };
 
+// externalReference so entra na busca por companies.id quando tem cara de
+// UUID: qualquer outro texto faria o Postgres recusar a consulta inteira
+// (22P02) e o pagamento sumiria no catch.
+var UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
 // Grava o evento cru em webhook_logs. Best-effort — nunca derruba o handler.
 async function logWebhookEvent(companyId, event, payment) {
   await db.query(
@@ -307,11 +327,16 @@ router.post('/', async function(req, res) {
     }
 
     var result = await db.query(
-      'SELECT id, plan, billing_status, is_primary FROM companies WHERE asaas_customer_id=$1 OR id=$2 LIMIT 1',
-      [payment.customer, payment.externalReference]
+      'SELECT id, plan, billing_status, is_primary, asaas_subscription_id FROM companies WHERE asaas_customer_id=$1 OR id=$2 LIMIT 1',
+      [payment.customer || null, UUID_RE.test(payment.externalReference || '') ? payment.externalReference : null]
     );
     if (!result.rows.length) {
-      console.warn('[WEBHOOK] Company not found for customer ' + payment.customer);
+      // Sem loja: o evento fica registrado com company_id NULL em vez de
+      // sumir. Vincular e decisao de gente (POST /admin/painel/asaas/orfaos/
+      // :logId/vincular) — aqui ninguem adivinha de quem e o dinheiro.
+      await logWebhookEvent(null, event, payment);
+      console.warn('[WEBHOOK] Company not found for customer ' + payment.customer +
+        ' — evento ' + event + ' gravado em webhook_logs sem empresa');
       return res.status(200).json({ received: true, company_found: false });
     }
 
@@ -334,9 +359,19 @@ router.post('/', async function(req, res) {
       });
     }
 
+    // Proximo vencimento: so a Asaas sabe. Consultado apenas em pagamento
+    // efetivo (e quando o dinheiro entra que o ciclo anda). Sem resposta,
+    // fica NULL e o COALESCE abaixo preserva a data atual.
+    var nextDue = null;
+    if (isPaid) {
+      var proximo = await proximoVencimento(asaas, company.asaas_subscription_id || payment.subscription);
+      nextDue = proximo ? proximo.data : null;
+    }
+
     // last_payment_date so avanca em pagamento efetivo; nos demais eventos
     // (OVERDUE, REFUNDED, CHARGEBACK) preserva o que ja estava la.
-    // next_billing_date nunca e sobrescrito por NULL.
+    // next_billing_date nunca e sobrescrito por NULL, e nunca recebe
+    // payment.dueDate (e o vencimento da cobranca ja paga, nao o proximo).
     await db.query(
       `UPDATE companies
           SET billing_status    = $1,
@@ -344,7 +379,7 @@ router.post('/', async function(req, res) {
               next_billing_date = COALESCE($4, next_billing_date),
               updated_at        = NOW()
         WHERE id = $5`,
-      [newStatus, isPaid, payment.paymentDate || null, payment.dueDate || null, company.id]
+      [newStatus, isPaid, payment.paymentDate || null, nextDue, company.id]
     );
 
     // ── MULTI-CNPJ: propaga pra filhas se for primary ────
@@ -377,6 +412,7 @@ router.post('/', async function(req, res) {
       received: true,
       handled: true,
       status: newStatus,
+      next_billing_date: nextDue,
       propagated_to_children: propagated,
     });
   } catch (err) {
