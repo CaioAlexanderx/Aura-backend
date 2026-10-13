@@ -67,6 +67,14 @@
 //   empresa esta sem cobranca ativa e sem trial valendo — no maximo um por
 //   empresa a cada 24h, fire-and-forget (services/trialFunnel). A resposta do
 //   status nao muda. Staff em modo admin nao conta.
+//
+// 13/10/2026 — PROMOCAO "PRIMEIRO MES PELO CALENDARIO" (services/promocoes.js):
+//   Quem assina ate 31/10 nao paga novembro. A Asaas nao cobra R$ 0, entao o
+//   efeito e o do cupom de DIAS GRATIS (nenhuma cobranca agora, assinatura
+//   agendada), com a 1a cobranca numa data de calendario (01/12). O /subscribe
+//   aplica o cupom PRIMEIROMES sozinho para empresa elegivel que nao informou
+//   cupom; cupom informado prevalece (nao acumula). GET /promocao-ativa alimenta
+//   o aviso do checkout. Prazo, data e regra: so em services/promocoes.js.
 // ============================================================
 
 const express = require('express');
@@ -93,6 +101,7 @@ const {
   recordRedemption,
 } = require('../services/checkoutCoupon');
 const subscriptionDiscount = require('../services/subscriptionDiscount');
+const promocoes = require('../services/promocoes');
 // 21/09/2026: o Asaas nao cobra cliente sem CPF/CNPJ e a maioria das empresas
 // nao tem CNPJ cadastrado. O documento agora vem do checkout (cpf_cnpj).
 const {
@@ -428,6 +437,21 @@ router.post('/tokenize', requireAuth, requireRole('client', 'admin'), async (req
   }
 });
 
+// GET /billing/promocao-ativa — aviso do checkout ("Assine ate 31/10 e nao pague
+// novembro"). `elegivel` e o que o /subscribe vai fazer: false fora do prazo,
+// com assinatura anterior, se ja resgatou ou se a linha do cupom nao existe.
+// Regra e textos em services/promocoes.js.
+router.get('/promocao-ativa', requireAuth, async (req, res) => {
+  try {
+    const { rows } = await db.query('SELECT * FROM companies WHERE id=$1', [req.params.id]);
+    if (!rows.length) return res.status(404).json({ error: 'Empresa nao encontrada' });
+    res.json(await promocoes.promocaoAtiva(rows[0]));
+  } catch (err) {
+    console.error('[BILLING] promocao-ativa error:', err.message);
+    res.status(500).json({ error: 'Erro ao consultar promocao' });
+  }
+});
+
 // POST /billing/validate-coupon — checagem do cupom ANTES de assinar.
 // Autenticada e por empresa (diferente do /auth/validate-code publico, que e do
 // cadastro): aqui a gente ja sabe QUEM esta resgatando, entao da pra barrar
@@ -440,7 +464,9 @@ router.post('/validate-coupon', requireAuth, requireRole('client', 'admin'), asy
     if (!companies.length) return res.status(404).json({ error: 'Empresa nao encontrada' });
     const company = companies[0];
 
-    const coupon = await validateCoupon(code, company.id);
+    // Cupom da campanha (PRIMEIROMES) vira periodo gratis de calendario; os
+    // demais passam intactos (promocoes.aplicarCampanha).
+    const coupon = promocoes.aplicarCampanha(await validateCoupon(code, company.id), company);
     if (!coupon.valid) {
       return res.json({ valid: false, error: coupon.error });
     }
@@ -473,7 +499,12 @@ router.post('/validate-coupon', requireAuth, requireRole('client', 'admin'), asy
       // O que o cliente paga HOJE e o que ele passa a pagar depois.
       first_charge_value: first,
       recurring_value: recurring,
-      first_charge_date: coupon.trial_days > 0 ? addDaysIso(coupon.trial_days) : addDaysIso(0),
+      first_charge_date: coupon.trial_days > 0
+        ? (coupon.first_charge_date || addDaysIso(coupon.trial_days))
+        : addDaysIso(0),
+      // O que o cupom abate da 1a mensalidade (dias gratis: ela inteira).
+      discount_amount: coupon.trial_days > 0 ? recurring : discountAmount,
+      campaign: coupon.campaign === true,
       // Desconto de varios meses: valor de cada mensalidade com desconto e
       // quando comeca a cheia. Para cupom de 1 mes, discounted_months = 1.
       discounted_value: coupon.trial_days > 0 ? null : first,
@@ -565,11 +596,18 @@ router.post('/subscribe', requireAuth, requireRole('client', 'admin'), async (re
 
     // ── Cupom (13/07/2026) ────────────────────────────────────
     let coupon = null;
+    // 13/10: true quando o cupom foi aplicado pelo backend (promocao), nao digitado.
+    let couponAutomatico = false;
     if (access_code) {
-      coupon = await validateCoupon(access_code, company.id);
+      // Cupom informado PREVALECE: a promocao automatica nao e somada a ele.
+      coupon = promocoes.aplicarCampanha(await validateCoupon(access_code, company.id), company);
       if (!coupon.valid) {
         return res.status(400).json({ error: coupon.error, stage: 'coupon' });
       }
+    } else {
+      // Sem cupom informado: empresa elegivel entra na promocao sozinha.
+      coupon = await promocoes.buscarCupomAutomatico(company);
+      couponAutomatico = !!coupon;
     }
     const discountPct = coupon ? coupon.discount_pct : 0;
     const discountValue = coupon ? coupon.discount_value : 0;
@@ -636,8 +674,24 @@ router.post('/subscribe', requireAuth, requireRole('client', 'admin'), async (re
     const tomorrowStr = tomorrow.toISOString().split('T')[0];
 
     // Data da primeira cobranca: hoje (ou amanha no Pix) — ou D+N com cupom de
-    // dias gratis.
-    const trialEndsStr = trialDays > 0 ? addDaysIso(trialDays) : null;
+    // dias gratis. Promocao de calendario traz a data pronta (first_charge_date):
+    // nao recalcular por dias, senao o fuso (UTC x Brasilia) a empurra um dia.
+    const trialEndsStr = trialDays > 0
+      ? ((coupon && coupon.first_charge_date) || addDaysIso(trialDays))
+      : null;
+    // Texto do periodo gratis nas descricoes que o cliente ve no Asaas.
+    const freeSuffix = trialDays > 0
+      ? (coupon.campaign
+        ? ' — promoção ' + coupon.code + ' (1ª cobrança em ' + trialEndsStr.split('-').reverse().join('/') + ')'
+        : ' — ' + trialDays + ' dias gratis (' + coupon.code + ')')
+      : '';
+    const freeMessage = trialDays > 0
+      ? (coupon.campaign
+        ? 'Promoção ' + coupon.code + ' aplicada! Nenhuma cobrança até ' +
+          trialEndsStr.split('-').reverse().join('/') + ' — a primeira mensalidade de R$ ' +
+          value.toFixed(2).replace('.', ',') + ' será nessa data.'
+        : trialDays + ' dias gratis ativados! A primeira cobranca sera em ' + trialEndsStr + '.')
+      : undefined;
 
     const cardHolderInfo = credit_card_holder_name ? {
       name: credit_card_holder_name,
@@ -669,8 +723,7 @@ router.post('/subscribe', requireAuth, requireRole('client', 'admin'), async (re
         nextDueDate: trialEndsStr,
         cycle: 'MONTHLY',
         endDate: subscriptionEndDate,
-        description: PLANS[plan].name + (cycle === 'annual' ? ' (Anual)' : '') + seatsSuffix +
-                     ' — ' + trialDays + ' dias gratis (' + coupon.code + ')',
+        description: PLANS[plan].name + (cycle === 'annual' ? ' (Anual)' : '') + seatsSuffix + freeSuffix,
         externalReference: company.id,
         creditCardToken: credit_card_token,
       };
@@ -707,13 +760,21 @@ router.post('/subscribe', requireAuth, requireRole('client', 'admin'), async (re
         payment_id: null,
         plan, cycle, value, billing_type: 'CREDIT_CARD',
         extra_seats: extraSeats,
-        coupon: { code: coupon.code, trial_days: trialDays, discount_pct: discountPct },
+        coupon: {
+          code: coupon.code, trial_days: trialDays, discount_pct: discountPct,
+          // 13/10: quanto o cupom deixou de cobrar (a 1a mensalidade inteira) e
+          // se foi aplicado pelo backend (promocao) ou digitado.
+          discount_amount: value, automatic: couponAutomatico, campaign: coupon.campaign === true,
+          first_charge_date: trialEndsStr,
+        },
         charged_now: 0,
         trial_ends_at: trialEndsStr,
         next_due_date: subscription.nextDueDate || trialEndsStr,
         confirmed: true,
-        message: trialDays + ' dias gratis ativados! Seu cartao ficou salvo e a primeira cobranca de ' +
-                 'R$ ' + value.toFixed(2).replace('.', ',') + ' sera em ' + trialEndsStr + '.',
+        message: coupon.campaign
+          ? freeMessage + ' Seu cartão ficou salvo.'
+          : trialDays + ' dias gratis ativados! Seu cartao ficou salvo e a primeira cobranca de ' +
+            'R$ ' + value.toFixed(2).replace('.', ',') + ' sera em ' + trialEndsStr + '.',
       });
     }
 
@@ -836,6 +897,7 @@ router.post('/subscribe', requireAuth, requireRole('client', 'admin'), async (re
           coupon: coupon ? {
             code: coupon.code, discount_pct: discountPct, discount_value: discountValue,
             discount_months: discountMonths, trial_days: 0,
+            discount_amount: discountAmount, automatic: couponAutomatico,
           } : null,
           confirmed: isPaid,
           warning: 'Primeira mensalidade capturada com sucesso, mas falha ao agendar recorrência. Suporte foi notificado para reconciliação manual.',
@@ -887,6 +949,7 @@ router.post('/subscribe', requireAuth, requireRole('client', 'admin'), async (re
           code: coupon.code, discount_pct: discountPct, discount_value: discountValue,
           discount_months: discountMonths, trial_days: 0,
           discounted_value: firstValue, first_full_due_date: firstFullDueDate,
+          discount_amount: discountAmount, automatic: couponAutomatico,
         } : null,
         payment_status: firstPayment.status,
         next_due_date: subscription.nextDueDate,
@@ -922,8 +985,7 @@ router.post('/subscribe', requireAuth, requireRole('client', 'admin'), async (re
       cycle: 'MONTHLY',
       endDate: cycle === 'annual' ? end_date : undefined,
       description: PLANS[plan].name + (cycle === 'annual' ? ' (Anual)' : '') + seatsSuffix +
-                   (trialDays > 0 ? ' — ' + trialDays + ' dias gratis (' + coupon.code + ')' : '') +
-                   recurringSuffix,
+                   freeSuffix + recurringSuffix,
       externalReference: company.id,
     };
 
@@ -1001,15 +1063,17 @@ router.post('/subscribe', requireAuth, requireRole('client', 'admin'), async (re
         code: coupon.code, discount_pct: discountPct, discount_value: discountValue,
         discount_months: discountMonths, trial_days: trialDays,
         discounted_value: trialDays > 0 ? null : firstValue, first_full_due_date: pixFirstFullDueDate,
+        // 13/10: valor que o cupom deixou de cobrar na 1a mensalidade.
+        discount_amount: trialDays > 0 ? value : discountAmount,
+        automatic: couponAutomatico, campaign: coupon.campaign === true,
+        first_charge_date: trialDays > 0 ? trialEndsStr : null,
       } : null,
       trial_ends_at: trialEndsStr,
       next_due_date: subscription.nextDueDate || pixFirstDue,
       pix_qr_code: pixData?.encodedImage || null,
       pix_copy_paste: pixData?.payload || null,
       pix_expiration: pixData?.expirationDate || null,
-      message: trialDays > 0
-        ? trialDays + ' dias gratis ativados! A primeira cobranca sera em ' + trialEndsStr + '.'
-        : undefined,
+      message: freeMessage,
     };
 
     res.status(201).json(response);
