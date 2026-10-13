@@ -9,6 +9,13 @@ const db     = require('../config/database');
 const { requireAuth } = require('../middleware/auth');
 const crypto = require('crypto');
 
+// 13/10/2026 (decisao do Caio): quem entra por indicacao recebe o mesmo teste
+// do cadastro self-service (Negocio, 7 dias corridos, trial_mode fixo) e 20%
+// no primeiro pagamento. Antes: Essencial, sem teste.
+const REFERRAL_PLANO = 'negocio';
+const REFERRAL_TRIAL_DIAS = 7;
+const REFERRAL_VALIDADE_DIAS = 90;
+
 // POST /auth/validate-code
 router.post('/validate-code', async (req, res) => {
   const { code } = req.body;
@@ -55,12 +62,23 @@ router.post('/generate', requireAuth, async (req, res) => {
   try {
     // Check if user already has a referral code
     const { rows: existing } = await db.query(
-      `SELECT code FROM access_codes WHERE referrer_id = $1 AND type = 'referral' AND is_active = true`,
+      `SELECT id, code, expires_at FROM access_codes WHERE referrer_id = $1 AND type = 'referral' AND is_active = true`,
       [req.user.id]
     );
 
     if (existing.length > 0) {
-      return res.json({ code: existing[0].code, existing: true });
+      // 13/10/2026: o codigo ativo mas VENCIDO era devolvido como esta e o
+      // cadastro recusava com "Codigo expirado" (o link /r/<codigo> do site
+      // cai no COMECAR, sem indicacao). Renova o mesmo codigo: o link que o
+      // cliente ja compartilhou continua valendo.
+      const vencido = existing[0].expires_at && new Date(existing[0].expires_at) < new Date();
+      if (vencido) {
+        await db.query(
+          `UPDATE access_codes SET expires_at = NOW() + INTERVAL '${REFERRAL_VALIDADE_DIAS} days', updated_at = NOW() WHERE id = $1`,
+          [existing[0].id]
+        );
+      }
+      return res.json({ code: existing[0].code, existing: true, renewed: !!vencido });
     }
 
     // BUGFIX: column is full_name, not name
@@ -72,9 +90,9 @@ router.post('/generate', requireAuth, async (req, res) => {
     const code = `REF-${firstName}${suffix}`;
 
     await db.query(
-      `INSERT INTO access_codes (code, type, plan, discount_pct, max_uses, referrer_id, expires_at)
-       VALUES ($1, 'referral', 'essencial', 20, 5, $2, NOW() + INTERVAL '90 days')`,
-      [code, req.user.id]
+      `INSERT INTO access_codes (code, type, plan, trial_days, discount_pct, max_uses, referrer_id, expires_at)
+       VALUES ($1, 'referral', $2, $3, 20, 5, $4, NOW() + INTERVAL '${REFERRAL_VALIDADE_DIAS} days')`,
+      [code, REFERRAL_PLANO, REFERRAL_TRIAL_DIAS, req.user.id]
     );
 
     res.status(201).json({ code, existing: false });
