@@ -11,6 +11,7 @@
 // GET  /admin/painel/layout                 — blocos visíveis e ordem do usuário
 // PUT  /admin/painel/layout                 — body: { blocos: [{ id, visivel }] }
 // POST /admin/painel/recalcular             — roda o passo diário agora
+// (conferência com a Asaas: routes/adminPainelAsaas.js, em /admin/painel/asaas)
 //
 // Exemplos reais de cada resposta: tests/fixtures/painel/*.json.
 // ============================================================
@@ -188,8 +189,8 @@ router.get('/clientes/:cid/ficha', ...adminOnly, asyncHandler(async (req, res) =
     base.opcional(
       pool,
       `SELECT event, processed_at,
-              NULLIF(payload->'payment'->>'value', '')::numeric AS valor,
-              payload->'payment'->>'dueDate' AS vencimento
+              NULLIF(${base.PAGAMENTO_ASAAS}->>'value', '')::numeric AS valor,
+              ${base.PAGAMENTO_ASAAS}->>'dueDate' AS vencimento
          FROM webhook_logs
         WHERE company_id = $1 AND provider = 'asaas'
         ORDER BY processed_at DESC
@@ -205,7 +206,7 @@ router.get('/clientes/:cid/ficha', ...adminOnly, asyncHandler(async (req, res) =
          (SELECT 'login', created_at, NULL::numeric, action::text
             FROM audit_log WHERE company_id = $1 AND action IN ${base.ACOES_ACESSO} ORDER BY created_at DESC LIMIT 10)
          UNION ALL
-         (SELECT 'pagamento', processed_at, NULLIF(payload->'payment'->>'value', '')::numeric, event::text
+         (SELECT 'pagamento', processed_at, NULLIF(${base.PAGAMENTO_ASAAS}->>'value', '')::numeric, event::text
             FROM webhook_logs WHERE company_id = $1 AND provider = 'asaas' ORDER BY processed_at DESC LIMIT 10)
          UNION ALL
          (SELECT 'nota', created_at, total_nfce, status::text

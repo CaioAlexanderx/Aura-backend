@@ -149,6 +149,14 @@ function dadosPadrao() {
       { id: 'w2', company_id: id(3), event: 'PAYMENT_OVERDUE', processed_at: ts('2026-10-02', '09:00'), valor: '74.17' },
       { id: 'w1', company_id: id(1), event: 'PAYMENT_DELETED', processed_at: ts('2026-09-21', '09:00'), valor: '140.83' },
     ],
+    // um por cobrança paga, mês corrente e anterior (w4 não achou loja)
+    asaasRecebidos: [
+      { id: 'w4', company_id: null, event: 'PAYMENT_RECEIVED', processed_at: ts('2026-10-12', '13:10'), mes_recebido: '2026-10', valor: '140.83', pagamento_id: 'pay_004', cliente_asaas: 'cus_000004', vencimento: '2026-10-12' },
+      { id: 'w3', company_id: id(2), event: 'PAYMENT_RECEIVED', processed_at: ts('2026-10-05', '09:00'), mes_recebido: '2026-10', valor: '169.00', pagamento_id: 'pay_003', cliente_asaas: 'cus_000002', vencimento: '2026-10-05' },
+      { id: 'w0c', company_id: id(8), event: 'PAYMENT_CONFIRMED', processed_at: ts('2026-09-20', '09:00'), mes_recebido: '2026-09', valor: '169.83', pagamento_id: 'pay_00c', cliente_asaas: 'cus_000008', vencimento: '2026-09-20' },
+      { id: 'w0b', company_id: id(1), event: 'PAYMENT_RECEIVED', processed_at: ts('2026-09-14', '09:00'), mes_recebido: '2026-09', valor: '140.83', pagamento_id: 'pay_00b', cliente_asaas: 'cus_000001', vencimento: '2026-09-14' },
+      { id: 'w0a', company_id: id(2), event: 'PAYMENT_RECEIVED', processed_at: ts('2026-09-05', '09:00'), mes_recebido: '2026-09', valor: '169.00', pagamento_id: 'pay_00a', cliente_asaas: 'cus_000002', vencimento: '2026-09-05' },
+    ],
     asaasSemLoja: [{ id: 'w4', processed_at: ts('2026-10-12', '13:10'), valor: '140.83' }],
     // linhas de 7 e 30 dias atrás, para a variação
     anteriores: [
@@ -231,7 +239,7 @@ function responder(dados, escritas, sql, params = []) {
   if (s.includes('AS imported_rows')) return [];
   if (s.includes('extra_seats_granted')) return [];
   if (s.includes("FILTER (WHERE action = 'login') AS logins")) return dados.ficha.logins;
-  if (s.includes("payload->'payment'->>'dueDate'")) return dados.ficha.asaas;
+  if (s.includes('FROM webhook_logs WHERE company_id = $1') && s.includes('AS vencimento')) return dados.ficha.asaas;
   if (s.includes('AS semana, COUNT(*) AS vendas')) return dados.ficha.vendasSemana;
 
   // ── uso por módulo ──
@@ -261,6 +269,7 @@ function responder(dados, escritas, sql, params = []) {
     return dados.funil.filter((f) => params[0].includes(f.company_id));
   }
   if (s.includes('FROM webhook_logs')) {
+    if (s.includes('AS mes_recebido')) return dados.asaasRecebidos;
     if (s.includes('AS mes')) return dados.asaasPorMes;
     if (s.includes('company_id IS NULL')) return dados.asaasSemLoja;
     return dados.asaasEventos;

@@ -30,6 +30,15 @@ const ACOES_ACESSO = `('login', 'switch_company')`;
 // Venda que conta: tudo menos a cancelada.
 const VENDA_VALIDA = `COALESCE(status, 'completed') <> 'cancelled'`;
 
+// A cobrança dentro de webhook_logs.payload. O webhook da Asaas grava o
+// pagamento na raiz do payload (routes/webhookAsaas.js → logWebhookEvent);
+// registro que tenha vindo com o corpo inteiro traz em payload.payment. Lendo
+// pelos dois caminhos o valor não vira NULL conforme quem gravou.
+const PAGAMENTO_ASAAS = `COALESCE(payload->'payment', payload)`;
+// Dinheiro que entrou. No cartão a Asaas manda CONFIRMED e, dias depois,
+// RECEIVED para a MESMA cobrança: quem soma precisa contar cada id uma vez.
+const EVENTOS_PAGOS = `('PAYMENT_RECEIVED', 'PAYMENT_CONFIRMED')`;
+
 // Início do dia (hoje - n) em Brasília, como timestamptz. $1 = hoje.
 const desde = (n) => `(($1::date - ${parseInt(n, 10)})::timestamp AT TIME ZONE '${TZ}')`;
 // Dia em Brasília de uma coluna timestamptz, como texto.
@@ -228,6 +237,7 @@ function brl(v) {
 
 module.exports = {
   pool, TZ, NOME, TELEFONE, SEM_INTERNAS, ACOES_ACESSO, VENDA_VALIDA,
+  PAGAMENTO_ASAAS, EVENTOS_PAGOS,
   desde, diaBRT, num, round2,
   somaDias, diasEntre, rotuloDia, inicioDaSemana, ultimasSemanas, diaDe,
   consultar, opcional, carregarEmpresas, ref,

@@ -54,7 +54,7 @@ const UPDATE_COMPANIES_RE = /UPDATE\s+companies/i;
 
 function mockCompanyLookupAndUpdate(db, companyRow) {
   db.query.mockImplementation((sql) => {
-    if (/SELECT id, plan, billing_status, is_primary FROM companies/i.test(sql)) {
+    if (/SELECT id, plan, billing_status, is_primary, asaas_subscription_id FROM companies/i.test(sql)) {
       return Promise.resolve({ rows: companyRow ? [companyRow] : [] });
     }
     if (UPDATE_COMPANIES_RE.test(sql)) {

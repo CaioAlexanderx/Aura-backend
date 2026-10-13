@@ -10,6 +10,16 @@
   "fonte": "companies + tabela de preços (anual ÷ 12) · webhook_logs (Asaas)",
   "indicadores": [
     {
+      "rotulo": "MRR pela Asaas",
+      "valor": null,
+      "nota": "sem chave da Asaas"
+    },
+    {
+      "rotulo": "MRR pela tabela",
+      "valor": 553,
+      "nota": "fonte usada"
+    },
+    {
       "rotulo": "Recebido · Set",
       "valor": 479.66,
       "nota": "3 pagamentos"
@@ -17,7 +27,7 @@
     {
       "rotulo": "Recebido · Out",
       "valor": 309.83,
-      "nota": "2 pagamentos"
+      "nota": "2 pagamentos · 1 sem loja (R$ 140,83)"
     },
     {
       "rotulo": "Atrasado",
@@ -173,6 +183,207 @@
       ]
     },
     {
+      "titulo": "Recebido em out",
+      "colunas": [
+        {
+          "chave": "quando",
+          "rotulo": "Quando",
+          "tipo": "data_hora"
+        },
+        {
+          "chave": "nome",
+          "rotulo": "Loja",
+          "tipo": "loja"
+        },
+        {
+          "chave": "valor",
+          "rotulo": "Valor",
+          "tipo": "moeda"
+        },
+        {
+          "chave": "vencimento",
+          "rotulo": "Vencimento",
+          "tipo": "data"
+        },
+        {
+          "chave": "situacao",
+          "rotulo": "Situação",
+          "tipo": "texto"
+        },
+        {
+          "chave": "cliente_asaas",
+          "rotulo": "Cliente na Asaas",
+          "tipo": "texto"
+        }
+      ],
+      "linhas": [
+        {
+          "company_id": null,
+          "nome": "Sem loja vinculada",
+          "telefone": null,
+          "log_id": "w4",
+          "mes": "2026-10",
+          "quando": "2026-10-12T13:10:00.000Z",
+          "valor": 140.83,
+          "vencimento": "2026-10-12",
+          "pagamento_id": "pay_004",
+          "cliente_asaas": "cus_000004",
+          "sem_loja": true,
+          "situacao": "Sem loja"
+        },
+        {
+          "company_id": "aaaaaaaa-0000-4000-8000-000000000002",
+          "nome": "Mercado Bela Vista",
+          "telefone": "11999900002",
+          "log_id": "w3",
+          "mes": "2026-10",
+          "quando": "2026-10-05T09:00:00.000Z",
+          "valor": 169,
+          "vencimento": "2026-10-05",
+          "pagamento_id": "pay_003",
+          "cliente_asaas": "cus_000002",
+          "sem_loja": false,
+          "situacao": "Vinculado"
+        }
+      ]
+    },
+    {
+      "titulo": "Recebido em set",
+      "colunas": [
+        {
+          "chave": "quando",
+          "rotulo": "Quando",
+          "tipo": "data_hora"
+        },
+        {
+          "chave": "nome",
+          "rotulo": "Loja",
+          "tipo": "loja"
+        },
+        {
+          "chave": "valor",
+          "rotulo": "Valor",
+          "tipo": "moeda"
+        },
+        {
+          "chave": "vencimento",
+          "rotulo": "Vencimento",
+          "tipo": "data"
+        },
+        {
+          "chave": "situacao",
+          "rotulo": "Situação",
+          "tipo": "texto"
+        },
+        {
+          "chave": "cliente_asaas",
+          "rotulo": "Cliente na Asaas",
+          "tipo": "texto"
+        }
+      ],
+      "linhas": [
+        {
+          "company_id": "aaaaaaaa-0000-4000-8000-000000000008",
+          "nome": "Papelaria Sol",
+          "telefone": "11999900008",
+          "log_id": "w0c",
+          "mes": "2026-09",
+          "quando": "2026-09-20T09:00:00.000Z",
+          "valor": 169.83,
+          "vencimento": "2026-09-20",
+          "pagamento_id": "pay_00c",
+          "cliente_asaas": "cus_000008",
+          "sem_loja": false,
+          "situacao": "Vinculado"
+        },
+        {
+          "company_id": "aaaaaaaa-0000-4000-8000-000000000001",
+          "nome": "Loja Aurora",
+          "telefone": "11999900001",
+          "log_id": "w0b",
+          "mes": "2026-09",
+          "quando": "2026-09-14T09:00:00.000Z",
+          "valor": 140.83,
+          "vencimento": "2026-09-14",
+          "pagamento_id": "pay_00b",
+          "cliente_asaas": "cus_000001",
+          "sem_loja": false,
+          "situacao": "Vinculado"
+        },
+        {
+          "company_id": "aaaaaaaa-0000-4000-8000-000000000002",
+          "nome": "Mercado Bela Vista",
+          "telefone": "11999900002",
+          "log_id": "w0a",
+          "mes": "2026-09",
+          "quando": "2026-09-05T09:00:00.000Z",
+          "valor": 169,
+          "vencimento": "2026-09-05",
+          "pagamento_id": "pay_00a",
+          "cliente_asaas": "cus_000002",
+          "sem_loja": false,
+          "situacao": "Vinculado"
+        }
+      ]
+    },
+    {
+      "titulo": "Assinaturas na Asaas sem empresa",
+      "colunas": [
+        {
+          "chave": "assinatura",
+          "rotulo": "Assinatura",
+          "tipo": "texto"
+        },
+        {
+          "chave": "cliente_asaas",
+          "rotulo": "Cliente na Asaas",
+          "tipo": "texto"
+        },
+        {
+          "chave": "descricao",
+          "rotulo": "Descrição",
+          "tipo": "texto"
+        },
+        {
+          "chave": "mrr",
+          "rotulo": "MRR",
+          "tipo": "moeda"
+        },
+        {
+          "chave": "proximo_vencimento",
+          "rotulo": "Próximo vencimento",
+          "tipo": "data"
+        }
+      ],
+      "linhas": []
+    },
+    {
+      "titulo": "Assinaturas ativas fora do MRR",
+      "colunas": [
+        {
+          "chave": "motivo",
+          "rotulo": "Motivo",
+          "tipo": "texto"
+        },
+        {
+          "chave": "nome",
+          "rotulo": "Loja",
+          "tipo": "loja"
+        },
+        {
+          "chave": "mrr",
+          "rotulo": "MRR",
+          "tipo": "moeda"
+        },
+        {
+          "chave": "proximo_vencimento",
+          "rotulo": "Próximo vencimento",
+          "tipo": "data"
+        }
+      ],
+      "linhas": []
+    },
+    {
       "titulo": "Eventos da Asaas · 30 dias",
       "colunas": [
         {
@@ -280,5 +491,5 @@
       ]
     }
   ],
-  "insight": "1 pagante sem cobrança registrada (R$ 89,00 fora do MRR) · 1 pagamento sem loja vinculada em 30 dias. O cálculo mostra, não esconde."
+  "insight": "1 pagante sem cobrança registrada (R$ 89,00 fora do MRR) · 1 pagamento sem loja vinculada desde set. O cálculo mostra, não esconde."
 }
