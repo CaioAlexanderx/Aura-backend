@@ -8,6 +8,7 @@
 // GET  /admin/painel/hoje                   — cabeçalho, blocos (resumo) e alertas
 // GET  /admin/painel/blocos/:id?periodo=    — card expandido (7 | 30 | 90 dias)
 // GET  /admin/painel/clientes/:cid/ficha    — ficha da loja
+// GET  /admin/painel/contatos/:conversaId   — conversa do WhatsApp da Aura, com as mensagens
 // GET  /admin/painel/layout                 — blocos visíveis e ordem do usuário
 // PUT  /admin/painel/layout                 — body: { blocos: [{ id, visivel }] }
 // POST /admin/painel/recalcular             — roda o passo diário agora
@@ -26,7 +27,8 @@ const { BLOCOS, POR_ID, PERIODOS } = require('../services/painelBlocos');
 const base = require('../services/painelBlocos/_base');
 const { usoPorModulo } = require('../services/painelBlocos/_uso');
 const painel = require('../services/painelDiario');
-const { calcularAlertas } = require('../services/painelAlertas');
+const { calcularAlertas, alertasDeContatos } = require('../services/painelAlertas');
+const { detalheDaConversa } = require('../services/contatosWhatsapp');
 const { listarClients360 } = require('../services/clients360');
 
 const adminOnly = [requireAuth, requireRole('admin')];
@@ -64,6 +66,18 @@ const formatarAlerta = (a) => ({
   bloco: a.bloco || null,
 });
 
+// Contato sem resposta depende do relógio (passou de 2h? é horário
+// comercial?): o gravado às 06h nunca valeria, então vale o de agora. Falha
+// aqui não derruba o painel.
+async function alertasDeContatosAgora() {
+  try {
+    return await alertasDeContatos({ db: pool });
+  } catch (err) {
+    console.error('[painel] alerta de contatos falhou:', err.message);
+    return [];
+  }
+}
+
 // ── GET /admin/painel/hoje ──────────────────────────────────────
 router.get('/hoje', ...adminOnly, asyncHandler(async (req, res) => {
   const hoje = painel.hojeBRT();
@@ -87,7 +101,10 @@ router.get('/hoje', ...adminOnly, asyncHandler(async (req, res) => {
       proximo_calculo: proximoCalculo(),
       ao_vivo: false,
       blocos: BLOCOS.filter((d) => porBloco.has(d.id)).map((d) => resumoDoBloco(d, porBloco.get(d.id).dados)),
-      alertas: alertas.map(formatarAlerta),
+      alertas: alertas
+        .filter((a) => a.tipo !== 'contato_sem_resposta')
+        .concat(await alertasDeContatosAgora())
+        .map(formatarAlerta),
     });
   }
 
@@ -286,6 +303,16 @@ router.get('/clientes/:cid/ficha', ...adminOnly, asyncHandler(async (req, res) =
       valor: e.valor === null || e.valor === undefined ? null : base.round2(e.valor),
     })),
   });
+}));
+
+// ── GET /admin/painel/contatos/:conversaId ──────────────────────
+// A conversa do WhatsApp da Aura por inteiro (telefone completo, link wa.me,
+// quem respondeu e as últimas 200 mensagens) — é o que a ficha do contato
+// abre a partir de uma linha do bloco Contatos. `conversa_id` vem na lista.
+router.get('/contatos/:conversaId', ...adminOnly, asyncHandler(async (req, res) => {
+  const conversa = await detalheDaConversa({ db: pool, conversaId: req.params.conversaId });
+  if (!conversa) throw new AppError('Conversa não encontrada', 404);
+  res.json(conversa);
 }));
 
 // ── Layout (blocos visíveis e ordem, por usuário) ───────────────

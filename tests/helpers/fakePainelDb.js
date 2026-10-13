@@ -17,6 +17,9 @@ const AGORA = new Date('2026-10-13T12:00:00.000Z');
 
 const id = (n) => `aaaaaaaa-0000-4000-8000-00000000000${n}`;
 const USER = 'bbbbbbbb-0000-4000-8000-000000000001';
+// Tenant Aura (AURA_COMPANY_ID) e as conversas do WhatsApp da Aura no hub.
+const AURA_COMPANY = 'eeeeeeee-0000-4000-8000-000000000001';
+const conv = (n) => `dddddddd-0000-4000-8000-00000000000${n}`;
 
 const empresa = (n, nome, extra) => ({
   company_id: id(n), nome, telefone: `1199990000${n}`, plan: 'negocio', ciclo: 'monthly', status: 'trial',
@@ -113,6 +116,41 @@ function dadosPadrao() {
       { id: 'l1', name: 'Marina Prado', phone: '11988880001', city: 'Jacareí', source: 'site', status: 'contacted', created_at: ts('2026-10-11', '17:20'), converted_company_id: null },
       { id: 'l2', name: 'Otávio Reis', phone: '11988880002', city: 'São José dos Campos', source: 'site_partial', status: 'new', created_at: ts('2026-10-08', '12:05'), converted_company_id: null },
       { id: 'l3', name: 'Bazar Novo', phone: '11999900006', city: 'Jacareí', source: 'site', status: 'won', created_at: ts('2026-09-25', '14:00'), converted_company_id: id(6) },
+    ],
+    // ── WhatsApp da Aura (hub) — "agora" é 09:00 BRT de 13/10 ──
+    // 1. Renata (telefone da Mercado Bela Vista): chegou 23:40 de 12/10, a
+    //    Aurinha respondeu na hora, o Caio só às 08:10 (510 min).
+    // 2. número sem cadastro: 05:30, Aurinha respondeu, ninguém humano (3h30).
+    // 3. Paulo Mendes: 11/10 14:00, Caio respondeu em 12 min.
+    // 4. 08:50, sem resposta, 10 min de espera.
+    // 5. 05/10 10:00, nunca respondido (fora da semana).
+    hubConversas: [
+      { id: conv(1), external_id: '5511999900002', customer_name: 'Renata Lima', status: 'humano', last_inbound_at: ts('2026-10-13', '02:40'), ultima_mensagem_humana_em: ts('2026-10-13', '11:10'), aguardando_resposta_desde: null, last_message_at: ts('2026-10-13', '11:10'), created_at: ts('2026-10-13', '02:40') },
+      { id: conv(2), external_id: '5512988880077', customer_name: null, status: 'ia', last_inbound_at: ts('2026-10-13', '08:30'), ultima_mensagem_humana_em: null, aguardando_resposta_desde: null, last_message_at: ts('2026-10-13', '08:30'), created_at: ts('2026-10-13', '08:30') },
+      { id: conv(3), external_id: '5511977770003', customer_name: 'Paulo Mendes', status: 'ia', last_inbound_at: ts('2026-10-11', '17:00'), ultima_mensagem_humana_em: ts('2026-10-11', '17:12'), aguardando_resposta_desde: null, last_message_at: ts('2026-10-11', '17:12'), created_at: ts('2026-10-11', '17:00') },
+      { id: conv(4), external_id: '5511966660004', customer_name: null, status: 'ia', last_inbound_at: ts('2026-10-13', '11:50'), ultima_mensagem_humana_em: null, aguardando_resposta_desde: ts('2026-10-13', '11:50'), last_message_at: ts('2026-10-13', '11:50'), created_at: ts('2026-10-13', '11:50') },
+      { id: conv(5), external_id: '5511955550005', customer_name: null, status: 'ia', last_inbound_at: ts('2026-10-05', '13:00'), ultima_mensagem_humana_em: null, aguardando_resposta_desde: null, last_message_at: ts('2026-10-05', '13:00'), created_at: ts('2026-10-05', '13:00') },
+    ],
+    hubMensagens: [
+      { id: 'm01', conversation_id: conv(5), direction: 'inbound', author: 'cliente', content: 'Vocês têm app?', created_at: ts('2026-10-05', '13:00') },
+      { id: 'm02', conversation_id: conv(3), direction: 'inbound', author: 'cliente', content: 'Quanto custa o plano Negócio?', created_at: ts('2026-10-11', '17:00') },
+      { id: 'm03', conversation_id: conv(3), direction: 'outbound', author: 'humano', content: 'R$ 169 por mês.', created_at: ts('2026-10-11', '17:12') },
+      { id: 'm04', conversation_id: conv(1), direction: 'inbound', author: 'cliente', content: 'Oi, vocês fazem integração\ncom iFood?', created_at: ts('2026-10-13', '02:40') },
+      { id: 'm05', conversation_id: conv(1), direction: 'outbound', author: 'aurinha', content: 'Oi! Aqui é a Aurinha, da Aura. Anotei sua mensagem e o Caio te responde às 8h.', created_at: '2026-10-13T02:40:20.000Z' },
+      { id: 'm06', conversation_id: conv(1), direction: 'outbound', author: 'humano', content: 'Oi, Renata! Fazemos sim.', created_at: ts('2026-10-13', '11:10') },
+      { id: 'm07', conversation_id: conv(2), direction: 'inbound', author: 'cliente', content: 'Preciso de ajuda com a nota fiscal', created_at: ts('2026-10-13', '08:30') },
+      { id: 'm08', conversation_id: conv(2), direction: 'outbound', author: 'aurinha', content: 'Oi! Aqui é a Aurinha, da Aura. Anotei sua mensagem e o Caio te responde às 8h.', created_at: '2026-10-13T08:30:20.000Z' },
+      { id: 'm09', conversation_id: conv(4), direction: 'inbound', author: 'cliente', content: 'Bom dia!', created_at: ts('2026-10-13', '11:50') },
+    ],
+    hubEventos: [
+      { conversation_id: conv(1), type: 'resposta_enfileirada', detail: { outbox_id: 'o1', status: 'pending', motivo: null, parada: false }, created_at: '2026-10-13T02:40:19.000Z' },
+      { conversation_id: conv(1), type: 'mensagem_humana', detail: { canal: 'whatsapp', origem: 'app_do_celular' }, created_at: ts('2026-10-13', '11:10') },
+      { conversation_id: conv(2), type: 'resposta_enfileirada', detail: { outbox_id: 'o2', status: 'pending', motivo: null, parada: false }, created_at: '2026-10-13T08:30:19.000Z' },
+      { conversation_id: conv(3), type: 'mensagem_humana', detail: { canal: 'whatsapp', origem: 'painel' }, created_at: ts('2026-10-11', '17:12') },
+    ],
+    // telefone cadastrado (empresa ou dono) que bate com um contato
+    hubEmpresas: [
+      { company_id: id(2), nome: 'Mercado Bela Vista', telefone: '(11) 99990-0002' },
     ],
     telas: [
       { screen: 'pdv', company_id: id(2), v7: '210', vp: '640', ultimo: ts('2026-10-13', '11:00') },
@@ -225,6 +263,18 @@ function responder(dados, escritas, sql, params = []) {
   const s = sql.replace(/\s+/g, ' ').trim();
   const escrever = (tabela) => { escritas.push({ tabela, sql: s, params }); return []; };
 
+  // ── WhatsApp da Aura (hub) ──
+  if (s.includes('-- contatos:mensagens ')) return dados.hubMensagens;
+  if (s.includes('-- contatos:conversas ')) return dados.hubConversas;
+  if (s.includes('-- contatos:eventos-conversa ')) return dados.hubEventos.filter((e) => e.conversation_id === params[0]);
+  if (s.includes('-- contatos:eventos ')) return dados.hubEventos;
+  if (s.includes('-- contatos:empresas ')) return dados.hubEmpresas;
+  if (s.includes('-- contatos:conversa ')) return dados.hubConversas.filter((c) => c.id === params[0] && params[1] === AURA_COMPANY);
+  if (s.includes('-- contatos:thread ')) {
+    return dados.hubMensagens.filter((m) => m.conversation_id === params[0])
+      .sort((x, y) => new Date(y.created_at) - new Date(x.created_at));
+  }
+
   // ── tabelas do painel ──
   if (s.startsWith('INSERT INTO painel_blocos_diarios')) return escrever('painel_blocos_diarios');
   if (s.includes('FROM painel_blocos_diarios WHERE dia IN')) return dados.anteriores;
@@ -324,4 +374,4 @@ function ligar(query, dados = dadosPadrao()) {
   return { dados, escritas };
 }
 
-module.exports = { HOJE, AGORA, USER, id, ts, EMPRESAS, dadosPadrao, responder, ligar };
+module.exports = { HOJE, AGORA, USER, AURA_COMPANY, conv, id, ts, EMPRESAS, dadosPadrao, responder, ligar };

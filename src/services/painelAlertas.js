@@ -8,29 +8,72 @@
 //   trial_com_venda_vencendo trial que já vendeu e vence em 48h
 //   pagamento_sem_loja       pagamento da Asaas sem loja vinculada
 //   nfce_rejeitada           NFC-e rejeitada nos últimos 7 dias
+//   contato_sem_resposta     contato do WhatsApp da Aura sem resposta humana
+//                            há mais de 2h, em horário comercial (8h–21h)
 //
-// `chave` identifica o alerta dentro do (dia, tipo): o id da loja ou, no
-// pagamento sem loja, o id do registro do webhook.
+// `chave` identifica o alerta dentro do (dia, tipo): o id da loja, no
+// pagamento sem loja o id do registro do webhook e, no contato, o id da
+// conversa do hub.
 // ============================================================
 'use strict';
 
 const b = require('./painelBlocos/_base');
 const { REJEITADA } = require('./painelBlocos/fiscal');
+const plantao = require('./plantao');
+const cw = require('./contatosWhatsapp');
 
 const DIAS_SEM_VENDA = 14;
 // Pagamento sem loja segue avisando por este tempo; depois vira histórico.
 const JANELA_SEM_LOJA_DIAS = 30;
+// Contato do WhatsApp: avisa depois de 2h sem resposta humana e para de
+// avisar com 3 dias (a partir daí o contato está na lista do bloco, não é
+// mais um alerta). Teto de avisos por vez, para uma fila antiga não inundar.
+const CONTATO_ESPERA_MIN = 2 * 60;
+const CONTATO_JANELA_DIAS = 3;
+const CONTATO_MAX_ALERTAS = 10;
 
 function quandoVence(dia, hoje) {
   const d = b.diasEntre(hoje, dia);
   return d <= 0 ? 'vence hoje' : d === 1 ? 'vence amanhã' : `vence em ${d} dias`;
 }
 
-async function calcularAlertas({ hoje, db = b.pool, empresas } = {}) {
+// Contatos do WhatsApp da Aura esperando resposta humana. Só avisa em
+// horário comercial: de noite a Aurinha está de plantão e o resumo das 8h
+// cobre o que chegou. O limite de 21h é a mesma fronteira do plantão
+// (21:00 já é noite; 08:00 já é dia).
+async function alertasDeContatos({ db = b.pool, agora = new Date() } = {}) {
+  if (!cw.auraCompanyId()) return [];
+  if (plantao.emHorarioNoturno(agora, null)) return [];
+
+  const desde = new Date(agora.getTime() - (CONTATO_JANELA_DIAS + 1) * 86400000);
+  const { contatos } = await cw.carregarContatos({ db, desde, ate: new Date(agora.getTime() + 1) });
+
+  return contatos
+    .filter((c) => c.pendente_desde
+      && agora.getTime() - c.pendente_desde.getTime() > CONTATO_ESPERA_MIN * 60000
+      && agora.getTime() - c.pendente_desde.getTime() <= CONTATO_JANELA_DIAS * 86400000)
+    .sort((x, y) => x.pendente_desde - y.pendente_desde)
+    .slice(0, CONTATO_MAX_ALERTAS)
+    .map((c) => {
+      const minutos = (agora.getTime() - c.pendente_desde.getTime()) / 60000;
+      const telefone = cw.formatarTelefone(c.telefone);
+      return {
+        tipo: 'contato_sem_resposta',
+        chave: c.conversa_id,
+        company_id: c.empresa ? c.empresa.company_id : null,
+        titulo: `${c.nome || (c.empresa && c.empresa.nome) || telefone || 'Contato'} sem resposta há ${cw.duracao(minutos)}`,
+        detalhe: `WhatsApp ${telefone} · ${cw.linkWhatsapp(c.telefone)}${c.resposta_aurinha_em ? ' · Aurinha já respondeu' : ''}`,
+        verbo: 'Responder',
+        bloco: 'contatos',
+      };
+    });
+}
+
+async function calcularAlertas({ hoje, db = b.pool, empresas, agora = new Date() } = {}) {
   const emp = empresas || await b.carregarEmpresas(db);
   const alertas = [];
 
-  const [ultima, semLoja, rejeitadas] = await Promise.all([
+  const [ultima, semLoja, rejeitadas, contatos] = await Promise.all([
     b.ultimaVendaPorLoja(db),
     b.opcional(
       db,
@@ -51,6 +94,11 @@ async function calcularAlertas({ hoje, db = b.pool, empresas } = {}) {
         GROUP BY company_id`,
       [hoje]
     ),
+    // O hub é uma fonte a mais: se ela falhar, os outros alertas saem.
+    alertasDeContatos({ db, agora }).catch((err) => {
+      console.error('[painel] alerta de contatos falhou:', err.message);
+      return [];
+    }),
   ]);
 
   // 1. Pagante anual que vence em até 2 dias sem vender há 14+ dias.
@@ -120,6 +168,9 @@ async function calcularAlertas({ hoje, db = b.pool, empresas } = {}) {
     });
   }
 
+  // 5. Contato do WhatsApp da Aura sem resposta humana (mais antigo primeiro).
+  alertas.push(...contatos);
+
   return alertas;
 }
 
@@ -146,4 +197,8 @@ async function gravarAlertas({ hoje, db = b.pool, alertas }) {
   );
 }
 
-module.exports = { calcularAlertas, gravarAlertas, DIAS_SEM_VENDA, JANELA_SEM_LOJA_DIAS };
+module.exports = {
+  calcularAlertas, gravarAlertas, alertasDeContatos,
+  DIAS_SEM_VENDA, JANELA_SEM_LOJA_DIAS,
+  CONTATO_ESPERA_MIN, CONTATO_JANELA_DIAS,
+};
