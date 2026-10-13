@@ -11,6 +11,7 @@ const router  = express.Router({ mergeParams: true });
 const { v4: uuidv4 } = require('uuid');
 const db = require('../config/database');
 const { requireAuth } = require('../middleware/auth');
+const { parseOFX } = require('../services/ofxParser');
 
 const VALID_TYPES = ['income', 'expense'];
 const MAX_BATCH = 5000;
@@ -104,29 +105,7 @@ function validateTransaction(tx, index) {
   return errors;
 }
 
-function parseOFX(content) {
-  const transactions = [];
-  const body = content.replace(/[\s\S]*?(?=<OFX>|<ofx>)/i, '');
-  const trnRegex = /<STMTTRN>([\s\S]*?)<\/STMTTRN>/gi;
-  let match;
-  while ((match = trnRegex.exec(body)) !== null) {
-    const block = match[1];
-    const get = (tag) => { const m = new RegExp(`<${tag}>([^<\\r\\n]+)`, 'i').exec(block); return m ? m[1].trim() : null; };
-    const trntype = get('TRNTYPE'), dtposted = get('DTPOSTED'), trnamt = get('TRNAMT'), fitid = get('FITID');
-    const memo = get('MEMO') || get('NAME') || '';
-    if (!trnamt || !dtposted || !fitid) continue;
-    const rawDate = dtposted.replace(/[^0-9]/g, '').substring(0, 8);
-    if (rawDate.length !== 8) continue;
-    const due_date = `${rawDate.substring(0,4)}-${rawDate.substring(4,6)}-${rawDate.substring(6,8)}`;
-    const amount = Math.abs(parseFloat(trnamt.replace(',', '.')));
-    if (isNaN(amount) || amount === 0) continue;
-    const positiveAmount = parseFloat(trnamt.replace(',', '.')) > 0;
-    const creditTypes = ['CREDIT', 'DEP', 'DIRECTDEP', 'INTEREST', 'DIV'];
-    const isCredit = creditTypes.includes((trntype || '').toUpperCase()) || positiveAmount;
-    transactions.push({ type: isCredit ? 'income' : 'expense', amount, description: memo || `Transacao bancaria - ${fitid}`, due_date, status: 'paid', fitid, category: null, notes: `Importado via OFX - FITID: ${fitid}` });
-  }
-  return transactions;
-}
+// Leitor de OFX: services/ofxParser.js (compartilhado com a conciliacao da Aura).
 
 // POST /companies/:id/transactions/batch
 router.post('/batch', requireAuth, async (req, res) => {

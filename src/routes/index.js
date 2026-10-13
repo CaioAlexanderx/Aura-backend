@@ -76,6 +76,8 @@ router.use('/admin/lead-views', require('./adminLeadViews'));
 // Gestão Aura: painel de blocos calculado pelo job diário (migration 370).
 // Conferência com a Asaas (órfãos, vencimentos): antes do painel, que é o prefixo.
 router.use('/admin/painel/asaas', require('./adminPainelAsaas'));
+// Extrato OFX da conta da Aura × repasses da Asaas (migration 373).
+router.use('/admin/painel/ofx', require('./adminPainelOfx'));
 router.use('/admin/painel', require('./adminPainel'));
 
 router.use('/webhooks/asaas',     require('./webhookAsaas'));

@@ -327,6 +327,98 @@
       ]
     },
     {
+      "titulo": "Conferência com o extrato",
+      "colunas": [
+        {
+          "chave": "mes_rotulo",
+          "rotulo": "Mês",
+          "tipo": "texto"
+        },
+        {
+          "chave": "asaas",
+          "rotulo": "Asaas",
+          "tipo": "moeda"
+        },
+        {
+          "chave": "banco",
+          "rotulo": "Banco",
+          "tipo": "moeda"
+        },
+        {
+          "chave": "diferenca",
+          "rotulo": "Diferença",
+          "tipo": "moeda"
+        },
+        {
+          "chave": "status",
+          "rotulo": "Situação",
+          "tipo": "texto"
+        }
+      ],
+      "linhas": [
+        {
+          "mes": "2026-10",
+          "mes_rotulo": "Out/2026",
+          "asaas": 309.83,
+          "banco": null,
+          "diferenca": null,
+          "status": "sem extrato",
+          "detalhe": null,
+          "extrato_id": null
+        },
+        {
+          "mes": "2026-09",
+          "mes_rotulo": "Set/2026",
+          "asaas": 479.66,
+          "banco": 359.83,
+          "diferenca": -119.83,
+          "status": "pendências",
+          "detalhe": "1 pagamento da Asaas sem crédito (R$ 169,83) · 1 crédito sem pagamento (R$ 50,00)",
+          "extrato_id": "7"
+        },
+        {
+          "mes": "2026-08",
+          "mes_rotulo": "Ago/2026",
+          "asaas": 0,
+          "banco": null,
+          "diferenca": null,
+          "status": "sem extrato",
+          "detalhe": null,
+          "extrato_id": null
+        },
+        {
+          "mes": "2026-07",
+          "mes_rotulo": "Jul/2026",
+          "asaas": 0,
+          "banco": null,
+          "diferenca": null,
+          "status": "sem extrato",
+          "detalhe": null,
+          "extrato_id": null
+        },
+        {
+          "mes": "2026-06",
+          "mes_rotulo": "Jun/2026",
+          "asaas": 0,
+          "banco": null,
+          "diferenca": null,
+          "status": "sem extrato",
+          "detalhe": null,
+          "extrato_id": null
+        },
+        {
+          "mes": "2026-05",
+          "mes_rotulo": "Mai/2026",
+          "asaas": 0,
+          "banco": null,
+          "diferenca": null,
+          "status": "sem extrato",
+          "detalhe": null,
+          "extrato_id": null
+        }
+      ]
+    },
+    {
       "titulo": "Assinaturas na Asaas sem empresa",
       "colunas": [
         {
@@ -491,5 +583,5 @@
       ]
     }
   ],
-  "insight": "1 pagante sem cobrança registrada (R$ 89,00 fora do MRR) · 1 pagamento sem loja vinculada desde set. O cálculo mostra, não esconde."
+  "insight": "1 pagante sem cobrança registrada (R$ 89,00 fora do MRR) · Extrato de set: 1 pagamento da Asaas sem crédito (R$ 169,83) · 1 crédito sem pagamento (R$ 50,00) · 1 pagamento sem loja vinculada desde set. O cálculo mostra, não esconde."
 }
