@@ -12,6 +12,11 @@
 //    mensagem de acolhimento — nunca fica IA respondendo em paralelo.
 //  - Toda ação vira hub_agent_events (auditoria).
 //  - Erro nunca sobe para o webhook: loga, marca evento 'erro' e sai.
+//
+// Duas personas, um loop (runToolLoop):
+//  - handleInbound      atendimento ao consumidor da LOJA (aurinhaPrompt.js)
+//  - responderSuporte   suporte da própria Aura, no plantão do WhatsApp
+//                       (aurinhaSuporte.js + aurinhaBase/)
 // ============================================================
 'use strict';
 
@@ -249,6 +254,100 @@ function parseFinalJson(text) {
   return parsed;
 }
 
+// ── Loop de tool use (compartilhado pelas duas personas) ────
+// Chama o modelo, executa as ferramentas pedidas e devolve os resultados
+// até ele parar de pedir (ou MAX_TOOL_ROUNDS). `messages` é alterado no
+// lugar. Ferramenta que lança vira { erro } para o modelo — nunca derruba
+// a rodada. Devolve a última resposta do modelo.
+async function runToolLoop({ system, messages, model, tools, exec, maxTokens = 1024, maxRounds = MAX_TOOL_ROUNDS }) {
+  let result = null;
+  for (let round = 0; round <= maxRounds; round++) {
+    result = await callClaude({ messages, system, model, maxTokens, tools });
+    if (result.stopReason !== 'tool_use') break;
+
+    messages.push({ role: 'assistant', content: result.content });
+    const toolResults = [];
+    for (const tu of result.toolUses) {
+      let output;
+      try {
+        output = await exec(tu.name, tu.input || {});
+      } catch (e) {
+        output = { erro: String(e.message || e).slice(0, 300) };
+      }
+      toolResults.push({
+        type: 'tool_result',
+        tool_use_id: tu.id,
+        content: JSON.stringify(output),
+      });
+    }
+    messages.push({ role: 'user', content: toolResults });
+  }
+  return result;
+}
+
+// ── Persona de SUPORTE (Aurinha de plantão, WhatsApp da Aura) ─
+// Histórico da conversa do hub em turns Anthropic. hub_messages (375):
+// cliente = user; aurinha e humano (o Caio) = assistant. Turns seguidos do
+// mesmo lado são unidos; a assinatura das falas antigas sai.
+async function loadHubHistory(conversationId) {
+  const suporte = require('./aurinhaSuporte');
+  const { rows } = await db.query(
+    `-- suporte:historico
+     SELECT direction, author, content FROM hub_messages
+      WHERE conversation_id = $1
+      ORDER BY created_at DESC LIMIT $2`,
+    [conversationId, HISTORY_LIMIT]
+  );
+  const turns = [];
+  for (const r of (rows || []).slice().reverse()) {
+    const role = r.author === 'cliente' || r.direction === 'inbound' ? 'user' : 'assistant';
+    const bruto = String(r.content || '').slice(0, 2000);
+    const content = role === 'assistant' ? suporte.semAssinatura(bruto) : bruto;
+    if (!content) continue;
+    const ultimo = turns[turns.length - 1];
+    if (ultimo && ultimo.role === role) ultimo.content += `\n${content}`;
+    else turns.push({ role, content });
+  }
+  while (turns.length && turns[0].role !== 'user') turns.shift();
+  return turns;
+}
+
+// Texto que a Aurinha de plantão manda AGORA nesta conversa.
+//   companyId  tenant do hub (a Aura)
+//   conversa   linha de hub_conversations (id, external_id = telefone, customer_name)
+// Devolve { texto } — texto null quando não há fala do cliente a responder.
+// LANÇA em qualquer falha (modelo fora do ar, resposta vazia, histórico
+// ilegível): quem chama (hubWhatsapp.responderNoHub) cai no texto fixo.
+async function responderSuporte({ companyId, conversa, agora = new Date() }) {
+  const suporte = require('./aurinhaSuporte');
+  const base = require('./aurinhaBase');
+
+  const messages = await loadHubHistory(conversa.id);
+  if (!messages.length) throw new Error('conversa sem histórico em hub_messages');
+  if (messages[messages.length - 1].role !== 'user') return { texto: null, motivo: 'SEM_FALA_DO_CLIENTE' };
+
+  // Relevância pela fala recente do cliente (as 3 últimas), não pela conversa toda.
+  const falas = messages.filter((m) => m.role === 'user').slice(-3).map((m) => m.content).join('\n');
+  const temas = base.selecionarTemas(falas);
+  const system = suporte.buildSuportePrompt({ temas, agora, nome: conversa.customer_name || null });
+  const ctx = await suporte.criarContexto({ hubCompanyId: companyId, conversa, agora });
+
+  const result = await runToolLoop({
+    system, messages, tools: suporte.TOOLS,
+    model: process.env.AURINHA_SUPORTE_MODEL || AURINHA_MODEL,
+    maxTokens: 700,
+    exec: (name, input) => suporte.executarFerramenta(ctx, name, input),
+  });
+  if (result.stopReason === 'tool_use') throw new Error('Aurinha de suporte não concluiu a resposta');
+
+  return {
+    texto: suporte.finalizarResposta(result.text),
+    temas: temas.map((t) => t.id),
+    ferramentas: ctx.usadas,
+    tokens_in: result.inputTokens, tokens_out: result.outputTokens, model: result.model,
+  };
+}
+
 // ── Entrada principal — chamada pelo webhook após persistir o inbound ─
 // Nunca lança: falha vira evento 'erro' + log.
 async function handleInbound(companyId, conversationId) {
@@ -279,38 +378,18 @@ async function handleInbound(companyId, conversationId) {
     let escalada = null;
     let result = null;
 
-    // Loop de tool use
-    for (let round = 0; round <= MAX_TOOL_ROUNDS; round++) {
-      result = await callClaude({
-        messages, system, model,
-        maxTokens: 1024,
-        tools: TOOLS,
-      });
-      if (result.stopReason !== 'tool_use') break;
-
-      messages.push({ role: 'assistant', content: result.content });
-      const toolResults = [];
-      for (const tu of result.toolUses) {
-        if (tu.name === 'escalar') {
+    result = await runToolLoop({
+      system, messages, model, tools: TOOLS,
+      exec: (name, input) => {
+        if (name === 'escalar') {
           escalada = {
-            motivo: String(tu.input?.motivo || 'sem motivo informado').slice(0, 500),
-            categoria: CATEGORIES.includes(tu.input?.categoria) ? tu.input.categoria : null,
+            motivo: String(input?.motivo || 'sem motivo informado').slice(0, 500),
+            categoria: CATEGORIES.includes(input?.categoria) ? input.categoria : null,
           };
         }
-        let output;
-        try {
-          output = await execTool(companyId, channelConfig, tu.name, tu.input || {}, { conversationId });
-        } catch (e) {
-          output = { erro: String(e.message || e).slice(0, 300) };
-        }
-        toolResults.push({
-          type: 'tool_result',
-          tool_use_id: tu.id,
-          content: JSON.stringify(output),
-        });
-      }
-      messages.push({ role: 'user', content: toolResults });
-    }
+        return execTool(companyId, channelConfig, name, input, { conversationId });
+      },
+    });
 
     let parsed;
     try {
@@ -382,4 +461,4 @@ async function handleInbound(companyId, conversationId) {
   }
 }
 
-module.exports = { handleInbound, TOOLS, AURINHA_MODEL };
+module.exports = { handleInbound, responderSuporte, runToolLoop, loadHubHistory, TOOLS, AURINHA_MODEL };

@@ -1,6 +1,6 @@
 # Aurinha de plantão — WhatsApp da Aura no hub
 
-**Status:** infraestrutura pronta e **dormente** (migration 375, 13/10/2026). Nada liga sozinho: sem `AURA_COMPANY_ID` no ambiente o webhook e o job nem consultam o banco. A persona de suporte e as ferramentas ficam para a f3-05.
+**Status:** infraestrutura (migration 375) e persona de suporte com ferramentas (migration 380, f3-05) prontas e **dormentes** (13/10/2026). Nada liga sozinho: sem `AURA_COMPANY_ID` no ambiente o webhook e o job nem consultam o banco.
 
 ## O fluxo
 
@@ -43,9 +43,51 @@ Horário de Brasília. **21:00→08:00** a Aurinha responde na hora. **08:00→2
 - A Aurinha não fala por cima: conversa assumida por humano → `CONVERSA_NAO_IA`; humano respondeu depois que a resposta entrou na fila → `HUMANO_RESPONDEU`.
 - Idempotência: `dedupe_key = hub:aurinha:<conversa>:<last_inbound_at>`.
 
-## Ponto de extensão (f3-05)
+## O que ela diz: persona de suporte (f3-05, migration 380)
 
-`hubWhatsapp.responderNoHub(conversa, { agora, config })` — hoje devolve o texto fixo do stub quando o relógio libera, no máximo uma vez a cada 6 h por conversa. A persona de suporte, as ferramentas e a base de conhecimento entram aqui (e o stub e o intervalo somem).
+`hubWhatsapp.responderNoHub(conversa, { agora, config })` → `aurinhaAgent.responderSuporte` → persona (`src/services/aurinhaSuporte.js`) + ferramentas + base de conhecimento + as últimas 20 mensagens de `hub_messages`. É **outra persona**, separada da de atendimento ao consumidor da loja (`aurinhaPrompt.js`); as duas usam o mesmo loop de tool use (`aurinhaAgent.runToolLoop`).
+
+Desenho: **acolhe, qualifica e agenda**. Lista **fechada** de intenções — o que não cabe nela é "não sei":
+
+| Intenção | O que ela faz | Ferramenta |
+|---|---|---|
+| Dúvida de uso | responde só com a base de conhecimento | — |
+| Problema técnico | coleta o essencial (até 2 perguntas) e abre pendência | `registrar_pendencia` |
+| Plano e preço | só a tabela de `billingPricing`, sem desconto | — |
+| Mais dias de teste | 7 dias, uma única vez por conta | `consultar_conta_pelo_telefone` → `estender_trial` |
+| Link para assinar | manda `APP_URL/checkout` | `link_do_checkout` |
+| Falar com o Caio | pedido de 20 min com 2 opções de horário comercial; o Caio confirma | `agendar_conversa` |
+| Não sei | anota e promete o retorno do relógio | `registrar_pendencia` |
+
+Regras duras (no prompt): não inventa, não promete funcionalidade nem data, não dá desconto, não fala de cobrança em atraso, não mostra dado de conta sem identificar o telefone.
+
+O que **não depende do modelo** (está no código):
+
+- **Identificação**: o telefone é o da conversa (`hub_conversations.external_id`); nenhuma ferramenta aceita telefone vindo do modelo. Bate com `companies.phone`, `users.phone` do dono ou de membro ativo, comparando DDD + 8 dígitos finais (ignora o 55 e o nono dígito). `company_id` que o modelo passa só vale se estiver entre as contas daquele telefone.
+- **Trial**: 7 dias fixos; só `vencido` ou em teste com até 3 dias pela frente (`clientLifecycle`); uma vez por conta para sempre — `audit_log` com `action = 'aurinha.trial_estendido'` + índice único da 380. A conta é a mesma regra do admin (`services/trialExtension.js`).
+- **Agendamento** (`hub_agendamentos`): segunda a sexta, 9h–18h, 1h de antecedência, até 14 dias; nasce `pendente` e só o Caio confirma. Um pedido pendente por telefone.
+- **Conta em atraso** aparece para ela só como "assinante".
+- **Limite por ferramenta por conversa** (24h, só conta uso que deu certo): consultar 3, trial 1, checkout 3, agendar 1, pendência 3. Cada uso vira evento `ferramenta_suporte`.
+- **Limite de respostas**: 8 por conversa por hora; passou disso ela se cala e a conversa fica para o humano.
+- **Tamanho e assinatura**: até 900 caracteres, cortado em frase inteira; toda resposta termina com a assinatura (`aurinhaSuporte.ASSINATURA`), que lembra que ela é a mesma Aurinha que pode atender os clientes da loja.
+- **Reserva**: qualquer falha do modelo (fora do ar, resposta vazia, laço de ferramenta) → texto fixo "Anotei sua mensagem e o Caio te responde às 8h", no máximo uma vez a cada 6h por conversa, + evento `erro` com `origem: persona_suporte`.
+- **Claim antes da resposta**: `avaliarConversa` zera `aguardando_resposta_desde` antes de chamar o modelo — webhook e job nunca rodam as ferramentas duas vezes para a mesma fala.
+
+Onde o Caio vê: pendências em `hub_agent_events` (`type = 'pendencia_suporte'`, `detail = { tipo, resumo, detalhes, telefone, contas, retorno_prometido }`), pedidos de conversa em `hub_agendamentos`; os dois disparam o sino do app no tenant Aura. Ainda **não** entram no resumo das 8h nem têm tela.
+
+```sql
+-- pendências abertas pela Aurinha
+SELECT created_at, detail->>'tipo' AS tipo, detail->>'resumo' AS resumo, detail->>'telefone' AS telefone
+  FROM hub_agent_events WHERE type = 'pendencia_suporte' ORDER BY created_at DESC LIMIT 50;
+-- pedidos de conversa aguardando confirmação
+SELECT created_at, nome, telefone, assunto, opcoes FROM hub_agendamentos WHERE status = 'pendente' ORDER BY created_at;
+```
+
+### Base de conhecimento (`src/services/aurinhaBase/`)
+
+Um markdown por tema (Caixa e bipe, etiquetas, estoque e importação, crediário, NFC-e, WhatsApp da loja, planos e trial, PWA). Cada arquivo abre com `tema:` e `palavras:`; a seleção é por palavra-chave na fala recente do cliente (sem acento, palavra inteira, expressão de mais de uma palavra pesa mais) e entram **no máximo 2 temas** no prompt — nunca a base inteira. Sem tema batendo, ela não responde dúvida de uso: anota. **Para ensinar algo: edite o `.md`** (ou crie outro com o mesmo cabeçalho). O conteúdo atual é a primeira versão, escrita a partir do código; a revisão com os 30 dias de conversas é a f3-06.
+
+Modelo: `AURINHA_SUPORTE_MODEL` (cai em `AURINHA_MODEL`).
 
 ## Operação
 
