@@ -12,6 +12,7 @@ const pool = require('../config/database');
 const { requireAuth, requireRole } = require('../middleware/auth');
 const asyncHandler = require('../utils/asyncHandler');
 const { RECOVERY_WINDOW_DAYS } = require('../services/clientLifecycle');
+const { recalculateAll } = require('../services/healthScore');
 
 const adminOnly = [requireAuth, requireRole('admin')];
 
@@ -292,58 +293,10 @@ router.get('/alerts', ...adminOnly, asyncHandler(async (req, res) => {
 }));
 
 // ── POST /admin/health/recalculate ──────────────────────────────
+// 13/10/2026: o cálculo mora em services/healthScore.js — o job diário do
+// painel (jobs/painelDiarioScheduler.js) chama a mesma função.
 router.post('/health/recalculate', ...adminOnly, asyncHandler(async (req, res) => {
-  const { rows: companies } = await pool.query(
-    `SELECT c.id, c.plan, c.billing_status, c.last_active_at,
-       (SELECT MAX(created_at) FROM transactions WHERE company_id=c.id) AS last_tx,
-       (SELECT COUNT(*) FROM transactions WHERE company_id=c.id AND created_at >= NOW() - INTERVAL '30 days') AS tx_30d
-     FROM companies c WHERE c.is_active=true AND (c.federation_id IS NULL OR c.federation_id = c.id)`
-  );
-
-  let updated = 0;
-  for (const c of companies) {
-    // Activity score (0-25)
-    const lastActive = c.last_active_at || c.last_tx;
-    let activityScore = 0;
-    if (lastActive) {
-      const days = Math.ceil((new Date() - new Date(lastActive)) / 86400000);
-      if (days <= 7) activityScore = 25;
-      else if (days <= 14) activityScore = 15;
-      else if (days <= 30) activityScore = 5;
-    }
-
-    // Usage score (0-25)
-    const txCount = parseInt(c.tx_30d || 0);
-    let usageScore = 0;
-    if (txCount >= 20) usageScore = 25;
-    else if (txCount >= 10) usageScore = 20;
-    else if (txCount >= 5) usageScore = 10;
-    else if (txCount >= 1) usageScore = 5;
-
-    // Payment score (0-25)
-    let paymentScore = 0;
-    if (c.billing_status === 'active') paymentScore = 25;
-    else if (c.billing_status === 'pending') paymentScore = 10;
-    else if (c.billing_status === 'trial') paymentScore = 15;
-
-    // Adoption score (0-25) — baseado no plano como proxy
-    let adoptionScore = 0;
-    if (c.plan === 'expansao') adoptionScore = 25;
-    else if (c.plan === 'negocio') adoptionScore = 15;
-    else if (c.plan === 'essencial') adoptionScore = 5;
-
-    const score = activityScore + usageScore + paymentScore + adoptionScore;
-    const riskLevel = score >= 70 ? 'healthy' : score >= 40 ? 'attention' : score >= 20 ? 'at_risk' : 'critical';
-
-    await pool.query(
-      `INSERT INTO client_health_scores (company_id, score, activity_score, usage_score, payment_score, adoption_score, risk_level, last_login, calculated_at)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,NOW())
-       ON CONFLICT (company_id) DO UPDATE SET score=$2, activity_score=$3, usage_score=$4, payment_score=$5, adoption_score=$6, risk_level=$7, last_login=$8, calculated_at=NOW()`,
-      [c.id, score, activityScore, usageScore, paymentScore, adoptionScore, riskLevel, lastActive || null]
-    );
-    updated++;
-  }
-
+  const { updated } = await recalculateAll();
   res.json({ message: `Health scores recalculados para ${updated} empresas`, updated });
 }));
 

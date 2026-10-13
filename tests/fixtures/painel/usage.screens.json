@@ -1,0 +1,22 @@
+{
+  "requisicao": {
+    "views": [
+      {
+        "screen": "pdv",
+        "count": 3,
+        "first_at": "2026-10-13T11:00:00.000Z",
+        "last_at": "2026-10-13T11:40:00.000Z"
+      },
+      {
+        "screen": "estoque",
+        "count": 1,
+        "first_at": "2026-10-13T11:00:00.000Z",
+        "last_at": "2026-10-13T11:45:00.000Z"
+      }
+    ]
+  },
+  "resposta": {
+    "ok": true,
+    "gravadas": 2
+  }
+}
