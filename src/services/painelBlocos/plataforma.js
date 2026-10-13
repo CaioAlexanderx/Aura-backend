@@ -1,7 +1,10 @@
-// Bloco "Plataforma": vendas por dia em todas as lojas (o pulso do produto).
+// Bloco "Plataforma": vendas por dia em todas as lojas (o pulso do produto)
+// e, quando o bipe sintético está ligado (services/canary.js), se o Caixa
+// está respondendo: último resultado, disponibilidade e série das 24h.
 'use strict';
 
 const b = require('./_base');
+const canaryStatus = require('../canaryStatus');
 
 async function calcular({ hoje, periodo = 14, db = b.pool, empresas } = {}) {
   const emp = empresas || await b.carregarEmpresas(db);
@@ -44,7 +47,28 @@ async function calcular({ hoje, periodo = 14, db = b.pool, empresas } = {}) {
     .sort((x, y) => y.vendas_7d - x.vendas_7d);
   const lojasOntem = linhas.filter((l) => l.vendas_ontem > 0).length;
 
-  return b.montarBloco({
+  // Bipe sintético: null quando dormente (sem envs / kill switch) — o bloco
+  // sai exatamente como antes. A venda sintética nunca entra nas contagens
+  // acima: a empresa de teste está fora do universo (CANARY_COMPANY_ID em
+  // _base.SEM_INTERNAS) e a venda é cancelada ao fim de cada execução.
+  const canary = await canaryStatus.resumo({ db, agora: new Date() });
+  const indicadoresCanary = [];
+  const seriesCanary = [];
+  if (canary) {
+    const d = canary.disponibilidade_24h;
+    indicadoresCanary.push(b.indicador(
+      'Caixa · disponibilidade 24h',
+      d.pct,
+      d.execucoes ? `${d.ok} de ${b.plural(d.execucoes, 'execução ok', 'execuções ok')}` : 'sem execuções ainda'
+    ));
+    seriesCanary.push(b.serieDe(
+      'Bipe sintético · % ok por hora',
+      'linha',
+      canary.serie_24h.filter((p) => p.execucoes > 0).map((p) => ({ rotulo: p.rotulo, dia: p.hora, valor: p.valor }))
+    ));
+  }
+
+  const bloco = b.montarBloco({
     valor: noDia(ontem),
     unidade: 'vendas ontem',
     resumo: `${vendas7} vendas em 7 dias · ${b.plural(lojasOntem, 'loja vendeu', 'lojas venderam')} ontem`,
@@ -56,13 +80,16 @@ async function calcular({ hoje, periodo = 14, db = b.pool, empresas } = {}) {
       b.indicador('Lojas vendendo · ontem', lojasOntem),
       b.indicador('Lojas vendendo · 7 dias', linhas.length),
       b.indicador('Recorde', recorde.valor, `em ${recorde.rotulo}, nos últimos ${janela} dias`),
+      ...indicadoresCanary,
     ],
     listas: [
       b.lista('Lojas vendendo · 7 dias', [b.colLoja(), b.col('vendas_7d', 'Vendas 7d', 'numero'), b.col('vendas_ontem', 'Ontem', 'numero')], linhas),
     ],
-    series: [b.serieDe(`Vendas por dia · ${janela} dias`, 'barras', serie)],
+    series: [b.serieDe(`Vendas por dia · ${janela} dias`, 'barras', serie), ...seriesCanary],
     insight: null,
   });
+  if (canary) bloco.detalhe.canary = canary;
+  return bloco;
 }
 
 module.exports = { calcular };

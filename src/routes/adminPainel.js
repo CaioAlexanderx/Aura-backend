@@ -30,6 +30,7 @@ const painel = require('../services/painelDiario');
 const { calcularAlertas, alertasDeContatos } = require('../services/painelAlertas');
 const { detalheDaConversa } = require('../services/contatosWhatsapp');
 const { listarClients360 } = require('../services/clients360');
+const canaryStatus = require('../services/canaryStatus');
 
 const adminOnly = [requireAuth, requireRole('admin')];
 
@@ -78,6 +79,26 @@ async function alertasDeContatosAgora() {
   }
 }
 
+// Bipe sintético: "há quanto tempo" e a disponibilidade valem agora, não às
+// 06h do snapshot — o bloco Plataforma ganha o `canary` ao vivo. Dormente
+// (sem envs) devolve null e a resposta sai como antes; falha na leitura cai
+// no que o cálculo diário gravou.
+async function canaryAoVivo(dados) {
+  try {
+    return await canaryStatus.resumo({ db: pool });
+  } catch (err) {
+    console.error('[painel] bipe sintético ao vivo falhou:', err.message);
+    return (dados && dados.detalhe && dados.detalhe.canary) || null;
+  }
+}
+
+async function comCanary(blocos, dadosPorId) {
+  if (!blocos.some((b) => b.id === 'plataforma')) return blocos;
+  const canary = await canaryAoVivo(dadosPorId('plataforma'));
+  if (!canary) return blocos;
+  return blocos.map((b) => (b.id === 'plataforma' ? { ...b, canary } : b));
+}
+
 // ── GET /admin/painel/hoje ──────────────────────────────────────
 router.get('/hoje', ...adminOnly, asyncHandler(async (req, res) => {
   const hoje = painel.hojeBRT();
@@ -100,7 +121,10 @@ router.get('/hoje', ...adminOnly, asyncHandler(async (req, res) => {
       calculado_em: gravados.reduce((m, g) => (g.calculado_em > m ? g.calculado_em : m), gravados[0].calculado_em),
       proximo_calculo: proximoCalculo(),
       ao_vivo: false,
-      blocos: BLOCOS.filter((d) => porBloco.has(d.id)).map((d) => resumoDoBloco(d, porBloco.get(d.id).dados)),
+      blocos: await comCanary(
+        BLOCOS.filter((d) => porBloco.has(d.id)).map((d) => resumoDoBloco(d, porBloco.get(d.id).dados)),
+        (id) => porBloco.get(id) && porBloco.get(id).dados
+      ),
       alertas: alertas
         .filter((a) => a.tipo !== 'contato_sem_resposta')
         .concat(await alertasDeContatosAgora())
@@ -118,7 +142,10 @@ router.get('/hoje', ...adminOnly, asyncHandler(async (req, res) => {
     calculado_em: new Date().toISOString(),
     proximo_calculo: proximoCalculo(),
     ao_vivo: true,
-    blocos: BLOCOS.filter((d) => resultados[d.id]).map((d) => resumoDoBloco(d, resultados[d.id])),
+    blocos: await comCanary(
+      BLOCOS.filter((d) => resultados[d.id]).map((d) => resumoDoBloco(d, resultados[d.id])),
+      (id) => resultados[id]
+    ),
     alertas: alertas.map(formatarAlerta),
   });
 }));
@@ -153,6 +180,7 @@ router.get('/blocos/:id', ...adminOnly, asyncHandler(async (req, res) => {
   }
 
   const detalhe = dados.detalhe || {};
+  const canary = def.id === 'plataforma' ? await canaryAoVivo(dados) : null;
   res.json({
     id: def.id,
     titulo: def.titulo,
@@ -167,6 +195,7 @@ router.get('/blocos/:id', ...adminOnly, asyncHandler(async (req, res) => {
     listas: detalhe.listas || [],
     series: detalhe.series || [],
     insight: detalhe.insight || null,
+    ...(canary ? { canary } : {}),
   });
 }));
 

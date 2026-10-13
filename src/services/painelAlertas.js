@@ -10,6 +10,10 @@
 //   nfce_rejeitada           NFC-e rejeitada nos últimos 7 dias
 //   contato_sem_resposta     contato do WhatsApp da Aura sem resposta humana
 //                            há mais de 2h, em horário comercial (8h–21h)
+//   plataforma_caida         bipe sintético (services/canary.js) falhando em
+//                            duas execuções seguidas. O job também grava a
+//                            linha na hora; entrar aqui é o que a mantém de
+//                            pé quando o passo diário regrava o dia
 //
 // `chave` identifica o alerta dentro do (dia, tipo): o id da loja, no
 // pagamento sem loja o id do registro do webhook e, no contato, o id da
@@ -21,6 +25,7 @@ const b = require('./painelBlocos/_base');
 const { REJEITADA } = require('./painelBlocos/fiscal');
 const plantao = require('./plantao');
 const cw = require('./contatosWhatsapp');
+const canaryStatus = require('./canaryStatus');
 
 const DIAS_SEM_VENDA = 14;
 // Pagamento sem loja segue avisando por este tempo; depois vira histórico.
@@ -170,6 +175,16 @@ async function calcularAlertas({ hoje, db = b.pool, empresas, agora = new Date()
 
   // 5. Contato do WhatsApp da Aura sem resposta humana (mais antigo primeiro).
   alertas.push(...contatos);
+
+  // 6. Plataforma caída: o bipe sintético falhou duas vezes seguidas. Dormente
+  //    (sem envs) não consulta nada. Uma fonte a mais: se falhar, os outros
+  //    alertas saem.
+  try {
+    const caida = canaryStatus.alertaDoPainel(await canaryStatus.resumo({ db, agora }), agora);
+    if (caida) alertas.unshift(caida);
+  } catch (err) {
+    console.error('[painel] alerta do bipe sintético falhou:', err.message);
+  }
 
   return alertas;
 }
