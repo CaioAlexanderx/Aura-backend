@@ -17,8 +17,9 @@
 // campo não é editável pela API da loja — só por SQL/admin.
 //
 // Quem decide QUANDO a Aurinha fala é o plantao.js (relógio). O que ela
-// diz é responderNoHub() — hoje um texto fixo (f3-05 troca por persona e
-// ferramentas). O que não pode responder agora fica marcado em
+// diz é responderNoHub(): a persona de suporte com ferramentas e base de
+// conhecimento (aurinhaSuporte.js, f3-05), com o texto fixo de reserva
+// quando o modelo falha. O que não pode responder agora fica marcado em
 // hub_conversations.aguardando_resposta_desde e o job por minuto
 // (jobs/plantaoJob.js) reavalia.
 //
@@ -34,11 +35,14 @@ const plantao = require('./plantao');
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const WINDOW_MS = 24 * 3600 * 1000;
 
-// Texto do stub (f3-05 substitui por persona de suporte + ferramentas).
-const TEXTO_STUB = 'Oi! Aqui é a Aurinha, da Aura. Anotei sua mensagem e o Caio te responde às 8h.';
-// Só do stub: o aviso é fixo, então não se repete a cada mensagem de uma
-// rajada. Some junto com o stub.
-const STUB_INTERVALO_MIN = 6 * 60;
+// Texto fixo: o que sai quando a persona de suporte falha (modelo fora do
+// ar, resposta vazia). Era a resposta única do stub até a f3-05.
+const TEXTO_FIXO = 'Oi! Aqui é a Aurinha, da Aura. Anotei sua mensagem e o Caio te responde às 8h.';
+const TEXTO_STUB = TEXTO_FIXO; // nome antigo, mantido para quem importa
+// O aviso é fixo, então não se repete a cada mensagem de uma rajada.
+const FIXO_INTERVALO_MIN = 6 * 60;
+// Teto de respostas da Aurinha por conversa por hora.
+const MAX_RESPOSTAS_POR_HORA = 8;
 
 function isMissingSchema(e) { return e && (e.code === '42P01' || e.code === '42703'); }
 
@@ -113,9 +117,12 @@ async function jaGravada(companyId, wamid) {
   return rows.length > 0;
 }
 
-// ── Ponto de extensão da persona (f3-05) ─────────────────────
+// ── O que a Aurinha diz ──────────────────────────────────────
 // Devolve o TEXTO que a Aurinha manda agora nesta conversa, ou null.
-// Hoje: texto fixo, e só quando o relógio de plantão libera.
+// Só quando o relógio de plantão libera. Quem fala é a persona de suporte
+// (aurinhaAgent.responderSuporte: persona + ferramentas + base de
+// conhecimento + as últimas 20 mensagens). Se o modelo falhar por qualquer
+// motivo, cai no texto fixo — o cliente nunca fica sem um "anotei".
 async function responderNoHub(conversa, { agora = new Date(), config = null } = {}) {
   const liberada = plantao.deveResponderAgora({
     agora,
@@ -124,10 +131,47 @@ async function responderNoHub(conversa, { agora = new Date(), config = null } = 
     config,
   });
   if (!liberada) return null;
-  if (await jaAvisouRecentemente(conversa.id)) return null;
-  return TEXTO_STUB;
+
+  // Teto por conversa por hora: conversa em laço (ou alguém testando o
+  // limite) para de ser respondida e fica para o humano.
+  if (await respostasNaUltimaHora(conversa.id) >= MAX_RESPOSTAS_POR_HORA) {
+    console.warn('[HUB-WA] conv=%s atingiu %d respostas/hora — fica para o humano', conversa.id, MAX_RESPOSTAS_POR_HORA);
+    return null;
+  }
+
+  const companyId = conversa.company_id || auraCompanyId();
+  try {
+    const { responderSuporte } = require('./aurinhaAgent');
+    const r = await responderSuporte({ companyId, conversa, agora });
+    return r.texto || null;
+  } catch (e) {
+    console.error('[HUB-WA] persona de suporte falhou conv=%s: %s', conversa.id, e.message);
+    await logEvent(companyId, conversa.id, 'erro', {
+      origem: 'persona_suporte', message: String(e.message || e).slice(0, 500),
+    });
+    if (await jaAvisouRecentemente(conversa.id)) return null;
+    return TEXTO_FIXO;
+  }
 }
 
+async function respostasNaUltimaHora(conversationId) {
+  try {
+    const { rows } = await db.query(
+      `-- hubwa:respostas-na-hora
+       SELECT COUNT(*)::int AS n FROM wa_outbox
+        WHERE hub_conversation_id = $1 AND source_type = 'aurinha'
+          AND status <> 'skipped'
+          AND created_at > NOW() - interval '1 hour'`,
+      [conversationId]
+    );
+    return rows.length ? Number(rows[0].n) || 0 : 0;
+  } catch (e) {
+    if (isMissingSchema(e)) return 0;
+    throw e;
+  }
+}
+
+// O texto fixo não se repete a cada mensagem de uma rajada.
 async function jaAvisouRecentemente(conversationId) {
   try {
     const { rows } = await db.query(
@@ -135,9 +179,10 @@ async function jaAvisouRecentemente(conversationId) {
        SELECT 1 FROM wa_outbox
         WHERE hub_conversation_id = $1 AND source_type = 'aurinha'
           AND status <> 'skipped'
+          AND text_body = $3
           AND created_at > NOW() - ($2 || ' minutes')::interval
         LIMIT 1`,
-      [conversationId, String(STUB_INTERVALO_MIN)]
+      [conversationId, String(FIXO_INTERVALO_MIN), TEXTO_FIXO]
     );
     return rows.length > 0;
   } catch (e) {
@@ -182,9 +227,9 @@ async function avaliarConversa(conv, { companyId, plantao: config = null }, { ag
     return { respondeu: false, agendada: true };
   }
 
-  const texto = await responderNoHub(conv, { agora, config });
-
-  // Claim atômico: webhook e job nunca respondem a mesma fala duas vezes.
+  // Claim atômico ANTES de responder: webhook e job nunca respondem a mesma
+  // fala duas vezes — e, como a resposta agora roda ferramentas (pendência,
+  // agendamento, trial), nunca as executam duas vezes.
   const { rows: claim } = await db.query(
     `-- hubwa:claim
      UPDATE hub_conversations
@@ -194,6 +239,14 @@ async function avaliarConversa(conv, { companyId, plantao: config = null }, { ag
     [conv.id]
   );
   if (!claim.length) return { respondeu: false, motivo: 'JA_RESPONDIDA' };
+
+  let texto;
+  try {
+    texto = await responderNoHub(conv, { agora, config });
+  } catch (e) {
+    await restaurarPendencia(conv.id, conv.aguardando_resposta_desde);
+    throw e;
+  }
   if (texto == null) return { respondeu: false, motivo: 'SEM_RESPOSTA' };
 
   const base = conv.last_inbound_at ? new Date(conv.last_inbound_at).getTime() : 0;
@@ -451,5 +504,5 @@ module.exports = {
   auraCompanyId, resolveTenant,
   registrarInbound, registrarEcho, marcarRespostaHumana,
   responderNoHub, avaliarConversa, processarPendentes,
-  TEXTO_STUB,
+  TEXTO_FIXO, TEXTO_STUB, MAX_RESPOSTAS_POR_HORA,
 };

@@ -57,8 +57,8 @@ const { listarClients360 } = require('../services/clients360');
 const { syncSubscriptionSeatValue } = require('../services/seatSubscription');
 const seatPass = require('../services/seatPass');
 const { RECOVERY_WINDOW_DAYS } = require('../services/clientLifecycle');
+const { estenderTrial } = require('../services/trialExtension');
 
-const { marcarTrialFixo } = require('../services/trialRegra');
 const adminOnly = [requireAuth, requireRole('admin')];
 
 // ── GET /admin/clients/:cid/health ─────────────────────────────
@@ -241,26 +241,14 @@ router.patch('/clients/:cid/extend-trial', ...adminOnly, asyncHandler(async (req
     throw new AppError('days deve ser inteiro entre 1 e 365', 400);
   }
 
-  const { rows: current } = await pool.query(
-    'SELECT trial_ends_at, billing_status FROM companies WHERE id = $1',
-    [cid]
-  );
-  if (!current.length) throw new AppError('Empresa nao encontrada', 404);
-
-  const now = new Date();
-  const previousEnds = current[0].trial_ends_at ? new Date(current[0].trial_ends_at) : null;
-  // Se trial ja vencido (ou nunca teve), conta a partir de hoje;
-  // se ativo, soma ao final atual.
-  const base = previousEnds && previousEnds > now ? previousEnds : now;
-  const newEnds = new Date(base.getTime() + n * 24 * 60 * 60 * 1000);
-
-  await pool.query(
-    `UPDATE companies SET trial_ends_at = $1, updated_at = NOW() WHERE id = $2`,
-    [newEnds, cid]
-  );
-  // 13/10/2026: a data dada pela Gestao Aura vale como esta — sem isto a
-  // primeira venda de uma conta 'primeira_venda' encurtaria a extensao.
-  await marcarTrialFixo(cid);
+  // 13/10/2026: a regra mora em services/trialExtension.js (a Aurinha de
+  // plantão usa a mesma). Vencido/sem data conta de hoje; ativo soma ao fim.
+  // Ela também marca trial_mode = 'fixo' (marcarTrialFixo): a data dada aqui
+  // vale como está — a primeira venda não a encurta.
+  const ext = await estenderTrial({ companyId: cid, days: n });
+  if (!ext) throw new AppError('Empresa nao encontrada', 404);
+  const previousEnds = ext.previousEnds;
+  const newEnds = ext.newEnds;
 
   // Audit log — staff_user_id + payload before/after + reason livre
   await pool.query(
@@ -273,7 +261,7 @@ router.patch('/clients/:cid/extend-trial', ...adminOnly, asyncHandler(async (req
         days_added: n,
         previous_trial_ends_at: previousEnds ? previousEnds.toISOString() : null,
         new_trial_ends_at: newEnds.toISOString(),
-        billing_status: current[0].billing_status,
+        billing_status: ext.billingStatus,
       }),
       reason && typeof reason === 'string' ? reason.trim() : null,
     ]
