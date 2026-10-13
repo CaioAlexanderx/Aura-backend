@@ -64,6 +64,13 @@ function janelaDoPasse(hoje = todayBrt(), temporada = TEMPORADA) {
   };
 }
 
+// O dia (YYYY-MM-DD) esta dentro da validade da temporada? Inclusivo nas duas
+// pontas. Usado por quem so roda na temporada (placar do dia no WhatsApp).
+function dentroDaTemporada(dia, temporada = TEMPORADA) {
+  const d = String(dia || '').slice(0, 10);
+  return d >= temporada.starts_at && d <= temporada.ends_at;
+}
+
 // O que sera cobrado e ate quando — texto pronto para a tela.
 function descreverCobranca({ qty, starts_at, ends_at, cortesia = false, unitPrice = SEAT_PRICE_BRL }) {
   const n = Math.max(parseInt(qty, 10) || 0, 0);
@@ -99,6 +106,7 @@ module.exports = {
   LIMITE_ADMIN,
   janelaDoPasse,
   mensalidadesAteOFim,
+  dentroDaTemporada,
   descreverCobranca,
   brl,
   dataBr,

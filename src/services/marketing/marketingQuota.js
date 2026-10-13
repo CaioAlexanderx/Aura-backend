@@ -50,8 +50,11 @@ const DEFAULT_UTILITY_CAP = 1500;
 // Ótica (15/09/2026): "óculos prontos" e "pós-venda de adaptação" são
 // resposta a um pedido que o cliente fez — utilidade. "Revisão da receita"
 // é convite para voltar à loja — marketing, com consentimento e cota.
+//
+// Placar do dia (13/10/2026): resumo de fim de dia da PRÓPRIA loja para o dono,
+// template UTILITY — conta no uso justo de utilidade, nunca na cota de marketing.
 const MARKETING_SOURCE_TYPES = ['reativacao', 'aniversario', 'campanha', 'otica_revisao'];
-const UTILITY_SOURCE_TYPES = ['crediario', 'crediario_manual', 'dojo_mensalidade', 'otica_pronta', 'otica_adaptacao'];
+const UTILITY_SOURCE_TYPES = ['crediario', 'crediario_manual', 'dojo_mensalidade', 'otica_pronta', 'otica_adaptacao', 'placar_dia'];
 
 function schemaMissing(e) {
   return !!e && (e.code === '42P01' || e.code === '42703');
