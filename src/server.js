@@ -72,6 +72,11 @@ function startServer() {
     // painel_runs. Kill switch PAINEL_DIARIO_ENABLED=false.
     const { initPainelDiarioScheduler } = require('./jobs/painelDiarioScheduler');
     initPainelDiarioScheduler();
+    // Assento de temporada (374): expira os passes vencidos, aplica os que
+    // começam e refaz o valor da assinatura — diário a partir da 01h BRT.
+    // Kill switch SEAT_PASS_JOB_ENABLED=false.
+    const { initSeatPassScheduler } = require('./jobs/seatPassScheduler');
+    initSeatPassScheduler();
     // Jobs de uma vez so (src/utils/jobRunner.js, arquivos em jobs/):
     // rodam em segundo plano e ficam registrados em jobs_run. Hoje: as
     // miniaturas do acervo de fotos (job 001).

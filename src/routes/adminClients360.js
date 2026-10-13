@@ -55,6 +55,7 @@ const AppError = require('../errors/AppError');
 const { getExtraSeatsMap, setExtraSeatsForCompany } = require('../services/extraSeats');
 const { listarClients360 } = require('../services/clients360');
 const { syncSubscriptionSeatValue } = require('../services/seatSubscription');
+const seatPass = require('../services/seatPass');
 const { RECOVERY_WINDOW_DAYS } = require('../services/clientLifecycle');
 
 const adminOnly = [requireAuth, requireRole('admin')];
@@ -431,6 +432,46 @@ router.post('/clients/:cid/resync-subscription', ...adminOnly, asyncHandler(asyn
     billing_status: comp[0].billing_status,
     billing_sync: billingSync,
   });
+}));
+
+// ── POST /admin/clients/:cid/seat-pass ─────────────────────────
+// 13/10/2026 (migration 374): concede assento de temporada (acesso extra com
+// validade 01/11/2026–31/01/2027, expira sozinho). Body: { qty, reason? }.
+//
+// Empresa COM assinatura na Asaas: o assento e' cobrado como qualquer extra
+// (plano + R$19 x extras via syncSubscriptionSeatValue), so enquanto valer.
+// Empresa SEM assinatura (trial, cancelada, plano que o sync nao precifica):
+// o passe e' concedido como CORTESIA — os assentos valem, nada e' cobrado.
+// Se a empresa assinar durante a validade, o assento entra no valor da
+// assinatura como qualquer outro extra (checkout le extra_seats_granted).
+// Regra e SQL: services/seatPass.js; datas: services/temporada.js.
+router.post('/clients/:cid/seat-pass', ...adminOnly, asyncHandler(async (req, res) => {
+  const { cid } = req.params;
+  const { qty, reason } = req.body || {};
+  const motivo = reason && typeof reason === 'string' ? reason.trim() : null;
+
+  let out;
+  try {
+    out = await seatPass.contratar({ companyId: cid, qty, source: 'admin', userId: req.user.id, reason: motivo });
+  } catch (err) {
+    if (seatPass.enviarErro(res, err)) return;
+    throw err;
+  }
+
+  try {
+    await pool.query(
+      `INSERT INTO admin_audit_log (staff_user_id, company_id, action, payload, reason)
+       VALUES ($1, $2, 'grant_seat_pass', $3, $4)`,
+      [req.user.id, cid, JSON.stringify({
+        pass_id: out.passe.id, qty: out.passe.qty, cortesia: out.passe.cortesia,
+        starts_at: out.passe.starts_at, ends_at: out.passe.ends_at,
+      }), motivo]
+    );
+  } catch (err) {
+    console.error('[admin] seat-pass: admin_audit_log falhou:', err.message);
+  }
+
+  res.status(201).json(out);
 }));
 
 // ── GET /admin/audit-log — lista acoes administrativas ──────────
