@@ -39,8 +39,21 @@ async function calcular({ hoje, periodo = 30, db = b.pool, empresas } = {}) {
     produtos: b.num(r.produtos), vendas: b.num(r.vendas), checkout_em: r.checkout_em || null,
   }]));
 
+  // 13/10/2026: modo do trial (migration 379). Consulta a parte: sem as
+  // colunas, b.opcional devolve [] e todo mundo aparece como 'fixo' — dentro
+  // da consulta do funil, a coluna ausente derrubaria o bloco.
+  const modoRows = contas.length ? await b.opcional(
+    db,
+    `SELECT c.id AS company_id, c.trial_mode, c.trial_started_by_sale_at
+       FROM companies c
+      WHERE c.id = ANY($1::uuid[])`,
+    [contas.map((e) => e.company_id)]
+  ) : [];
+  const modo = new Map(modoRows.map((r) => [r.company_id, r]));
+
   const linhas = contas.map((e) => {
     const f = funil.get(e.company_id) || { produtos: 0, vendas: 0, checkout_em: null };
+    const m = modo.get(e.company_id) || {};
     return {
       ...b.ref(e),
       degrau: degrauDe(e, f),
@@ -49,6 +62,10 @@ async function calcular({ hoje, periodo = 30, db = b.pool, empresas } = {}) {
       viu_checkout_em: f.checkout_em,
       criado_em: e.criado_em,
       vence_em: e.pagante ? null : e.trial_ate,
+      // 'primeira_venda' sem started_by_sale_at = o relógio ainda não começou
+      // (vence_em é o teto de 15 dias do cadastro).
+      trial_mode: m.trial_mode || 'fixo',
+      started_by_sale_at: m.trial_started_by_sale_at || null,
       vencido: !e.pagante && !!e.trial_ate && e.trial_ate < hoje,
       plano: b.PLANO_ROTULO[e.plan] || e.plan,
       ciclo: e.pagante ? b.CICLO_ROTULO[e.ciclo] : null,
@@ -85,7 +102,7 @@ async function calcular({ hoje, periodo = 30, db = b.pool, empresas } = {}) {
     resumo: `${b.plural(vencidos, 'vencido', 'vencidos')} · ${b.plural(assinaram, 'assinou', 'assinaram')}`,
     serie,
     linhas,
-    fonte: 'companies, products, sales, audit_log (checkout.viewed)',
+    fonte: 'companies (trial_mode), products, sales, audit_log (checkout.viewed)',
     indicadores: [
       b.indicador('Cadastros', total, `${periodo} dias, sem dojôs`),
       b.indicador('Trials vencidos', vencidos),

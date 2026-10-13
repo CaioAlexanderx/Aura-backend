@@ -7,7 +7,7 @@
   "valor": 4,
   "unidade": "cadastros",
   "resumo": "1 vencido · 1 assinou",
-  "fonte": "companies, products, sales, audit_log (checkout.viewed)",
+  "fonte": "companies (trial_mode), products, sales, audit_log (checkout.viewed)",
   "indicadores": [
     {
       "rotulo": "Cadastros",
@@ -112,6 +112,8 @@
           "viu_checkout_em": null,
           "criado_em": "2026-10-09",
           "vence_em": "2026-10-16",
+          "trial_mode": "fixo",
+          "started_by_sale_at": null,
           "vencido": false,
           "plano": "Essencial",
           "ciclo": null
@@ -163,6 +165,8 @@
           "viu_checkout_em": null,
           "criado_em": "2026-10-06",
           "vence_em": "2026-10-14",
+          "trial_mode": "primeira_venda",
+          "started_by_sale_at": "2026-10-07T15:00:00.000Z",
           "vencido": false,
           "plano": "Negócio",
           "ciclo": null
@@ -214,6 +218,8 @@
           "viu_checkout_em": "2026-10-09T15:00:00.000Z",
           "criado_em": "2026-10-01",
           "vence_em": "2026-10-08",
+          "trial_mode": "primeira_venda",
+          "started_by_sale_at": null,
           "vencido": true,
           "plano": "Negócio",
           "ciclo": null
@@ -265,6 +271,8 @@
           "viu_checkout_em": null,
           "criado_em": "2026-09-20",
           "vence_em": null,
+          "trial_mode": "fixo",
+          "started_by_sale_at": null,
           "vencido": false,
           "plano": "Negócio",
           "ciclo": "Mensal"

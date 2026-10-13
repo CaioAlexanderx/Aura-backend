@@ -58,6 +58,7 @@ const { syncSubscriptionSeatValue } = require('../services/seatSubscription');
 const seatPass = require('../services/seatPass');
 const { RECOVERY_WINDOW_DAYS } = require('../services/clientLifecycle');
 
+const { marcarTrialFixo } = require('../services/trialRegra');
 const adminOnly = [requireAuth, requireRole('admin')];
 
 // ── GET /admin/clients/:cid/health ─────────────────────────────
@@ -257,6 +258,9 @@ router.patch('/clients/:cid/extend-trial', ...adminOnly, asyncHandler(async (req
     `UPDATE companies SET trial_ends_at = $1, updated_at = NOW() WHERE id = $2`,
     [newEnds, cid]
   );
+  // 13/10/2026: a data dada pela Gestao Aura vale como esta — sem isto a
+  // primeira venda de uma conta 'primeira_venda' encurtaria a extensao.
+  await marcarTrialFixo(cid);
 
   // Audit log — staff_user_id + payload before/after + reason livre
   await pool.query(
@@ -279,6 +283,7 @@ router.patch('/clients/:cid/extend-trial', ...adminOnly, asyncHandler(async (req
     trial_ends_at: newEnds.toISOString(),
     previous_trial_ends_at: previousEnds ? previousEnds.toISOString() : null,
     days_added: n,
+    trial_mode: 'fixo',
   });
 }));
 

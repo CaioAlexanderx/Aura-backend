@@ -82,6 +82,7 @@ const router  = express.Router({ mergeParams: true });
 const db      = require('../config/database');
 const { requireAuth, requireRole } = require('../middleware/auth');
 const { isCheckoutDue, recordCheckoutViewed } = require('../services/trialFunnel');
+const { marcarTrialFixo } = require('../services/trialRegra');
 const { asaas } = require('../services/asaasClient');
 const {
   PLANS,
@@ -737,6 +738,8 @@ router.post('/subscribe', requireAuth, requireRole('client', 'admin'), async (re
          WHERE id=$6`,
         [plan, subscription.id, cycle, trialEndsStr, subscription.nextDueDate || trialEndsStr, company.id]
       );
+      // 13/10/2026: a data do cupom (dias gratis / PRIMEIROMES) vale como esta.
+      await marcarTrialFixo(company.id);
 
       await recordRedemption({
         companyId: company.id,
@@ -1032,6 +1035,8 @@ router.post('/subscribe', requireAuth, requireRole('client', 'admin'), async (re
        WHERE id=$7`,
       [plan, subscription.id, pixStatus, cycle, subscription.nextDueDate || pixFirstDue, trialEndsStr, company.id]
     );
+    // 13/10/2026: so quando o cupom escreveu trial_ends_at (dias gratis / PRIMEIROMES).
+    if (trialEndsStr) await marcarTrialFixo(company.id);
 
     let pixFirstFullDueDate = null;
     if (coupon) {

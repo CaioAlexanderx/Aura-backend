@@ -76,6 +76,7 @@ const matconSaleHooks = require('../services/matconSaleHooks');
 const comandaSaleHooks = require('../services/comandaSaleHooks');
 // 06/10/2026: chave "vender sem estoque" — ver cabecalho do util.
 const { vendaSemEstoqueLiberada } = require('../utils/vendaSemEstoque');
+const { iniciarTrialPelaPrimeiraVenda } = require('../services/trialRegra');
 
 const fmt = (v) => parseFloat(v || 0).toFixed(2);
 const SP_DATE_NOW = "(NOW() AT TIME ZONE 'America/Sao_Paulo')::date";
@@ -751,6 +752,11 @@ async function handleSale(req, res, opts = {}) {
     }
 
     await client.query('COMMIT');
+
+    // 13/10/2026: a primeira venda dispara o trial do self-service
+    // (services/trialRegra). Sem await e sem lancar: nunca atrasa nem derruba
+    // a venda.
+    Promise.resolve().then(() => iniciarTrialPelaPrimeiraVenda(req.params.id)).catch(() => {});
 
     const { rows: saleItems } = await db.query(
       `SELECT si.*, p.name AS product_name FROM sale_items si

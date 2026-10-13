@@ -276,6 +276,35 @@ describe('GET /admin/painel/blocos/:id — uma rota por bloco', () => {
     expect(body.series[0].pontos.map((p) => p.valor)).toEqual([4, 3, 2, 1, 1]);
   });
 
+  test('trials por degrau: cada linha diz o modo do trial e quando a primeira venda o iniciou', async () => {
+    comDiaGravado();
+    const { body } = await api('get', '/blocos/trials_degrau');
+    const linhas = body.listas.flatMap((l) => l.linhas);
+    const modo = Object.fromEntries(linhas.map((l) => [l.nome, [l.trial_mode, l.started_by_sale_at]]));
+    expect(modo).toEqual({
+      'Ótica Visão': ['primeira_venda', fake.ts('2026-10-07')], // vendeu: os 7 dias correm
+      'Tech Assist': ['primeira_venda', null],                  // ainda não vendeu: vence_em é o teto
+      'Bazar Novo': ['fixo', null],                             // conta por código
+      'Papelaria Sol': ['fixo', null],
+    });
+  });
+
+  test('trials por degrau sem a migration 379: todo mundo fixo e o funil não zera', async () => {
+    const dados = fake.dadosPadrao();
+    const banco = {
+      query: async (sql, params) => {
+        if (sql.includes('trial_started_by_sale_at')) throw Object.assign(new Error('column c.trial_mode does not exist'), { code: '42703' });
+        return { rows: fake.responder(dados, [], sql, params) };
+      },
+    };
+    jest.spyOn(console, 'warn').mockImplementation(() => {});
+    const bloco = await require('../../src/services/painelBlocos/trials_degrau').calcular({ hoje: fake.HOJE, db: banco });
+    const linhas = bloco.lista;
+    expect(linhas.map((l) => l.trial_mode)).toEqual(['fixo', 'fixo', 'fixo', 'fixo']);
+    expect(linhas.find((l) => l.nome === 'Ótica Visão')).toMatchObject({ vendas: 3, produtos: 40, started_by_sale_at: null });
+    console.warn.mockRestore();
+  });
+
   test('uso por funcionalidade: lojas distintas em 7 dias, no período e desde sempre', async () => {
     comDiaGravado();
     const { body } = await api('get', '/blocos/uso_funcionalidade');
