@@ -38,6 +38,10 @@ router.use('/me', require('./customerProfile').meRouter);
 router.use('/me/financeiro', require('./financeiroInsights').meRouter);
 router.use('/me/financeiro', require('./financeiroComparative').meRouter);
 
+// Telas visitadas: o app envia em lotes (POST /usage/screens) e o painel da
+// Gestão Aura lê em screen_views. Empresa e usuário vêm do token.
+router.use('/usage', require('./usageScreens'));
+
 router.use('/companies/:id', privateCompaniesRouter);
 
 // ── WhatsApp Cloud API por company (FONTE ÚNICA: connect, status,
@@ -69,6 +73,8 @@ router.use('/admin/aura-notas', require('./adminAuraNotas')); // Gestão Aura �
 router.use('/admin/cadences',   require('./adminCadences'));
 router.use('/admin/lead-goals', require('./adminLeadGoals'));
 router.use('/admin/lead-views', require('./adminLeadViews'));
+// Gestão Aura: painel de blocos calculado pelo job diário (migration 370).
+router.use('/admin/painel', require('./adminPainel'));
 
 router.use('/webhooks/asaas',     require('./webhookAsaas'));
 // ── AURA DOJÔ — F3b (público: conciliação da subconta Asaas do dojô/BaaS) ──

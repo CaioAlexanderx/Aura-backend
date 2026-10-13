@@ -67,6 +67,11 @@ function startServer() {
     // Iniciar scheduler de relatórios
     const { initReportScheduler } = require('./jobs/reportScheduler');
     initReportScheduler();
+    // Gestão Aura (370): health score, MRR do mês, blocos do painel e
+    // alertas — diário a partir das 06h BRT, com trava por dia em
+    // painel_runs. Kill switch PAINEL_DIARIO_ENABLED=false.
+    const { initPainelDiarioScheduler } = require('./jobs/painelDiarioScheduler');
+    initPainelDiarioScheduler();
     // Jobs de uma vez so (src/utils/jobRunner.js, arquivos em jobs/):
     // rodam em segundo plano e ficam registrados em jobs_run. Hoje: as
     // miniaturas do acervo de fotos (job 001).
