@@ -11,10 +11,16 @@
 //   Fallback p/ db.query quando queryRetry não existe (mocks de teste que
 //   substituem o módulo database sem o helper) — chamado como MÉTODO de db p/
 //   preservar o `this` do pool em produção.
+// 12/10/2026: requireCompanyAccess passa a gravar companies.last_active_at
+//   (ninguém gravava; NULL em todas as contas e a Gestão Aura não sabia quando
+//   a conta em trial esteve aqui pela última vez). No máximo 1 UPDATE a cada
+//   15 min por empresa, fire-and-forget — ver services/trialFunnel. Staff em
+//   modo admin (bypass role='admin') não conta como acesso do cliente.
 // ============================================================
 const jwt  = require('jsonwebtoken');
 const db   = require('../config/database');
 const { validateRuntimeEnv } = require('../config/env');
+const { touchCompanyActivity } = require('../services/trialFunnel');
 
 const env        = validateRuntimeEnv();
 const JWT_SECRET = env.JWT_SECRET;
@@ -84,6 +90,8 @@ function requireCompanyAccess(opts = {}) {
         return res.status(403).json({ error: 'Permissão insuficiente', required_roles: opts.roles, your_role: role });
       }
       req.companyRole = role;
+      // 12/10/2026: último acesso real da empresa (throttle 15 min, sem await).
+      touchCompanyActivity(companyId);
       next();
     } catch (err) {
       console.error('requireCompanyAccess error:', err);

@@ -59,12 +59,21 @@
 //   (ex.: o anual) segue o caminho normal — o desconto concluido nao interfere.
 //   Cupom de 1 mes (inclusive o novo desconto em reais) segue a regra acima:
 //   so a 1a cobranca.
+//
+// 12/10/2026 — CHEGADA AO CHECKOUT NO FUNIL DO TRIAL:
+//   O self-service converteu 0 de 21 contas e nao havia como saber quem sequer
+//   viu a tela de planos. O GET /status (a tela de checkout chama a cada
+//   abertura) agora registra audit_log action='checkout.viewed' quando a
+//   empresa esta sem cobranca ativa e sem trial valendo — no maximo um por
+//   empresa a cada 24h, fire-and-forget (services/trialFunnel). A resposta do
+//   status nao muda. Staff em modo admin nao conta.
 // ============================================================
 
 const express = require('express');
 const router  = express.Router({ mergeParams: true });
 const db      = require('../config/database');
 const { requireAuth, requireRole } = require('../middleware/auth');
+const { isCheckoutDue, recordCheckoutViewed } = require('../services/trialFunnel');
 const { asaas } = require('../services/asaasClient');
 const {
   PLANS,
@@ -214,6 +223,15 @@ router.get('/status', requireAuth, async (req, res) => {
     const c = rows[0];
     const trialActive = c.trial_ends_at && new Date(c.trial_ends_at) > new Date();
     const daysLeft = trialActive ? Math.ceil((new Date(c.trial_ends_at) - new Date()) / 86400000) : 0;
+
+    // 12/10/2026: funil do trial — chegou ao checkout sem cobranca nem trial.
+    // Sem await: o registro nunca atrasa nem derruba o status.
+    const isStaffAdmin = req.companyRole === 'admin' || (req.user && req.user.role === 'admin');
+    if (!isStaffAdmin && isCheckoutDue(c)) {
+      Promise.resolve()
+        .then(() => recordCheckoutViewed({ companyId: c.id || req.params.id, userId: (req.user && req.user.id) || null, company: c }))
+        .catch(() => {});
+    }
 
     const d = c.subscription_discount;
     const discount = d ? {

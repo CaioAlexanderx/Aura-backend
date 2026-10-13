@@ -51,3 +51,14 @@ jest.mock('../src/services/dentalConsentWs', () => ({
   getConsentSessionStatus: jest.fn(() => ({ status: 'waiting', connected: false })),
   validateConsentToken: jest.fn(),
 }));
+
+// 12/10/2026: sinais do funil do trial (last_active_at em requireCompanyAccess,
+// checkout.viewed no GET /billing/status) sao fire-and-forget e fariam uma
+// query extra em todo request — consumindo os mockResolvedValueOnce que os
+// testes de rota enfileiram em db.query. Aqui viram no-op; os testes do funil
+// usam jest.unmock('../src/services/trialFunnel') para exercitar o real.
+jest.mock('../src/services/trialFunnel', () => ({
+  ...jest.requireActual('../src/services/trialFunnel'),
+  touchCompanyActivity: jest.fn(() => false),
+  recordCheckoutViewed: jest.fn(async () => false),
+}));

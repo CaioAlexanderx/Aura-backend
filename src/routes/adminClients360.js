@@ -35,6 +35,16 @@
 //   0 e depois 1 — gambiarra que ainda faz um PUT intermediario removendo o
 //   seat da assinatura. A rota nova re-dispara o sync de forma idempotente,
 //   sem alterar extra_seats_granted.
+//
+// 12/10/2026: funil do trial no /clients-360. O self-service converteu 0 de
+//   21 contas em 120 dias e o Caio precisa ver, por conta, em que degrau ela
+//   parou: importou estoque -> abriu o Caixa -> vendeu -> viu o checkout.
+//   Campos novos por cliente: first_sale_at, caixa_sessions, last_caixa_at,
+//   imported_rows, checkout_viewed_at, checkout_views e o resumo
+//   ativacao { importou, abriu_caixa, vendeu, viu_checkout }. sales e
+//   audit_log entram no SELECT principal (ja eram usadas nele); caixa_sessoes
+//   e import_logs vem de queries agrupadas a parte, com 42P01/42703 guardados
+//   — tabela ausente zera o degrau em vez de esvaziar a Gestao Aura.
 // ============================================================
 
 const router = require('express').Router();
@@ -147,6 +157,58 @@ router.get('/clients/:cid/activity', ...adminOnly, asyncHandler(async (req, res)
   });
 }));
 
+// ── Funil do trial (12/10/2026) ───────────────────────────────
+// Importou estoque conta planilha/XML de produtos (import_logs module
+// 'products', sem as importacoes desfeitas) OU 10+ produtos cadastrados a mao
+// — quem digita o estoque tambem passou do degrau.
+const IMPORT_MIN_PRODUCTS = 10;
+
+function activationOf(f) {
+  return {
+    importou: f.imported_rows > 0 || f.prod_count >= IMPORT_MIN_PRODUCTS,
+    abriu_caixa: f.caixa_sessions > 0,
+    vendeu: f.sale_count > 0 || !!f.first_sale_at,
+    viu_checkout: f.checkout_views > 0 || !!f.checkout_viewed_at,
+  };
+}
+
+// Tabela/coluna ausente (deploy antes da migration) zera o degrau; qualquer
+// outro erro sobe, como no resto da rota.
+async function optionalRows(sql, params) {
+  try {
+    const { rows } = await pool.query(sql, params);
+    return rows || [];
+  } catch (err) {
+    if (err && (err.code === '42P01' || err.code === '42703')) return [];
+    throw err;
+  }
+}
+
+async function getFunnelMaps(ids) {
+  const caixaMap = new Map();
+  const importMap = new Map();
+  if (!ids.length) return { caixaMap, importMap };
+  const [caixaRows, importRows] = await Promise.all([
+    optionalRows(
+      `SELECT company_id, COUNT(*) AS caixa_sessions, MAX(opened_at) AS last_caixa_at
+         FROM caixa_sessoes
+        WHERE company_id = ANY($1)
+        GROUP BY company_id`,
+      [ids]
+    ),
+    optionalRows(
+      `SELECT company_id, COALESCE(SUM(imported_rows), 0) AS imported_rows
+         FROM import_logs
+        WHERE company_id = ANY($1) AND module = 'products' AND reverted_at IS NULL
+        GROUP BY company_id`,
+      [ids]
+    ),
+  ]);
+  for (const r of caixaRows) caixaMap.set(r.company_id, r);
+  for (const r of importRows) importMap.set(r.company_id, r.imported_rows);
+  return { caixaMap, importMap };
+}
+
 // ── GET /admin/clients (enhanced — inclui health score + vertical) ─
 // 12/05/2026 (noite): SELECT principal NAO referencia mais
 // extra_seats_granted — campo vem de query separada via helper
@@ -174,7 +236,9 @@ router.get('/clients-360', ...adminOnly, asyncHandler(async (req, res) => {
        (SELECT COUNT(*) FROM customers WHERE company_id=c.id) AS cust_count,
        (SELECT COUNT(*) FROM sales WHERE company_id=c.id) AS sale_count,
        (SELECT COALESCE(SUM(amount),0) FROM transactions WHERE company_id=c.id AND type='income') AS total_revenue,
-       la.last_login_at, la.login_days
+       la.last_login_at, la.login_days,
+       (SELECT MIN(created_at) FROM sales WHERE company_id=c.id) AS first_sale_at,
+       ck.checkout_viewed_at, ck.checkout_views
     FROM companies c
     LEFT JOIN users u ON u.id=c.owner_id
     LEFT JOIN client_health_scores h ON h.company_id=c.id
@@ -184,6 +248,11 @@ router.get('/clients-360', ...adminOnly, asyncHandler(async (req, res) => {
         FROM audit_log a
        WHERE a.company_id = c.id AND a.action IN ('login', 'switch_company', 'register')
     ) la ON true
+    LEFT JOIN LATERAL (
+      SELECT MAX(a.created_at) AS checkout_viewed_at, COUNT(*) AS checkout_views
+        FROM audit_log a
+       WHERE a.company_id = c.id AND a.action = 'checkout.viewed'
+    ) ck ON true
     WHERE (c.federation_id IS NULL OR c.federation_id = c.id)
     ORDER BY h.score ASC NULLS LAST, c.created_at DESC
   `);
@@ -191,23 +260,38 @@ router.get('/clients-360', ...adminOnly, asyncHandler(async (req, res) => {
   // Defensivo: pega extra_seats_granted via helper opcional.
   // Pre-migration → mapa vazio → todos default 0.
   const seatsMap = await getExtraSeatsMap(rows.map(r => r.id));
+  // 12/10/2026: degraus do funil que vivem em tabelas fora do SELECT principal.
+  const { caixaMap, importMap } = await getFunnelMaps(rows.map(r => r.id));
 
   const now = new Date();
   res.json({
     total: rows.length,
     recovery_window_days: RECOVERY_WINDOW_DAYS,
-    clients: rows.map(r => ({
-      ...r,
-      ...classifyLifecycle(r, now),
-      tx_count: parseInt(r.tx_count || 0),
-      prod_count: parseInt(r.prod_count || 0),
-      cust_count: parseInt(r.cust_count || 0),
-      sale_count: parseInt(r.sale_count || 0),
-      login_days: parseInt(r.login_days || 0),
-      total_revenue: parseFloat(r.total_revenue || 0),
-      health_score: r.health_score ? parseInt(r.health_score) : null,
-      extra_seats_granted: seatsMap.get(r.id) || 0,
-    })),
+    clients: rows.map(r => {
+      const caixa = caixaMap.get(r.id) || {};
+      const funnel = {
+        prod_count: parseInt(r.prod_count || 0),
+        sale_count: parseInt(r.sale_count || 0),
+        first_sale_at: r.first_sale_at || null,
+        caixa_sessions: parseInt(caixa.caixa_sessions || 0),
+        last_caixa_at: caixa.last_caixa_at || null,
+        imported_rows: parseInt(importMap.get(r.id) || 0),
+        checkout_viewed_at: r.checkout_viewed_at || null,
+        checkout_views: parseInt(r.checkout_views || 0),
+      };
+      return {
+        ...r,
+        ...classifyLifecycle(r, now),
+        ...funnel,
+        tx_count: parseInt(r.tx_count || 0),
+        cust_count: parseInt(r.cust_count || 0),
+        login_days: parseInt(r.login_days || 0),
+        total_revenue: parseFloat(r.total_revenue || 0),
+        health_score: r.health_score ? parseInt(r.health_score) : null,
+        extra_seats_granted: seatsMap.get(r.id) || 0,
+        ativacao: activationOf(funnel),
+      };
+    }),
   });
 }));
 
