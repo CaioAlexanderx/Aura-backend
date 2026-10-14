@@ -492,7 +492,9 @@ router.post('/register', async (req, res) => {
     await client.query('COMMIT');
 
     // E-mail de follow-up pra CS quando uma conta self-service e criada (best-effort, nao bloqueia).
-    if (isNewCompany && trialDays > 0 && (isSelfServe || codeType === 'trial')) {
+    // 13/10/2026: cadastro por codigo de indicacao (REF-) tambem avisa a CS:
+    // ele agora entra com teste de Negocio de 7 dias, como o COMECAR.
+    if (isNewCompany && trialDays > 0 && (isSelfServe || codeType === 'trial' || codeType === 'referral')) {
       sendSelfServeSignupNotification({
         name: user.name,
         companyName: company.trade_name || company.legal_name,
