@@ -142,6 +142,24 @@ describe('GET /checkin', () => {
     expect(acoes(visto)).toEqual([]);
   });
 
+  test('multi-CNPJ: filial nova de dono antigo (ou sede da federação) não habilita nem registra exibição', async () => {
+    const visto = mockBanco({ empresa: { fora: true } });
+    const res = await request(buildApp()).get(url).set(dono);
+    expect(res.status).toBe(200);
+    expect(res.body.habilitado).toBe(false);
+    expect(visto.exibido).toHaveLength(0);
+    expect(acoes(visto)).toEqual([]);
+  });
+
+  test('a consulta da empresa usa a regra multi-CNPJ (billing_owner, dono mais antigo, federação)', async () => {
+    mockBanco();
+    await request(buildApp()).get(url).set(dono);
+    const sql = db.query.mock.calls.map((c) => String(c[0])).find((s) => s.includes('-- checkin:empresa'));
+    expect(sql).toContain('billing_owner_company_id');
+    expect(sql).toContain('o_ck.owner_id = c.owner_id');
+    expect(sql).toContain('c.federation_id IS NOT NULL');
+  });
+
   test('quem não é da empresa → 403', async () => {
     mockBanco({ membro: false });
     const res = await request(buildApp()).get(url).set(dono);
@@ -197,6 +215,28 @@ describe('PUT /checkin', () => {
     expect(res.status).toBe(200);
     expect(res.body.checkin).toMatchObject({ pulou: true, versao: 1 });
     expect(acoes(visto)).toEqual(['checkin.pulou']);
+  });
+
+  test('{ pulou: false } sozinho: 200 sem gravar, sem carimbar e sem fechar a tela', async () => {
+    const atual = { exibido_em: '2026-10-14T12:01:00.000Z' };
+    const visto = mockBanco({ empresa: { checkin: atual } });
+    const res = await request(buildApp()).put(url).set(dono).send({ pulou: false });
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ checkin: atual });
+    expect(visto.gravar).toHaveLength(0);
+    expect(visto.audit).toHaveLength(0);
+
+    // E a tela segue habilitada na leitura seguinte.
+    const get = await request(buildApp()).get(url).set(dono);
+    expect(get.body.habilitado).toBe(true);
+  });
+
+  test('{ pulou: false } numa empresa sem check-in devolve { checkin: {} }', async () => {
+    const visto = mockBanco();
+    const res = await request(buildApp()).put(url).set(dono).send({ pulou: false });
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ checkin: {} });
+    expect(visto.gravar).toHaveLength(0);
   });
 
   test('falha de auditoria não derruba a gravação', async () => {

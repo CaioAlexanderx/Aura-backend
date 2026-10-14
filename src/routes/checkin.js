@@ -30,13 +30,14 @@ const checkin = require('../services/checkin');
 
 const FECHADO = { habilitado: false, respondido: false, pulou: false, versao: checkin.VERSAO, respostas: null };
 
-// Leitura da empresa. Dojô (federation_id de outra empresa) não passa pelo
-// check-in: as perguntas são de varejo.
+// Leitura da empresa. Federação (sede e dojôs) e filial de dono antigo ficam de
+// fora (services/checkin.sqlForaDoCheckin): as perguntas são de varejo e o
+// check-in é do cadastro novo, não de cada CNPJ.
 async function carregar(companyId) {
   const { rows } = await db.query(
     `-- checkin:empresa
      SELECT c.created_at, c.checkin,
-            (c.federation_id IS NOT NULL AND c.federation_id <> c.id) AS eh_dojo
+            ${checkin.sqlForaDoCheckin('c')} AS fora
        FROM companies c
       WHERE c.id = $1`,
     [companyId]
@@ -94,7 +95,7 @@ router.put('/', asyncHandler(async (req, res) => {
   if (ehStaff(req)) {
     return res.status(403).json({ error: 'O check-in é respondido pelo cliente.', code: 'CHECKIN_STAFF' });
   }
-  const { erro, patch } = checkin.normalizarPut(req.body);
+  const { erro, patch, semEfeito } = checkin.normalizarPut(req.body);
   if (erro) return res.status(400).json({ error: erro, code: 'CHECKIN_INVALID' });
 
   const companyId = req.params.id;
@@ -108,6 +109,11 @@ router.put('/', asyncHandler(async (req, res) => {
     throw err;
   }
   if (!empresa) return res.status(404).json({ error: 'Empresa não encontrada', code: 'COMPANY_NOT_FOUND' });
+
+  // `{ pulou: false }` sozinho: 200 sem mexer em nada (não carimba, não fecha).
+  if (semEfeito) {
+    return res.json({ checkin: empresa.checkin && typeof empresa.checkin === 'object' ? empresa.checkin : {} });
+  }
 
   const agora = new Date();
   const { checkin: depois, eventos } = checkin.aplicar(empresa.checkin, patch, agora);

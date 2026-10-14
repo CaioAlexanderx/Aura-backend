@@ -15,7 +15,9 @@
 //                                 'false', '0', 'off' ou 'no' desligam.
 //   CHECKIN_DESDE                 'YYYY-MM-DD' (Brasília). Só cadastros criados
 //                                 a partir deste dia veem a tela. Padrão: a
-//                                 data de subida (DESDE_PADRAO abaixo).
+//                                 data de subida (DESDE_PADRAO abaixo). Deve ser
+//                                 o dia em que a TELA DO APP sobe, não o do
+//                                 backend (ver docs/CHECKIN_PROSPECT.md).
 //   CHECKIN_LIMIAR_PRODUTO_24H    fração (0..1) de cadastros com produto em
 //                                 24 h abaixo da qual a tela deve ser
 //                                 desligada. Padrão 0.57 (linha de base da
@@ -77,7 +79,26 @@ const inicioDoDia = (ymd) => new Date(`${ymd}T03:00:00.000Z`);
 
 const objeto = (v) => (v && typeof v === 'object' && !Array.isArray(v) ? v : {});
 
-// Estado que a tela do cliente lê. `empresa` = { created_at, checkin, eh_dojo }.
+// Multi-CNPJ (armadilha 2 do CLAUDE.md): o check-in é do CADASTRO NOVO, não de
+// cada CNPJ. Só a primeira (mais antiga) empresa do dono vê e conta a tela:
+//   - filial: billing_owner_company_id aponta para outra empresa (migration
+//     082) OU o dono já tem empresa mais antiga (o desempate é o id) — uma
+//     filial nova de cliente antigo não é cadastro novo;
+//   - federação do Karatê: sede (federation_id = id) e dojôs (federation_id de
+//     outra empresa) não passam pelo funil do varejo.
+// Fragmento SQL (alias da tabela `companies`) que é verdadeiro para quem
+// FICA DE FORA. A rota (GET/PUT) e o bloco do painel usam o mesmo.
+function sqlForaDoCheckin(alias = 'c') {
+  return `(${alias}.federation_id IS NOT NULL
+        OR (${alias}.billing_owner_company_id IS NOT NULL AND ${alias}.billing_owner_company_id <> ${alias}.id)
+        OR EXISTS (SELECT 1 FROM companies o_ck
+                    WHERE o_ck.owner_id = ${alias}.owner_id AND o_ck.id <> ${alias}.id
+                      AND (o_ck.created_at, o_ck.id) < (${alias}.created_at, ${alias}.id)))`;
+}
+
+// Estado que a tela do cliente lê. `empresa` = { created_at, checkin, fora }
+// (`fora` = sqlForaDoCheckin; `eh_dojo` segue valendo para quem ainda manda).
+
 // `staff` = o token é de staff (modo admin): a tela nunca aparece para ele.
 function estado({ empresa, config = configuracao(), staff = false }) {
   const j = objeto(empresa && empresa.checkin);
@@ -87,7 +108,7 @@ function estado({ empresa, config = configuracao(), staff = false }) {
 
   const criado = empresa && empresa.created_at ? new Date(empresa.created_at) : null;
   const novo = !!criado && !Number.isNaN(criado.getTime()) && criado >= inicioDoDia(config.desde);
-  const habilitado = config.ligado && !staff && !(empresa && empresa.eh_dojo) && novo && !terminou && !pulou;
+  const habilitado = config.ligado && !staff && !(empresa && (empresa.fora || empresa.eh_dojo)) && novo && !terminou && !pulou;
 
   const temResposta = CHAVES_RESPOSTA.some((k) => typeof j[k] === 'string' && j[k] !== '');
   const respostas = temResposta
@@ -121,7 +142,9 @@ function normalizarPut(body) {
     patch.pulou = body.pulou;
   }
   if (!Object.keys(patch).length) return { erro: 'Envie ao menos uma resposta ou pulou.' };
-  return { patch };
+  // `{ pulou: false }` sozinho não responde nem fecha a tela: é "sem efeito".
+  const temResposta = CHAVES_RESPOSTA.some((k) => patch[k] !== undefined);
+  return { patch, semEfeito: !temResposta && patch.pulou !== true };
 }
 
 // Aplica o patch ao json atual. O carimbo é do servidor: respondido_em vale a
@@ -132,6 +155,10 @@ function aplicar(atual, patch, agora = new Date()) {
   const antes = objeto(atual);
   const depois = { ...antes };
   const iso = agora.toISOString();
+  // Nada de resposta nem pulou:true não fecha a tela (sem respondido_em).
+  if (!CHAVES_RESPOSTA.some((k) => patch[k] !== undefined) && patch.pulou !== true) {
+    return { checkin: depois, eventos: [] };
+  }
 
   for (const k of CHAVES_RESPOSTA) if (patch[k] !== undefined) depois[k] = patch[k];
   const respondeu = CHAVES_RESPOSTA.some((k) => patch[k] !== undefined);
@@ -153,5 +180,5 @@ function aplicar(atual, patch, agora = new Date()) {
 
 module.exports = {
   VERSAO, DESDE_PADRAO, LIMIAR_PADRAO, AMOSTRA_MINIMA, CHAVES_RESPOSTA, CHAVES_EQUIPE, MAX_VALOR,
-  configuracao, ligado, limiarProduto24h, inicioDoDia, estado, normalizarPut, aplicar,
+  configuracao, ligado, limiarProduto24h, inicioDoDia, estado, normalizarPut, aplicar, sqlForaDoCheckin,
 };

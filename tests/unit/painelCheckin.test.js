@@ -240,6 +240,10 @@ describe('a consulta', () => {
     expect(q.params).toEqual(['2026-10-16T03:00:00.000Z']);
     expect(q.sql).toContain("NOT ILIKE '%@getaura.com.br'");
     expect(q.sql).toContain('is_sandbox IS NOT TRUE');
-    expect(q.sql).toContain('federation_id <> c.id');
+    // multi-CNPJ: federação, filial (billing_owner) e dono com empresa mais antiga
+    expect(q.sql).toContain('c.federation_id IS NOT NULL');
+    expect(q.sql).toContain('c.billing_owner_company_id <> c.id');
+    expect(q.sql).toContain('o_ck.owner_id = c.owner_id');
+    expect(q.sql).toContain('(o_ck.created_at, o_ck.id) < (c.created_at, c.id)');
   });
 });
