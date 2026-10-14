@@ -15,7 +15,7 @@ function etiqueta(sql) {
   return m ? m[1] : String(sql).trim().split(/\s+/)[0].toUpperCase();
 }
 
-const ESCRITAS = new Set(['inserir', 'aplicada', 'falhou', 'estornando', 'estornada', 'estorno-falhou']);
+const ESCRITAS = new Set(['inserir', 'aplicada', 'falhou', 'estornando', 'estornada', 'estorno-falhou', 'anotar']);
 
 function fakeDb({ candidatos = [], eventos = [], concessoes = [], empresas = [], relatorio = {}, ordem = [] } = {}) {
   const estado = { concessoes: concessoes.map((k) => ({ status: 'aplicada', tipo: 'padrao', ...k })) };
@@ -54,6 +54,12 @@ function fakeDb({ candidatos = [], eventos = [], concessoes = [], empresas = [],
       case 'estornando': return atualizar(params[0], 'aplicada', { status: 'estornando' });
       case 'estornada': return atualizar(params[0], 'estornando', { status: 'estornada', estorno_pay_id: params[1] });
       case 'estorno-falhou': return atualizar(params[0], 'estornando', { status: 'aplicada', erro: params[1] });
+      case 'anotar': {
+        const k = estado.concessoes.find((x) => x.id === params[0] && ['registrada', 'estornando'].includes(x.status));
+        if (!k) return { rows: [], rowCount: 0 };
+        k.erro = params[1];
+        return { rows: [], rowCount: 1 };
+      }
       default: throw new Error('SQL inesperado no teste: ' + String(sql).slice(0, 80));
     }
   });
@@ -61,10 +67,27 @@ function fakeDb({ candidatos = [], eventos = [], concessoes = [], empresas = [],
   return { query, connect: async () => ({ query, release: () => {} }), estado, ordem, escritas };
 }
 
+// Erro no formato do asaasRequest: { message, status } vira err.asaasStatus;
+// string vira erro sem status (ambíguo: rede, tempo, corpo que não é JSON).
+function erroAsaas(def) {
+  if (typeof def === 'string') return new Error(def);
+  const e = new Error(def.message || 'Asaas error ' + def.status);
+  if (def.status) e.asaasStatus = def.status;
+  return e;
+}
+
 // pendentes: { sub_x: [cobranças] } · atrasadas: { cus_x: [cobranças] }
-function fakeAsaas({ pendentes = {}, atrasadas = {}, falharDelete = null, falharPost = null, ordem = [] } = {}) {
+// delete: { erro, apagaMesmoAssim, pendura, getDepois: 'erro' | '404' }
+// post:   { erro, criaMesmoAssim, pendura } · busca: 'erro' para a lista do estorno falhar
+function fakeAsaas({
+  pendentes = {}, atrasadas = {}, falharDelete = null, falharPost = null, ordem = [],
+  delete: del = {}, post = {}, busca = null, avulsas = [],
+} = {}) {
   const todas = new Map();
   for (const lista of Object.values(pendentes)) for (const p of lista) todas.set(p.id, { ...p });
+  for (const p of avulsas) todas.set(p.id, { ...p });
+  let deleteTentado = false;
+  let seqPost = 0;
   const fn = jest.fn(async (metodo, caminho, corpo) => {
     ordem.push(`asaas:${metodo} ${caminho}`);
     let m;
@@ -75,20 +98,51 @@ function fakeAsaas({ pendentes = {}, atrasadas = {}, falharDelete = null, falhar
     if (metodo === 'GET' && (m = caminho.match(/^\/payments\?customer=([^&]+)&status=OVERDUE/))) {
       return { data: atrasadas[decodeURIComponent(m[1])] || [] };
     }
+    if (metodo === 'GET' && (m = caminho.match(/^\/payments\?customer=([^&]+)&externalReference=([^&]+)/))) {
+      if (busca === 'erro') throw new Error('Asaas fora do ar');
+      const [cus, ref] = [decodeURIComponent(m[1]), decodeURIComponent(m[2])];
+      return { data: [...todas.values()].filter((p) => p.customer === cus && p.externalReference === ref) };
+    }
     if (metodo === 'GET' && (m = caminho.match(/^\/payments\/([^/?]+)$/))) {
+      if (deleteTentado && del.getDepois === 'erro') throw new Error('conexão caiu');
+      if (deleteTentado && del.getDepois === '404') throw erroAsaas({ status: 404, message: 'não encontrada' });
       const p = todas.get(decodeURIComponent(m[1]));
-      if (!p) throw new Error('Asaas error 404');
+      if (!p) throw erroAsaas({ status: 404 });
       return { ...p };
     }
     if (metodo === 'DELETE' && (m = caminho.match(/^\/payments\/([^/?]+)$/))) {
-      if (falharDelete) throw new Error(falharDelete);
+      deleteTentado = true;
       const p = todas.get(decodeURIComponent(m[1]));
+      if (del.pendura) {
+        if (del.apagaMesmoAssim && p) p.deleted = true;
+        return new Promise(() => {});
+      }
+      if ('resposta' in del) { // ex.: corpo que não era JSON vira {}
+        if (del.apagaMesmoAssim && p) p.deleted = true;
+        return del.resposta;
+      }
+      const erro = falharDelete || del.erro;
+      if (erro) {
+        if (del.apagaMesmoAssim && p) p.deleted = true;
+        throw erroAsaas(erro);
+      }
       if (p) p.deleted = true;
       return { deleted: true, id: decodeURIComponent(m[1]) };
     }
     if (metodo === 'POST' && caminho === '/payments') {
-      if (falharPost) throw new Error(falharPost);
-      return { id: 'pay_estorno_1', ...corpo, status: 'PENDING' };
+      seqPost += 1;
+      const nova = { id: 'pay_estorno_' + seqPost, ...corpo, status: 'PENDING' };
+      if (post.pendura) {
+        if (post.criaMesmoAssim) todas.set(nova.id, nova);
+        return new Promise(() => {});
+      }
+      const erro = falharPost || post.erro;
+      if (erro) {
+        if (post.criaMesmoAssim) todas.set(nova.id, nova);
+        throw erroAsaas(erro);
+      }
+      todas.set(nova.id, nova);
+      return nova;
     }
     throw new Error(`chamada inesperada na Asaas: ${metodo} ${caminho}`);
   });

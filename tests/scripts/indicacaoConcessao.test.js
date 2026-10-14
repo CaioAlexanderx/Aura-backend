@@ -16,11 +16,11 @@ const silencio = () => {};
 beforeEach(() => { jest.spyOn(console, 'table').mockImplementation(() => {}); });
 afterEach(() => jest.restoreAllMocks());
 
-function cenario(pares, { concessoes = [], atrasadas = {}, falharDelete = null, falharPost = null, empresas = [] } = {}) {
+function cenario(pares, { concessoes = [], atrasadas = {}, falharDelete = null, falharPost = null, empresas = [], asaasOpts = {} } = {}) {
   const ordem = [];
   const d = juntar(pares);
   const db = fakeDb({ candidatos: d.candidatos, eventos: d.eventos, concessoes, empresas, ordem });
-  const asaas = fakeAsaas({ pendentes: d.pendentes, atrasadas, falharDelete, falharPost, ordem });
+  const asaas = fakeAsaas({ pendentes: d.pendentes, atrasadas, falharDelete, falharPost, ordem, ...asaasOpts });
   return { db, asaas, ordem };
 }
 
@@ -396,7 +396,7 @@ describe('estorno (cobrança avulsa de mesmo valor e vencimento)', () => {
   });
 
   test('a Asaas recusa: volta para aplicada com o erro', async () => {
-    const c = cenario([], { concessoes: [concedida()], falharPost: 'Asaas error 400' });
+    const c = cenario([], { concessoes: [concedida()], falharPost: { status: 400, message: 'Asaas error 400' } });
     const r = await rodar(['--estornar', 'k1', '--apply'], c);
     expect(r.estornos).toBe(0);
     expect(c.db.estado.concessoes[0]).toMatchObject({ status: 'aplicada', erro: 'estorno: Asaas error 400' });
@@ -409,6 +409,9 @@ describe('estorno (cobrança avulsa de mesmo valor e vencimento)', () => {
 });
 
 describe('combinada (antes de 15/10): fora do teto, um benefício por indicado', () => {
+  // Fernanda já pagou a 1ª mensalidade (avulsa): a cobrança de novembro não é a primeira.
+  const pagouAntes = [{ company_id: 'emp-fernanda', event: 'PAYMENT_RECEIVED', processed_at: '2026-09-10T12:00:00Z', dia: '2026-09-10',
+    pagamento_id: 'pay_f_1', referencia: 'emp-fernanda', pago_em: '2026-09-10', valor: 140.83 }];
   const empresas = [
     { id: 'emp-fernanda', nome: 'Fernanda', asaas_customer_id: 'cus_f', asaas_subscription_id: 'sub_f' },
     { id: 'emp-valen', nome: 'Valen', asaas_customer_id: 'cus_v', asaas_subscription_id: null },
@@ -419,7 +422,7 @@ describe('combinada (antes de 15/10): fora do teto, um benefício por indicado',
 
   test('teto do mês cheio não impede a combinada; grava tipo combinada antes de excluir', async () => {
     const ordem = [];
-    const db = fakeDb({ empresas, concessoes: [cheio], ordem });
+    const db = fakeDb({ empresas, eventos: pagouAntes, concessoes: [cheio], ordem });
     const asaas = fakeAsaas({ pendentes: { sub_f: [cobranca] }, ordem });
     const r = await rodar([...argv, '--apply'], { db, asaas });
     expect(r.concedidas).toBe(1);
@@ -430,7 +433,7 @@ describe('combinada (antes de 15/10): fora do teto, um benefício por indicado',
   });
 
   test('segunda combinada para o mesmo indicado é recusada', async () => {
-    const db = fakeDb({ empresas, concessoes: [{ id: 'k1', tipo: 'combinada', status: 'aplicada', indicado_company_id: 'emp-valen',
+    const db = fakeDb({ empresas, eventos: pagouAntes, concessoes: [{ id: 'k1', tipo: 'combinada', status: 'aplicada', indicado_company_id: 'emp-valen',
       indicador_company_id: 'emp-fernanda', data_concessao: HOJE, valor: 140.83, asaas_payment_id: 'pay_antiga' }] });
     const asaas = fakeAsaas({ pendentes: { sub_f: [cobranca] } });
     const r = await rodar([...argv, '--apply'], { db, asaas });
@@ -439,11 +442,173 @@ describe('combinada (antes de 15/10): fora do teto, um benefício por indicado',
   });
 
   test('sem --apply não escreve', async () => {
-    const db = fakeDb({ empresas });
+    const db = fakeDb({ empresas, eventos: pagouAntes });
     const asaas = fakeAsaas({ pendentes: { sub_f: [cobranca] } });
     const r = await rodar(argv, { db, asaas });
     expect(r.modo).toBe('dry-run');
     expect(db.escritas()).toEqual([]);
     expect(mutacoesNaAsaas(asaas)).toEqual([]);
+  });
+});
+
+// ── revisão de 14/10: respostas ambíguas da Asaas ──────────────────────
+const RAPIDO = { tempoLimiteMs: 50, esperaAposTempoMs: 0 };
+const rodarRapido = (argv, c, extra = {}) => rodar(argv, c, { params: RAPIDO, ...extra });
+
+describe('exclusão sem resposta limpa: confere a cobrança antes de decidir', () => {
+  test('erro de rede mas a cobrança foi excluída: aplicada (a consulta confirma)', async () => {
+    const c = cenario([par()], { asaasOpts: { delete: { erro: 'socket hang up', apagaMesmoAssim: true } } });
+    const r = await rodarRapido(['--apply'], c);
+    expect(r.concedidas).toBe(1);
+    expect(r.resultados[0].aviso).toMatch(/consulta mostrou a cobrança excluída/);
+    expect(c.db.estado.concessoes[0].status).toBe('aplicada');
+  });
+
+  test('5xx e a cobrança continua pendente: falhou', async () => {
+    const c = cenario([par()], { asaasOpts: { delete: { erro: { status: 502, message: 'Bad Gateway' } } } });
+    const r = await rodarRapido(['--apply'], c);
+    expect(r.concedidas).toBe(0);
+    expect(c.db.estado.concessoes[0]).toMatchObject({ status: 'falhou', erro: 'Bad Gateway' });
+  });
+
+  test('erro e a consulta devolve 404 (cobrança sumiu): aplicada', async () => {
+    const c = cenario([par()], { asaasOpts: { delete: { erro: 'ECONNRESET', getDepois: '404' } } });
+    await rodarRapido(['--apply'], c);
+    expect(c.db.estado.concessoes[0].status).toBe('aplicada');
+  });
+
+  test('corpo que não é JSON ({}) e cobrança excluída: aplicada; sem excluir: falhou', async () => {
+    const a = cenario([par()], { asaasOpts: { delete: { resposta: {}, apagaMesmoAssim: true } } });
+    await rodarRapido(['--apply'], a);
+    expect(a.db.estado.concessoes[0].status).toBe('aplicada');
+    const b = cenario([par()], { asaasOpts: { delete: { resposta: {} } } });
+    await rodarRapido(['--apply'], b);
+    expect(b.db.estado.concessoes[0].status).toBe('falhou');
+  });
+
+  test('tempo esgotado e a exclusão chegou: aplicada', async () => {
+    const c = cenario([par()], { asaasOpts: { delete: { pendura: true, apagaMesmoAssim: true } } });
+    const r = await rodarRapido(['--apply'], c);
+    expect(r.concedidas).toBe(1);
+    expect(c.db.estado.concessoes[0].status).toBe('aplicada');
+  });
+
+  test('sem como saber: fica registrada, anota o erro e a próxima execução não concede de novo nem na cobrança seguinte', async () => {
+    const p = par({ indicadorValor: 74.17, indicadoPagouEm: '2026-10-01' });
+    // segunda indicação do MESMO indicador, e uma segunda cobrança futura dele
+    const outra = { ...p.candidato, referral_id: 'ref-outra2', indicado_id: 'emp-outra2', indicado_nome: 'Outra',
+      indicado_cnpj: '44.444.444/0001-44', indicado_email: 'o2@o.com', indicado_user_email: 'o2@dono.com', indicado_user_phone: '41977776666' };
+    const ev = { company_id: 'emp-outra2', event: 'PAYMENT_RECEIVED', processed_at: '2026-10-03T12:00:00Z', dia: '2026-10-03',
+      pagamento_id: 'pay_outra2_1', referencia: 'emp-outra2', pago_em: '2026-10-03', valor: 112.66 };
+    const sub = p.candidato.indicador_assinatura;
+    const segunda = { ...p.pendentes[sub][0], id: `pay_a${p.n}_dez`, dueDate: '2026-12-15' };
+    const ordem = [];
+    const db = fakeDb({ candidatos: [p.candidato, outra], eventos: [...p.eventos, ev], ordem });
+    const asaas = fakeAsaas({ pendentes: { [sub]: [p.pendentes[sub][0], segunda] }, ordem, delete: { pendura: true, getDepois: 'erro' } });
+
+    const r1 = await rodarRapido(['--apply'], { db, asaas });
+    expect(r1.resultados[0]).toMatchObject({ ok: false, emConferencia: true });
+    expect(db.estado.concessoes).toHaveLength(1);
+    expect(db.estado.concessoes[0].status).toBe('registrada');
+    expect(db.estado.concessoes[0].erro).toMatch(/Conferir no painel da Asaas/);
+
+    const r2 = await rodarRapido(['--apply'], { db, asaas });
+    expect(r2.resultados).toEqual([]);
+    const fila = await lib.montarFila({ db, asaas, hoje: HOJE, params: { ...lib.PARAMETROS_PADRAO, ...RAPIDO } });
+    expect(fila.itens.map((it) => it.situacao)).toEqual(['em_conferencia', 'indicador_em_conferencia']);
+    expect(asaas.mock.calls.filter(([m]) => m === 'DELETE')).toHaveLength(1);
+    expect(asaas.mock.calls.some(([m, cam]) => m === 'DELETE' && cam.includes('_dez'))).toBe(false);
+  });
+
+  test('comTempoLimite: rejeita marcado como tempo esgotado', async () => {
+    const lento = lib.comTempoLimite(() => new Promise(() => {}), 20);
+    await expect(lento('GET', '/x')).rejects.toMatchObject({ tempoEsgotado: true });
+  });
+});
+
+describe('estorno sem resposta limpa: fica estornando e confere antes de recriar', () => {
+  const concedida = (extra = {}) => ({
+    id: 'k1', tipo: 'padrao', status: 'aplicada', indicador_company_id: 'emp-a', data_concessao: '2026-10-10', valor: 93.17,
+    asaas_payment_id: 'pay_x', cobranca_vencimento: '2026-11-15', cobranca_forma: 'PIX', asaas_customer_id: 'cus_a', ...extra,
+  });
+  const posts = (asaas) => asaas.mock.calls.filter(([m]) => m === 'POST');
+
+  test('POST com erro de rede que criou a cobrança: estornando; rodar de novo liga a existente sem criar outra', async () => {
+    const c = cenario([], { concessoes: [concedida()], asaasOpts: { post: { erro: 'socket hang up', criaMesmoAssim: true } } });
+    const r1 = await rodarRapido(['--estornar', 'k1', '--apply'], c);
+    expect(r1.resultado).toMatchObject({ ok: false, emConferencia: true });
+    expect(c.db.estado.concessoes[0].status).toBe('estornando');
+
+    const r2 = await rodarRapido(['--estornar', 'k1', '--apply'], c);
+    expect(r2.resultado).toMatchObject({ ok: true, reaproveitada: true, estornoPayId: 'pay_estorno_1' });
+    expect(c.db.estado.concessoes[0]).toMatchObject({ status: 'estornada', estorno_pay_id: 'pay_estorno_1' });
+    expect(posts(c.asaas)).toHaveLength(1);
+  });
+
+  test('tempo esgotado sem criar: estornando; rodar de novo confere (nada lá) e só então cria', async () => {
+    const c = cenario([], { concessoes: [concedida()], asaasOpts: { post: { pendura: true } } });
+    await rodarRapido(['--estornar', 'k1', '--apply'], c);
+    expect(c.db.estado.concessoes[0].status).toBe('estornando');
+    c.asaas.mockClear();
+    const ordem = c.ordem;
+    ordem.length = 0;
+    // a Asaas voltou ao normal
+    const normal = fakeAsaas({ ordem });
+    const r = await rodarRapido(['--estornar', 'k1', '--apply'], { db: c.db, asaas: normal });
+    expect(r.resultado).toMatchObject({ ok: true });
+    expect(ordem.findIndex((o) => o.includes('externalReference'))).toBeLessThan(ordem.indexOf('asaas:POST /payments'));
+    expect(c.db.estado.concessoes[0].status).toBe('estornada');
+  });
+
+  test('estornando e a Asaas não responde à conferência: recusa, nenhuma cobrança criada', async () => {
+    const c = cenario([], { concessoes: [concedida({ status: 'estornando' })], asaasOpts: { busca: 'erro' } });
+    await expect(rodarRapido(['--estornar', 'k1', '--apply'], c)).rejects.toThrow(/não deu para conferir/);
+    expect(posts(c.asaas)).toHaveLength(0);
+    expect(c.db.estado.concessoes[0].status).toBe('estornando');
+  });
+
+  test('recusa clara (4xx) volta para aplicada', async () => {
+    const c = cenario([], { concessoes: [concedida()], asaasOpts: { post: { erro: { status: 422, message: 'vencimento inválido' } } } });
+    const r = await rodarRapido(['--estornar', 'k1', '--apply'], c);
+    expect(r.resultado).toMatchObject({ ok: false });
+    expect(c.db.estado.concessoes[0].status).toBe('aplicada');
+  });
+
+  test('indicador com estorno pendente não recebe outra concessão', async () => {
+    const p = par();
+    const c = cenario([p], { concessoes: [concedida({ status: 'estornando', indicador_company_id: p.a, referral_id: 'ref-velha' })] });
+    const fila = await lib.montarFila({ db: c.db, asaas: c.asaas, hoje: HOJE });
+    expect(fila.itens[0].situacao).toBe('indicador_em_conferencia');
+  });
+});
+
+describe('combinada: nunca a primeira mensalidade sem confirmação explícita', () => {
+  const empresas = [
+    { id: 'emp-jenny', nome: 'Jenny', asaas_customer_id: 'cus_j', asaas_subscription_id: 'sub_j' },
+    { id: 'emp-luis', nome: 'Luis', asaas_customer_id: 'cus_l', asaas_subscription_id: null },
+  ];
+  const cobranca = { id: 'pay_j_1', status: 'PENDING', dueDate: '2026-11-10', value: 140.83, customer: 'cus_j', subscription: 'sub_j' };
+  const argv = ['--combinada', '--indicador', 'emp-jenny', '--indicado', 'emp-luis', '--cobranca', 'pay_j_1'];
+
+  test('indicador sem pagamento recebido: recusa sem gravar nem excluir', async () => {
+    const db = fakeDb({ empresas });
+    const asaas = fakeAsaas({ pendentes: { sub_j: [cobranca] } });
+    await expect(rodarRapido([...argv, '--apply'], { db, asaas })).rejects.toThrow(/primeira mensalidade/);
+    expect(db.escritas()).toEqual([]);
+    expect(mutacoesNaAsaas(asaas)).toEqual([]);
+  });
+
+  test('com --confirmo-primeira-mensalidade: concede, avisa na confirmação e anota na linha', async () => {
+    const db = fakeDb({ empresas });
+    const asaas = fakeAsaas({ pendentes: { sub_j: [cobranca] } });
+    const perguntar = jest.fn(digitaOValor);
+    const r = await rodarRapido([...argv, '--confirmo-primeira-mensalidade', '--apply'], { db, asaas }, { perguntar });
+    expect(r.concedidas).toBe(1);
+    expect(perguntar.mock.calls[0][0]).toMatch(/PRIMEIRA mensalidade/);
+    expect(db.estado.concessoes[0].observacao).toMatch(/primeira mensalidade/);
+  });
+
+  test('a flag só vale com --combinada', () => {
+    expect(() => lerArgs(['--confirmo-primeira-mensalidade'])).toThrow(/só vale com --combinada/);
   });
 });

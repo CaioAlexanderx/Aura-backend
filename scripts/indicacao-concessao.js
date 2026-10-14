@@ -7,8 +7,10 @@
 //   node scripts/indicacao-concessao.js --estornar <id> --apply [--vencimento AAAA-MM-DD]
 //   node scripts/indicacao-concessao.js --combinada --indicador <company_id> \
 //        --indicado <company_id> --cobranca pay_... [--observacao "texto"] --apply
+//        [--confirmo-primeira-mensalidade]  (só se o indicador ainda não pagou nada)
 //
 // Opções: --teto-mensal 230 · --max-por-ano 3 · --operador "nome" (fica na linha)
+//         --tempo-limite 20 (segundos por chamada à Asaas)
 //
 // O que faz (cartão t2-19, regras da Célia em 13/10; detalhe em
 // docs/indicacao-concessao.md e scripts/indicacao-lib.js):
@@ -43,10 +45,14 @@ function lerArgs(argv) {
     else if (k === '--operador') a.operador = v();
     else if (k === '--teto-mensal') a.params.tetoMensal = Number(v());
     else if (k === '--max-por-ano') a.params.maxPorAno = Number(v());
+    else if (k === '--tempo-limite') a.params.tempoLimiteMs = Number(v()) * 1000;
+    else if (k === '--confirmo-primeira-mensalidade') a.confirmoPrimeiraMensalidade = true;
     else throw new Error(`opção desconhecida: ${k}`);
   }
   if (a.apply && a.dryRun) throw new Error('Escolha um: --dry-run (padrão) ou --apply.');
   if (!(a.params.tetoMensal > 0) || !(a.params.maxPorAno > 0)) throw new Error('teto e máximo por ano precisam ser positivos');
+  if (!(a.params.tempoLimiteMs > 0)) throw new Error('--tempo-limite precisa ser positivo (segundos)');
+  if (a.confirmoPrimeiraMensalidade && !a.combinada) throw new Error('--confirmo-primeira-mensalidade só vale com --combinada');
   if (a.combinada && !(a.indicador && a.indicado && a.cobranca)) {
     throw new Error('--combinada precisa de --indicador, --indicado e --cobranca');
   }
@@ -70,6 +76,7 @@ function textoConfirmacao(item) {
     `  Tipo      : ${item.tipo || 'padrao'}`,
     `  Cobrança  : ${item.cobranca.id} · vence ${item.cobranca.vencimento} · ${item.cobranca.forma || '-'}`,
     `  Valor     : ${lib.reais(item.valor)}`,
+    ...(item.aviso ? [`  ${item.aviso}`] : []),
     '  A cobrança será EXCLUÍDA na Asaas. Isso não volta (só por estorno).',
     `  Para confirmar, digite o valor (${valor}); qualquer outra coisa pula: `,
   ].join('\n');
@@ -93,6 +100,7 @@ function imprimirFila(fila, log) {
 async function executar(argv, deps) {
   const { db, asaas, perguntar, hoje = lib.hojeSP(), log = console.log, interativo = true } = deps;
   const args = lerArgs(argv);
+  Object.assign(args.params, deps.params || {}); // teste: tempos curtos
   const operador = args.operador || process.env.USER || process.env.USERNAME || null;
 
   if (args.apply && !interativo) {
@@ -104,13 +112,25 @@ async function executar(argv, deps) {
   if (args.estornar) {
     const c = await lib.lerConcessao(db, args.estornar);
     const corpo = lib.planoDeEstorno(c, { hoje, vencimento: args.vencimento });
+    if (c.status === 'estornando') {
+      log(`Concessão ${c.id} está 'estornando' (estorno anterior sem confirmação): a Asaas será consultada ANTES;` +
+        ' se a cobrança de estorno já existir, ela é ligada à linha e nenhuma outra é criada.');
+    }
     log(`Estorno da concessão ${c.id}: nova cobrança avulsa de ${lib.reais(corpo.value)} para ${corpo.dueDate}` +
       ` (cliente ${corpo.customer}, ${corpo.billingType}), ligada à cobrança excluída ${c.asaas_payment_id}.`);
     if (!args.apply) { log('DRY-RUN: nada foi feito. Use --apply para estornar.'); return { modo: 'dry-run' }; }
     const resp = await perguntar(`  Para confirmar, digite o valor (${corpo.value.toFixed(2).replace('.', ',')}): `);
     if (!confere(resp, corpo.value)) { log('Valor não confere: estorno não feito.'); return { modo: 'apply', estornos: 0 }; }
-    const r = await lib.estornar({ db, asaas, concessao: c, hoje, vencimento: args.vencimento });
-    log(r.ok ? `Estornada: cobrança nova ${r.estornoPayId}.` : `A Asaas recusou o estorno: ${r.erro}. A concessão continua 'aplicada'.`);
+    const r = await lib.estornar({ db, asaas, concessao: c, hoje, vencimento: args.vencimento, params: args.params });
+    if (r.ok) {
+      log(r.reaproveitada
+        ? `Estornada: a cobrança ${r.estornoPayId} já existia na Asaas e foi ligada à linha (nenhuma nova criada).`
+        : `Estornada: cobrança nova ${r.estornoPayId}.`);
+    } else if (r.emConferencia) {
+      log(`ATENÇÃO: ${r.erro}. A linha ficou 'estornando'.`);
+    } else {
+      log(`A Asaas recusou o estorno: ${r.erro}. A concessão continua 'aplicada'.`);
+    }
     return { modo: 'apply', estornos: r.ok ? 1 : 0, resultado: r };
   }
 
@@ -120,7 +140,7 @@ async function executar(argv, deps) {
     if (!asaas) throw new Error('--combinada precisa de ASAAS_API_KEY para conferir a cobrança.');
     const item = await lib.montarCombinada({
       db, asaas, indicadorId: args.indicador, indicadoId: args.indicado, cobrancaId: args.cobranca,
-      observacao: args.observacao || null, hoje,
+      observacao: args.observacao || null, hoje, confirmoPrimeiraMensalidade: !!args.confirmoPrimeiraMensalidade,
     });
     log(`Concessão combinada (fora do teto): ${item.indicador_nome} ← ${item.indicado_nome},` +
       ` cobrança ${item.cobranca.id} de ${lib.reais(item.valor)} (vence ${item.cobranca.vencimento}).`);
@@ -146,6 +166,8 @@ async function executar(argv, deps) {
       if (r.ok) {
         log(`  Concedida: linha ${r.concessaoId}, cobrança ${item.cobranca.id} excluída.` + (r.aviso ? ` ATENÇÃO: ${r.aviso}` : ''));
         log(`  Avisar a Célia hoje: ${item.indicador_nome} ganhou ${lib.reais(item.valor)} (cobrança ${item.cobranca.id}, vencimento ${item.cobranca.vencimento}) pela indicação de ${item.indicado_nome}.`);
+      } else if (r.emConferencia) {
+        log(`  ATENÇÃO: ${r.erro} A linha ${r.concessaoId} ficou 'registrada' e o indicador fica travado até alguém conferir.`);
       } else {
         log(`  A Asaas recusou a exclusão: ${r.erro}. Linha ${r.concessaoId} marcada como 'falhou'; a cobrança continua lá.`);
       }
@@ -167,7 +189,10 @@ function perguntarNoTerminal(texto) {
 
 async function main() {
   const db = require('../src/config/database');
-  const { asaas } = require('../src/services/asaasClient');
+  // asaasRequest: o erro traz o status HTTP (asaasStatus), que separa recusa
+  // clara (4xx) de resposta ambígua; corpo que não é JSON não derruba.
+  const { asaasRequest } = require('../src/services/asaasClient');
+  const asaas = (metodo, caminho, corpo) => asaasRequest(metodo, caminho, corpo);
   const r = await executar(process.argv.slice(2), {
     db,
     asaas: process.env.ASAAS_API_KEY ? asaas : null,

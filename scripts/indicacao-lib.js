@@ -36,7 +36,32 @@ const PARAMETROS_PADRAO = Object.freeze({
   maxPorAno: 3,          // concessões 'padrao' por indicador por ano
   diasAtraso: 3,         // atraso tolerado do indicador
   janelaTrialDias: 60,   // indicador em trial: prazo para assinar
+  tempoLimiteMs: 20000,  // cada chamada à Asaas; estourou = resposta ambígua
+  esperaAposTempoMs: 5000, // depois de um tempo esgotado, espera antes de conferir
 });
+
+// ── chamadas à Asaas com tempo limite ───────────────────────────────────
+// Tempo esgotado NÃO quer dizer que a Asaas não fez: a requisição pode ter
+// chegado. O erro sai marcado (tempoEsgotado) e quem chama trata como ambíguo.
+function comTempoLimite(asaas, ms) {
+  if (!asaas || !(ms > 0)) return asaas;
+  return function asaasComTempo(...args) {
+    let timer;
+    const limite = new Promise((_, rejeita) => {
+      timer = setTimeout(() => {
+        const e = new Error(`a Asaas não respondeu em ${Math.round(ms / 1000)} s`);
+        e.tempoEsgotado = true;
+        rejeita(e);
+      }, ms);
+    });
+    return Promise.race([Promise.resolve().then(() => asaas(...args)), limite])
+      .finally(() => clearTimeout(timer));
+  };
+}
+const esperar = (ms) => new Promise((r) => setTimeout(r, ms));
+// Recusa clara da Asaas (4xx com corpo): a operação não aconteceu.
+const recusaClara = (err) => !!err && Number(err.asaasStatus) >= 400 && Number(err.asaasStatus) < 500;
+const naoEncontrada = (err) => !!err && Number(err.asaasStatus) === 404;
 
 // Concessão "viva": ocupa o teto e trava a cobrança/indicação.
 const STATUS_VIVOS = ['registrada', 'aplicada', 'estornando'];
@@ -246,7 +271,13 @@ const ROTULOS = {
   aguardando_teto_mensal: 'na fila: o teto do mês acabou',
   uma_por_execucao: 'mesmo indicador já tem uma concessão nesta execução',
   pronta: 'pronta para conceder',
+  indicador_em_conferencia: 'indicador com concessão ou estorno sem confirmação da Asaas: conferir antes de outra',
 };
+
+// Linha que ainda espera confirmação da Asaas (exclusão ou estorno ambíguos).
+const STATUS_EM_CONFERENCIA = ['registrada', 'estornando'];
+const indicadorEmConferencia = (concessoes, indicadorId) => concessoes.find((k) =>
+  STATUS_EM_CONFERENCIA.includes(k.status) && k.indicador_company_id === indicadorId);
 
 function avaliarCandidato(c, { eventosPorEmpresa, concessoes, hoje, params = PARAMETROS_PADRAO }) {
   const base = {
@@ -269,6 +300,13 @@ function avaliarCandidato(c, { eventosPorEmpresa, concessoes, hoje, params = PAR
     return sai(viva.status === 'aplicada' ? 'concedida' : 'em_conferencia', {
       valor: viva.valor, motivo: `concessão ${viva.id} (${viva.status})`,
     });
+  }
+
+  // Exclusão ou estorno ambíguo deste indicador: nada de conceder outra (cairia
+  // na cobrança seguinte) até alguém conferir a linha pendente.
+  const pendente = indicadorEmConferencia(concessoes, c.indicador_id);
+  if (pendente) {
+    return sai('indicador_em_conferencia', { motivo: `concessão ${pendente.id} (${pendente.status})` });
   }
 
   const evIndicado = eventosPorEmpresa.get(c.indicado_id) || [];
@@ -394,7 +432,11 @@ async function completarComAsaas(itens, { asaas, hoje, concessoes, params = PARA
 async function montarFila({ db, asaas = null, hoje, params = PARAMETROS_PADRAO }) {
   const dados = await carregarDados(db);
   let itens = dados.candidatos.map((c) => avaliarCandidato(c, { ...dados, hoje, params }));
-  if (asaas) itens = await completarComAsaas(itens, { asaas, hoje, concessoes: dados.concessoes, params });
+  if (asaas) {
+    itens = await completarComAsaas(itens, {
+      asaas: comTempoLimite(asaas, params.tempoLimiteMs), hoje, concessoes: dados.concessoes, params,
+    });
+  }
   const tetos = aplicarTetos(itens, dados.concessoes, hoje, params);
   return { ...tetos, itens: tetos.itens, dados };
 }
@@ -451,6 +493,8 @@ async function gravarConcessao(db, item, { hoje, params = PARAMETROS_PADRAO, ope
       && ((item.referral_id && k.referral_id === item.referral_id)
         || (item.indicado_id && k.indicado_company_id === item.indicado_id)));
     if (viva) throw new Recusa(`indicação já tem concessão (${viva.id}, ${viva.status})`);
+    const pendente = indicadorEmConferencia(concessoes, item.indicador_id);
+    if (pendente) throw new Recusa(`indicador tem concessão sem confirmação da Asaas (${pendente.id}, ${pendente.status}): conferir antes`);
     if (item.tipo !== 'combinada') {
       const { usadoMes, porIndicadorNoAno } = usoDoTeto(concessoes, hoje);
       if (centavos(usadoMes) + centavos(item.valor) > centavos(params.tetoMensal)) {
@@ -476,24 +520,64 @@ async function gravarConcessao(db, item, { hoje, params = PARAMETROS_PADRAO, ope
   }
 }
 
+// Anota o erro sem mudar o status (a linha continua esperando conferência).
+const SQL_ANOTAR = `-- indicacao:anotar
+UPDATE indicacao_concessoes SET erro = $2, atualizado_em = NOW()
+ WHERE id = $1 AND status IN ('registrada', 'estornando')`;
+
+// Depois de um DELETE sem resposta limpa: a cobrança ainda existe?
+//   'excluida'    a Asaas mostra deleted ou responde 404
+//   'pendente'    continua PENDING e não excluída: a exclusão não aconteceu
+//   'desconhecido' qualquer outra coisa (sem resposta, outro status)
+async function situacaoDaCobranca(asaas, pagamentoId) {
+  try {
+    const p = await asaas('GET', '/payments/' + encodeURIComponent(pagamentoId));
+    if (p && p.deleted) return { situacao: 'excluida' };
+    if (p && p.id && p.status === 'PENDING') return { situacao: 'pendente' };
+    return { situacao: 'desconhecido', detalhe: `status ${p && p.status}` };
+  } catch (err) {
+    if (naoEncontrada(err)) return { situacao: 'excluida' };
+    return { situacao: 'desconhecido', detalhe: err.message };
+  }
+}
+
 // Concede UMA: confere na Asaas, grava a linha, só então exclui a cobrança.
-async function concederUma({ db, asaas, item, hoje, params = PARAMETROS_PADRAO, operador = null }) {
+// Resposta do DELETE que não seja um {deleted: true} limpo (tempo esgotado,
+// conexão caída, 5xx, corpo que não é JSON, recusa) NUNCA vira 'falhou' às
+// cegas: a cobrança é consultada de novo. Excluída → 'aplicada'; ainda
+// pendente → 'falhou'; sem como saber → a linha fica 'registrada' (aparece
+// em conferência no relatório e trava o indicador até alguém conferir).
+async function concederUma({ db, asaas: asaasCru, item, hoje, params = PARAMETROS_PADRAO, operador = null }) {
   if (!item || !item.cobranca || !item.cobranca.id) throw new Recusa('item sem cobrança');
+  const asaas = comTempoLimite(asaasCru, params.tempoLimiteMs);
   const atual = await asaas('GET', '/payments/' + encodeURIComponent(item.cobranca.id));
   conferirCobranca(atual, item, hoje);
 
   const concessaoId = await gravarConcessao(db, item, { hoje, params, operador });
 
-  let resposta;
+  let resposta = null;
+  let erroDelete = null;
   try {
     resposta = await asaas('DELETE', '/payments/' + encodeURIComponent(item.cobranca.id));
   } catch (err) {
-    await db.query(SQL_FALHOU, [concessaoId, err.message]);
-    return { ok: false, concessaoId, erro: err.message };
+    erroDelete = err;
   }
-  if (resposta && resposta.deleted === false) {
-    await db.query(SQL_FALHOU, [concessaoId, 'Asaas respondeu deleted=false']);
-    return { ok: false, concessaoId, erro: 'Asaas respondeu deleted=false' };
+
+  const confirmada = !erroDelete && !!resposta && resposta.deleted === true;
+  const motivo = erroDelete ? erroDelete.message : `resposta sem deleted=true (${JSON.stringify(resposta)})`;
+  if (!confirmada) {
+    if (erroDelete && erroDelete.tempoEsgotado && params.esperaAposTempoMs > 0) await esperar(params.esperaAposTempoMs);
+    const v = await situacaoDaCobranca(asaas, item.cobranca.id);
+    if (v.situacao === 'pendente') {
+      await db.query(SQL_FALHOU, [concessaoId, motivo]);
+      return { ok: false, concessaoId, erro: motivo };
+    }
+    if (v.situacao === 'desconhecido') {
+      const nota = `exclusão sem confirmação (${motivo}); consulta: ${v.detalhe}. Conferir no painel da Asaas.`;
+      await db.query(SQL_ANOTAR, [concessaoId, nota]).catch(() => {});
+      return { ok: false, emConferencia: true, concessaoId, erro: nota };
+    }
+    // 'excluida': a consulta confirmou a exclusão
   }
   try {
     await db.query(SQL_APLICADA, [concessaoId]);
@@ -502,7 +586,9 @@ async function concederUma({ db, asaas, item, hoje, params = PARAMETROS_PADRAO, 
     // mostra em conferência. Não tentar de novo.
     return { ok: true, concessaoId, aviso: `exclusão feita, mas a linha ficou 'registrada': ${err.message}` };
   }
-  return { ok: true, concessaoId };
+  return confirmada
+    ? { ok: true, concessaoId }
+    : { ok: true, concessaoId, aviso: 'a Asaas não confirmou na hora; a consulta mostrou a cobrança excluída' };
 }
 
 const SQL_CONCESSAO_POR_ID = `-- indicacao:concessao-por-id
@@ -532,7 +618,9 @@ async function lerConcessao(db, id) {
 
 function planoDeEstorno(c, { hoje, vencimento = null }) {
   if (!c) throw new Recusa('concessão não encontrada');
-  if (c.status !== 'aplicada') throw new Recusa(`concessão está '${c.status}', só 'aplicada' pode ser estornada`);
+  if (c.status !== 'aplicada' && c.status !== 'estornando') {
+    throw new Recusa(`concessão está '${c.status}', só 'aplicada' (ou 'estornando', para retomar) pode ser estornada`);
+  }
   if (!c.asaas_customer_id) throw new Recusa('concessão sem cliente da Asaas');
   const venc = vencimento || c.cobranca_vencimento;
   if (!dia(venc)) throw new Recusa('concessão sem vencimento: informe --vencimento AAAA-MM-DD');
@@ -549,21 +637,56 @@ function planoDeEstorno(c, { hoje, vencimento = null }) {
   };
 }
 
+// Cobrança de estorno já criada para esta concessão? Procura pelo cliente e
+// pelo externalReference (id da empresa) e confere o id da concessão na
+// descrição. Lança se a Asaas não responder: sem conferir, não se cria outra.
+async function buscarEstornoNaAsaas(asaas, c) {
+  const r = await asaas('GET', '/payments?customer=' + encodeURIComponent(c.asaas_customer_id) +
+    '&externalReference=' + encodeURIComponent(c.indicador_company_id) + '&limit=100');
+  if (!r || !Array.isArray(r.data)) throw new Error('resposta inesperada da Asaas ao procurar o estorno');
+  return r.data.find((p) => p && p.id && !p.deleted && String(p.description || '').includes(c.id)) || null;
+}
+
 // Estorno: grava 'estornando' antes, cria a cobrança avulsa, liga o pay_ novo.
-async function estornar({ db, asaas, concessao, hoje, vencimento = null }) {
+// Recusa clara da Asaas (4xx) volta a linha para 'aplicada'. Resposta ambígua
+// (tempo esgotado, conexão, 5xx, sem id) deixa a linha em 'estornando': rodar
+// --estornar de novo procura a cobrança na Asaas ANTES de criar outra.
+async function estornar({ db, asaas: asaasCru, concessao, hoje, vencimento = null, params = PARAMETROS_PADRAO }) {
+  const asaas = comTempoLimite(asaasCru, params.tempoLimiteMs);
   const corpo = planoDeEstorno(concessao, { hoje, vencimento });
-  const r = await db.query(SQL_ESTORNANDO, [concessao.id]);
-  if (!r || r.rowCount !== 1) throw new Recusa('concessão mudou de estado; nada foi feito');
+
+  if (concessao.status === 'estornando') {
+    let achada;
+    try {
+      achada = await buscarEstornoNaAsaas(asaas, concessao);
+    } catch (err) {
+      throw new Recusa(`não deu para conferir na Asaas se o estorno já existe (${err.message}); nada foi feito`);
+    }
+    if (achada) {
+      await db.query(SQL_ESTORNADA, [concessao.id, achada.id]);
+      return { ok: true, estornoPayId: achada.id, corpo, reaproveitada: true };
+    }
+  } else {
+    const r = await db.query(SQL_ESTORNANDO, [concessao.id]);
+    if (!r || r.rowCount !== 1) throw new Recusa('concessão mudou de estado; nada foi feito');
+  }
+
   let nova;
   try {
     nova = await asaas('POST', '/payments', corpo);
   } catch (err) {
-    await db.query(SQL_ESTORNO_FALHOU, [concessao.id, 'estorno: ' + err.message]);
-    return { ok: false, erro: err.message };
+    if (recusaClara(err)) {
+      await db.query(SQL_ESTORNO_FALHOU, [concessao.id, 'estorno: ' + err.message]);
+      return { ok: false, erro: err.message };
+    }
+    const nota = `estorno sem confirmação (${err.message}): rodar --estornar de novo confere na Asaas antes de criar outra`;
+    await db.query(SQL_ANOTAR, [concessao.id, nota]).catch(() => {});
+    return { ok: false, emConferencia: true, erro: nota };
   }
   if (!nova || !nova.id) {
-    await db.query(SQL_ESTORNO_FALHOU, [concessao.id, 'estorno: Asaas não devolveu id']);
-    return { ok: false, erro: 'Asaas não devolveu o id da cobrança nova' };
+    const nota = 'estorno sem confirmação (a Asaas não devolveu o id): rodar --estornar de novo confere antes de criar outra';
+    await db.query(SQL_ANOTAR, [concessao.id, nota]).catch(() => {});
+    return { ok: false, emConferencia: true, erro: nota };
   }
   await db.query(SQL_ESTORNADA, [concessao.id, nova.id]);
   return { ok: true, estornoPayId: nova.id, corpo };
@@ -575,14 +698,31 @@ const SQL_EMPRESA = `-- indicacao:empresa
 SELECT id, COALESCE(trade_name, legal_name) AS nome, asaas_customer_id, asaas_subscription_id
   FROM companies WHERE id = $1`;
 
-async function montarCombinada({ db, asaas, indicadorId, indicadoId, cobrancaId, observacao = null, hoje }) {
+// Regra da primeira mensalidade (Célia, 13/10): o mês grátis nunca é a
+// primeira cobrança do indicador (ela captura o cartão). A combinada exige
+// um pagamento do plano JÁ recebido pelo indicador em webhook_logs; sem ele,
+// só com --confirmo-primeira-mensalidade (decisão explícita de quem roda,
+// depois de falar com a Célia), e o aviso aparece na confirmação.
+async function montarCombinada({
+  db, asaas, indicadorId, indicadoId, cobrancaId, observacao = null, hoje, confirmoPrimeiraMensalidade = false,
+}) {
   const { rows: a } = await db.query(SQL_EMPRESA, [indicadorId]);
   const { rows: b } = await db.query(SQL_EMPRESA, [indicadoId]);
   if (!a[0]) throw new Recusa('indicador não encontrado');
   if (!b[0]) throw new Recusa('indicado não encontrado');
   if (a[0].id === b[0].id) throw new Recusa('indicador e indicado são a mesma empresa');
   if (!a[0].asaas_customer_id) throw new Recusa('indicador sem cliente na Asaas');
-  const p = await asaas('GET', '/payments/' + encodeURIComponent(cobrancaId));
+  const { rows: evIndicador } = await db.query(SQL_EVENTOS, [[a[0].id]]);
+  const pagouAntes = primeiroRecebimento(evIndicador || []);
+  let aviso = null;
+  if (!pagouAntes) {
+    if (!confirmoPrimeiraMensalidade) {
+      throw new Recusa('o indicador ainda não tem pagamento recebido: a cobrança seria a primeira mensalidade. ' +
+        'Só com --confirmo-primeira-mensalidade, depois de confirmar com a Célia.');
+    }
+    aviso = 'ATENÇÃO: o indicador não tem pagamento recebido; esta pode ser a PRIMEIRA mensalidade (confirmado por --confirmo-primeira-mensalidade).';
+  }
+  const p = await comTempoLimite(asaas, PARAMETROS_PADRAO.tempoLimiteMs)('GET', '/payments/' + encodeURIComponent(cobrancaId));
   const item = {
     tipo: 'combinada', referral_id: null,
     indicador_id: a[0].id, indicador_nome: a[0].nome, indicador_cliente: a[0].asaas_customer_id,
@@ -590,7 +730,8 @@ async function montarCombinada({ db, asaas, indicadorId, indicadoId, cobrancaId,
     indicado_id: b[0].id, indicado_nome: b[0].nome,
     valor: p ? Number(p.value) : null,
     cobranca: p ? { id: p.id, vencimento: dia(p.dueDate), forma: p.billingType || null, valor: Number(p.value) } : null,
-    observacao,
+    observacao: aviso ? [observacao, 'confirmada como possível primeira mensalidade'].filter(Boolean).join(' · ') : observacao,
+    aviso,
     situacao: 'pronta',
   };
   conferirCobranca(p, item, hoje);
@@ -598,7 +739,7 @@ async function montarCombinada({ db, asaas, indicadorId, indicadoId, cobrancaId,
 }
 
 module.exports = {
-  PARAMETROS_PADRAO, STATUS_VIVOS, ROTULOS, Recusa,
+  PARAMETROS_PADRAO, STATUS_VIVOS, STATUS_EM_CONFERENCIA, ROTULOS, Recusa, comTempoLimite, situacaoDaCobranca,
   hojeSP, dia, somarDias, diasEntre, reais,
   motivosAntifraude, recebimentosDoPlano, primeiroRecebimento, ultimoRecebimento, atrasosAbertos,
   carregarDados, lerConcessoes, lerConcessao, avaliarCandidato, ordenarFila, usoDoTeto, aplicarTetos,

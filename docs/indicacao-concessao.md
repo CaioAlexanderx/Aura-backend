@@ -51,10 +51,24 @@ Ordem de cada concessão:
 2. **grava** a linha em `indicacao_concessoes` com status `registrada`, dentro de uma
    transação com trava, revalidando teto e unicidade;
 3. só então **exclui** a cobrança na Asaas;
-4. marca a linha como `aplicada` (ou `falhou`, se a Asaas recusou; a cobrança continua lá).
+4. marca a linha como `aplicada` quando a Asaas responde `{deleted: true}`.
 
-Se a linha ficar `registrada` (queda no meio), o relatório a mostra "em conferência":
-conferir no painel da Asaas se a cobrança foi excluída e corrigir a linha à mão.
+Resposta que não é limpa (tempo esgotado, conexão caída, 5xx, corpo que não é JSON, recusa)
+**nunca** vira `falhou` às cegas: o script consulta a cobrança de novo (depois de um tempo
+esgotado, espera alguns segundos antes):
+
+| a consulta mostra | a linha fica |
+|---|---|
+| cobrança excluída (`deleted`) ou 404 | `aplicada` |
+| cobrança ainda `PENDING` | `falhou` (a cobrança continua lá) |
+| não deu para saber | `registrada`, com o erro anotado em `erro` |
+
+Linha `registrada` (ou `estornando`) aparece "em conferência" no relatório e **trava o
+indicador**: nenhuma outra concessão dele (nem na cobrança seguinte) até alguém conferir no
+painel da Asaas e acertar a linha à mão (`aplicada` se a cobrança foi excluída, `falhou` se não).
+
+Cada chamada à Asaas tem tempo limite (`--tempo-limite`, padrão 20 s). O script usa o
+`asaasRequest` do `src/services/asaasClient.js`, que traz o status HTTP no erro.
 
 Depois de cada concessão o script imprime o aviso para mandar à Célia no mesmo dia.
 
@@ -70,6 +84,14 @@ Cria uma cobrança avulsa de mesmo valor e vencimento para o mesmo cliente, grav
 `pay_...` novo em `estorno_pay_id` e a concessão sai do teto do mês (status `estornada`).
 A linha é marcada `estornando` antes da chamada à Asaas.
 
+- Recusa clara da Asaas (4xx): a linha volta para `aplicada` com o erro anotado.
+- Resposta ambígua (tempo esgotado, conexão, 5xx, sem id): a linha **fica `estornando`**.
+  Rodar `--estornar <id> --apply` de novo primeiro **procura na Asaas** (cliente +
+  `externalReference` = id da empresa, e o id da concessão na descrição). Achou: liga essa
+  cobrança à linha e não cria outra. Não achou: só então cria. Se a Asaas não responder a essa
+  consulta, nada é feito. Espere alguns minutos antes de repetir: uma requisição que estourou o
+  tempo ainda pode chegar.
+
 ### Concessão combinada (antes de 15/10)
 
 ```bash
@@ -80,6 +102,12 @@ node scripts/indicacao-concessao.js --combinada \
 
 Mesmo caminho (grava antes, exclui depois), tipo `combinada`, **fora do teto mensal e
 anual** (conforme o cartão; a confirmar com a Célia). Um benefício por indicado.
+
+Nunca a primeira mensalidade: o indicador precisa ter um pagamento do plano já recebido em
+`webhook_logs`. Sem isso a combinada é recusada; só passa com
+`--confirmo-primeira-mensalidade`, depois de confirmar com a Célia (a confirmação mostra o
+aviso e a linha fica anotada). Antes de usar nas duas combinadas (Jenny e Fernanda), conferir
+no relatório se os indicadores já pagaram.
 A extensão de 30 dias (Jenny com o Luis) não é exclusão de cobrança e **não** é feita
 por este script: aguarda a Célia dizer como registrar.
 
@@ -103,10 +131,10 @@ Não escreve no banco e não chama a Asaas.
 
 | status | significado | ocupa o teto |
 |---|---|---|
-| `registrada` | gravada, exclusão não confirmada | sim |
+| `registrada` | gravada, exclusão não confirmada (em conferência; trava o indicador) | sim |
 | `aplicada` | cobrança excluída na Asaas | sim |
-| `falhou` | a Asaas recusou a exclusão | não |
-| `estornando` | estorno em curso | sim |
+| `falhou` | a exclusão não aconteceu (a consulta mostrou a cobrança pendente) | não |
+| `estornando` | estorno em curso ou sem confirmação (em conferência; trava o indicador) | sim |
 | `estornada` | cobrança refeita (`estorno_pay_id`) | não |
 
 Unicidade: uma concessão viva por cobrança (`asaas_payment_id`), por indicação e por indicado.
