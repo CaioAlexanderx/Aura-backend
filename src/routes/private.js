@@ -102,6 +102,9 @@ router.use('/', require('./productLinks').companyRouter);
 router.use('/coupons', require('./coupons'));
 router.use('/nfce', require('./nfce'));
 router.use('/nfe', require('./nfe'));
+// 14/10/2026: o dono envia o proprio certificado A1 (mesmo certStore da Gestao
+// Aura; so o dono, CNPJ do certificado confere). Nao mexe em /nfe/certificate.
+router.use('/fiscal-certificate', require('./fiscalCertificate'));
 router.use('/nfse', require('./nfse'));
 router.use('/storage', require('./storage'));
 router.use('/obligations', require('./fiscalObligations'));
