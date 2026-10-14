@@ -226,6 +226,7 @@ const TITULO_EVENTO = {
     PAYMENT_CONFIRMED: 'Pagamento confirmado',
     PAYMENT_OVERDUE: 'Pagamento atrasado',
     PAYMENT_DELETED: 'Cobrança apagada na Asaas',
+    PAYMENT_CREATED: 'Cobrança criada',
   }[e.detalhe] || `Asaas: ${e.detalhe}`),
   nota: (e) => `NFC-e ${e.detalhe}`,
 };
