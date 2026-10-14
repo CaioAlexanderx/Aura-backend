@@ -6,6 +6,10 @@
 //
 //   pagante_anual_vencendo   anual que vence em até 2 dias, sem venda há 14+
 //   trial_com_venda_vencendo trial que já vendeu e vence em 48h
+//
+// Alerta de vencimento/cobrança nunca sai de empresa cujo plano é pago por
+// outra (billing_owner_company_id diferente do id: filial da Villa Branca,
+// cobrada na Matriz): o vencimento dela é o da matriz.
 //   pagamento_sem_loja       pagamento da Asaas sem loja vinculada
 //   nfce_rejeitada           NFC-e rejeitada nos últimos 7 dias
 //   contato_sem_resposta     contato do WhatsApp da Aura sem resposta humana
@@ -108,6 +112,7 @@ async function calcularAlertas({ hoje, db = b.pool, empresas, agora = new Date()
 
   // 1. Pagante anual que vence em até 2 dias sem vender há 14+ dias.
   for (const e of emp.pagantes) {
+    if (e.paga_por_outra) continue; // `pagantes` já a deixa de fora; garantia explícita
     if (e.ciclo !== 'annual' || !e.vence_em) continue;
     const faltam = b.diasEntre(hoje, e.vence_em);
     if (faltam < 0 || faltam > 2) continue;
@@ -127,7 +132,7 @@ async function calcularAlertas({ hoje, db = b.pool, empresas, agora = new Date()
 
   // 2. Trial que já vendeu e vence em 48h.
   for (const e of emp.lista) {
-    if (e.pagante || e.eh_dojo || !e.trial_ate) continue;
+    if (e.pagante || e.eh_dojo || e.paga_por_outra || !e.trial_ate) continue;
     const faltam = b.diasEntre(hoje, e.trial_ate);
     if (faltam < 0 || faltam > 2) continue;
     const v = ultima.get(e.company_id);
