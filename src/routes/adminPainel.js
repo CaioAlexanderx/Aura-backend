@@ -9,6 +9,8 @@
 // GET  /admin/painel/blocos/:id?periodo=    — card expandido (7 | 30 | 90 dias)
 // GET  /admin/painel/clientes/:cid/ficha    — ficha da loja
 // GET  /admin/painel/contatos/:conversaId   — conversa do WhatsApp da Aura, com as mensagens
+// POST /admin/painel/contatos               — Registrar contato (empresa OU lead)
+// GET  /admin/painel/contatos?desde=        — contatos registrados desde um dia
 // GET  /admin/painel/layout                 — blocos visíveis e ordem do usuário
 // PUT  /admin/painel/layout                 — body: { blocos: [{ id, visivel }] }
 // POST /admin/painel/recalcular             — roda o passo diário agora
@@ -30,6 +32,7 @@ const painel = require('../services/painelDiario');
 const { calcularAlertas, alertasDeContatos } = require('../services/painelAlertas');
 const { detalheDaConversa } = require('../services/contatosWhatsapp');
 const { listarClients360 } = require('../services/clients360');
+const contatos = require('../services/registrarContato');
 const canaryStatus = require('../services/canaryStatus');
 
 const adminOnly = [requireAuth, requireRole('admin')];
@@ -221,7 +224,7 @@ router.get('/clientes/:cid/ficha', ...adminOnly, asyncHandler(async (req, res) =
   if (!cliente) throw new AppError('Empresa não encontrada', 404);
 
   const semanas = base.ultimasSemanas(hoje, 12);
-  const [logins, asaas, linhaDoTempo, vendasSemana, alertas, modulos] = await Promise.all([
+  const [logins, asaas, linhaDoTempo, vendasSemana, alertas, modulos, contatosDaLoja, checkinRows] = await Promise.all([
     base.consultar(
       pool,
       `SELECT COUNT(*) FILTER (WHERE action = 'login') AS logins,
@@ -279,9 +282,58 @@ router.get('/clientes/:cid/ficha', ...adminOnly, asyncHandler(async (req, res) =
       [hoje, cid]
     ),
     usoPorModulo({ hoje, periodo: 30, companyId: cid }),
+    // Contatos registrados pela equipe (migration 383). Consulta à parte: sem
+    // as colunas novas devolve [] e a ficha continua igual.
+    base.opcional(
+      pool,
+      `-- contatos:ficha
+       SELECT n.id, n.created_at, n.body, n.canal, n.resultado, n.proximo_passo,
+              to_char(n.proximo_passo_em, 'YYYY-MM-DD') AS proximo_passo_em,
+              n.motivo, n.prorrogou_dias, n.marcador,
+              COALESCE(u.full_name, u.email) AS autor
+         FROM company_admin_notes n
+         LEFT JOIN users u ON u.id = n.author_user_id
+        WHERE n.company_id = $1
+        ORDER BY n.created_at DESC
+        LIMIT 20`,
+      [cid]
+    ),
+    // Check-in (migration 384): o que o cliente respondeu e o que a equipe anotou.
+    base.opcional(pool, `-- checkin:ficha
+       SELECT checkin FROM companies WHERE id = $1`, [cid]),
   ]);
 
   const l = logins[0] || {};
+
+  const contatosFormatados = contatosDaLoja.map((c) => ({
+    id: c.id,
+    quando: c.created_at,
+    titulo: contatos.tituloDoContato(c),
+    body: c.body,
+    canal: c.canal || null,
+    resultado: c.resultado || null,
+    proximo_passo: c.proximo_passo || null,
+    proximo_passo_em: c.proximo_passo_em || null,
+    motivo: c.motivo || null,
+    prorrogou_dias: c.prorrogou_dias === null || c.prorrogou_dias === undefined ? null : c.prorrogou_dias,
+    marcador: c.marcador || null,
+    autor: c.autor || null,
+  }));
+  // Os eventos do sistema (10 mais recentes) e os contatos entram na mesma
+  // linha do tempo, do mais recente ao mais antigo.
+  const linhaDoTempoCompleta = linhaDoTempo
+    .map((e) => ({
+      tipo: e.tipo,
+      quando: e.quando,
+      titulo: (TITULO_EVENTO[e.tipo] || (() => e.tipo))(e),
+      valor: e.valor === null || e.valor === undefined ? null : base.round2(e.valor),
+    }))
+    .concat(contatosFormatados.slice(0, 10).map((c) => ({
+      tipo: 'contato', quando: c.quando, titulo: c.titulo, valor: null, contato: c,
+    })))
+    .sort((x, y) => new Date(y.quando).getTime() - new Date(x.quando).getTime())
+    .slice(0, 15);
+
   const usados = modulos
     .map((m) => ({ id: m.id, nome: m.rotulo, uso: m.lojas.get(cid) }))
     .filter((m) => m.uso && m.uso.total > 0)
@@ -325,12 +377,68 @@ router.get('/clientes/:cid/ficha', ...adminOnly, asyncHandler(async (req, res) =
       valor: base.num((vendasSemana.find((v) => v.semana === s) || {}).vendas),
     })),
     alertas: alertas.map(formatarAlerta),
-    linha_do_tempo: linhaDoTempo.map((e) => ({
-      tipo: e.tipo,
-      quando: e.quando,
-      titulo: (TITULO_EVENTO[e.tipo] || (() => e.tipo))(e),
-      valor: e.valor === null || e.valor === undefined ? null : base.round2(e.valor),
-    })),
+    // Contatos da equipe (do mais recente): o app mostra o último e o próximo
+    // passo sem varrer a linha do tempo, que é cortada em 15 eventos.
+    contatos: contatosFormatados.slice(0, 10),
+    checkin: (checkinRows[0] && checkinRows[0].checkin) || null,
+    linha_do_tempo: linhaDoTempoCompleta,
+  });
+}));
+
+// ── POST /admin/painel/contatos — Registrar contato ─────────────
+// Body: { company_id | lead_id, canal, resultado, body, proximo_passo?,
+//         proximo_passo_em?, motivo?, prorrogou_dias?, marcador?, checkin? }
+//   canal      whatsapp | ligacao | email | presencial
+//   resultado  respondeu | sem_resposta | pediu_tempo | combinou_ligacao |
+//              quer_assinar | nao_quer (motivo obrigatório)
+//   checkin    { como_chegou?, fiado?, quem_decide? } → companies.checkin
+// Empresa grava em company_admin_notes; lead, em lead_interactions. → 201
+// { id, created_at } (+ checkin_gravado quando veio checkin). Validação e SQL
+// em services/registrarContato.js; enums idênticos aos CHECK da migration 383.
+const PENDENTE_CONTATO = {
+  error: 'Registrar contato indisponível (migration 383 pendente).',
+  code: 'MIGRATION_PENDING',
+};
+
+router.post('/contatos', ...adminOnly, asyncHandler(async (req, res) => {
+  const { erro, valor } = contatos.normalizar(req.body);
+  if (erro) return res.status(400).json({ error: erro, code: 'CONTATO_INVALID' });
+
+  let criado;
+  try {
+    if (valor.alvo.company_id) {
+      criado = await contatos.registrarEmpresa(pool, req.user.id, valor);
+      if (!criado) throw new AppError('Empresa não encontrada', 404);
+    } else {
+      const quem = await base.opcional(pool, 'SELECT COALESCE(full_name, email) AS nome FROM users WHERE id = $1', [req.user.id]);
+      const autor = { id: req.user.id, nome: (quem[0] && quem[0].nome) || req.user.email || 'Staff' };
+      criado = await contatos.registrarLead(pool, autor, valor);
+      if (!criado) throw new AppError('Lead não encontrado', 404);
+    }
+  } catch (err) {
+    if (contatos.migrationPendente(err)) return res.status(503).json(PENDENTE_CONTATO);
+    throw err;
+  }
+  res.status(201).json(criado);
+}));
+
+// ── GET /admin/painel/contatos?desde=YYYY-MM-DD ─────────────────
+// Contatos registrados desde o dia (Brasília), do mais recente ao mais
+// antigo, empresas e leads juntos. Sem `desde`: os últimos 7 dias. É o que a
+// Cassie lê na rodada das 7h30.
+router.get('/contatos', ...adminOnly, asyncHandler(async (req, res) => {
+  let desde = req.query.desde;
+  if (desde === undefined || desde === '') {
+    desde = base.somaDias(painel.hojeBRT(), -7);
+  } else if (!contatos.diaValido(desde)) {
+    throw new AppError('desde deve ser uma data YYYY-MM-DD', 400);
+  }
+  const r = await contatos.listarDesde(pool, desde);
+  res.json({
+    desde,
+    total: r.contatos.length,
+    ...(r.migration_pendente ? { migration_pendente: true } : {}),
+    contatos: r.contatos,
   });
 }));
 
