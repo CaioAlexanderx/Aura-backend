@@ -81,6 +81,11 @@
 //   - PAYMENT_CREATED passa a ser registrado (neutro, como PAYMENT_DELETED):
 //     e o "a receber" da Financeiro. Sem loja ele nao e gravado (nao e
 //     dinheiro e poluiria a lista de pagamentos sem loja).
+//   - Pagamento com paymentDate ANTERIOR ao last_payment_date da loja so e
+//     registrado: nao muda billing_status nem propaga para filiais.
+//   - A checagem de reenvio exige, para RECEIVED/CONFIRMED, que o log antigo
+//     tenha status de pago, e, com loja encontrada, que ele ja esteja
+//     vinculado a uma loja (orfao vinculado depois pode ser reprocessado).
 //   PAYMENT_OVERDUE e PAYMENT_DELETED seguem exatamente como antes.
 //
 // ATENCAO: quando operando sem segredo, o log fica MUITO barulhento de
@@ -284,15 +289,26 @@ async function logWebhookEvent(companyId, event, payment) {
 // O mesmo evento ja foi registrado para este pagamento? Em erro de leitura
 // responde false: o handler segue como antes (melhor processar de novo —
 // com GREATEST a data nao regride — do que perder um pagamento).
-async function alreadyLogged(event, paymentId) {
+//   - Evento de dinheiro (RECEIVED/CONFIRMED) so conta como reenvio se o log
+//     antigo tambem tinha status de pago: um log gravado com o evento errado
+//     (body forjado ou status OVERDUE) nao "envenena" a chave e nao faz o
+//     pagamento real ser descartado.
+//   - comEmpresa: a empresa foi encontrada, entao so vale log JA vinculado a
+//     uma loja. Um orfao gravado antes (company_id NULL) nao bloqueia o
+//     reenvio depois que alguem cadastra o cliente da Asaas na loja.
+var STATUS_PAGOS_NO_LOG = ['RECEIVED', 'CONFIRMED', 'RECEIVED_IN_CASH'];
+async function alreadyLogged(event, paymentId, comEmpresa) {
   if (!paymentId) return false;
   try {
     var r = await db.query(
       `SELECT 1 FROM webhook_logs
         WHERE provider = 'asaas' AND event = $1
           AND COALESCE(payload->'payment', payload)->>'id' = $2
+          AND ($3::boolean IS NOT TRUE OR company_id IS NOT NULL)
+          AND ($4::boolean IS NOT TRUE
+               OR COALESCE(payload->'payment', payload)->>'status' = ANY($5::text[]))
         LIMIT 1`,
-      [event, String(paymentId)]
+      [event, String(paymentId), !!comEmpresa, !!PAID_EVENTS[event], STATUS_PAGOS_NO_LOG]
     );
     return !!(r && r.rows && r.rows.length);
   } catch (err) {
@@ -380,11 +396,10 @@ router.post('/', async function(req, res) {
       return res.status(200).json({ received: true, handled: false, event_ignored: event });
     }
 
-    // Reenvio: o mesmo evento deste pagamento ja foi processado e registrado.
-    if (DEDUPE_EVENTS[event] && await alreadyLogged(event, payment.id)) {
+    var duplicado = function() {
       console.log('[WEBHOOK] Reenvio ignorado: ' + event + ' de ' + payment.id + ' ja registrado em webhook_logs');
       return res.status(200).json({ received: true, handled: false, duplicate: true, event: event });
-    }
+    };
 
     var result = await db.query(
       'SELECT id, plan, billing_status, is_primary, asaas_subscription_id FROM companies WHERE asaas_customer_id=$1 OR id=$2 LIMIT 1',
@@ -395,6 +410,8 @@ router.post('/', async function(req, res) {
         console.log('[WEBHOOK] ' + event + ' sem loja (customer ' + payment.customer + ') — nao registrado');
         return res.status(200).json({ received: true, company_found: false, logged: false });
       }
+      // Reenvio de um orfao ja gravado: nao grava outra linha sem loja.
+      if (DEDUPE_EVENTS[event] && await alreadyLogged(event, payment.id, false)) return duplicado();
       // Sem loja: o evento fica registrado com company_id NULL em vez de
       // sumir. Vincular e decisao de gente (POST /admin/painel/asaas/orfaos/
       // :logId/vincular) — aqui ninguem adivinha de quem e o dinheiro.
@@ -406,6 +423,10 @@ router.post('/', async function(req, res) {
 
     var company    = result.rows[0];
     var prevStatus = company.billing_status;
+
+    // Reenvio: o mesmo evento deste pagamento ja foi processado e registrado
+    // numa loja.
+    if (DEDUPE_EVENTS[event] && await alreadyLogged(event, payment.id, true)) return duplicado();
 
     // ── Evento neutro: audita e sai SEM tocar em companies ────
     // PAYMENT_DELETED cai aqui. Apagar uma cobranca no Asaas nao diz nada
@@ -420,6 +441,30 @@ router.post('/', async function(req, res) {
         status_changed: false,
         status: prevStatus,
         event_neutral: event,
+      });
+    }
+
+    // Pagamento ANTIGO (anterior ao ultimo pagamento conhecido da loja), como
+    // o de 19/05 da Davi chegando com last_payment_date em 24/09: e dinheiro
+    // que entrou e fica registrado, mas nao diz nada sobre a situacao de HOJE.
+    // Nao muda billing_status (uma loja 'overdue' continua 'overdue') nem
+    // propaga para as filiais. Pagamento novo ou loja sem data: fluxo normal.
+    var dataPagamento = payment.paymentDate ? String(payment.paymentDate).slice(0, 10) : null;
+    var ultimoPagamento = null;
+    if (isPaid && dataPagamento) {
+      var ult = await db.query('SELECT last_payment_date::text AS last_payment_text FROM companies WHERE id = $1', [company.id]);
+      ultimoPagamento = (ult && ult.rows && ult.rows[0] && ult.rows[0].last_payment_text) || null;
+    }
+    if (isPaid && dataPagamento && ultimoPagamento && dataPagamento < ultimoPagamento) {
+      await logWebhookEvent(company.id, event, payment);
+      console.log('[WEBHOOK] Company ' + company.id + ' — pagamento antigo ' + payment.id + ' (' + dataPagamento +
+        ' < ' + ultimoPagamento + ') registrado; billing_status preservado em ' + prevStatus);
+      return res.status(200).json({
+        received: true,
+        handled: true,
+        status_changed: false,
+        status: prevStatus,
+        old_payment: true,
       });
     }
 

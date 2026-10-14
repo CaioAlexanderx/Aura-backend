@@ -43,10 +43,18 @@ const COALESCE_ANTIGO = 'CASE WHEN $2 THEN COALESCE($3, last_payment_date) ELSE 
 function bancoDeMentira(db, { empresa = null, logs = [], falharChecagem = false } = {}) {
   const estado = { empresa: empresa && { ...empresa }, logs: logs.map((l) => ({ ...l })), updates: 0 };
   db.query.mockImplementation(async (sql, params) => {
-    if (/FROM companies WHERE asaas_customer_id/i.test(sql)) return { rows: estado.empresa ? [{ ...estado.empresa }] : [] };
+    if (/FROM companies WHERE asaas_customer_id/i.test(sql)) {
+      return { rows: estado.empresa ? [{ ...estado.empresa }] : [] };
+    }
+    if (/SELECT last_payment_date::text AS last_payment_text FROM companies WHERE id/i.test(sql)) {
+      return { rows: estado.empresa ? [{ last_payment_text: estado.empresa.last_payment_date }] : [] };
+    }
     if (/SELECT 1 FROM webhook_logs/i.test(sql)) {
       if (falharChecagem) throw new Error('conexão caiu');
-      const achou = estado.logs.some((l) => l.event === params[0] && l.payload.id === params[1]);
+      // params: evento, pay_, só log com loja?, exige status de pago?, status pagos
+      const [ev, id, comEmpresa, exigePago, pagos] = params;
+      const achou = estado.logs.some((l) => l.event === ev && l.payload.id === id
+        && (!comEmpresa || l.company_id != null) && (!exigePago || pagos.includes(l.payload.status)));
       return { rows: achou ? [{ '?column?': 1 }] : [] };
     }
     if (/INSERT INTO webhook_logs/i.test(sql)) {
@@ -144,7 +152,7 @@ describe('last_payment_date nunca regride (caso Davi, 19/05)', () => {
     const { app, db, asaas } = buildApp();
     bancoDeMentira(db, { empresa: davi() });
     assinaturaAsaas(asaas);
-    await enviar(app, { event: 'PAYMENT_RECEIVED', payment: pagamento1905() });
+    await enviar(app, { event: 'PAYMENT_RECEIVED', payment: pagamento1905({ id: 'pay_out', paymentDate: '2026-10-14' }) });
     const [sql] = db.query.mock.calls.find(([s]) => /UPDATE\s+companies\s+SET billing_status/i.test(s));
     expect(sql).toContain(GREATEST);
     expect(sql).not.toContain('COALESCE($3, last_payment_date)');
@@ -274,5 +282,63 @@ describe('PAYMENT_CREATED registrado; OVERDUE e DELETED como antes', () => {
     asaas.mockRejectedValueOnce(new Error('Asaas error 404'));
     await request(app).post('/webhooks/asaas').send({ event: 'PAYMENT_CREATED', payment: { id: 'pay_falso' } });
     expect(estado.logs).toHaveLength(1);
+  });
+});
+
+describe('revisão de 14/10: chave de reenvio e pagamento antigo', () => {
+  test('log antigo com status OVERDUE e evento PAYMENT_RECEIVED não bloqueia o pagamento real', async () => {
+    const { app, db, asaas } = buildApp();
+    const estado = bancoDeMentira(db, {
+      empresa: davi({ billing_status: 'overdue' }),
+      logs: [{ company_id: DAVI, event: 'PAYMENT_RECEIVED', payload: pagamento1905({ id: 'pay_real', status: 'OVERDUE', paymentDate: null }) }],
+    });
+    assinaturaAsaas(asaas);
+    const res = await enviar(app, { event: 'PAYMENT_RECEIVED', payment: pagamento1905({ id: 'pay_real', paymentDate: '2026-10-14' }) });
+    expect(res.body).toMatchObject({ handled: true, status: 'active' });
+    expect(estado.updates).toBe(1);
+    expect(estado.empresa).toMatchObject({ billing_status: 'active', last_payment_date: '2026-10-14' });
+    expect(estado.logs).toHaveLength(2);
+  });
+
+  test('órfão já gravado (company_id nulo) não bloqueia o reenvio depois que a loja é vinculada', async () => {
+    const { app, db, asaas } = buildApp();
+    const estado = bancoDeMentira(db, {
+      empresa: davi(),
+      logs: [{ company_id: null, event: 'PAYMENT_RECEIVED', payload: pagamento1905({ id: 'pay_orf', paymentDate: '2026-10-14' }) }],
+    });
+    assinaturaAsaas(asaas);
+    const res = await enviar(app, { event: 'PAYMENT_RECEIVED', payment: pagamento1905({ id: 'pay_orf', paymentDate: '2026-10-14' }) });
+    expect(res.body.duplicate).toBeUndefined();
+    expect(estado.updates).toBe(1);
+    expect(estado.logs.filter((l) => l.company_id === DAVI)).toHaveLength(1);
+  });
+
+  test('caso Davi: loja overdue com último pagamento em 24/09 recebendo o de 19/05 continua overdue', async () => {
+    const { app, db, asaas } = buildApp();
+    const estado = bancoDeMentira(db, { empresa: davi({ billing_status: 'overdue', is_primary: true }) });
+    assinaturaAsaas(asaas);
+
+    const res = await enviar(app, { event: 'PAYMENT_RECEIVED', payment: pagamento1905() });
+
+    expect(res.body).toEqual({ received: true, handled: true, status_changed: false, status: 'overdue', old_payment: true });
+    expect(estado.empresa).toMatchObject({ billing_status: 'overdue', last_payment_date: '2026-09-24' });
+    expect(estado.updates).toBe(0);
+    expect(db.query.mock.calls.some(([s]) => /billing_owner_company_id/i.test(s))).toBe(false); // não propaga
+    expect(estado.logs).toEqual([expect.objectContaining({ company_id: DAVI, event: 'PAYMENT_RECEIVED' })]);
+    expect(asaas).not.toHaveBeenCalled();
+  });
+
+  test('fluxo normal intacto: overdue recebendo pagamento novo vira active; loja sem data também', async () => {
+    const a = buildApp();
+    const e1 = bancoDeMentira(a.db, { empresa: davi({ billing_status: 'overdue' }) });
+    assinaturaAsaas(a.asaas);
+    await enviar(a.app, { event: 'PAYMENT_RECEIVED', payment: pagamento1905({ id: 'pay_n', paymentDate: '2026-09-24' }) });
+    expect(e1.empresa.billing_status).toBe('active'); // mesma data do último: não é antigo
+
+    const b = buildApp();
+    const e2 = bancoDeMentira(b.db, { empresa: davi({ billing_status: 'overdue', last_payment_date: null }) });
+    assinaturaAsaas(b.asaas);
+    await enviar(b.app, { event: 'PAYMENT_RECEIVED', payment: pagamento1905() });
+    expect(e2.empresa).toMatchObject({ billing_status: 'active', last_payment_date: '2026-05-19' });
   });
 });
