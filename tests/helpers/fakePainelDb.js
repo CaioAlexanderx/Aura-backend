@@ -268,6 +268,13 @@ function dadosPadrao() {
         { tipo: 'nota', quando: ts('2026-09-21', '18:31'), valor: '189.90', detalhe: 'autorizada' },
         { tipo: 'pagamento', quando: ts('2026-09-14', '09:00'), valor: '140.83', detalhe: 'PAYMENT_RECEIVED' },
       ],
+      // contatos registrados pela equipe (company_admin_notes, migration 383)
+      contatos: [
+        { id: 7, created_at: ts('2026-10-12', '14:00'), body: 'Pediu até sexta para ver o preço do anual', canal: 'whatsapp', resultado: 'pediu_tempo', proximo_passo: 'Ligar de novo', proximo_passo_em: '2026-10-16', motivo: null, prorrogou_dias: null, marcador: null, autor: 'Caio' },
+        { id: 3, created_at: ts('2026-10-02', '10:30'), body: 'Importação da planilha pedida', canal: 'ligacao', resultado: 'respondeu', proximo_passo: null, proximo_passo_em: null, motivo: null, prorrogou_dias: 7, marcador: 'importacao_assistida_pedida', autor: 'Caio' },
+      ],
+      // companies.checkin (migration 384): o que a equipe anotou no Registrar contato
+      checkin: { como_chegou: 'indicacao', fiado: 'sim', quem_decide: 'dono' },
       vendasSemana: [
         { semana: '2026-09-21', vendas: '1' },
         { semana: '2026-09-14', vendas: '3' },
@@ -328,6 +335,8 @@ function responder(dados, escritas, sql, params = []) {
   if (s.includes('FROM aura_extrato_lancamentos')) return dados.extratoCasados;
 
   // ── ficha (antes das consultas genéricas das mesmas tabelas) ──
+  if (s.includes('-- contatos:ficha')) return dados.ficha.contatos;
+  if (s.includes('-- checkin:ficha')) return dados.ficha.checkin ? [{ checkin: dados.ficha.checkin }] : [];
   if (s.includes("(SELECT 'venda' AS tipo")) return dados.ficha.linhaDoTempo;
   if (s.includes('ck ON true')) return dados.ficha.cliente && (!params[0] || params[0] === dados.ficha.cliente.id) ? [{ ...dados.ficha.cliente }] : [];
   if (s.includes('AS caixa_sessions')) return [{ company_id: id(1), caixa_sessions: '14', last_caixa_at: ts('2026-09-21') }];

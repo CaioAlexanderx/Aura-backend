@@ -87,7 +87,7 @@ function comDiaGravado() {
 describe('acesso', () => {
   test('sem token → 401; cliente comum → 403', async () => {
     expect((await request(makeApp()).get('/admin/painel/hoje')).status).toBe(401);
-    for (const [metodo, url] of [['get', '/hoje'], ['get', '/blocos/pagantes'], ['get', '/layout'], ['put', '/layout'], ['post', '/recalcular'], ['get', `/clientes/${fake.id(1)}/ficha`], ['get', `/contatos/${fake.conv(1)}`]]) {
+    for (const [metodo, url] of [['get', '/hoje'], ['get', '/blocos/pagantes'], ['get', '/layout'], ['put', '/layout'], ['post', '/recalcular'], ['get', `/clientes/${fake.id(1)}/ficha`], ['get', `/contatos/${fake.conv(1)}`], ['get', '/contatos'], ['post', '/contatos']]) {
       expect((await api(metodo, url, cliente)).status).toBe(403);
     }
     expect(db.query).not.toHaveBeenCalled();
@@ -332,10 +332,20 @@ describe('GET /admin/painel/clientes/:cid/ficha', () => {
     expect(res.body.logins).toEqual({ ultimos_30d: 3, dias_ativos_30d: 3, ultimo_acesso: '2026-10-08T15:00:00.000Z' });
     expect(res.body.modulos).toEqual(['Caixa', 'Studio pedidos', 'Estoque']);
     expect(res.body.asaas[0]).toEqual({ evento: 'PAYMENT_DELETED', quando: '2026-09-21T09:00:00.000Z', valor: 140.83, vencimento: '2026-10-14' });
+    // eventos do sistema e contatos da equipe na mesma linha, do mais recente ao mais antigo
     expect(res.body.linha_do_tempo.map((e) => e.titulo)).toEqual([
-      'Login', 'Cobrança apagada na Asaas', 'Venda', 'NFC-e autorizada', 'Pagamento recebido',
+      'Contato por WhatsApp: Pediu um tempo', 'Login', 'Contato por Ligação: Respondeu', 'NFC-e autorizada', 'Venda',
+      'Cobrança apagada na Asaas', 'Pagamento recebido',
     ]);
-    expect(res.body.linha_do_tempo.length).toBeLessThanOrEqual(10);
+    expect(res.body.linha_do_tempo.length).toBeLessThanOrEqual(15);
+    expect(res.body.linha_do_tempo[0]).toMatchObject({
+      tipo: 'contato', valor: null,
+      contato: { proximo_passo: 'Ligar de novo', proximo_passo_em: '2026-10-16', autor: 'Caio' },
+    });
+    // contatos à parte (último contato e próximo passo sem varrer a linha do tempo) e o check-in da equipe
+    expect(res.body.contatos.map((c) => c.id)).toEqual([7, 3]);
+    expect(res.body.contatos[1]).toMatchObject({ marcador: 'importacao_assistida_pedida', prorrogou_dias: 7 });
+    expect(res.body.checkin).toEqual({ como_chegou: 'indicacao', fiado: 'sim', quem_decide: 'dono' });
     expect(res.body.vendas_por_semana).toHaveLength(12);
     expect(res.body.alertas.map((a) => a.tipo)).toEqual(['pagante_anual_vencendo']);
     conferir('clientes.ficha', res.body);
