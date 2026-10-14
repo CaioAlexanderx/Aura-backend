@@ -105,6 +105,36 @@ function validateTransaction(tx, index) {
   return errors;
 }
 
+// ── Status do lancamento importado por planilha (14/10/2026, cartao tq-10) ──
+// Ate aqui TODO lancamento da planilha entrava como 'confirmed' com
+// paid_at = due_date. Boleto com vencimento futuro aparecia como PAGO (GF
+// Amorim, 28/09). Agora:
+//   - vencimento FUTURO (depois de hoje em Sao Paulo) e nenhuma indicacao de
+//     pagamento na linha  -> 'pending' (a pagar / a receber), sem paid_at;
+//   - todo o resto (data de hoje ou passada, ou a linha diz que foi pago)
+//     -> exatamente como antes: data.status || 'confirmed', paid_at = due_date.
+// Indicacao de pagamento: coluna status preenchida, paid_at/data_pagamento
+// preenchida, ou pago/paid = sim. O OFX (extrato = realizado) nao passa aqui.
+const PAGO_SIM = new Set(['sim', 's', 'true', '1', 'x', 'pago', 'paga', 'yes', 'y']);
+
+function hojeSP(agora = new Date()) {
+  return new Intl.DateTimeFormat('en-CA', { timeZone: 'America/Sao_Paulo', year: 'numeric', month: '2-digit', day: '2-digit' }).format(agora);
+}
+
+function indicaPagamento(tx) {
+  const preenchido = (v) => v !== undefined && v !== null && String(v).trim() !== '';
+  if (preenchido(tx.status)) return true;
+  if (preenchido(tx.paid_at) || preenchido(tx.data_pagamento)) return true;
+  return ['pago', 'paid'].some((k) => preenchido(tx[k]) && PAGO_SIM.has(String(tx[k]).trim().toLowerCase()));
+}
+
+function statusImportado(tx, hoje) {
+  const venc = String(tx.due_date || '').trim();
+  const futuro = /^\d{4}-\d{2}-\d{2}/.test(venc) && venc.slice(0, 10) > hoje;
+  if (futuro && !indicaPagamento(tx)) return { status: 'pending', paid_at: null };
+  return { status: tx.status || 'confirmed', paid_at: tx.due_date };
+}
+
 // Leitor de OFX: services/ofxParser.js (compartilhado com a conciliacao da Aura).
 
 // POST /companies/:id/transactions/batch
@@ -148,7 +178,9 @@ router.post('/batch', requireAuth, async (req, res) => {
 
   const batchId = uuidv4();
   let saved = 0;
+  let pendingSaved = 0;
   const dbErrors = [];
+  const hoje = hojeSP();
 
   const client = await db.connect();
   try {
@@ -158,13 +190,15 @@ router.post('/batch', requireAuth, async (req, res) => {
         const empName = (data.vendedor || data.employee_name || data.seller || '').trim();
         let empId = null;
         if (empName) empId = employeeMap[empName.toLowerCase()] || null;
+        const st = statusImportado(data, hoje);
 
         await client.query(
           `INSERT INTO transactions (company_id, type, amount, description, category, due_date, status, notes, import_batch_id, created_by, paid_at, created_at, employee_name, employee_id)
            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)`,
-          [companyId, data.type, parseFloat(data.amount), String(data.description).trim(), data.category || null, data.due_date, data.status || 'confirmed', data.notes || null, batchId, req.user?.id || null, data.due_date, data.due_date, empName || null, empId]
+          [companyId, data.type, parseFloat(data.amount), String(data.description).trim(), data.category || null, data.due_date, st.status, data.notes || null, batchId, req.user?.id || null, st.paid_at, data.due_date, empName || null, empId]
         );
         saved++;
+        if (st.status === 'pending') pendingSaved++;
       } catch (err) {
         dbErrors.push({ index, error: err.message, data });
         if (!partial) throw err;
@@ -181,7 +215,7 @@ router.post('/batch', requireAuth, async (req, res) => {
     return res.status(500).json({ error: 'Erro ao salvar lancamentos', detail: err.message });
   } finally { client.release(); }
 
-  res.status(201).json({ saved, total: transactions.length, error_count: errorItems.length + dbErrors.length, batch_id: batchId, employees_matched: Object.keys(employeeMap).length, errors: [...errorItems, ...dbErrors].sort((a, b) => a.index - b.index).slice(0, 20) });
+  res.status(201).json({ saved, pending: pendingSaved, total: transactions.length, error_count: errorItems.length + dbErrors.length, batch_id: batchId, employees_matched: Object.keys(employeeMap).length, errors: [...errorItems, ...dbErrors].sort((a, b) => a.index - b.index).slice(0, 20) });
 });
 
 // POST /companies/:id/transactions/import-ofx
@@ -268,3 +302,4 @@ router.delete('/import/:batch_id', requireAuth, async (req, res) => {
 });
 
 module.exports = router;
+module.exports.statusImportado = statusImportado;
