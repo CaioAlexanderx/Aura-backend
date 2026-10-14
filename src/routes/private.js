@@ -111,6 +111,9 @@ router.use('/guides', require('./guides'));
 router.use('/checklist', require('./checklist').checklistRouter);
 // 05/10/2026: primeiros passos da frente (companies.segment, migration 366).
 router.use('/onboarding', require('./onboardingFirstSteps'));
+// 14/10/2026: check-in do prospect (migration 384) — 3 perguntas em chip depois da
+// escolha da frente. Qualquer membro da empresa; staff em modo admin so le.
+router.use('/checkin', require('./checkin'));
 router.use('/onboarding', require('./onboarding'));
 router.use('/export', require('./exportReports'));
 router.use('/', require('./importData'));

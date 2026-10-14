@@ -15,6 +15,7 @@ const BLOCOS = [
   { id: 'cadastros', titulo: 'Cadastros', grupo: 'negocio', periodoPadrao: 30 },
   { id: 'pagantes', titulo: 'Pagantes', grupo: 'negocio', periodoPadrao: 30 },
   { id: 'pagantes_sem_venda', titulo: 'Pagantes sem venda', grupo: 'negocio', periodoPadrao: 7 },
+  { id: 'checkin', titulo: 'Check-in', grupo: 'negocio', periodoPadrao: 30 },
   { id: 'acesso', titulo: 'Acesso', grupo: 'produto', periodoPadrao: 30 },
   { id: 'uso_funcionalidade', titulo: 'Uso por funcionalidade', grupo: 'produto', periodoPadrao: 30 },
   { id: 'horario', titulo: 'Horário de uso', grupo: 'produto', periodoPadrao: 30 },

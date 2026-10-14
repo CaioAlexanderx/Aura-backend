@@ -65,13 +65,15 @@ beforeAll(async () => {
   // O número da Aura está ligado neste arquivo: o bloco Contatos, o alerta e a
   // ficha da conversa leem o hub (dados em fakePainelDb.hub*).
   process.env.AURA_COMPANY_ID = fake.AURA_COMPANY;
+  // Bloco Check-in: a tela subiu antes das lojas inventadas (padrão real: 16/10).
+  process.env.CHECKIN_DESDE = '2026-10-01';
   jest.useFakeTimers({ now: fake.AGORA, doNotFake: ['nextTick', 'setImmediate', 'setTimeout', 'setInterval', 'clearTimeout', 'clearInterval', 'queueMicrotask'] });
   jest.spyOn(console, 'warn').mockImplementation(() => {});
   jest.spyOn(console, 'error').mockImplementation(() => {});
   doDia = await gravadosDoDia();
   db.query.mockReset();
 });
-afterAll(() => { delete process.env.AURA_COMPANY_ID; jest.useRealTimers(); jest.restoreAllMocks(); });
+afterAll(() => { delete process.env.AURA_COMPANY_ID; delete process.env.CHECKIN_DESDE; jest.useRealTimers(); jest.restoreAllMocks(); });
 afterEach(() => db.query.mockReset());
 
 // Banco com o dia já calculado pelo job.
