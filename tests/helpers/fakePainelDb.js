@@ -343,6 +343,16 @@ function responder(dados, escritas, sql, params = []) {
       .map((t) => (s.includes('AS company_id') ? { ...t } : { id: t.company_id, trial_mode: t.trial_mode, trial_started_by_sale_at: t.trial_started_by_sale_at }));
   }
 
+  // ── erros por minuto (migration 381): sem dados = tabela ausente (dormente) ──
+  if (s.includes('FROM erros_por_minuto')) {
+    if (!dados.errosPorMinuto) {
+      const e = new Error('relation "erros_por_minuto" does not exist');
+      e.code = '42P01';
+      throw e;
+    }
+    return dados.errosPorMinuto;
+  }
+
   // ── blocos ──
   if (s.includes('FROM products p WHERE p.company_id = c.id')) {
     return dados.funil.filter((f) => params[0].includes(f.company_id));

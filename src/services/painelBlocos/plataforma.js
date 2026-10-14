@@ -1,10 +1,13 @@
 // Bloco "Plataforma": vendas por dia em todas as lojas (o pulso do produto)
 // e, quando o bipe sintético está ligado (services/canary.js), se o Caixa
 // está respondendo: último resultado, disponibilidade e série das 24h.
+// Também lê o contador de erro na ponta do lojista (services/errosPorMinuto.js):
+// 5xx e EMAXCONNSESSION dos últimos 60 minutos, com a série por minuto.
 'use strict';
 
 const b = require('./_base');
 const canaryStatus = require('../canaryStatus');
+const errosPorMinuto = require('../errosPorMinuto');
 
 async function calcular({ hoje, periodo = 14, db = b.pool, empresas } = {}) {
   const emp = empresas || await b.carregarEmpresas(db);
@@ -68,6 +71,33 @@ async function calcular({ hoje, periodo = 14, db = b.pool, empresas } = {}) {
     ));
   }
 
+  // Erros na ponta do lojista, últimos 60 minutos: null quando dormente (sem a
+  // tabela da migration 381, kill switch ou sem linhas) — o bloco sai como
+  // antes. Falha de leitura não derruba o bloco.
+  let erros = null;
+  try {
+    erros = await errosPorMinuto.resumo({ db, agora: new Date() });
+  } catch (err) {
+    console.warn('[painel] erros por minuto indisponíveis:', err.message);
+  }
+  const indicadoresErros = [];
+  const seriesErros = [];
+  if (erros) {
+    const nota = `${b.plural(erros.requisicoes, 'requisição', 'requisições')} em ${erros.janela_min} min`;
+    indicadoresErros.push(
+      b.indicador('Erros 5xx · 60 min', erros.erros_5xx, erros.pct_5xx === null ? nota : `${nota} · ${erros.pct_5xx}%`),
+      b.indicador('EMAXCONNSESSION · 60 min', erros.emaxconnsession, 'pooler sem vaga'),
+    );
+    seriesErros.push(
+      b.serieDe('Erros 5xx por minuto · 60 min', 'barras', erros.serie_60m.map((p) => ({
+        rotulo: p.rotulo, minuto: p.minuto, valor: p.valor, requisicoes: p.requisicoes,
+      }))),
+      b.serieDe('EMAXCONNSESSION por minuto · 60 min', 'barras', erros.serie_60m.map((p) => ({
+        rotulo: p.rotulo, minuto: p.minuto, valor: p.emaxconnsession,
+      }))),
+    );
+  }
+
   const bloco = b.montarBloco({
     valor: noDia(ontem),
     unidade: 'vendas ontem',
@@ -81,14 +111,16 @@ async function calcular({ hoje, periodo = 14, db = b.pool, empresas } = {}) {
       b.indicador('Lojas vendendo · 7 dias', linhas.length),
       b.indicador('Recorde', recorde.valor, `em ${recorde.rotulo}, nos últimos ${janela} dias`),
       ...indicadoresCanary,
+      ...indicadoresErros,
     ],
     listas: [
       b.lista('Lojas vendendo · 7 dias', [b.colLoja(), b.col('vendas_7d', 'Vendas 7d', 'numero'), b.col('vendas_ontem', 'Ontem', 'numero')], linhas),
     ],
-    series: [b.serieDe(`Vendas por dia · ${janela} dias`, 'barras', serie), ...seriesCanary],
+    series: [b.serieDe(`Vendas por dia · ${janela} dias`, 'barras', serie), ...seriesCanary, ...seriesErros],
     insight: null,
   });
   if (canary) bloco.detalhe.canary = canary;
+  if (erros) bloco.detalhe.erros = erros;
   return bloco;
 }
 
