@@ -17,9 +17,10 @@ function initSentry() {
     return;
   }
 
-  // Versao da release: GIT_SHA injetado pelo CI, fallback para package version
+  // Versao da release: commit do deploy (RAILWAY_GIT_COMMIT_SHA, reserva
+  // GIT_SHA — ver shaDaVersao em env.js), fallback para package version
   const pkg     = require('../../package.json');
-  const gitSha  = process.env.GIT_SHA;
+  const gitSha  = require('./env').shaDaVersao();
   const release = gitSha
     ? `aura-backend@${gitSha}`
     : `aura-backend@${pkg.version}`;
