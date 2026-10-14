@@ -1,0 +1,61 @@
+name: Verificador de produção
+
+# t1-04 (14/10/2026): a cada 15 min confere se o que está no ar é o que está
+# em main, nos dois repositórios:
+#   backend: "version" de /health contra main do Aura-backend
+#   app:     "sha" de https://app.getaura.com.br/version.json contra main do aura-app
+# Defasado há mais de 20 min (contando do commit mais antigo de main que não
+# está no ar) => o job fica vermelho e abre ou atualiza uma issue neste
+# repositório; quando volta ao normal, a issue é fechada sozinha.
+# version.json com sha "main" (build pelo deploy hook do app) é registrado
+# como "sem sha" e não falha. A lógica está em .github/scripts/verificador-producao.js.
+#
+# POR QUE continue-on-error NO JOB: a Railway faz deploy com "Wait for CI"
+# e espera TODOS os workflows do commit de main, e uma execução agendada
+# conta como workflow do commit. Se este job derrubasse a execução, um app
+# atrasado (que não tem nada a ver com o backend) pularia o deploy do
+# backend. Com continue-on-error o job aparece vermelho, mas a execução
+# termina como sucesso. O alerta de verdade é a issue.
+#
+# Horário do cron é UTC e o GitHub pode atrasar execuções agendadas alguns
+# minutos; workflow_dispatch permite rodar na mão.
+
+on:
+  schedule:
+    - cron: "*/15 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: verificador-producao
+  cancel-in-progress: false
+
+jobs:
+  verificar:
+    name: main está no ar? (backend e app)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    continue-on-error: true
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          sparse-checkout: .github/scripts
+          sparse-checkout-cone-mode: false
+
+      - name: Setup Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Comparar main com produção
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          LIMITE_MIN: "20"
+          BACKEND_HEALTH_URL: https://aura-backend-production-f805.up.railway.app/health
+          APP_VERSION_URL: https://app.getaura.com.br/version.json
+        run: node .github/scripts/verificador-producao.js
