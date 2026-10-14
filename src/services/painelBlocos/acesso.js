@@ -46,7 +46,7 @@ async function calcular({ hoje, periodo = 30, db = b.pool, empresas } = {}) {
     return {
       rotulo: b.rotuloDia(s),
       valor: lojas.length,
-      pagantes: lojas.filter((r) => emp.porId.get(r.company_id).pagante).length,
+      pagantes: lojas.filter((r) => emp.porId.get(r.company_id).conta_pagante).length,
     };
   });
 
@@ -54,7 +54,7 @@ async function calcular({ hoje, periodo = 30, db = b.pool, empresas } = {}) {
   const linhaDe = (e) => ({
     ...b.ref(e),
     plano: b.PLANO_ROTULO[e.plan] || e.plan,
-    situacao: e.pagante ? 'Pagante' : 'Trial',
+    situacao: b.situacaoDe(e),
     dias_ativos: (acesso.get(e.company_id) || {}).dias_ativos || 0,
     ultimo_login: b.diaDe(ultimoDe.get(e.company_id)),
     eh_dojo: e.eh_dojo,
@@ -62,10 +62,11 @@ async function calcular({ hoje, periodo = 30, db = b.pool, empresas } = {}) {
 
   const linhas = emp.pagantes.map(linhaDe).sort((x, y) => y.dias_ativos - x.dias_ativos);
   const entraram = linhas.filter((l) => l.dias_ativos > 0).length;
-  // Quem nunca entrou: pagantes e trials (os dojôs em trial ficam de fora —
-  // são cadastro da federação, não conta que alguém abriu).
+  // Quem nunca entrou: pagantes e trials (os dojôs em trial ou sem assinatura
+  // própria ficam de fora — são cadastro da federação, não conta que alguém
+  // abriu).
   const nunca = emp.lista
-    .filter((e) => !ultimoDe.has(e.company_id) && (e.pagante || !e.eh_dojo))
+    .filter((e) => !ultimoDe.has(e.company_id) && (e.conta_pagante || !e.eh_dojo))
     .map(linhaDe)
     .sort((x, y) => (x.situacao === y.situacao ? 0 : x.situacao === 'Pagante' ? -1 : 1));
   const pagantesNunca = nunca.filter((l) => l.situacao === 'Pagante').length;

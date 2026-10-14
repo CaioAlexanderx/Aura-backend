@@ -12,6 +12,9 @@
 //   - fora as contas internas (e-mail da empresa @getaura.com.br);
 //   - só billing_status 'trial' ou 'active'.
 // Uma loja fora do universo some de todos os blocos de uma vez.
+// Dentro do universo, `emp.pagantes` é só quem conta como pagante da Aura:
+// filial paga pela matriz e dojô sem assinatura própria ficam em `emp.lista`
+// (existem, usam o produto) e em `emp.foraDaContagem`, nunca em `pagantes`.
 // ============================================================
 'use strict';
 
@@ -37,6 +40,21 @@ const ID_CANARY = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}
 const SEM_INTERNAS = `COALESCE(c.email, '') NOT ILIKE '%@getaura.com.br'`
   + ` AND c.is_sandbox IS NOT TRUE`
   + (ID_CANARY ? ` AND c.id <> '${ID_CANARY}'::uuid` : '');
+
+// 14/10/2026 (card t1-11, estende o #820): quem NÃO conta como pagante da Aura.
+// A empresa continua no universo (usa o produto, aparece em acesso, uso,
+// fiscal...), mas sai da contagem de pagantes e da adoção. Duas razões, e a
+// regra mora aqui — services/receita.js (MRR) e carregarEmpresas (blocos e
+// alertas) usam o MESMO fragmento, para a conta nunca divergir:
+//   - filial cujo plano é pago por OUTRA empresa (billing_owner_company_id
+//     diferente do próprio id): Villa Branca, cobrada na Matriz;
+//   - dojô de federação SEM assinatura própria (asaas_subscription_id nulo e
+//     federation_id diferente do id): BASSAI DAI, KANO DOJO e SHOBUKAN SÃO
+//     PAULO. Dojô COM assinatura própria continua contando.
+// Conta de teste (is_sandbox) já sai do universo inteiro em SEM_INTERNAS.
+// Alias `c` = companies, como em SEM_INTERNAS.
+const PAGA_POR_OUTRA = `(c.billing_owner_company_id IS NOT NULL AND c.billing_owner_company_id <> c.id)`;
+const DOJO_SEM_ASSINATURA = `(c.asaas_subscription_id IS NULL AND c.federation_id IS NOT NULL AND c.federation_id <> c.id)`;
 
 // Acesso da loja: login direto ou troca de loja (grupo multi-CNPJ entra numa
 // e troca para a outra — o login em si fica gravado sem empresa).
@@ -139,23 +157,50 @@ async function carregarEmpresas(db = pool) {
             (c.access_code_used IS NOT NULL AND c.access_code_used <> '') AS por_codigo,
             UPPER(NULLIF(TRIM(c.access_code_used), '')) AS codigo_acesso,
             (c.asaas_subscription_id IS NOT NULL) AS tem_cobranca,
-            (c.federation_id IS NOT NULL AND c.federation_id <> c.id) AS eh_dojo
+            (c.federation_id IS NOT NULL AND c.federation_id <> c.id) AS eh_dojo,
+            ${PAGA_POR_OUTRA} AS paga_por_outra,
+            ${DOJO_SEM_ASSINATURA} AS dojo_sem_assinatura
        FROM companies c
        LEFT JOIN users u ON u.id = c.owner_id
       WHERE ${SEM_INTERNAS}
         AND c.billing_status IN ('trial', 'active')
       ORDER BY 2`
   );
-  const lista = rows.map((r) => ({
-    ...r,
-    telefone: r.telefone || null,
-    por_codigo: !!r.por_codigo,
-    tem_cobranca: !!r.tem_cobranca,
-    eh_dojo: !!r.eh_dojo,
-    pagante: r.status === 'active',
-  }));
+  const lista = rows.map((r) => {
+    const pagaPorOutra = !!r.paga_por_outra;
+    const dojoSemAssinatura = !!r.dojo_sem_assinatura;
+    const foraDaContagem = pagaPorOutra || dojoSemAssinatura;
+    const ativa = r.status === 'active';
+    return {
+      ...r,
+      telefone: r.telefone || null,
+      por_codigo: !!r.por_codigo,
+      tem_cobranca: !!r.tem_cobranca,
+      eh_dojo: !!r.eh_dojo,
+      paga_por_outra: pagaPorOutra,
+      dojo_sem_assinatura: dojoSemAssinatura,
+      fora_da_contagem: foraDaContagem,
+      // `pagante`: a conta está ativa (billing_status). `conta_pagante`: ativa
+      // E conta como pagante da Aura. Só a segunda entra em contagens.
+      pagante: ativa,
+      conta_pagante: ativa && !foraDaContagem,
+    };
+  });
   const porId = new Map(lista.map((e) => [e.company_id, e]));
-  return { lista, porId, pagantes: lista.filter((e) => e.pagante) };
+  return {
+    lista,
+    porId,
+    pagantes: lista.filter((e) => e.conta_pagante),
+    // Ativas que existem mas não contam (filial paga pela matriz, dojô sem
+    // assinatura): o painel mostra à parte, para ninguém filtrar à mão.
+    foraDaContagem: lista.filter((e) => e.pagante && e.fora_da_contagem),
+  };
+}
+
+function motivoForaDaContagem(e) {
+  if (e.paga_por_outra) return 'Filial paga pela matriz';
+  if (e.dojo_sem_assinatura) return 'Dojô sem assinatura própria';
+  return null;
 }
 
 // Identificação que toda linha de lista carrega.
@@ -243,6 +288,10 @@ function mediana(valores) {
   return v.length % 2 ? v[m] : Math.round(((v[m - 1] + v[m]) / 2) * 10) / 10;
 }
 
+// Situação de uma loja no painel: Pagante (conta), Sem cobrança própria
+// (ativa, mas paga pela matriz ou dojô sem assinatura) ou Trial.
+const situacaoDe = (e) => (e.conta_pagante ? 'Pagante' : e.pagante ? 'Sem cobrança própria' : 'Trial');
+
 const plural = (n, um, varios) => `${n} ${n === 1 ? um : varios}`;
 
 // R$ 9.690,70
@@ -252,7 +301,8 @@ function brl(v) {
 }
 
 module.exports = {
-  pool, TZ, NOME, TELEFONE, SEM_INTERNAS, ACOES_ACESSO, VENDA_VALIDA,
+  pool, TZ, NOME, TELEFONE, SEM_INTERNAS, ACOES_ACESSO,
+  PAGA_POR_OUTRA, DOJO_SEM_ASSINATURA, motivoForaDaContagem, situacaoDe, VENDA_VALIDA,
   PAGAMENTO_ASAAS, EVENTOS_PAGOS,
   desde, diaBRT, num, round2,
   somaDias, diasEntre, rotuloDia, inicioDaSemana, ultimasSemanas, diaDe,

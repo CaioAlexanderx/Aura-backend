@@ -23,7 +23,7 @@ async function calcular({ db = b.pool, empresas } = {}) {
   const linhas = emp.lista.map((e) => ({
     ...b.ref(e),
     frente: ROTULO[frenteDe(e)] || frenteDe(e),
-    situacao: e.pagante ? 'Pagante' : 'Trial',
+    situacao: b.situacaoDe(e),
     plano: b.PLANO_ROTULO[e.plan] || e.plan,
   }));
 
@@ -31,7 +31,11 @@ async function calcular({ db = b.pool, empresas } = {}) {
   for (const l of linhas) {
     const g = grupos.get(l.frente) || { rotulo: l.frente, valor: 0, pagantes: 0, trials: 0 };
     g.valor += 1;
-    g[l.situacao === 'Pagante' ? 'pagantes' : 'trials'] += 1;
+    if (l.situacao === 'Pagante') g.pagantes += 1;
+    else if (l.situacao === 'Trial') g.trials += 1;
+    // Filial paga pela matriz / dojô sem assinatura: nem pagante nem trial.
+    // O campo só existe no grupo que tem uma (o formato antigo não muda).
+    else g.sem_cobranca_propria = (g.sem_cobranca_propria || 0) + 1;
     grupos.set(l.frente, g);
   }
   const serie = [...grupos.values()]
@@ -47,7 +51,7 @@ async function calcular({ db = b.pool, empresas } = {}) {
     linhas,
     fonte: 'companies (segment, vertical)',
     indicadores: [
-      b.indicador('Sem frente', sem.valor, `${sem.pagantes} pagantes · ${sem.trials} trials`),
+      b.indicador('Sem frente', sem.valor, `${sem.pagantes} pagantes · ${sem.trials} trials${sem.sem_cobranca_propria ? ` · ${sem.sem_cobranca_propria} sem cobrança própria` : ''}`),
       b.indicador('Frentes com conta', serie.length),
     ],
     listas: [
