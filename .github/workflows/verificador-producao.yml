@@ -4,18 +4,25 @@ name: Verificador de produção
 # em main, nos dois repositórios:
 #   backend: "version" de /health contra main do Aura-backend
 #   app:     "sha" de https://app.getaura.com.br/version.json contra main do aura-app
-# Defasado há mais de 20 min (contando do commit mais antigo de main que não
-# está no ar) => o job fica vermelho e abre ou atualiza uma issue neste
-# repositório; quando volta ao normal, a issue é fechada sozinha.
-# version.json com sha "main" (build pelo deploy hook do app) é registrado
-# como "sem sha" e não falha. A lógica está em .github/scripts/verificador-producao.js.
+# Defasado há mais de 30 min (contando do ÚLTIMO commit de main, para uma
+# rajada de merges não dar falso alarme) ou versão inacessível => abre ou
+# atualiza uma issue neste repositório; quando volta ao normal, a issue é
+# fechada sozinha. A lógica está em .github/scripts/verificador-producao.js.
 #
-# POR QUE continue-on-error NO JOB: a Railway faz deploy com "Wait for CI"
-# e espera TODOS os workflows do commit de main, e uma execução agendada
-# conta como workflow do commit. Se este job derrubasse a execução, um app
-# atrasado (que não tem nada a ver com o backend) pularia o deploy do
-# backend. Com continue-on-error o job aparece vermelho, mas a execução
-# termina como sucesso. O alerta de verdade é a issue.
+# Casos que NÃO alertam:
+#   - version.json com sha "main" (build pelo deploy hook do app): "sem sha",
+#     só registra;
+#   - commits só de documentação (docs/** ou *.md) entre o que está no ar e
+#     main: o Cloudflare ou a Railway podem não gerar build para eles, então
+#     conta como em dia ("sem deploy esperado").
+#
+# POR QUE ESTE WORKFLOW NUNCA FALHA (script sai sempre com 0, e
+# continue-on-error no passo e no job): a Railway faz deploy com "Wait for
+# CI" e espera TODOS os workflows do commit de main, e uma execução agendada
+# conta como workflow do commit. Se este workflow falhasse, um app atrasado
+# (que não tem nada a ver com o backend) pularia o deploy do backend. O
+# alerta de verdade é a issue; o problema também aparece como anotação de
+# erro e no resumo da execução.
 #
 # Horário do cron é UTC e o GitHub pode atrasar execuções agendadas alguns
 # minutos; workflow_dispatch permite rodar na mão.
@@ -53,9 +60,10 @@ jobs:
           node-version: "20"
 
       - name: Comparar main com produção
+        continue-on-error: true
         env:
           GITHUB_TOKEN: ${{ github.token }}
-          LIMITE_MIN: "20"
+          LIMITE_MIN: "30"
           BACKEND_HEALTH_URL: https://aura-backend-production-f805.up.railway.app/health
           APP_VERSION_URL: https://app.getaura.com.br/version.json
         run: node .github/scripts/verificador-producao.js
