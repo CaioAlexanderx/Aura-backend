@@ -106,8 +106,9 @@ async function calcular({ hoje, periodo = 30, db = b.pool, agora = Date.now() } 
   const cfg = regra.configuracao();
   const desdeTs = regra.inicioDoDia(cfg.desde);
 
-  // Cadastros a partir da subida da tela, sem contas internas/teste e sem
-  // dojôs (a tela não é de varejo). Produto e venda saem de subconsultas
+  // Cadastros a partir da subida da tela, sem contas internas/teste, sem a
+  // federação do Karatê e sem filial de dono antigo (multi-CNPJ: só a primeira
+  // empresa do dono é cadastro novo). Produto e venda saem de subconsultas
   // correlacionadas: as tabelas são índice por company_id.
   const rows = await b.consultar(
     db,
@@ -123,7 +124,7 @@ async function calcular({ hoje, periodo = 30, db = b.pool, agora = Date.now() } 
        LEFT JOIN users u ON u.id = c.owner_id
       WHERE c.created_at >= $1::timestamptz
         AND ${b.SEM_INTERNAS}
-        AND NOT (c.federation_id IS NOT NULL AND c.federation_id <> c.id)
+        AND NOT ${regra.sqlForaDoCheckin('c')}
       ORDER BY c.created_at, c.id`,
     [desdeTs.toISOString()]
   );

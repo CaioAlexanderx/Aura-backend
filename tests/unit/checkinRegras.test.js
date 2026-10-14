@@ -65,6 +65,19 @@ describe('estado', () => {
     expect(c.estado({ empresa: { ...novo, eh_dojo: true }, config: cfg }).habilitado).toBe(false);
   });
 
+  test('multi-CNPJ: filial de dono antigo e sede/dojô da federação ficam de fora (fora: true)', () => {
+    expect(c.estado({ empresa: { ...novo, fora: false }, config: cfg }).habilitado).toBe(true);
+    expect(c.estado({ empresa: { ...novo, fora: true }, config: cfg }).habilitado).toBe(false);
+  });
+
+  test('sqlForaDoCheckin: federação, billing_owner de outra empresa e dono com empresa mais antiga', () => {
+    const sql = c.sqlForaDoCheckin('x');
+    expect(sql).toContain('x.federation_id IS NOT NULL');
+    expect(sql).toContain('x.billing_owner_company_id <> x.id');
+    expect(sql).toContain('o_ck.owner_id = x.owner_id');
+    expect(sql).toContain('(o_ck.created_at, o_ck.id) < (x.created_at, x.id)');
+  });
+
   test('respondeu: respondido, com as três respostas, e não reaparece', () => {
     const empresa = {
       ...novo,
@@ -98,8 +111,8 @@ describe('estado', () => {
 
 describe('normalizarPut', () => {
   test('aceita só as chaves do contrato, texto curto aparado', () => {
-    expect(c.normalizarPut({ comeco: ' vender ', onde_anota: 'caderno' })).toEqual({ patch: { comeco: 'vender', onde_anota: 'caderno' } });
-    expect(c.normalizarPut({ pulou: true })).toEqual({ patch: { pulou: true } });
+    expect(c.normalizarPut({ comeco: ' vender ', onde_anota: 'caderno' })).toEqual({ patch: { comeco: 'vender', onde_anota: 'caderno' }, semEfeito: false });
+    expect(c.normalizarPut({ pulou: true })).toEqual({ patch: { pulou: true }, semEfeito: false });
   });
 
   test.each([
@@ -114,6 +127,12 @@ describe('normalizarPut', () => {
     ['pulou não booleano', { pulou: 'sim' }],
   ])('%s → erro', (_n, body) => {
     expect(c.normalizarPut(body).erro).toEqual(expect.any(String));
+  });
+
+  test('pulou:false sozinho é válido mas sem efeito; pulou:true e respostas têm efeito', () => {
+    expect(c.normalizarPut({ pulou: false })).toEqual({ patch: { pulou: false }, semEfeito: true });
+    expect(c.normalizarPut({ pulou: true }).semEfeito).toBe(false);
+    expect(c.normalizarPut({ comeco: 'a', pulou: false }).semEfeito).toBe(false);
   });
 
   test('40 caracteres ainda valem', () => {
@@ -159,6 +178,14 @@ describe('aplicar', () => {
     const depois = c.aplicar(pulado, { comeco: 'vender' }, t0);
     expect(depois.checkin.pulou).toBe(false);
     expect(depois.eventos).toEqual(['checkin.respondido']);
+  });
+
+  test('pulou:false sem resposta não carimba nem fecha a tela', () => {
+    const r = c.aplicar({ exibido_em: '2026-10-16T11:59:00.000Z' }, { pulou: false }, t0);
+    expect(r.checkin).toEqual({ exibido_em: '2026-10-16T11:59:00.000Z' });
+    expect(r.checkin).not.toHaveProperty('respondido_em');
+    expect(r.eventos).toEqual([]);
+    expect(c.aplicar(null, { pulou: false }, t0).checkin).toEqual({});
   });
 
   test('não mexe nas chaves da equipe', () => {
