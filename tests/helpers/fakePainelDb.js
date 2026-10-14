@@ -213,6 +213,25 @@ function dadosPadrao() {
     ],
     extratoCasados: [{ conciliado_com: 'pay_00a' }, { conciliado_com: 'pay_00b' }],
     asaasSemLoja: [{ id: 'w4', processed_at: ts('2026-10-12', '13:10'), valor: '140.83' }],
+    // check-in do prospect (bloco "checkin"): cadastros desde CHECKIN_DESDE, com
+    // 1º produto, 5º produto e 1ª venda; o json vem à parte; importação
+    // assistida pelos marcadores do Registrar contato.
+    //   Ótica Visão: produto em 1h30, 5º em 2h10, vendeu no dia seguinte, respondeu.
+    //   Bazar Novo: 1º produto com 29 h (fora das 24 h), sem venda ainda; pulou.
+    //   Tech Assist: 12 dias sem produto, nunca viu a tela (antes da subida).
+    checkinCadastros: [
+      { company_id: id(7), nome: 'Tech Assist', telefone: '11999900007', created_at: ts('2026-10-01', '13:00'), primeiro_produto: null, quinto_produto: null, primeira_venda: null },
+      { company_id: id(5), nome: 'Ótica Visão', telefone: '11999900005', created_at: ts('2026-10-06', '13:00'), primeiro_produto: ts('2026-10-06', '14:30'), quinto_produto: ts('2026-10-06', '15:10'), primeira_venda: ts('2026-10-07', '10:00') },
+      { company_id: id(6), nome: 'Bazar Novo', telefone: '11999900006', created_at: ts('2026-10-09', '15:00'), primeiro_produto: ts('2026-10-10', '20:00'), quinto_produto: null, primeira_venda: null },
+    ],
+    checkinJson: [
+      { company_id: id(5), checkin: { comeco: 'vender', onde_anota: 'caderno', produtos_faixa: 'ate_50', como_chegou: 'indicacao', versao: 1, exibido_em: ts('2026-10-06', '13:02'), respondido_em: ts('2026-10-06', '13:03'), pulou: false } },
+      { company_id: id(6), checkin: { versao: 1, exibido_em: ts('2026-10-09', '15:01'), respondido_em: ts('2026-10-09', '15:01'), pulou: true } },
+      { company_id: id(7), checkin: null },
+    ],
+    checkinImportacao: [
+      { company_id: id(5), nome: 'Ótica Visão', telefone: '11999900005', pedida_em: ts('2026-10-06', '15:00'), entregue_em: ts('2026-10-06', '19:30') },
+    ],
     // linhas de 7 e 30 dias atrás, para a variação
     anteriores: [
       { dia: '2026-10-06', bloco: 'pagantes', valor: 4 },
@@ -268,6 +287,11 @@ function usoRows(linhas, companyId) {
 function responder(dados, escritas, sql, params = []) {
   const s = sql.replace(/\s+/g, ' ').trim();
   const escrever = (tabela) => { escritas.push({ tabela, sql: s, params }); return []; };
+
+  // ── check-in do prospect ──
+  if (s.includes('-- checkin:cadastros')) return dados.checkinCadastros;
+  if (s.includes('-- checkin:json')) return dados.checkinJson.filter((r) => [].concat(params[0] || []).includes(r.company_id));
+  if (s.includes('-- checkin:importacao')) return dados.checkinImportacao;
 
   // ── WhatsApp da Aura (hub) ──
   if (s.includes('-- contatos:mensagens ')) return dados.hubMensagens;
