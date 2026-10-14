@@ -70,6 +70,19 @@
 //   No mesmo dia: pagamento que nao acha empresa passou a ser gravado em
 //   webhook_logs com company_id NULL (antes so saia no console). E o que
 //   alimenta o alerta "pagamento sem loja" e GET /admin/painel/asaas/orfaos.
+// FIX (14/10/2026) — reenvio seguro e cobranca criada (cartao t3-02, Celia):
+//   - last_payment_date = GREATEST(paymentDate, last_payment_date): reenviar
+//     (ou receber atrasado) o evento de um pagamento antigo nao regride mais a
+//     data (caso Davi: o pagamento de 19/05 nao pode apagar o de 24/09).
+//   - PAYMENT_RECEIVED / PAYMENT_CONFIRMED / PAYMENT_CREATED ja registrado
+//     em webhook_logs para o mesmo pagamento (mesmo evento + mesmo pay_) e
+//     reenvio: responde 200 sem tocar em companies e sem gravar outra linha.
+//     O log e gravado DEPOIS do efeito, entao "ja tem log" = "ja teve efeito".
+//   - PAYMENT_CREATED passa a ser registrado (neutro, como PAYMENT_DELETED):
+//     e o "a receber" da Financeiro. Sem loja ele nao e gravado (nao e
+//     dinheiro e poluiria a lista de pagamentos sem loja).
+//   PAYMENT_OVERDUE e PAYMENT_DELETED seguem exatamente como antes.
+//
 // ATENCAO: quando operando sem segredo, o log fica MUITO barulhento de
 // proposito (WARN por requisicao) — ninguem deve poder dizer que "nao viu".
 //
@@ -194,8 +207,27 @@ var PAYMENT_STATUS_MAP = {
 };
 
 // Eventos registrados (auditoria) mas que NAO alteram o billing da empresa.
+// 14/10/2026: PAYMENT_CREATED entra aqui — cobranca criada e o "a receber"
+// da Financeiro, nao diz nada sobre o status da assinatura.
 var STATUS_NEUTRAL_EVENTS = {
   PAYMENT_DELETED: true,
+  PAYMENT_CREATED: true,
+};
+
+// Eventos neutros que so valem com loja: sem empresa, nao sao gravados
+// (cobranca criada nao e dinheiro; a lista de "pagamento sem loja" e de
+// dinheiro que entrou).
+var NEUTRAL_ONLY_WITH_COMPANY = {
+  PAYMENT_CREATED: true,
+};
+
+// Reenvio do mesmo evento para o mesmo pagamento nao repete o efeito. So
+// estes: um pagamento recebe cada um deles uma unica vez. OVERDUE/DELETED
+// ficam como estavam (t3-02 pediu para nao mexer).
+var DEDUPE_EVENTS = {
+  PAYMENT_RECEIVED:  true,
+  PAYMENT_CONFIRMED: true,
+  PAYMENT_CREATED:   true,
 };
 
 // So estes eventos representam dinheiro efetivamente recebido — apenas eles
@@ -249,6 +281,26 @@ async function logWebhookEvent(companyId, event, payment) {
   ).catch(function() {});
 }
 
+// O mesmo evento ja foi registrado para este pagamento? Em erro de leitura
+// responde false: o handler segue como antes (melhor processar de novo —
+// com GREATEST a data nao regride — do que perder um pagamento).
+async function alreadyLogged(event, paymentId) {
+  if (!paymentId) return false;
+  try {
+    var r = await db.query(
+      `SELECT 1 FROM webhook_logs
+        WHERE provider = 'asaas' AND event = $1
+          AND COALESCE(payload->'payment', payload)->>'id' = $2
+        LIMIT 1`,
+      [event, String(paymentId)]
+    );
+    return !!(r && r.rows && r.rows.length);
+  } catch (err) {
+    console.error('[WEBHOOK] checagem de reenvio falhou (seguindo): ' + err.message);
+    return false;
+  }
+}
+
 router.post('/', async function(req, res) {
   var hasSecret = !!ASAAS_WEBHOOK_TOKEN;
 
@@ -293,7 +345,9 @@ router.post('/', async function(req, res) {
   if (statusSource === 'asaas-api') {
     var realStatus = payment.status;
     newStatus             = ASAAS_STATUS_TO_BILLING[realStatus];
-    isNeutral              = false; // PAYMENT_DELETED equivalente ja foi filtrado (404 -> null acima)
+    // PAYMENT_DELETED equivalente ja foi filtrado (404 -> null acima). Cobranca
+    // criada: so registra se a Asaas confirma que ela existe e esta pendente.
+    isNeutral              = (event === 'PAYMENT_CREATED' && realStatus === 'PENDING');
     isPaid                 = !!ASAAS_STATUS_IS_PAID[realStatus];
     newOrderPaymentStatus  = ASAAS_STATUS_TO_ORDER_PAYMENT[realStatus];
   } else {
@@ -326,11 +380,21 @@ router.post('/', async function(req, res) {
       return res.status(200).json({ received: true, handled: false, event_ignored: event });
     }
 
+    // Reenvio: o mesmo evento deste pagamento ja foi processado e registrado.
+    if (DEDUPE_EVENTS[event] && await alreadyLogged(event, payment.id)) {
+      console.log('[WEBHOOK] Reenvio ignorado: ' + event + ' de ' + payment.id + ' ja registrado em webhook_logs');
+      return res.status(200).json({ received: true, handled: false, duplicate: true, event: event });
+    }
+
     var result = await db.query(
       'SELECT id, plan, billing_status, is_primary, asaas_subscription_id FROM companies WHERE asaas_customer_id=$1 OR id=$2 LIMIT 1',
       [payment.customer || null, UUID_RE.test(payment.externalReference || '') ? payment.externalReference : null]
     );
     if (!result.rows.length) {
+      if (isNeutral && NEUTRAL_ONLY_WITH_COMPANY[event]) {
+        console.log('[WEBHOOK] ' + event + ' sem loja (customer ' + payment.customer + ') — nao registrado');
+        return res.status(200).json({ received: true, company_found: false, logged: false });
+      }
       // Sem loja: o evento fica registrado com company_id NULL em vez de
       // sumir. Vincular e decisao de gente (POST /admin/painel/asaas/orfaos/
       // :logId/vincular) — aqui ninguem adivinha de quem e o dinheiro.
@@ -369,13 +433,15 @@ router.post('/', async function(req, res) {
     }
 
     // last_payment_date so avanca em pagamento efetivo; nos demais eventos
-    // (OVERDUE, REFUNDED, CHARGEBACK) preserva o que ja estava la.
+    // (OVERDUE, REFUNDED, CHARGEBACK) preserva o que ja estava la. E so
+    // AVANCA: GREATEST ignora NULL e nunca devolve a data mais antiga, entao
+    // um evento antigo reenviado nao regride a empresa (14/10/2026).
     // next_billing_date nunca e sobrescrito por NULL, e nunca recebe
     // payment.dueDate (e o vencimento da cobranca ja paga, nao o proximo).
     await db.query(
       `UPDATE companies
           SET billing_status    = $1,
-              last_payment_date = CASE WHEN $2 THEN COALESCE($3, last_payment_date) ELSE last_payment_date END,
+              last_payment_date = CASE WHEN $2 THEN GREATEST($3::date, last_payment_date) ELSE last_payment_date END,
               next_billing_date = COALESCE($4, next_billing_date),
               updated_at        = NOW()
         WHERE id = $5`,
