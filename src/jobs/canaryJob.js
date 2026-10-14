@@ -20,6 +20,8 @@ const db = require('../config/database');
 const canary = require('../services/canary');
 const alerta = require('../services/canaryAlerta');
 const status = require('../services/canaryStatus');
+// t1-08: laço de 30 s só com o bipe. Um aviso por evento entre os dois laços.
+const bipeRapido = require('../services/canaryBipeRapido');
 
 const TICK_MS = 60 * 1000;
 const JANELA_MS = 5 * 60 * 1000;
@@ -102,9 +104,19 @@ async function tratarAlertas({ runId, agora, banco = db, mailer, env = process.e
 
   const decisao = alerta.decidir(runs, agora);
   if (!decisao) return null;
+
+  // O bipe rápido (30 s) já mandou este aviso: só registra, sem e-mail. O
+  // registro mantém a régua daqui (lembrete de 30 min, "voltou") igual.
+  if (bipeRapido.jaAvisadoPeloBipe(decisao.tipo)) {
+    await banco.query('UPDATE canary_runs SET alerta = $1 WHERE id = $2', [decisao.tipo, runId]);
+    console.log(`[canary] alerta "${decisao.tipo}" já enviado pelo bipe rápido — só registrado`);
+    return decisao.tipo;
+  }
+
   try {
     const tipo = await alerta.avisar({ decisao, runs, mailer, env });
     await banco.query('UPDATE canary_runs SET alerta = $1 WHERE id = $2', [tipo, runId]);
+    bipeRapido.registrarAvisoDoCanario(tipo, agora);
     console.log(`[canary] alerta "${tipo}" enviado para ${alerta.destinatario(env)}`);
     return tipo;
   } catch (e) {
@@ -176,11 +188,18 @@ function initCanaryJob() {
   _interval = setInterval(tick, TICK_MS);
   if (_interval.unref) _interval.unref();
   console.log('[canary] iniciado — bipe sintético a cada 5 min');
+
+  // t1-08: o laço rápido (só o bipe, 30 s) sobe junto. Nunca derruba o boot.
+  try {
+    require('./canaryBipeRapidoJob').initCanaryBipeRapidoJob();
+  } catch (e) {
+    console.error('[canary-bipe] não iniciou:', e.message);
+  }
 }
 function stopCanaryJob() { if (_interval) { clearInterval(_interval); _interval = null; } }
 
 // Só para testes.
-function _resetForTests() { _running = false; _ultimaJanela = null; _limpouEm = 0; }
+function _resetForTests() { _running = false; _ultimaJanela = null; _limpouEm = 0; bipeRapido._resetForTests(); }
 
 module.exports = {
   initCanaryJob, stopCanaryJob, tick, pegarTrava, recolherPendentes, limparAntigas, tratarAlertas,

@@ -145,6 +145,55 @@ async function cancelarVenda(cfg, token, vendaId, deps = {}) {
   return { r, ok };
 }
 
+// O bipe: GET /companies/:id/pdv/scan/:code, o mesmo do leitor no Caixa.
+function bipar(cfg, token, deps = {}) {
+  return chamar(cfg, token, 'GET',
+    `/companies/${cfg.companyId}/pdv/scan/${encodeURIComponent(cfg.barcode)}`, null, deps);
+}
+
+// O bipe deu certo? Achou o produto canário (match exato) com preço válido.
+// → { ok: true, produto, varianteId, preco } | { ok: false, erro }
+function conferirBipe(r) {
+  const p = r.body && r.body.product;
+  if (r.status === 200 && r.body && r.body.match === 'exact' && p && p.id) {
+    const preco = Number(r.body.effective_price != null ? r.body.effective_price : p.price);
+    if (!Number.isFinite(preco) || preco < 0) {
+      return { ok: false, erro: `produto canário sem preço válido (price=${p.price})` };
+    }
+    return { ok: true, produto: p, varianteId: r.body.variant_id || null, preco };
+  }
+  const achou = r.body && r.body.match ? `match=${r.body.match}` : null;
+  return { ok: false, erro: motivo(r, 200) + (achou ? ` · ${achou}` : '') };
+}
+
+// Só o bipe (t1-08: laço rápido de 30 s). Mesmo formato de executar(), com
+// os passos token e bipe. Não vende, não consulta, não cancela: só leitura.
+async function executarSoBipe(cfg, deps = {}) {
+  const inicio = Date.now();
+  const passos = [];
+  let token = null;
+  const t0 = Date.now();
+  try {
+    token = (deps.gerarToken || gerarToken)(cfg);
+    passos.push({ passo: 'token', ok: true, ms: Date.now() - t0, status: null, erro: null });
+  } catch (e) {
+    passos.push({ passo: 'token', ok: false, ms: Date.now() - t0, status: null, erro: `não assinou o token: ${e.message}` });
+  }
+  if (token) {
+    const r = await bipar(cfg, token, deps);
+    const b = conferirBipe(r);
+    passos.push(passo('bipe', r, b.ok, b.erro, b.ok ? { produto_id: b.produto.id } : null));
+  }
+  const falho = passos.find((p) => !p.ok) || null;
+  return {
+    ok: !falho,
+    passos,
+    duracao_ms: Date.now() - inicio,
+    erro: falho ? `${falho.passo}: ${falho.erro}` : null,
+    passo_falho: falho ? falho.passo : null,
+  };
+}
+
 // A sequência inteira. Devolve:
 //   { ok, passos[], duracao_ms, erro, passo_falho, venda_id, venda_pendente }
 async function executar(cfg, deps = {}) {
@@ -173,22 +222,13 @@ async function executar(cfg, deps = {}) {
   let varianteId = null;
   let preco = 0;
   if (seguir) {
-    const r = await chamar(cfg, token, 'GET',
-      `/companies/${cfg.companyId}/pdv/scan/${encodeURIComponent(cfg.barcode)}`, null, deps);
-    const p = r.body && r.body.product;
-    if (r.status === 200 && r.body && r.body.match === 'exact' && p && p.id) {
-      produto = p;
-      varianteId = r.body.variant_id || null;
-      preco = Number(r.body.effective_price != null ? r.body.effective_price : p.price);
-      if (!Number.isFinite(preco) || preco < 0) {
-        passos.push(passo('bipe', r, false, `produto canário sem preço válido (price=${p.price})`));
-        seguir = false;
-      } else {
-        passos.push(passo('bipe', r, true, null, { produto_id: p.id, estoque: p.stock_qty }));
-      }
+    const r = await bipar(cfg, token, deps);
+    const b = conferirBipe(r);
+    if (b.ok) {
+      ({ produto, varianteId, preco } = b);
+      passos.push(passo('bipe', r, true, null, { produto_id: produto.id, estoque: produto.stock_qty }));
     } else {
-      const achou = r.body && r.body.match ? `match=${r.body.match}` : null;
-      passos.push(passo('bipe', r, false, motivo(r, 200) + (achou ? ` · ${achou}` : '')));
+      passos.push(passo('bipe', r, false, b.erro));
       seguir = false;
     }
   }
@@ -278,4 +318,5 @@ async function executar(cfg, deps = {}) {
 module.exports = {
   PASSOS, MARCA_VENDA, NOME_VENDEDOR,
   configuracao, gerarToken, chamar, cancelarVenda, executar,
+  bipar, conferirBipe, executarSoBipe,
 };
