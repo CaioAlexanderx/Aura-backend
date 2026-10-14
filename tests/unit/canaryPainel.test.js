@@ -194,8 +194,10 @@ describe('empresa de teste fora do universo do painel (_base.SEM_INTERNAS)', () 
     return base;
   }
 
-  test('sem CANARY_COMPANY_ID, só a regra do e-mail interno', () => {
-    expect(carregarBase().SEM_INTERNAS).toBe(`COALESCE(c.email, '') NOT ILIKE '%@getaura.com.br'`);
+  test('sem CANARY_COMPANY_ID, as regras do e-mail interno e da conta de teste (is_sandbox)', () => {
+    expect(carregarBase().SEM_INTERNAS).toBe(
+      `COALESCE(c.email, '') NOT ILIKE '%@getaura.com.br' AND c.is_sandbox IS NOT TRUE`
+    );
   });
 
   test('com CANARY_COMPANY_ID, a empresa de teste sai (a conta Aura tem e-mail @gmail.com)', () => {

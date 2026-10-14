@@ -30,7 +30,12 @@ const ID_CANARY = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}
   .test(String(process.env.CANARY_COMPANY_ID || '').trim())
   ? String(process.env.CANARY_COMPANY_ID).trim().toLowerCase()
   : null;
+// 13/10/2026: conta de teste (companies.is_sandbox) também sai de todos os
+// blocos. JKA Teste, os 10 dojôs de teste da JKA e a empresa Aura de teste
+// eram contados como pagantes porque a regra só olhava e-mail e o id do
+// canário (pedido de Produto e Financeiro; card P1).
 const SEM_INTERNAS = `COALESCE(c.email, '') NOT ILIKE '%@getaura.com.br'`
+  + ` AND c.is_sandbox IS NOT TRUE`
   + (ID_CANARY ? ` AND c.id <> '${ID_CANARY}'::uuid` : '');
 
 // Acesso da loja: login direto ou troca de loja (grupo multi-CNPJ entra numa
