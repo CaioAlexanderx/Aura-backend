@@ -200,6 +200,41 @@ function startServer() {
     const { initLembreteDeFaturaJob } = require('./jobs/lembreteDeFaturaJob');
     initLembreteDeFaturaJob();
   });
+
+  instalarEncerramento();
+}
+
+// ── Encerramento gracioso (t1-03) ───────────────────────────
+// SIGTERM (troca de versão na Railway) e SIGINT (Ctrl+C local): para de
+// aceitar conexões, espera as requisições em andamento (até 10 s), para os
+// jobs, derruba os WebSockets, devolve as conexões do pool (pool.end) e só
+// então sai. Detalhes e o porquê em src/utils/encerrar.js.
+// Nunca derruba o boot: se algo aqui falhar, o servidor segue sem o handler.
+function instalarEncerramento() {
+  try {
+    const { encerrar, stopsDosJobsCarregados } = require('./utils/encerrar');
+    const fecharWebSockets = function() {
+      [wssDental, wssConsent].forEach(function(wss) {
+        wss.clients.forEach(function(ws) { try { ws.terminate(); } catch (_) {} });
+      });
+    };
+    ['SIGTERM', 'SIGINT'].forEach(function(sinal) {
+      process.on(sinal, function() {
+        encerrar({
+          server,
+          pool: require('./config/database'),
+          jobs: stopsDosJobsCarregados().concat([fecharWebSockets]),
+          timeoutMs: 10000,
+          sinal,
+        }).catch(function(e) {
+          console.error('[shutdown] falha no encerramento:', e && e.message);
+          process.exit(1);
+        });
+      });
+    });
+  } catch (e) {
+    console.error('[shutdown] handler de encerramento nao instalado:', e.message);
+  }
 }
 
 module.exports = { app, server, startServer };
