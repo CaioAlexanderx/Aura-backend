@@ -8,19 +8,28 @@ do Supavisor.
 
 ### Como era (até 13/10)
 
-Cada merge em `main` criava **três** deploys na Railway:
+Cada merge em `main` criava **três** deploys na Railway. Como cada um
+aparece na lista de deployments (os horários de 13 e 14/10 batem com esta
+leitura):
 
-| Gatilho | Quem | Na lista de deployments da Railway |
-| --- | --- | --- |
-| `railway up` no workflow **Deploy** (logo depois do CI) | token do Caio | criado pelo Caio, com a mensagem do commit |
-| `railway variables set GIT_SHA=...` no fim do mesmo workflow (variável nova reinicia o serviço) | token do Caio | criado pelo Caio, sem mensagem |
-| Integração GitHub da Railway com **Wait for CI** (`checkSuites: true`), que espera o CI e o workflow Deploy terminarem | integração | sem criador, com a mensagem do commit |
+| Gatilho | Na lista de deployments da Railway |
+| --- | --- |
+| Integração GitHub da Railway com **Wait for CI** (`checkSuites: true`) | **criado pelo Caio, com a mensagem do commit, no instante do push**; fica em WAITING até o CI e o workflow Deploy terminarem |
+| `railway up` no workflow **Deploy** | criado pelo Caio, **sem mensagem**, uns 13 s depois do início de cada execução do Deploy |
+| `railway variables set GIT_SHA=...` no fim do mesmo workflow (variável nova reinicia o serviço) | **sem criador, com a mensagem do commit**, no fim de cada execução do Deploy |
 
 Medido em 13/10: 40 deploys para 13 merges (3,1 por merge). Cada troca de
 versão deixa duas instâncias de pé, cada uma com até 15 conexões no pool do
 Supavisor, e 19 de 20 rajadas de EMAXCONNSESSION em 7 dias começaram numa
-troca de versão. Exemplo do #819 (13/10): `railway up` às 15:18, reinício
-pelo `variables set` às 15:26 e a integração às 15:27.
+troca de versão. Exemplo do #819 (13/10): integração às 15:18 (no merge, em
+WAITING), `railway up` às 15:26 e reinício pelo `variables set` às 15:27.
+
+Com merges em sequência fica pior. Cada execução do Deploy usa o commit do
+**seu** CI: o `railway up` sobe a árvore daquele commit, e o `variables set`
+grava o sha dele. Quem termina por último ganha, mesmo que seja o commit mais
+velho. Em 14/10, entre 01:20 e 01:29 UTC, os merges #820 a #823 geraram 12
+deploys. A última execução do Deploy a terminar era a do CI do #822 e gravou
+`GIT_SHA=3bbe1bbd`.
 
 ### Como fica
 
@@ -36,6 +45,13 @@ pelo `variables set` às 15:26 e a integração às 15:27.
   da integração, redeploy e rollback, com 8 caracteres
   (`shaDaVersao` em `src/config/env.js`). A variável `GIT_SHA` vira reserva
   para deploy feito à mão pela CLI (`railway up`), que não traz o commit.
+- **Sem `RAILWAY_GIT_COMMIT_SHA`** (deploy pela CLI ou por imagem): o
+  `/health` mostra o `GIT_SHA`, se a variável ainda existir, e senão
+  `1.0.0`. O log de boot mostra `Release: local`, e a release do Sentry vira
+  `aura-backend@<versão do package.json>`. **O boot não é afetado**: a
+  versão é só informativa e nenhuma checagem de partida depende dela. O
+  verificador de produção (t1-04) trata `1.0.0` como "sem sha", registra e
+  não falha.
 - Quem confere se a versão no ar é a de `main` é o verificador de produção
   (t1-04), não mais o workflow Deploy. O health check antigo só via 200 da
   versão anterior e ficava verde mesmo com deploy falho.
@@ -53,17 +69,25 @@ pelo `variables set` às 15:26 e a integração às 15:27.
    existir `RAILWAY_GIT_COMMIT_SHA`. A exclusão fica "staged" e vai junto
    com o próximo deploy; não precisa disparar um só para isso. Se ficar,
    não quebra nada, só confunde.
-3. Opcional, mais tarde: os segredos `RAILWAY_TOKEN`, `RAILWAY_PROJECT_ID`,
+3. Lembrete com prazo: o `railway.toml` é "Config as Code", que a Railway
+   marca como obsoleto, com corte em **01/12/2026**. É nele que roda o
+   `preDeployCommand` das migrations. Ver "Aviso: `railway.toml` tem prazo"
+   abaixo.
+4. Opcional, mais tarde: os segredos `RAILWAY_TOKEN`, `RAILWAY_PROJECT_ID`,
    `RAILWAY_SERVICE` e `RAILWAY_API_URL` do GitHub (Settings > Secrets >
    Actions) deixam de ser usados por este workflow. Dá para revogar o token
    na Railway quando ninguém mais precisar dele.
 
 ### Como conferir
 
-- Na lista de deployments da Railway, um merge deve gerar **um** deploy
-  ativo, sem criador e com a mensagem do commit. Os deploys de outros merges
-  que chegarem juntos podem aparecer como REMOVED ou SKIPPED, o que é
-  normal.
+- Na lista de deployments da Railway, um merge deve gerar **um** deploy:
+  criado pelo Caio (a integração aparece com o usuário do GitHub), com a
+  mensagem do commit, **criado no instante do merge** e em **WAITING** até
+  o CI e o workflow Deploy terminarem. Depois disso ele constrói e fica
+  ativo. Não devem aparecer deploys sem mensagem (`railway up`) nem deploys
+  sem criador no fim do Deploy (`variables set`). Quando vários merges
+  chegam juntos, os mais velhos podem aparecer como REMOVED ou SKIPPED, o
+  que é normal.
 - `curl -s https://aura-backend-production-f805.up.railway.app/health`
   deve mostrar `"version"` com os 8 primeiros caracteres do commit do merge.
 - O workflow Deploy do merge fica verde em menos de 1 minuto.
