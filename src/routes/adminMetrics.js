@@ -13,6 +13,8 @@ const { requireAuth, requireRole } = require('../middleware/auth');
 const asyncHandler = require('../utils/asyncHandler');
 const { RECOVERY_WINDOW_DAYS } = require('../services/clientLifecycle');
 const { recalculateAll } = require('../services/healthScore');
+// Filial cujo plano é pago por outra empresa: a mesma regra do MRR e do painel.
+const { PAGA_POR_OUTRA } = require('../services/painelBlocos/_base');
 
 const adminOnly = [requireAuth, requireRole('admin')];
 
@@ -197,12 +199,15 @@ router.get('/alerts', ...adminOnly, asyncHandler(async (req, res) => {
     });
   });
 
-  // 2. Pagamentos pendentes/vencidos
+  // 2. Pagamentos pendentes/vencidos. Filial paga pela matriz (Villa Branca,
+  //    billing_owner_company_id diferente do id) não tem cobrança própria: o
+  //    vencimento dela é o da matriz, então não gera alerta de atraso.
   const { rows: overdueRows } = await pool.query(
     `SELECT c.id, c.trade_name, c.legal_name, c.plan, c.billing_status, c.next_billing_date, u.email
      FROM companies c LEFT JOIN users u ON u.id=c.owner_id
      WHERE c.is_active=true AND (c.federation_id IS NULL OR c.federation_id = c.id) AND c.billing_status IN ('pending','overdue')
        AND c.plan != 'essencial'
+       AND NOT ${PAGA_POR_OUTRA}
      ORDER BY c.next_billing_date ASC`
   );
   overdueRows.forEach(r => {

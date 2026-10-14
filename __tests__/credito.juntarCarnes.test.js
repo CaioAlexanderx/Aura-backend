@@ -653,7 +653,12 @@ describe('depois da junção — ficha e impressão', () => {
     expect(html).toContain('410,00');
     // As três parcelas novas viram cupom; as canceladas das origens não aparecem.
     for (const valor of ['136,66', '136,68']) expect(html).toContain(valor);
-    for (const vencimento of ['13/12/2026', '14/10/2026']) expect(html).not.toContain(vencimento);
+    // A data de EMISSÃO do carnê é a de hoje: tirá-la antes de procurar os
+    // vencimentos. Sem isso o teste quebrava no dia 14/10/2026 (e quebraria em
+    // 13/12 se a emissão caísse numa dessas datas), por causa da linha
+    // "Emitido em dd/mm/aaaa" e não de um vencimento de parcela cancelada.
+    const semEmissao = html.replace(/Emitido em:? \d{2}\/\d{2}\/\d{4}/g, 'Emitido em');
+    for (const vencimento of ['13/12/2026', '14/10/2026']) expect(semEmissao).not.toContain(vencimento);
   });
 
   test('a térmica do carnê novo também lista os produtos das duas compras', async () => {

@@ -23,7 +23,10 @@ function degrauDe(e, f) {
 
 async function calcular({ hoje, periodo = 30, db = b.pool, empresas } = {}) {
   const emp = empresas || await b.carregarEmpresas(db);
-  const contas = emp.lista.filter((e) => !e.eh_dojo && e.criado_em && b.diasEntre(e.criado_em, hoje) < periodo);
+  // Filial paga pela matriz não é cadastro que assinou: fica fora do funil
+  // (senão aparece como "Assinaram" ou, sem trial_ate, como trial vencido).
+  const contas = emp.lista.filter((e) => !e.eh_dojo && !(e.pagante && e.fora_da_contagem)
+    && e.criado_em && b.diasEntre(e.criado_em, hoje) < periodo);
 
   const rows = contas.length ? await b.consultar(
     db,

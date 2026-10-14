@@ -31,6 +31,7 @@ const { calcularAlertas, alertasDeContatos } = require('../services/painelAlerta
 const { detalheDaConversa } = require('../services/contatosWhatsapp');
 const { listarClients360 } = require('../services/clients360');
 const canaryStatus = require('../services/canaryStatus');
+const errosPorMinuto = require('../services/errosPorMinuto');
 
 const adminOnly = [requireAuth, requireRole('admin')];
 
@@ -92,11 +93,26 @@ async function canaryAoVivo(dados) {
   }
 }
 
+// Erro na ponta do lojista (5xx e EMAXCONNSESSION dos últimos 60 minutos,
+// services/errosPorMinuto): também vale agora, não às 06h. null quando
+// dormente (sem a tabela da migration 381) — a resposta sai como antes.
+async function errosAoVivo(dados) {
+  try {
+    return await errosPorMinuto.resumo({ db: pool });
+  } catch (err) {
+    console.error('[painel] erros por minuto ao vivo falhou:', err.message);
+    return (dados && dados.detalhe && dados.detalhe.erros) || null;
+  }
+}
+
 async function comCanary(blocos, dadosPorId) {
   if (!blocos.some((b) => b.id === 'plataforma')) return blocos;
-  const canary = await canaryAoVivo(dadosPorId('plataforma'));
-  if (!canary) return blocos;
-  return blocos.map((b) => (b.id === 'plataforma' ? { ...b, canary } : b));
+  const dados = dadosPorId('plataforma');
+  const [canary, erros] = await Promise.all([canaryAoVivo(dados), errosAoVivo(dados)]);
+  if (!canary && !erros) return blocos;
+  return blocos.map((b) => (b.id === 'plataforma'
+    ? { ...b, ...(canary ? { canary } : {}), ...(erros ? { erros } : {}) }
+    : b));
 }
 
 // ── GET /admin/painel/hoje ──────────────────────────────────────
@@ -181,6 +197,7 @@ router.get('/blocos/:id', ...adminOnly, asyncHandler(async (req, res) => {
 
   const detalhe = dados.detalhe || {};
   const canary = def.id === 'plataforma' ? await canaryAoVivo(dados) : null;
+  const erros = def.id === 'plataforma' ? await errosAoVivo(dados) : null;
   res.json({
     id: def.id,
     titulo: def.titulo,
@@ -196,6 +213,7 @@ router.get('/blocos/:id', ...adminOnly, asyncHandler(async (req, res) => {
     series: detalhe.series || [],
     insight: detalhe.insight || null,
     ...(canary ? { canary } : {}),
+    ...(erros ? { erros } : {}),
   });
 }));
 
