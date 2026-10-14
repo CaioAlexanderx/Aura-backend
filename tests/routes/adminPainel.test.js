@@ -106,10 +106,13 @@ describe('GET /admin/painel/hoje', () => {
       expect(Object.keys(b).sort()).toEqual(['fonte', 'grupo', 'id', 'resumo', 'serie', 'titulo', 'unidade', 'valor', 'variacao']);
     }
     // só leitura: 2 consultas do painel + a leitura do hub para o alerta de
-    // contato (que depende do relógio e por isso não vem gravado)
+    // contato (que depende do relógio e por isso não vem gravado) + a leitura
+    // ao vivo dos erros por minuto (últimos 60 min, também não vem gravada)
     const sqls = db.query.mock.calls.map((c) => c[0]);
-    expect(sqls.filter((q) => !q.includes('-- contatos:'))).toHaveLength(2);
+    const doPainel = sqls.filter((q) => !q.includes('-- contatos:') && !q.includes('FROM erros_por_minuto'));
+    expect(doPainel).toHaveLength(2);
     expect(sqls.filter((q) => q.includes('-- contatos:')).length).toBeGreaterThan(0);
+    expect(sqls.filter((q) => q.includes('FROM erros_por_minuto'))).toHaveLength(1);
     expect(escritas).toHaveLength(0);
     conferir('hoje', res.body);
   });

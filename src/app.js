@@ -10,6 +10,7 @@ const { sentryContext, sentryError } = require('./middleware/sentryContext');
 const { validateRuntimeEnv } = require('./config/env');
 const { customDomainMiddleware } = require('./middleware/customDomain');
 const { foraDaBusca } = require('./middleware/foraDaBusca');
+const { errosPorMinuto } = require('./middleware/errosPorMinuto');
 const { montarJsonDeUpload } = require('./middleware/jsonDeUpload');
 
 const env = validateRuntimeEnv();
@@ -21,6 +22,12 @@ app.set('trust proxy', 1);
 // ── Sentry ─────────────────────────────────────────
 initSentry();
 app.use(Sentry.Handlers.requestHandler());
+
+// ── Erro na ponta do lojista, por minuto (14/10/2026, card t1-02) ──────
+// Conta respostas e 5xx em memoria e grava 1 linha por minuto em
+// erros_por_minuto (migration 381) para o bloco Plataforma do painel. Nada
+// de banco por requisicao; dormente sem a tabela. Kill switch: ERROS_POR_MINUTO=off.
+app.use(errosPorMinuto());
 
 // ── API fora da busca (06/10/2026) ─────────────────────
 // X-Robots-Tag: noindex, nofollow em toda resposta e GET /robots.txt
