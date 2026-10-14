@@ -1,5 +1,24 @@
 name: Deploy
 
+# QUEM FAZ O DEPLOY É A RAILWAY (t1-01, 14/10/2026) — leia docs/deploy.md.
+#
+# O serviço está ligado ao GitHub com "Wait for CI" (checkSuites): a cada
+# push em main a Railway cria o deploy e espera TODOS os workflows do commit
+# terminarem (CI e este). Se algum falhar, o deploy é pulado.
+#
+# Até 13/10 este workflow também rodava `railway up` e `railway variables
+# set GIT_SHA=...`. Cada um criava um deploy a mais: 40 deploys para 13
+# merges em 13/10 (3,1 por merge), e 19 de 20 rajadas de EMAXCONNSESSION
+# em 7 dias começaram numa troca de versão. O /health agora lê o commit de
+# RAILWAY_GIT_COMMIT_SHA (src/config/env.js, shaDaVersao), que a própria
+# Railway injeta, então nenhum passo daqui precisa tocar na Railway.
+#
+# Sobrou só a release do Sentry. Ela não pode falhar (continue-on-error):
+# como a Railway espera este workflow, uma falha aqui pularia o deploy.
+# Pelo mesmo motivo este workflow NÃO espera o /health mostrar o sha novo:
+# a Railway só sobe depois que ele termina. Quem confere a versão no ar é o
+# verificador de produção (t1-04).
+
 on:
   workflow_run:
     workflows: [CI]
@@ -7,10 +26,12 @@ on:
     branches: [main]
 
 jobs:
-  deploy:
-    name: Deploy to Railway
+  sentry-release:
+    name: Sentry release (o deploy é da integração GitHub da Railway)
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 10
+    # Nem o checkout pode derrubar o deploy: falha aqui não falha o workflow.
+    continue-on-error: true
     if: ${{ github.event.workflow_run.conclusion == 'success' }}
 
     steps:
@@ -19,43 +40,6 @@ jobs:
         with:
           ref: ${{ github.event.workflow_run.head_sha }}
           fetch-depth: 0
-
-      - name: Setup Node.js 20
-        uses: actions/setup-node@v4
-        with:
-          node-version: "20"
-
-      - name: Install Railway CLI
-        run: npm install -g @railway/cli
-
-      - name: Deploy to Railway
-        env:
-          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
-          RAILWAY_PROJECT_ID: ${{ secrets.RAILWAY_PROJECT_ID }}   
-          RAILWAY_SERVICE: ${{ secrets.RAILWAY_SERVICE }}
-        run: |
-          railway up --service "$RAILWAY_SERVICE" --detach
-          echo "Deploy iniciado em $(date -u '+%Y-%m-%dT%H:%M:%SZ')"
-
-      - name: Wait + Health check
-        env:
-          API_URL: ${{ secrets.RAILWAY_API_URL }}
-        run: |
-          echo "Aguardando Railway subir (60s)..."
-          sleep 60
-          for i in 1 2 3 4 5; do
-            STATUS=$(curl -sL -o /dev/null -w "%{http_code}" "$API_URL/health" || echo "000")
-            echo "Tentativa $i -- HTTP $STATUS"
-            if [ "$STATUS" = "200" ]; then
-              echo "Health check OK!"
-              break
-            fi
-            if [ $i -eq 5 ]; then
-              echo "Health check falhou apos 5 tentativas"
-              exit 1
-            fi
-            sleep 15
-          done
 
       - name: Create Sentry release
         continue-on-error: true
@@ -66,7 +50,8 @@ jobs:
         run: |
           if [ -n "$SENTRY_AUTH_TOKEN" ]; then
             npm install -g @sentry/cli
-            VERSION="aura-backend@$(git rev-parse --short HEAD)"
+            # 8 caracteres: o mesmo que o backend usa (shaDaVersao em src/config/env.js)
+            VERSION="aura-backend@$(git rev-parse --short=8 HEAD)"
             sentry-cli releases new "$VERSION"
             sentry-cli releases set-commits "$VERSION" --auto --ignore-missing || echo "set-commits falhou (API Sentry instavel) — ignorando"
             sentry-cli releases finalize "$VERSION"
@@ -75,20 +60,3 @@ jobs:
           else
             echo "SENTRY_AUTH_TOKEN nao configurado, pulando release Sentry"
           fi
-
-      - name: Set GIT_SHA on Railway
-        continue-on-error: true
-        env:
-          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
-          RAILWAY_PROJECT_ID: ${{ secrets.RAILWAY_PROJECT_ID }}   
-          RAILWAY_SERVICE: ${{ secrets.RAILWAY_SERVICE }}
-        run: |
-          SHA=$(git rev-parse --short HEAD)
-          railway variables set GIT_SHA=$SHA --service "$RAILWAY_SERVICE" || true
-          echo "GIT_SHA=$SHA definido no Railway"
-
-      - name: Notify on failure
-        if: failure()
-        run: |
-          echo "Deploy falhou no commit $(git rev-parse --short HEAD)"
-          echo "Autor: ${{ github.actor }}"

@@ -16,6 +16,21 @@ function getOptionalEnv(name, fallback) {
   return value;
 }
 
+// Versão que o /health, o log de boot e o Sentry mostram (t1-01, 14/10/2026).
+// Primeiro o RAILWAY_GIT_COMMIT_SHA, que a Railway injeta em todo deploy
+// vindo da integração com o GitHub (e nos redeploys e rollbacks dele): é o
+// commit que está de fato rodando. Antes o workflow Deploy gravava GIT_SHA
+// com `railway variables set`, e isso reiniciava o serviço a cada merge
+// (3,1 deploys por merge em 13/10). GIT_SHA continua valendo como reserva
+// para deploy pela CLI (`railway up`), que não traz o commit.
+// 8 caracteres, o mesmo tamanho que o `git rev-parse --short` dava.
+function shaDaVersao(vars = process.env) {
+  const railway = String(vars.RAILWAY_GIT_COMMIT_SHA || '').trim();
+  if (railway) return railway.slice(0, 8);
+  const reserva = vars.GIT_SHA;
+  return reserva === undefined || reserva === null ? '' : String(reserva);
+}
+
 function validateRuntimeEnv() {
   const nodeEnv = getOptionalEnv('NODE_ENV', 'development');
 
@@ -57,7 +72,7 @@ function validateRuntimeEnv() {
                        : requireEnv('SUPABASE_DB_URL'),
     REDIS_URL:       getOptionalEnv('REDIS_URL', ''),
     SENTRY_DSN:      getOptionalEnv('SENTRY_DSN', ''),
-    GIT_SHA:         getOptionalEnv('GIT_SHA', ''),
+    GIT_SHA:         shaDaVersao(),
     // FIX: APP_URL deve apontar pro app/Expo (login, reset-password, verify-email).
     // Nao confundir com STOREFRONT_BASE_URL, que e o dominio publico das vitrines
     // do Canal Digital (loja.getaura.com.br/<slug>).
@@ -74,4 +89,4 @@ function validateRuntimeEnv() {
   };
 }
 
-module.exports = { requireEnv, getOptionalEnv, validateRuntimeEnv };
+module.exports = { requireEnv, getOptionalEnv, validateRuntimeEnv, shaDaVersao };
