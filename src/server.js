@@ -199,6 +199,14 @@ function startServer() {
     // vencer sem pagamento. A cada 30 min, 8h–20h BRT.
     const { initLembreteDeFaturaJob } = require('./jobs/lembreteDeFaturaJob');
     initLembreteDeFaturaJob();
+
+    // Indicação (14/10/2026): prepara, 1x por dia após 06h30 BRT, o banner
+    // "Indique um lojista" das empresas em teste que já venderam. O banner
+    // nasce INATIVO (a Cassie aprova, o Teo ativa). Nasce desligado:
+    // BANNER_INDICACAO_TRIAL_ENABLED=true liga; ..._DRY_RUN=true só loga;
+    // ..._PUBLICAR=true cria já ativo.
+    const { initBannerIndicacaoTrialJob } = require('./jobs/bannerIndicacaoTrialJob');
+    initBannerIndicacaoTrialJob();
   });
 
   instalarEncerramento();
