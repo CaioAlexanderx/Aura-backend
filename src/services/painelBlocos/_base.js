@@ -137,6 +137,7 @@ async function carregarEmpresas(db = pool) {
             c.segment,
             c.vertical_active,
             (c.access_code_used IS NOT NULL AND c.access_code_used <> '') AS por_codigo,
+            UPPER(NULLIF(TRIM(c.access_code_used), '')) AS codigo_acesso,
             (c.asaas_subscription_id IS NOT NULL) AS tem_cobranca,
             (c.federation_id IS NOT NULL AND c.federation_id <> c.id) AS eh_dojo
        FROM companies c
