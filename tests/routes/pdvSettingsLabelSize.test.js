@@ -7,7 +7,7 @@
 // O que estes testes travam:
 //   1. default null (loja que nunca escolheu segue no fallback do app —
 //      um default '99x21' tiraria a Eryca do 30x25 no primeiro GET)
-//   2. os 3 modelos passam pela whitelist e sao gravados
+//   2. os modelos (inclui 40x25, 14/10/2026) passam pela whitelist e sao gravados
 //   3. modelo desconhecido => 400
 //   4. save de outra chave nao apaga o modelo salvo (merge)
 //
@@ -46,7 +46,7 @@ describe('pdv_settings -- label_size', () => {
     expect(res.body.settings.label_size).toBeNull();
   });
 
-  test.each(['99x21', '30x25', '58mm'])('PUT: %s e gravado', async (size) => {
+  test.each(['99x21', '30x25', '58mm', '105x21', '40x25'])('PUT: %s e gravado', async (size) => {
     mockSql({ label_offset_mm: -1.5 });
     const res = await request(app).put(url).set(auth).send({ settings: { label_size: size } });
     expect(res.status).toBe(200);

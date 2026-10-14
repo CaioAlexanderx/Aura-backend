@@ -17,7 +17,7 @@
 //   NUMBER: service_fee_pct, food_service_fee_pct,
 //           card_fee_credit_pct, card_fee_debit_pct
 //   NUMBER OU NULL (percentual 0-100): card_price_pct
-//   STRING (enum) OU NULL: label_size (99x21 | 30x25 | 58mm | 105x21)
+//   STRING (enum) OU NULL: label_size (99x21 | 30x25 | 58mm | 105x21 | 40x25)
 //
 // 26/05/2026: ampliada whitelist pra desbloquear UI Studio/Food. Antes,
 // app/studio/(estudio)/configuracoes.tsx tentava salvar studio_approval_*
@@ -100,8 +100,10 @@ const ALLOWED_STRING_KEYS = {
 // voltaria pro 99x21 no primeiro GET). Novos modelos entram nesta lista.
 // 25/09/2026 — 105x21: etiqueta 33x21mm em 3 colunas com vao, papel de
 // 105mm (Divina D'Lux).
+// 14/10/2026 — 40x25: etiqueta 40x25mm em 2 colunas, impressora termica de
+// cupom 80mm, desenho editorial compacto (Toda Linda).
 const ALLOWED_NULLABLE_STRING_KEYS = {
-  label_size: ['99x21', '30x25', '58mm', '105x21'],
+  label_size: ['99x21', '30x25', '58mm', '105x21', '40x25'],
 };
 
 // 01/10/2026 — Modelo dos termos da Garantia de produto (texto livre). null/''
