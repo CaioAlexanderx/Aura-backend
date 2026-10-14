@@ -33,6 +33,9 @@
 const pool = require('../config/database');
 const { PLANS, getPlanValue, getSeatsValue } = require('./billingPricing');
 const { getExtraSeatsMap } = require('./extraSeats');
+// A regra de "não é pagante da Aura" mora em painelBlocos/_base: o MRR e os
+// blocos do painel usam o mesmo fragmento SQL (card t1-11).
+const { PAGA_POR_OUTRA, DOJO_SEM_ASSINATURA } = require('./painelBlocos/_base');
 
 const PLANOS = ['essencial', 'negocio', 'expansao'];
 
@@ -65,6 +68,9 @@ function contratoDeTabela(plan, ciclo) {
 // A empresa continua existindo e usando o produto; só deixa de contar como
 // pagante contábil. Para voltar a contar uma delas, mude o cadastro (tire a
 // marca de teste, dê assinatura ou tire o dono da cobrança), não este filtro.
+// Os grupos 2 e 3 vêm de painelBlocos/_base (PAGA_POR_OUTRA e
+// DOJO_SEM_ASSINATURA), os mesmos que tiram a empresa da contagem de
+// pagantes e da adoção nos blocos do painel.
 async function fonteCompanies({ db = pool } = {}) {
   const { rows } = await db.query(
     `SELECT c.id AS company_id,
@@ -78,9 +84,8 @@ async function fonteCompanies({ db = pool } = {}) {
       WHERE c.billing_status = 'active'
         AND COALESCE(c.email, '') NOT ILIKE '%@getaura.com.br'
         AND c.is_sandbox IS NOT TRUE
-        AND NOT (c.billing_owner_company_id IS NOT NULL AND c.billing_owner_company_id <> c.id)
-        AND NOT (c.asaas_subscription_id IS NULL
-                 AND c.federation_id IS NOT NULL AND c.federation_id <> c.id)
+        AND NOT ${PAGA_POR_OUTRA}
+        AND NOT ${DOJO_SEM_ASSINATURA}
       ORDER BY 2`
   );
   const seats = await getExtraSeatsMap(rows.map((r) => r.company_id));
