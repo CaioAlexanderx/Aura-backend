@@ -8,7 +8,7 @@
 -- conversão do site.
 --
 -- O endpoint público POST /api/v1/public/leads agora avalia cada envio
--- (services/leadSpam.js: honeypot, tempo de preenchimento, nome conhecido,
+-- (services/leadSpam.js: honeypot (hp), tempo de preenchimento, nome conhecido,
 -- mensagem-modelo, inglês com link, Turnstile). O que for lixo NÃO entra em
 -- sales_leads: fica aqui, com o motivo. Tabela à parte (e não uma coluna
 -- is_spam em sales_leads) para que nenhuma lista, contagem, meta, cadência ou
@@ -27,7 +27,7 @@
 CREATE TABLE IF NOT EXISTS site_lead_spam (
   id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-  motivo      TEXT NOT NULL,          -- rapido_demais | nome_conhecido | mensagem_modelo | mensagem_em_ingles | link_em_outra_lingua | nome_com_link | turnstile_invalido
+  motivo      TEXT NOT NULL,          -- honeypot | rapido_demais | nome_conhecido | mensagem_modelo | mensagem_em_ingles | link_em_outra_lingua | nome_com_link | turnstile_invalido
   source      TEXT NOT NULL DEFAULT 'site',   -- 'site' (completo) | 'site_partial'
   nome        TEXT,
   telefone    TEXT,

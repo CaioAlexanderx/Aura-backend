@@ -6,11 +6,9 @@
 // validarTurnstile, que faz uma chamada de rede e falha ABERTA.
 //
 //   1. honeypot (hp, e os nomes antigos _empresa / honeypot) preenchido:
-//      descarte silencioso, responde 200 e não grava nada (decidido na rota).
-//   2. elapsed_ms < 3000 no envio COMPLETO: robô (humano não preenche nome,
-//      contato e mensagem em 3 s). O lead parcial (passo 1 / exit-intent) não
-//      tem esta regra: deixar só o telefone leva menos que isso com
-//      preenchimento automático e um falso positivo perde contato real.
+//      decidido na rota; grava em site_lead_spam (motivo 'honeypot') e responde 200.
+//   2. elapsed_ms < 3000: robô (humano não preenche em 3 s). O Worker do site
+//      já descarta antes de chamar o backend; aqui é defesa em profundidade.
 //   3. nome de robô conhecido (Harryseeno, Roberthaupt, Robinscawl e
 //      variações: maiúsculas, espaço, ponto, acento, número, 1 letra a mais
 //      ou a menos).
@@ -19,7 +17,9 @@
 //   5. mensagem majoritariamente em inglês E (com link OU palavra de golpe/
 //      SEO): "Win a Rolls-Royce https://...", "Best seo services ...".
 //   6. mensagem com link e nenhuma palavra em português (texto aleatório).
-//   7. Turnstile (só se TURNSTILE_SECRET estiver definido e vier token):
+//   7. Turnstile (só se TURNSTILE_SECRET estiver definido E vier token; nunca
+//      exigido. O token é de uso único: se o Worker do site tem o secret, ele
+//      valida e NÃO repassa o token, então aqui nem chega):
 //      token inválido = robô. Cloudflare fora do ar NÃO marca ninguém.
 //
 // Quem cai numa regra NÃO vira lead: vai para site_lead_spam (migration 388)
@@ -107,15 +107,15 @@ function elapsedDe(b) {
   return Number.isFinite(n) && n >= 0 ? n : null;
 }
 
-// Regras locais. `partial` = lead parcial (sem a regra do tempo).
+// Regras locais (valem para lead completo e parcial).
 // Devolve { spam: false } ou { spam: true, motivo }.
-function avaliarLead(b, { partial = false } = {}) {
+function avaliarLead(b) {
   const nome = b.nome || b.name;
   const msg = String(b.mensagem || b.message || '');
   const msgSemAcento = semAcento(msg);
 
   const ms = elapsedDe(b);
-  if (!partial && ms !== null && ms < TEMPO_MINIMO_MS) return { spam: true, motivo: 'rapido_demais' };
+  if (ms !== null && ms < TEMPO_MINIMO_MS) return { spam: true, motivo: 'rapido_demais' };
 
   if (nomeDeRobo(nome)) return { spam: true, motivo: 'nome_conhecido' };
   if (/https?:|www\./i.test(String(nome || ''))) return { spam: true, motivo: 'nome_com_link' };

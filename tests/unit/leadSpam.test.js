@@ -75,8 +75,9 @@ describe('avaliarLead -- tempo de preenchimento', () => {
     expect(motivo({ ...real, elapsed_ms: 'abc' })).toBeNull();
     expect(motivo({ ...real, elapsed_ms: -5 })).toBeNull();
   });
-  test('lead parcial (so o contato) nao tem a regra do tempo', () => {
-    expect(motivo({ nome: '', whatsapp: '12 99999-0000', elapsed_ms: 900 }, { partial: true })).toBeNull();
+  test('vale tambem para o lead parcial (o Worker do site ja descarta < 3 s)', () => {
+    expect(motivo({ nome: '', whatsapp: '12 99999-0000', elapsed_ms: 900, partial: true })).toBe('rapido_demais');
+    expect(motivo({ nome: '', whatsapp: '12 99999-0000', elapsed_ms: 5000, partial: true })).toBeNull();
   });
 });
 
@@ -101,8 +102,8 @@ describe('avaliarLead -- quem NAO pode cair no filtro', () => {
   });
 
   test('lead parcial com telefone no lugar do nome e pedido de ligacao (os 3 reais de hoje)', () => {
-    expect(motivo({ nome: '(96) 99188-9193', whatsapp: '(96) 99188-9193', mensagem: 'Pediu para ser chamado no WhatsApp (site: /)', partial: true }, { partial: true })).toBeNull();
-    expect(motivo({ nome: '75992384611', whatsapp: '75992384611' }, { partial: true })).toBeNull();
+    expect(motivo({ nome: '(96) 99188-9193', whatsapp: '(96) 99188-9193', mensagem: 'Pediu para ser chamado no WhatsApp (site: /)', partial: true })).toBeNull();
+    expect(motivo({ nome: '75992384611', whatsapp: '75992384611' })).toBeNull();
   });
 
   test('mensagem curta em ingles sem link nem golpe nao e barrada (estrangeiro de verdade)', () => {

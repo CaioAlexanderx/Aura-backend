@@ -18,8 +18,8 @@
 // (honeypot `hp`, tempo `elapsed_ms`, nome e mensagem de robô conhecidos,
 // Turnstile se TURNSTILE_SECRET estiver definido e vier o token). Robô NÃO
 // vira lead: vai para site_lead_spam (migration 388) com o motivo e a rota
-// responde como se tivesse dado certo, para ele não aprender. Honeypot
-// preenchido nem é gravado.
+// responde 200 como se tivesse dado certo, para ele não aprender (inclusive
+// honeypot preenchido, que vira motivo 'honeypot').
 //
 // Auth: header x-site-token === env.SITE_LEADS_TOKEN (o Worker é o
 // único chamador). Em produção, sem token configurado => 503
@@ -89,8 +89,16 @@ router.post('/', leadsLimiter, authSite, asyncHandler(async (req, res) => {
 
   // Honeypot — finge sucesso pra não revelar detecção.
   // `hp` é o campo invisível do formulário do site (t2-12); _empresa/honeypot
-  // são os nomes antigos.
+  // são os nomes antigos. O Worker do site já descarta antes de chamar aqui;
+  // isto é defesa em profundidade: marca como spam (site_lead_spam) e responde 200.
   if (s(b.hp) || s(b._empresa) || s(b.honeypot)) {
+    const parcial = (b.partial === true || s(b.partial) === 'true');
+    await gravarSpam(b, {
+      motivo: 'honeypot', source: parcial ? 'site_partial' : 'site',
+      nome: s(b.nome || b.name), phone: s(b.whatsapp || b.telefone || b.phone), email: s(b.email),
+      empresa: s(b.empresa), cargo: s(b.cargo), category: s(b.vertical || b.category || b.tipo) || null,
+      mensagem: s(b.mensagem || b.message).slice(0, 2000),
+    });
     return res.json({ ok: true });
   }
 
@@ -135,7 +143,7 @@ router.post('/', leadsLimiter, authSite, asyncHandler(async (req, res) => {
   const channel = email ? 'email' : 'outro';
 
   // Anti-robô: regras locais primeiro; Turnstile só se configurado e com token.
-  let veredito = leadSpam.avaliarLead(b, { partial });
+  let veredito = leadSpam.avaliarLead(b);
   const turnstileSecret = process.env.TURNSTILE_SECRET || '';
   const turnstileToken = leadSpam.tokenDoTurnstile(b);
   if (!veredito.spam && turnstileSecret && turnstileToken) {
@@ -148,7 +156,7 @@ router.post('/', leadsLimiter, authSite, asyncHandler(async (req, res) => {
     });
     // Mesmo formato de um lead novo: o robô (ou uma pessoa barrada por engano,
     // que fica em site_lead_spam) não vê diferença.
-    return res.status(201).json({ ok: true, id: spamId || crypto.randomUUID(), partial, upgraded: false, deduped: false });
+    return res.status(200).json({ ok: true, id: spamId || crypto.randomUUID(), partial, upgraded: false, deduped: false });
   }
 
   const client = await pool.connect();

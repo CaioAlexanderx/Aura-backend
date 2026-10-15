@@ -4,15 +4,16 @@
 // O que estes testes travam:
 //   1. lead de verdade (nome brasileiro, mensagem em portugues) segue o fluxo
 //      de sempre: INSERT em sales_leads + lead_interactions, 201
-//   2. honeypot `hp` (e os nomes antigos): 200, nada gravado em lugar nenhum
+//   2. honeypot `hp` (e os nomes antigos): 200, vai para site_lead_spam (motivo
+//      honeypot) e nao para sales_leads
 //   3. robo (tempo < 3 s, nome conhecido, mensagem-modelo, ingles com link):
-//      NAO entra em sales_leads; vai para site_lead_spam com o motivo; a
-//      resposta e igual a de um lead novo
+//      NAO entra em sales_leads; vai para site_lead_spam com o motivo; 200 no
+//      mesmo formato de um lead novo
 //   4. Turnstile: com TURNSTILE_SECRET + token invalido = barrado; valido =
 //      segue; Cloudflare fora do ar = segue; sem segredo ou sem token = nao
 //      chama a Cloudflare
 //   5. migration 388 pendente (42P01): o robo e descartado e nada quebra
-//   6. lead parcial nao tem a regra do tempo
+//   6. a regra do tempo vale tambem para o lead parcial
 //
 // Mock por CONTEUDO DO SQL, nunca fila posicional.
 // ============================================================
@@ -82,8 +83,8 @@ describe('lead de verdade', () => {
     expect(leadGravado()).toBe(true);
   });
 
-  test('lead parcial so com telefone e tempo curto entra (a regra do tempo e do envio completo)', async () => {
-    const res = await request(app).post(URL).send({ partial: true, whatsapp: '(96) 99188-9193', mensagem: 'Pediu para ser chamado no WhatsApp (site: /)', elapsed_ms: 800 });
+  test('lead parcial so com telefone (pedido de ligacao do WhatsApp) entra', async () => {
+    const res = await request(app).post(URL).send({ partial: true, whatsapp: '(96) 99188-9193', mensagem: 'Pediu para ser chamado no WhatsApp (site: /)', elapsed_ms: 6000, hp: '' });
     expect(res.status).toBe(201);
     expect(res.body.partial).toBe(true);
     expect(leadGravado()).toBe(true);
@@ -92,12 +93,20 @@ describe('lead de verdade', () => {
 });
 
 describe('honeypot', () => {
-  test.each(['hp', '_empresa', 'honeypot'])('%s preenchido: 200, nada gravado', async (campo) => {
+  test.each(['hp', '_empresa', 'honeypot'])('%s preenchido: 200, marcado como spam e nao vira lead', async (campo) => {
     const res = await request(app).post(URL).send({ ...real, [campo]: 'Acme Ltda' });
     expect(res.status).toBe(200);
     expect(res.body).toEqual({ ok: true });
     expect(db.connect).not.toHaveBeenCalled();
-    expect(spamGravado()).toBeUndefined();
+    expect(leadGravado()).toBe(false);
+    expect(spamGravado()[1][0]).toBe('honeypot');
+  });
+
+  test('hp preenchido e migration 388 pendente: 200 igual', async () => {
+    ligarBanco({ semTabelaSpam: true });
+    const res = await request(app).post(URL).send({ ...real, hp: 'x' });
+    expect(res.status).toBe(200);
+    expect(leadGravado()).toBe(false);
   });
 });
 
@@ -111,8 +120,8 @@ describe('robo vai para site_lead_spam, nao para sales_leads', () => {
 
   test.each(casos)('%s', async (_nome, corpo, motivo) => {
     const res = await request(app).post(URL).send(corpo);
-    // mesma cara de um lead novo: o robo nao aprende
-    expect(res.status).toBe(201);
+    // mesmo formato de um lead novo: o robo nao aprende
+    expect(res.status).toBe(200);
     expect(res.body).toMatchObject({ ok: true, id: 'spam-1', partial: false, upgraded: false, deduped: false });
     expect(leadGravado()).toBe(false);
     expect(db.connect).not.toHaveBeenCalled();
@@ -131,7 +140,7 @@ describe('robo vai para site_lead_spam, nao para sales_leads', () => {
   test('migration 388 pendente: o robo e descartado e a resposta e a mesma', async () => {
     ligarBanco({ semTabelaSpam: true });
     const res = await request(app).post(URL).send({ nome: 'Roberthaupt', mensagem: 'Hallo, ek wou jou prys ken.', elapsed_ms: 9000 });
-    expect(res.status).toBe(201);
+    expect(res.status).toBe(200);
     expect(res.body.ok).toBe(true);
     expect(res.body.id).toMatch(/^[0-9a-f-]{36}$/);
     expect(leadGravado()).toBe(false);
@@ -151,7 +160,7 @@ describe('Turnstile', () => {
     process.env.TURNSTILE_SECRET = 'segredo-de-teste';
     const f = resposta({ success: false, 'error-codes': ['invalid-input-response'] });
     const res = await request(app).post(URL).send({ ...real, turnstile_token: 'tok-ruim' });
-    expect(res.status).toBe(201);
+    expect(res.status).toBe(200);
     expect(f).toHaveBeenCalledTimes(1);
     expect(f.mock.calls[0][0]).toBe('https://challenges.cloudflare.com/turnstile/v0/siteverify');
     expect(leadGravado()).toBe(false);
