@@ -31,6 +31,15 @@
 //   apenas na cobranca imediata, entao nao existe nada pra "restaurar"
 //   depois (sem estado persistente, sem job de expiracao).
 //
+// 14/10/2026: VALOR CUSTOMIZADO POR EMPRESA (migration 386). A equipe pode
+//   combinar um valor mensal total com um cliente (ex.: R$ 211,20 para 2
+//   lojas no Negocio anual). valorDaAssinatura() e' a ENTRADA UNICA do valor
+//   de uma assinatura: devolve o customizado quando plano E ciclo escolhidos
+//   batem com os gravados na empresa, senao o getTotalValue de sempre. O
+//   valor customizado ja inclui os acessos extras e NAO leva o desconto anual
+//   (o ciclo e' parte do combinado). Cupom/promocao seguem como hoje, sobre
+//   esse valor (ver getCouponDiscountAmount com baseValue).
+//
 // getPlanValue() reproduz EXATAMENTE o comportamento que existia em
 // billing.js (validado por teste). getTotalValue() = plano + seats.
 // ============================================================
@@ -112,9 +121,14 @@ function getFirstChargeValue(plan, cycle, billingType, extraSeats = 0, discountP
 // (discount_value, ex.: R$ 50). Nos dois casos incide so no plano e nunca
 // passa do valor do plano. Para discount_pct o resultado bate centavo a
 // centavo com getFirstChargeValue (total - abatimento = primeira cobranca).
-function getCouponDiscountAmount(plan, cycle, billingType, { discountPct = 0, discountValue = 0 } = {}) {
-  const planValue = getPlanValue(plan, cycle, billingType);
-  if (planValue === null) return null;
+//
+// 14/10/2026: baseValue (opcional) = valor combinado da empresa. Quando vem,
+// o cupom incide sobre ELE (e' o "plano" desse cliente) em vez do valor de
+// tabela do plano. Sem baseValue o calculo e' exatamente o de antes.
+function getCouponDiscountAmount(plan, cycle, billingType, { discountPct = 0, discountValue = 0, baseValue = null } = {}) {
+  const tablePlanValue = getPlanValue(plan, cycle, billingType);
+  if (tablePlanValue === null) return null;
+  const planValue = Number.isFinite(baseValue) && baseValue > 0 ? round2(baseValue) : tablePlanValue;
 
   const pct = Number.isFinite(discountPct) && discountPct > 0 ? Math.min(discountPct, 100) : 0;
   if (pct > 0) return round2(planValue - round2(planValue * (1 - pct / 100)));
@@ -123,8 +137,54 @@ function getCouponDiscountAmount(plan, cycle, billingType, { discountPct = 0, di
   return round2(Math.min(fixed, planValue));
 }
 
+// ── Valor customizado por empresa (migration 386) ──────────────────────────
+const CYCLES = ['monthly', 'annual'];
+
+// Normaliza o que a linha de companies guarda. null = empresa sem valor
+// combinado (ou valor invalido: nunca cobra um valor que nao faz sentido).
+// NUMERIC chega do driver como string ('211.20').
+function getCustomSubscription(company) {
+  if (!company) return null;
+  const raw = company.custom_subscription_value;
+  if (raw === null || raw === undefined || raw === '') return null;
+  const value = Number(raw);
+  if (!Number.isFinite(value) || value <= 0) return null;
+  return {
+    value: round2(value),
+    plan: company.custom_subscription_plan || null,
+    cycle: company.custom_subscription_cycle || null,
+    note: company.custom_subscription_note || null,
+  };
+}
+
+// O valor combinado vale para este plano E este ciclo?
+function customMatches(custom, plan, cycle) {
+  if (!custom || !custom.plan || !custom.cycle) return false;
+  return custom.plan === plan && custom.cycle === (cycle || 'monthly');
+}
+
+// Valor RECORRENTE (mensal) da assinatura de uma empresa para plano + ciclo.
+// Fonte unica usada pelo checkout (/subscribe, /validate-coupon, /quote).
+//   custom=false → valor === getTotalValue(...) (comportamento de sempre)
+//   custom=true  → valor combinado (ja inclui acessos extras)
+// table_value = o que o checkout cobraria sem o valor combinado.
+// Retorna null se o plano for invalido (igual a getTotalValue).
+function valorDaAssinatura(company, plan, cycle, billingType, extraSeats = 0) {
+  const tableValue = getTotalValue(plan, cycle, billingType, extraSeats);
+  if (tableValue === null) return null;
+  const custom = getCustomSubscription(company);
+  if (customMatches(custom, plan, cycle)) {
+    return { value: custom.value, custom: true, table_value: tableValue, note: custom.note };
+  }
+  return { value: tableValue, custom: false, table_value: tableValue, note: null };
+}
+
 module.exports = {
   PLANS,
+  CYCLES,
+  getCustomSubscription,
+  customMatches,
+  valorDaAssinatura,
   ANNUAL_DISCOUNT,
   SEAT_PRICE_BRL,
   MIN_CHARGE_BRL,

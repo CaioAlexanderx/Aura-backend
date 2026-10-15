@@ -45,6 +45,16 @@
 //   audit_log entram no SELECT principal (ja eram usadas nele); caixa_sessoes
 //   e import_logs vem de queries agrupadas a parte, com 42P01/42703 guardados
 //   — tabela ausente zera o degrau em vez de esvaziar a Gestao Aura.
+//
+// 14/10/2026: assinatura com valor customizado por empresa (migration 386)
+// GET    /admin/clients/:cid/custom-subscription — valor combinado atual
+// PUT    /admin/clients/:cid/custom-subscription — define { value, plan, cycle, note, reason }
+// DELETE /admin/clients/:cid/custom-subscription — remove (volta a tabela)
+//   A equipe combina um valor mensal total com o cliente; o checkout da Aura
+//   passa a cobrar esse valor quando plano e ciclo batem (billingPricing.
+//   valorDaAssinatura). NAO mexe na assinatura que ja existe na Asaas: vale a
+//   partir do proximo checkout. Auditado em admin_audit_log
+//   (action='set_custom_subscription' / 'clear_custom_subscription').
 // ============================================================
 
 const router = require('express').Router();
@@ -57,6 +67,9 @@ const { listarClients360 } = require('../services/clients360');
 const { syncSubscriptionSeatValue } = require('../services/seatSubscription');
 const seatPass = require('../services/seatPass');
 const { RECOVERY_WINDOW_DAYS } = require('../services/clientLifecycle');
+const {
+  PLANS, CYCLES, MIN_CHARGE_BRL, getCustomSubscription, getTotalValue,
+} = require('../services/billingPricing');
 const { estenderTrial } = require('../services/trialExtension');
 
 const adminOnly = [requireAuth, requireRole('admin')];
@@ -465,6 +478,254 @@ router.post('/clients/:cid/seat-pass', ...adminOnly, asyncHandler(async (req, re
   }
 
   res.status(201).json(out);
+}));
+
+// ── Valor customizado da assinatura (14/10/2026, migration 386) ──
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const CUSTOM_VALUE_MAX_BRL = 100000;
+const CUSTOM_NOTE_MAX = 1000;
+
+// Aceita 211.2 | "211.20" | "211,20". Devolve numero com 2 casas ou NaN.
+function parseCustomValue(raw) {
+  if (typeof raw === 'number') return Math.round(raw * 100) / 100;
+  if (typeof raw !== 'string') return NaN;
+  const t = raw.trim().replace(/^R\$\s*/, '');
+  const norm = /,/.test(t) ? t.replace(/\./g, '').replace(',', '.') : t;
+  if (!/^\d+(\.\d{1,2})?$/.test(norm)) return NaN;
+  return Math.round(Number(norm) * 100) / 100;
+}
+
+const CUSTOM_COLS = `custom_subscription_value, custom_subscription_plan, custom_subscription_cycle,
+       custom_subscription_note, custom_subscription_set_at, custom_subscription_set_by`;
+
+// Bloco devolvido a Gestao Aura (equipe: inclui a observacao). null = tabela.
+function formatCustomSubscription(row, seats = 0) {
+  const c = getCustomSubscription(row);
+  if (!c) return null;
+  const tableValue = PLANS[c.plan] && CYCLES.includes(c.cycle)
+    ? getTotalValue(c.plan, c.cycle, 'PIX', seats)
+    : null;
+  return {
+    value: c.value,
+    plan: c.plan,
+    cycle: c.cycle,
+    note: c.note,
+    set_at: row.custom_subscription_set_at || null,
+    set_by: row.custom_subscription_set_by || null,
+    table_value: tableValue,
+  };
+}
+
+function migrationPendenteCustom(res) {
+  return res.status(503).json({
+    error: 'O valor combinado ainda nao esta disponivel (migration 386 pendente). Tente novamente em instantes.',
+  });
+}
+
+// ── GET /admin/clients/:cid/custom-subscription ─────────────────
+// Resposta: { custom_subscription: null | { value, plan, cycle, note, set_at,
+//   set_by, set_by_name, table_value }, company: { plan, billing_cycle,
+//   billing_status, extra_seats_granted, has_subscription }, min_value }
+router.get('/clients/:cid/custom-subscription', ...adminOnly, asyncHandler(async (req, res) => {
+  const { cid } = req.params;
+  if (!UUID_RE.test(cid)) throw new AppError('Empresa nao encontrada', 404);
+
+  let rows;
+  try {
+    ({ rows } = await pool.query(
+      `SELECT c.id, c.plan, c.billing_cycle, c.billing_status,
+              (c.asaas_subscription_id IS NOT NULL) AS has_subscription,
+              ${CUSTOM_COLS.replace(/custom_subscription_/g, 'c.custom_subscription_')},
+              u.full_name AS set_by_name
+         FROM companies c
+         LEFT JOIN users u ON u.id = c.custom_subscription_set_by
+        WHERE c.id = $1`,
+      [cid]
+    ));
+  } catch (err) {
+    if (err.code === '42703') return migrationPendenteCustom(res);
+    throw err;
+  }
+  if (!rows.length) throw new AppError('Empresa nao encontrada', 404);
+  const r = rows[0];
+
+  const seatsMap = await getExtraSeatsMap([cid]);
+  const seats = seatsMap.get(cid) || 0;
+  const block = formatCustomSubscription(r, seats);
+  if (block) block.set_by_name = r.set_by_name || null;
+
+  res.json({
+    custom_subscription: block,
+    company: {
+      plan: r.plan,
+      billing_cycle: r.billing_cycle || 'monthly',
+      billing_status: r.billing_status,
+      extra_seats_granted: seats,
+      has_subscription: !!r.has_subscription,
+    },
+    min_value: MIN_CHARGE_BRL,
+  });
+}));
+
+// ── PUT /admin/clients/:cid/custom-subscription ─────────────────
+// Body: { value, plan, cycle, note?, reason? }
+//   value  valor MENSAL total (substitui plano + acessos extras)
+//   plan   essencial | negocio | expansao
+//   cycle  monthly | annual
+// Vale no PROXIMO checkout da empresa (nao altera a assinatura ja criada) e
+// protege o valor contra o reajuste automatico de acessos extras.
+router.put('/clients/:cid/custom-subscription', ...adminOnly, asyncHandler(async (req, res) => {
+  const { cid } = req.params;
+  if (!UUID_RE.test(cid)) throw new AppError('Empresa nao encontrada', 404);
+  const { value, plan, cycle, note, reason } = req.body || {};
+
+  const v = parseCustomValue(value);
+  if (!Number.isFinite(v) || v <= 0) {
+    throw new AppError('value deve ser um valor em reais maior que zero', 400);
+  }
+  if (v < MIN_CHARGE_BRL) {
+    throw new AppError('value abaixo do minimo de R$ ' + MIN_CHARGE_BRL + ' aceito pelo provedor', 400);
+  }
+  if (v > CUSTOM_VALUE_MAX_BRL) {
+    throw new AppError('value acima do limite de R$ ' + CUSTOM_VALUE_MAX_BRL, 400);
+  }
+  if (typeof plan !== 'string' || !PLANS[plan]) {
+    throw new AppError('plan invalido. Opcoes: ' + Object.keys(PLANS).join(', '), 400);
+  }
+  if (typeof cycle !== 'string' || !CYCLES.includes(cycle)) {
+    throw new AppError('cycle invalido. Opcoes: ' + CYCLES.join(', '), 400);
+  }
+  if (note !== undefined && note !== null && typeof note !== 'string') {
+    throw new AppError('note deve ser texto', 400);
+  }
+  const nota = typeof note === 'string' && note.trim() ? note.trim() : null;
+  if (nota && nota.length > CUSTOM_NOTE_MAX) {
+    throw new AppError('note deve ter no maximo ' + CUSTOM_NOTE_MAX + ' caracteres', 400);
+  }
+  const motivo = reason && typeof reason === 'string' ? reason.trim() : null;
+
+  const client = await pool.connect();
+  let antes;
+  let depois;
+  try {
+    await client.query('BEGIN');
+    let cur;
+    try {
+      cur = await client.query(
+        `SELECT id, plan, billing_cycle, billing_status, ${CUSTOM_COLS}
+           FROM companies WHERE id = $1 FOR UPDATE`,
+        [cid]
+      );
+    } catch (err) {
+      await client.query('ROLLBACK');
+      if (err.code === '42703') return migrationPendenteCustom(res);
+      throw err;
+    }
+    if (!cur.rows.length) {
+      await client.query('ROLLBACK');
+      throw new AppError('Empresa nao encontrada', 404);
+    }
+    antes = formatCustomSubscription(cur.rows[0]);
+
+    const upd = await client.query(
+      `UPDATE companies
+          SET custom_subscription_value = $2, custom_subscription_plan = $3,
+              custom_subscription_cycle = $4, custom_subscription_note = $5,
+              custom_subscription_set_at = NOW(), custom_subscription_set_by = $6,
+              updated_at = NOW()
+        WHERE id = $1
+        RETURNING ${CUSTOM_COLS}`,
+      [cid, v, plan, cycle, nota, req.user.id]
+    );
+    depois = formatCustomSubscription(upd.rows[0]);
+
+    await client.query(
+      `INSERT INTO admin_audit_log (staff_user_id, company_id, action, payload, reason)
+       VALUES ($1, $2, 'set_custom_subscription', $3, $4)`,
+      [
+        req.user.id,
+        cid,
+        JSON.stringify({
+          before: antes,
+          after: depois,
+          company_plan: cur.rows[0].plan,
+          company_billing_cycle: cur.rows[0].billing_cycle,
+        }),
+        motivo,
+      ]
+    );
+    await client.query('COMMIT');
+  } catch (err) {
+    try { await client.query('ROLLBACK'); } catch (_) { /* ja encerrada */ }
+    throw err;
+  } finally {
+    client.release();
+  }
+
+  res.json({
+    custom_subscription: depois,
+    previous: antes,
+    applies: 'next_checkout',
+  });
+}));
+
+// ── DELETE /admin/clients/:cid/custom-subscription ──────────────
+// Remove o valor combinado: o checkout volta a cobrar a tabela. Body opcional:
+// { reason }. Idempotente: sem valor combinado, devolve changed:false.
+router.delete('/clients/:cid/custom-subscription', ...adminOnly, asyncHandler(async (req, res) => {
+  const { cid } = req.params;
+  if (!UUID_RE.test(cid)) throw new AppError('Empresa nao encontrada', 404);
+  const rawReason = (req.body && req.body.reason) || req.query.reason;
+  const motivo = rawReason && typeof rawReason === 'string' ? rawReason.trim() : null;
+
+  const client = await pool.connect();
+  let antes;
+  try {
+    await client.query('BEGIN');
+    let cur;
+    try {
+      cur = await client.query(
+        `SELECT id, plan, billing_cycle, ${CUSTOM_COLS} FROM companies WHERE id = $1 FOR UPDATE`,
+        [cid]
+      );
+    } catch (err) {
+      await client.query('ROLLBACK');
+      if (err.code === '42703') return migrationPendenteCustom(res);
+      throw err;
+    }
+    if (!cur.rows.length) {
+      await client.query('ROLLBACK');
+      throw new AppError('Empresa nao encontrada', 404);
+    }
+    antes = formatCustomSubscription(cur.rows[0]);
+    if (!antes) {
+      await client.query('ROLLBACK');
+      return res.json({ custom_subscription: null, previous: null, changed: false });
+    }
+
+    await client.query(
+      `UPDATE companies
+          SET custom_subscription_value = NULL, custom_subscription_plan = NULL,
+              custom_subscription_cycle = NULL, custom_subscription_note = NULL,
+              custom_subscription_set_at = NULL, custom_subscription_set_by = NULL,
+              updated_at = NOW()
+        WHERE id = $1`,
+      [cid]
+    );
+    await client.query(
+      `INSERT INTO admin_audit_log (staff_user_id, company_id, action, payload, reason)
+       VALUES ($1, $2, 'clear_custom_subscription', $3, $4)`,
+      [req.user.id, cid, JSON.stringify({ before: antes, after: null }), motivo]
+    );
+    await client.query('COMMIT');
+  } catch (err) {
+    try { await client.query('ROLLBACK'); } catch (_) { /* ja encerrada */ }
+    throw err;
+  } finally {
+    client.release();
+  }
+
+  res.json({ custom_subscription: null, previous: antes, changed: true });
 }));
 
 // ── GET /admin/audit-log — lista acoes administrativas ──────────

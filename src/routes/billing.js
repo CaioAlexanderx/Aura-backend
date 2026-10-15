@@ -75,6 +75,15 @@
 //   aplica o cupom PRIMEIROMES sozinho para empresa elegivel que nao informou
 //   cupom; cupom informado prevalece (nao acumula). GET /promocao-ativa alimenta
 //   o aviso do checkout. Prazo, data e regra: so em services/promocoes.js.
+//
+// 14/10/2026 — ASSINATURA COM VALOR CUSTOMIZADO POR EMPRESA (migration 386):
+//   A equipe combina um valor mensal total com o cliente (ex.: R$ 211,20 para
+//   2 lojas no Negocio anual) e grava na Gestao Aura (PUT /admin/clients/:cid/
+//   custom-subscription). O checkout e' o mesmo (PIX/cartao); o valor da
+//   assinatura vem de billingPricing.valorDaAssinatura: o combinado quando
+//   plano E ciclo batem, senao a tabela de sempre. Cupom e promocao seguem
+//   como hoje, calculados sobre esse valor. GET /billing/quote devolve o valor
+//   por empresa para a tela mostrar o numero certo. Detalhes na migration 386.
 // ============================================================
 
 const express = require('express');
@@ -93,6 +102,7 @@ const {
   getPlanValue,
   getTotalValue,
   getCouponDiscountAmount,
+  valorDaAssinatura,
 } = require('../services/billingPricing');
 const {
   validateCoupon,
@@ -128,11 +138,14 @@ function couponLabel(coupon, discountPct, discountValue) {
 
 // Quanto o cupom abate da mensalidade. Cupom de dias gratis nao abate nada:
 // nao ha cobranca imediata (ver checkoutCoupon.js).
-function couponDiscountAmount(coupon, plan, cycle, billingType) {
+// baseValue: so com valor combinado da empresa — o cupom incide sobre ele em
+// vez do valor de tabela do plano (null = comportamento de sempre).
+function couponDiscountAmount(coupon, plan, cycle, billingType, baseValue = null) {
   if (!coupon || coupon.trial_days > 0) return 0;
   return getCouponDiscountAmount(plan, cycle, billingType, {
     discountPct: coupon.discount_pct,
     discountValue: coupon.discount_value,
+    baseValue,
   }) || 0;
 }
 
@@ -453,6 +466,42 @@ router.get('/promocao-ativa', requireAuth, async (req, res) => {
   }
 });
 
+// GET /billing/quote?plan=&cycle=&billing_type= — valor RECORRENTE da assinatura
+// DESTA empresa para o plano/ciclo/forma escolhidos (14/10/2026). E' o numero
+// que o /subscribe vai cobrar (mesma funcao: valorDaAssinatura), para o
+// checkout mostrar o valor certo, inclusive o valor combinado com a equipe.
+// custom diz se e' o valor combinado; table_value o que a tabela cobraria
+// (plano + acessos extras). Cupom/promocao nao entram aqui (vem do
+// /validate-coupon e do /promocao-ativa). A observacao interna do combinado
+// NUNCA vai na resposta (e' da equipe).
+router.get('/quote', requireAuth, async (req, res) => {
+  const plan = String(req.query.plan || '').toLowerCase();
+  const cycle = req.query.cycle === 'annual' ? 'annual' : 'monthly';
+  const billingType = String(req.query.billing_type || 'PIX').toUpperCase() === 'CREDIT_CARD' ? 'CREDIT_CARD' : 'PIX';
+  if (!PLANS[plan]) {
+    return res.status(400).json({ error: 'Plano invalido. Opcoes: ' + Object.keys(PLANS).join(', ') });
+  }
+  try {
+    const { rows } = await db.query('SELECT * FROM companies WHERE id=$1', [req.params.id]);
+    if (!rows.length) return res.status(404).json({ error: 'Empresa nao encontrada' });
+    const company = rows[0];
+    const extraSeats = parseInt(company.extra_seats_granted, 10) || 0;
+    const pricing = valorDaAssinatura(company, plan, cycle, billingType, extraSeats);
+    res.json({
+      plan,
+      cycle,
+      billing_type: billingType,
+      value: pricing.value,
+      custom: pricing.custom,
+      table_value: pricing.table_value,
+      extra_seats: extraSeats,
+    });
+  } catch (err) {
+    console.error('[BILLING] quote error:', err.message);
+    res.status(500).json({ error: 'Erro ao calcular valor' });
+  }
+});
+
 // POST /billing/validate-coupon — checagem do cupom ANTES de assinar.
 // Autenticada e por empresa (diferente do /auth/validate-code publico, que e do
 // cadastro): aqui a gente ja sabe QUEM esta resgatando, entao da pra barrar
@@ -481,8 +530,11 @@ router.post('/validate-coupon', requireAuth, requireRole('client', 'admin'), asy
       return res.json({ valid: false, error: 'Este cupom ainda não pode ser usado. Tente novamente mais tarde.' });
     }
 
-    const recurring = getTotalValue(selectedPlan, cycle, billing_type, extraSeats);
-    const discountAmount = couponDiscountAmount(coupon, selectedPlan, cycle, billing_type);
+    // 14/10: valor combinado da empresa (quando plano e ciclo batem) substitui
+    // plano + acessos extras; o cupom incide sobre ele.
+    const pricing = valorDaAssinatura(company, selectedPlan, cycle, billing_type, extraSeats);
+    const recurring = pricing.value;
+    const discountAmount = couponDiscountAmount(coupon, selectedPlan, cycle, billing_type, pricing.custom ? recurring : null);
     const first = coupon.trial_days > 0 ? 0 : money(recurring - discountAmount);
 
     // Data prevista da 1a mensalidade cheia (mesma conta do /subscribe).
@@ -576,6 +628,25 @@ router.post('/subscribe', requireAuth, requireRole('client', 'admin'), async (re
       });
     }
 
+    // 14/10/2026: valor da assinatura — o combinado da empresa quando plano e
+    // ciclo batem, senao plano + acessos extras (tabela). Calculado ANTES de
+    // tocar a Asaas: valor combinado abaixo do minimo do provedor e' recusado
+    // aqui e nao cria cliente nem cobranca.
+    // 15/06/2026: acessos extras pagos (R$19/seat) entram no valor cobrado.
+    // Cliente sem seat extra → extraSeats=0 → value identico ao de antes.
+    // Coluna pode nao existir pre-migration 110 → undefined → 0 (seguro).
+    const extraSeats = parseInt(company.extra_seats_granted, 10) || 0;
+    const pricing = valorDaAssinatura(company, plan, cycle, billing_type, extraSeats);
+    if (!pricing) return res.status(400).json({ error: 'Erro ao calcular valor' });
+    if (pricing.custom && pricing.value < MIN_CHARGE_BRL) {
+      console.error('[BILLING] Valor combinado abaixo do minimo — company=' + company.id + ' valor=' + pricing.value);
+      return res.status(400).json({
+        error: 'O valor combinado desta assinatura esta abaixo do minimo de R$ ' + MIN_CHARGE_BRL +
+               ' aceito pelo provedor. Fale com o suporte.',
+        stage: 'valor_customizado',
+      });
+    }
+
     const { rows: users } = await db.query('SELECT * FROM users WHERE id=$1', [req.user.id]);
     const user = users[0];
 
@@ -586,14 +657,11 @@ router.post('/subscribe', requireAuth, requireRole('client', 'admin'), async (re
       fallbackTaxId: credit_card_holder_cpf,
     });
 
-    // 15/06/2026: acessos extras pagos (R$19/seat) entram no valor cobrado.
-    // Cliente sem seat extra → extraSeats=0 → value identico ao de antes.
-    // Coluna pode nao existir pre-migration 110 → undefined → 0 (seguro).
-    const extraSeats = parseInt(company.extra_seats_granted, 10) || 0;
-
     // Valor RECORRENTE (o que vai pra assinatura no Asaas). Cupom nao entra aqui.
-    const value = getTotalValue(plan, cycle, billing_type, extraSeats);
-    const seatsSuffix = extraSeats > 0 ? ' + ' + extraSeats + ' acesso(s) extra' : '';
+    const value = pricing.value;
+    // 14/10: valor combinado marcado na descricao para a equipe achar na Asaas.
+    const seatsSuffix = (extraSeats > 0 ? ' + ' + extraSeats + ' acesso(s) extra' : '') +
+                        (pricing.custom ? ' (valor combinado)' : '');
 
     // ── Cupom (13/07/2026) ────────────────────────────────────
     let coupon = null;
@@ -633,7 +701,8 @@ router.post('/subscribe', requireAuth, requireRole('client', 'admin'), async (re
     // Valor da PRIMEIRA cobranca (desconto so no plano). Com trial_days nao ha
     // cobranca imediata nenhuma — o desconto e ignorado de proposito (ver
     // comentario em checkoutCoupon.js).
-    const discountAmount = couponDiscountAmount(coupon, plan, cycle, billing_type);
+    // Valor combinado: o cupom incide sobre ele (nao sobre a tabela do plano).
+    const discountAmount = couponDiscountAmount(coupon, plan, cycle, billing_type, pricing.custom ? value : null);
     const firstValue = money(value - discountAmount);
     // Valor da ASSINATURA no Asaas: cheio, exceto no desconto de varios meses.
     const subscriptionValue = recurringDiscount ? firstValue : value;

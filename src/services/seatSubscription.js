@@ -17,11 +17,34 @@
 
 const db = require('../config/database');
 const { asaas } = require('./asaasClient');
-const { getTotalValue, PLANS, MIN_CHARGE_BRL } = require('./billingPricing');
+const {
+  getTotalValue, PLANS, MIN_CHARGE_BRL, getCustomSubscription, customMatches,
+} = require('./billingPricing');
 const { getSyncAdjustment } = require('./subscriptionDiscount');
 
 // Status de assinatura no Asaas que aceitam atualizacao de valor.
 const SYNCABLE_STATUSES = new Set(['ACTIVE', 'active']);
+
+// 14/10/2026: valor combinado (migration 386). Os chamadores do sync passam um
+// objeto parcial da empresa (sem as colunas custom_subscription_*); quando as
+// colunas nao vieram, le do banco. Pre-migration (42703) ou qualquer falha de
+// leitura = sem valor combinado: o sync segue o caminho de sempre.
+async function lerValorCustomizado(company) {
+  if (company.custom_subscription_value !== undefined) return getCustomSubscription(company);
+  try {
+    const { rows } = await db.query(
+      `SELECT custom_subscription_value, custom_subscription_plan, custom_subscription_cycle
+         FROM companies WHERE id = $1`,
+      [company.id]
+    );
+    return getCustomSubscription(rows && rows[0]);
+  } catch (err) {
+    if (err && err.code !== '42703') {
+      console.error('[seatSubscription] leitura do valor combinado falhou:', err.message);
+    }
+    return null;
+  }
+}
 
 /**
  * Recalcula o valor recorrente (plano + acessos extras) e atualiza a
@@ -48,6 +71,15 @@ async function syncSubscriptionSeatValue(company) {
     const subId = company.asaas_subscription_id;
     const cycle = company.billing_cycle || 'monthly';
     const seats = parseInt(company.extra_seats_granted, 10) || 0;
+
+    // 14/10/2026: empresa com valor combinado para ESTE plano e ciclo. O valor
+    // da assinatura ja inclui os acessos extras e e' definido pela equipe —
+    // conceder/tirar acesso extra nao pode reajusta-lo (nem 'ajustar' pra
+    // tabela). Nao faz PUT nem le a Asaas; quem chamou registra o skip no audit.
+    const combinado = await lerValorCustomizado(company);
+    if (customMatches(combinado, company.plan, cycle)) {
+      return { updated: false, skipped: 'valor_customizado', value: combinado.value, subscriptionId: subId, seats };
+    }
 
     // Le a assinatura pra saber a forma de pagamento atual (cartao/pix)
     // e o valor vigente — assim o recalculo respeita o ciclo real.
