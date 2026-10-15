@@ -79,6 +79,15 @@
 // empresa NOVA de cadastro self-service (self_serve=true ou codigo COMECAR);
 // a frente nasce ligada na mesma transacao. Sem segment: fluxo identico.
 // login/me/register expoem company.segment (no corpo, nao no JWT).
+//
+// ── Origem do cadastro (15/10/2026, card t2-09) ─────────────
+// /auth/register aceita `origem` { utm_source, utm_medium, utm_campaign,
+// utm_content, utm_term, landing_page, referrer, first_seen_at } — o primeiro
+// toque do site (aura-site js/origem.js). Sanitizado em services/signupOrigem
+// (whitelist, tamanhos, sem query/hash, referrer so o host) e gravado em
+// companies.signup_origin (migration 387) so em empresa NOVA, atras de
+// SAVEPOINT. Sem `origem` (ou invalida): nada muda. A cidade do CNPJ tambem
+// e gravada no cadastro (em segundo plano, depois do COMMIT).
 // ============================================================
 const router  = require('express').Router();
 const bcrypt  = require('bcrypt');
@@ -95,6 +104,11 @@ const { getExtraSeatsForCompany, getExtraSeatsMap } = require('../services/extra
 const { appModeDoCabecalho } = require('../utils/appMode');
 const trialRegra = require('../services/trialRegra');
 const { applySegment, isValidSegment, normalizeCnae, ALLOWED_EXTRAS } = require('../services/segment');
+const signupOrigem = require('../services/signupOrigem');
+const { lookupCNPJ } = require('../services/cnpj');
+
+let redis = null;
+try { redis = require('../config/redis').default || require('../config/redis'); } catch (_) {}
 
 const env        = validateRuntimeEnv();
 const JWT_SECRET = env.JWT_SECRET;
@@ -319,6 +333,8 @@ router.post('/register', async (req, res) => {
     return res.status(400).json({ error: parsedSegment.error, code: parsedSegment.code });
   }
   const signupSegment = parsedSegment.value;
+  // Origem do cadastro (opcional, nunca bloqueia): invalida vira null.
+  const signupOrigin = signupOrigem.sanitizarOrigem(req.body && req.body.origem);
   const dojoFederationId = (typeof federation_id === 'string') ? federation_id.trim() : '';
   if (isDojoSignup && !company_name) {
     return res.status(400).json({
@@ -451,6 +467,9 @@ router.post('/register', async (req, res) => {
       );
       company = newCompany;
 
+      // 15/10/2026 (t2-09): primeiro toque do site, na mesma transacao.
+      if (signupOrigin) await signupOrigem.gravarOrigem(client, company.id, signupOrigin);
+
       // 13/10/2026: self-service sem codigo (e que nao e dojo) entra no modo
       // primeira_venda. Sem as colunas da migration 379 volta null e os 7
       // dias fixos do INSERT ficam valendo.
@@ -490,6 +509,13 @@ router.post('/register', async (req, res) => {
       await client.query('INSERT INTO referrals (referrer_id, referred_user_id, referred_email, code, status, completed_at) VALUES ($1, $2, $3, $4, \'completed\', NOW())', [referrerId, user.id, email.toLowerCase().trim(), access_code.toUpperCase().trim()]);
     }
     await client.query('COMMIT');
+
+    // 15/10/2026 (t2-09): cidade do CNPJ na empresa nova (best-effort, em
+    // segundo plano; o cadastro do site ja aqueceu o cache do lookup).
+    if (isNewCompany && !isDojoSignup && cnpj) {
+      signupOrigem.completarCidadePeloCnpj({ db, companyId: company.id, cnpj: String(cnpj), lookup: lookupCNPJ, redis })
+        .catch(() => {});
+    }
 
     // E-mail de follow-up pra CS quando uma conta self-service e criada (best-effort, nao bloqueia).
     // 13/10/2026: cadastro por codigo de indicacao (REF-) tambem avisa a CS:

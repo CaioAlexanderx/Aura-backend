@@ -72,3 +72,13 @@ jest.mock('../src/services/trialRegra', () => ({
   iniciarTrialPelaPrimeiraVenda: jest.fn(async () => ({ iniciou: false })),
   marcarTrialFixo: jest.fn(async () => false),
 }));
+
+// 15/10/2026 (t2-09): o cadastro (POST /auth/register) consulta o CNPJ em
+// segundo plano para gravar a cidade. Nos testes a rede fica desligada: o
+// lookup falha de imediato (o cadastro ignora) e nao ha chamada externa nem
+// db.query extra roubando os mockResolvedValueOnce das rotas. Os testes da
+// cidade (tests/routes/signupOrigem.test.js) trocam o lookup por um valor.
+jest.mock('../src/services/cnpj', () => ({
+  ...jest.requireActual('../src/services/cnpj'),
+  lookupCNPJ: jest.fn(async () => { throw new Error('rede desligada nos testes'); }),
+}));
