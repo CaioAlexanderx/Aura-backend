@@ -29,7 +29,7 @@
 
 const defaultDb = require('../config/database');
 const { SEAT_PRICE_BRL } = require('./memberSeats');
-const { PLANS } = require('./billingPricing');
+const { PLANS, getCustomSubscription, customMatches } = require('./billingPricing');
 const { syncSubscriptionSeatValue } = require('./seatSubscription');
 const { todayBrt } = require('./subscriptionDiscount');
 const temporada = require('./temporada');
@@ -102,6 +102,28 @@ function motivoSemCobranca(company) {
   if (!PLANS[company.plan]) return 'plano_nao_suportado';
   return null;
 }
+
+// 14/10/2026: a empresa tem VALOR COMBINADO para o plano/ciclo atual
+// (migration 386)? Entao a assinatura tem valor definido pela equipe, que ja
+// inclui os acessos — o assento de temporada nao pode ser cobrado por cima nem
+// reajustar a assinatura. Falha de leitura (coluna ausente) = sem valor combinado.
+async function temValorCombinado(db, company) {
+  try {
+    const { rows } = await db.query(
+      `SELECT custom_subscription_value, custom_subscription_plan, custom_subscription_cycle
+         FROM companies WHERE id = $1`,
+      [company.id]
+    );
+    const combinado = getCustomSubscription(rows && rows[0]);
+    return customMatches(combinado, company.plan, company.billing_cycle || 'monthly');
+  } catch (err) {
+    return false;
+  }
+}
+
+const MSG_VALOR_COMBINADO =
+  'A assinatura desta empresa tem um valor combinado com a Aura, que já inclui os acessos. ' +
+  'Para ter mais assentos na temporada, fale com o suporte.';
 
 // Resultado do syncSubscriptionSeatValue → 'ok' | 'transitorio' | 'indisponivel'.
 //   ok           valor ajustado (ou ja estava certo)
@@ -182,6 +204,7 @@ async function estado(companyId, { previaQty = null } = {}, deps = {}) {
 
   const janela = temporada.janelaDoPasse(hoje);
   const semCobranca = motivoSemCobranca(company);
+  const valorCombinado = !semCobranca && await temValorCombinado(db, company);
   const limiteRestante = Math.max(temporada.LIMITE_POR_LOJA - assentosAplicados - assentosAgendados, 0);
 
   const out = {
@@ -192,9 +215,9 @@ async function estado(companyId, { previaQty = null } = {}, deps = {}) {
       ends_at: temporada.TEMPORADA.ends_at,
     },
     preco_assento_mensal: SEAT_PRICE_BRL,
-    pode_contratar: janela.aberta && limiteRestante > 0 && !semCobranca,
+    pode_contratar: janela.aberta && limiteRestante > 0 && !semCobranca && !valorCombinado,
     motivo_bloqueio: !janela.aberta ? 'temporada_encerrada'
-      : (limiteRestante <= 0 ? 'limite_de_assentos' : semCobranca),
+      : (limiteRestante <= 0 ? 'limite_de_assentos' : (semCobranca || (valorCombinado ? 'valor_customizado' : null))),
     limite_restante: limiteRestante,
     assentos_ativos: assentosAplicados,
     assentos_agendados: assentosAgendados,
@@ -311,7 +334,9 @@ async function aplicarPasse(passId, opts = {}, deps = {}) {
   const classe = classificarSync(resultado);
 
   if (classe !== 'ok') {
-    const motivo = classe === 'transitorio' ? 'falha_asaas' : 'assinatura_indisponivel';
+    const motivo = classe === 'transitorio'
+      ? 'falha_asaas'
+      : (resultado && resultado.skipped === 'valor_customizado' ? 'valor_customizado' : 'assinatura_indisponivel');
     const cancelar = cancelarSeFalhar || classe === 'indisponivel';
     const { rows: voltou } = await db.query(DESFAZER_SQL, [passId, cancelar, motivo]);
     if (classe === 'transitorio' && voltou.length) {
@@ -440,6 +465,11 @@ async function contratar({ companyId, qty, source, userId = null, reason = null 
   }
   const cortesia = !!semCobranca; // so chega aqui se source==='admin'
 
+  // 14/10/2026: valor combinado — nada a cobrar por cima, nada a reajustar.
+  if (!cortesia && await temValorCombinado(db, company)) {
+    throw new SeatPassError(409, 'VALOR_CUSTOMIZADO', MSG_VALOR_COMBINADO);
+  }
+
   let somaViva;
   try {
     const { rows } = await db.query(
@@ -484,6 +514,9 @@ async function contratar({ companyId, qty, source, userId = null, reason = null 
       if (r.motivo === 'falha_asaas') {
         throw new SeatPassError(502, 'FALHA_ASAAS',
           'Não conseguimos ajustar a sua assinatura agora. Nada foi contratado nem será cobrado. Tente novamente em alguns minutos.');
+      }
+      if (r.motivo === 'valor_customizado') {
+        throw new SeatPassError(409, 'VALOR_CUSTOMIZADO', MSG_VALOR_COMBINADO);
       }
       throw new SeatPassError(409, 'ASSINATURA_INDISPONIVEL',
         'A assinatura não está ativa para receber o ajuste. Nada foi contratado nem será cobrado.');
