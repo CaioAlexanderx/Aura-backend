@@ -20,6 +20,35 @@ function origemDe(e) {
   return codigo === CODIGO_DO_SITE ? ORIGEM_SITE_COMECAR : ORIGEM_CONVITE;
 }
 
+// 15/10/2026 (t2-09): primeiro toque do site (companies.signup_origin, migration
+// 387) das contas do período. Opcional: sem a coluna, ou sem nenhum cadastro com
+// origem, o bloco sai exatamente como antes (nenhuma coluna, série ou
+// indicador novo). Fonte = utm_source, ou o host do referrer quando o
+// visitante não veio de campanha; "Direto" quando só tem a página de entrada.
+async function carregarOrigemDoSite(db, ids) {
+  if (!ids.length) return new Map();
+  const rows = await b.opcional(
+    db,
+    `-- cadastros:origem
+     SELECT c.id AS company_id,
+            NULLIF(c.signup_origin->>'utm_source', '') AS utm_source,
+            NULLIF(c.signup_origin->>'utm_campaign', '') AS utm_campaign,
+            NULLIF(c.signup_origin->>'referrer', '') AS referrer
+       FROM companies c
+      WHERE c.id = ANY($1::uuid[])
+        AND c.signup_origin IS NOT NULL`,
+    [ids]
+  );
+  const m = new Map();
+  for (const r of rows) {
+    m.set(r.company_id, {
+      fonte: r.utm_source || r.referrer || 'Direto',
+      campanha: r.utm_campaign || null,
+    });
+  }
+  return m;
+}
+
 async function calcular({ hoje, periodo = 30, db = b.pool, empresas } = {}) {
   const emp = empresas || await b.carregarEmpresas(db);
   const contas = emp.lista.filter((e) => !e.eh_dojo && e.criado_em);
@@ -35,6 +64,9 @@ async function calcular({ hoje, periodo = 30, db = b.pool, empresas } = {}) {
     .filter((e) => b.diasEntre(e.criado_em, hoje) < periodo)
     .sort((x, y) => (x.criado_em < y.criado_em ? 1 : -1));
 
+  const origemDoSite = await carregarOrigemDoSite(db, noPeriodo.map((e) => e.company_id));
+  const comOrigemDoSite = origemDoSite.size > 0;
+
   const linhas = noPeriodo.map((e) => ({
     ...b.ref(e),
     criado_em: e.criado_em,
@@ -42,11 +74,22 @@ async function calcular({ hoje, periodo = 30, db = b.pool, empresas } = {}) {
     frente: FRENTE[e.segment] || 'Sem frente',
     plano: b.PLANO_ROTULO[e.plan] || e.plan,
     status: e.status,
+    ...(comOrigemDoSite ? {
+      fonte: (origemDoSite.get(e.company_id) || {}).fonte || '—',
+      campanha: (origemDoSite.get(e.company_id) || {}).campanha || '—',
+    } : {}),
   }));
 
   const contar = (campo) => {
     const m = new Map();
     for (const l of linhas) m.set(l[campo], (m.get(l[campo]) || 0) + 1);
+    return [...m.entries()].sort((x, y) => y[1] - x[1]).map(([rotulo, valor]) => ({ rotulo, valor }));
+  };
+  const contarOrigem = (campo) => {
+    const m = new Map();
+    for (const l of linhas) {
+      if (l[campo] && l[campo] !== '—') m.set(l[campo], (m.get(l[campo]) || 0) + 1);
+    }
     return [...m.entries()].sort((x, y) => y[1] - x[1]).map(([rotulo, valor]) => ({ rotulo, valor }));
   };
   const porCodigo = em7.filter((e) => origemDe(e) === ORIGEM_CONVITE).length;
@@ -62,17 +105,23 @@ async function calcular({ hoje, periodo = 30, db = b.pool, empresas } = {}) {
       b.indicador('Em 7 dias', em7.length),
       b.indicador(`Em ${periodo} dias`, linhas.length),
       b.indicador('Por código de convite', linhas.filter((l) => l.origem === ORIGEM_CONVITE).length, `${periodo} dias`),
+      ...(comOrigemDoSite ? [b.indicador('Com origem do site', origemDoSite.size, `de ${linhas.length} em ${periodo} dias`)] : []),
     ],
     listas: [
       b.lista(`Cadastros · ${periodo} dias`, [
         b.colLoja(), b.col('criado_em', 'Cadastro', 'data'), b.col('origem', 'Origem'),
         b.col('frente', 'Frente'), b.col('plano', 'Plano'), b.col('status', 'Situação'),
+        ...(comOrigemDoSite ? [b.col('fonte', 'Fonte (UTM)'), b.col('campanha', 'Campanha (UTM)')] : []),
       ], linhas),
     ],
     series: [
       b.serieDe('Cadastros por semana', 'barras', serie),
       b.serieDe(`Origem · ${periodo} dias`, 'barras_h', contar('origem')),
       b.serieDe('Frente escolhida', 'barras_h', contar('frente')),
+      ...(comOrigemDoSite ? [
+        b.serieDe(`Fonte do site (UTM) · ${periodo} dias`, 'barras_h', contarOrigem('fonte')),
+        ...(contarOrigem('campanha').length ? [b.serieDe(`Campanha (UTM) · ${periodo} dias`, 'barras_h', contarOrigem('campanha'))] : []),
+      ] : []),
     ],
     insight: linhas.length
       ? `${linhas.filter((l) => l.frente === 'Sem frente').length} de ${linhas.length} cadastros em ${periodo} dias estão sem frente atribuída.`

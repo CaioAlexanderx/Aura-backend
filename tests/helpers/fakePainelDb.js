@@ -295,6 +295,9 @@ function responder(dados, escritas, sql, params = []) {
   const s = sql.replace(/\s+/g, ' ').trim();
   const escrever = (tabela) => { escritas.push({ tabela, sql: s, params }); return []; };
 
+  // ── origem do site nos cadastros (migration 387); sem dados = ninguém tem origem ──
+  if (s.includes('-- cadastros:origem')) return dados.cadastrosOrigem || [];
+
   // ── check-in do prospect ──
   if (s.includes('-- checkin:cadastros')) return dados.checkinCadastros;
   if (s.includes('-- checkin:json')) return dados.checkinJson.filter((r) => [].concat(params[0] || []).includes(r.company_id));
