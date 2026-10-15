@@ -199,6 +199,14 @@ function startServer() {
     // vencer sem pagamento. A cada 30 min, 8h–20h BRT.
     const { initLembreteDeFaturaJob } = require('./jobs/lembreteDeFaturaJob');
     initLembreteDeFaturaJob();
+
+    // Indicação (14/10/2026): 1x por dia após 06h30 BRT cria o banner
+    // "Indique um lojista" (ativo) para toda empresa de varejo em teste,
+    // um por empresa (dedupe_key). Kill switch
+    // BANNER_INDICACAO_TRIAL_ENABLED=false; ..._DRY_RUN=true só loga;
+    // ..._PUBLICAR=false cria o banner inativo.
+    const { initBannerIndicacaoTrialJob } = require('./jobs/bannerIndicacaoTrialJob');
+    initBannerIndicacaoTrialJob();
   });
 
   instalarEncerramento();
