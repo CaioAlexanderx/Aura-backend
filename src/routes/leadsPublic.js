@@ -14,6 +14,13 @@
 //  • submit COMPLETO com telefone de um parcial → PROMOVE o parcial
 //    a 'site' e registra a interação (1 pessoa = 1 lead que amadurece).
 //
+// Anti-robô (15/10/2026, card t2-12): services/leadSpam.js avalia cada envio
+// (honeypot `hp`, tempo `elapsed_ms`, nome e mensagem de robô conhecidos,
+// Turnstile se TURNSTILE_SECRET estiver definido e vier o token). Robô NÃO
+// vira lead: vai para site_lead_spam (migration 388) com o motivo e a rota
+// responde como se tivesse dado certo, para ele não aprender. Honeypot
+// preenchido nem é gravado.
+//
 // Auth: header x-site-token === env.SITE_LEADS_TOKEN (o Worker é o
 // único chamador). Em produção, sem token configurado => 503
 // (falha fechada, não deixa o endpoint aberto).
@@ -25,6 +32,8 @@ const pool = require('../config/database');
 const asyncHandler = require('../utils/asyncHandler');
 const AppError = require('../errors/AppError');
 const { getOptionalEnv } = require('../config/env');
+const crypto = require('crypto');
+const leadSpam = require('../services/leadSpam');
 
 const VALID_PLANS = ['essencial', 'negocio', 'expansao'];
 const SITE_LEADS_TOKEN = getOptionalEnv('SITE_LEADS_TOKEN', '');
@@ -54,12 +63,34 @@ function authSite(req, res, next) {
 const s = (v) => (v == null ? '' : String(v)).trim();
 const onlyDigits = (v) => s(v).replace(/\D/g, '');
 
+// Guarda o envio barrado, com o motivo. Nunca lança: sem a tabela (migration
+// 388 pendente) ou com o banco com problema, o lixo é descartado.
+async function gravarSpam(b, { motivo, source, nome, phone, email, empresa, cargo, category, mensagem }) {
+  const ms = Number(b.elapsed_ms);
+  try {
+    const { rows } = await pool.query(
+      `INSERT INTO site_lead_spam (motivo, source, nome, telefone, email, empresa, cargo, vertical, mensagem, elapsed_ms)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+       RETURNING id`,
+      [motivo, source, nome.slice(0, 200) || null, phone.slice(0, 60) || null, email.slice(0, 200) || null,
+        empresa.slice(0, 200) || null, cargo.slice(0, 200) || null, category ? String(category).slice(0, 200) : null,
+        mensagem || null, Number.isFinite(ms) && ms >= 0 && ms < 2147483647 ? Math.round(ms) : null]
+    );
+    return rows && rows[0] ? rows[0].id : null;
+  } catch (err) {
+    if (!(err && err.code === '42P01')) console.warn('[leads] spam nao gravado:', err && err.message);
+    return null;
+  }
+}
+
 // POST /api/v1/public/leads
 router.post('/', leadsLimiter, authSite, asyncHandler(async (req, res) => {
   const b = req.body || {};
 
-  // Honeypot — finge sucesso pra não revelar detecção
-  if (s(b._empresa) || s(b.honeypot)) {
+  // Honeypot — finge sucesso pra não revelar detecção.
+  // `hp` é o campo invisível do formulário do site (t2-12); _empresa/honeypot
+  // são os nomes antigos.
+  if (s(b.hp) || s(b._empresa) || s(b.honeypot)) {
     return res.json({ ok: true });
   }
 
@@ -102,6 +133,23 @@ router.post('/', leadsLimiter, authSite, asyncHandler(async (req, res) => {
     return parts.join('\n');
   };
   const channel = email ? 'email' : 'outro';
+
+  // Anti-robô: regras locais primeiro; Turnstile só se configurado e com token.
+  let veredito = leadSpam.avaliarLead(b, { partial });
+  const turnstileSecret = process.env.TURNSTILE_SECRET || '';
+  const turnstileToken = leadSpam.tokenDoTurnstile(b);
+  if (!veredito.spam && turnstileSecret && turnstileToken) {
+    const t = await leadSpam.validarTurnstile(turnstileToken, { secret: turnstileSecret });
+    if (t === 'invalido') veredito = { spam: true, motivo: 'turnstile_invalido' };
+  }
+  if (veredito.spam) {
+    const spamId = await gravarSpam(b, {
+      motivo: veredito.motivo, source, nome: nameIn, phone, email, empresa, cargo, category, mensagem,
+    });
+    // Mesmo formato de um lead novo: o robô (ou uma pessoa barrada por engano,
+    // que fica em site_lead_spam) não vê diferença.
+    return res.status(201).json({ ok: true, id: spamId || crypto.randomUUID(), partial, upgraded: false, deduped: false });
+  }
 
   const client = await pool.connect();
   try {
