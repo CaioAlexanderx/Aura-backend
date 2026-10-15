@@ -2,13 +2,18 @@
 // services/bannerIndicacaoTrial + jobs/bannerIndicacaoTrialJob
 // (banner "Indique um lojista" para empresas em teste, 14/10/2026).
 //
+// Regra (decisão do Caio, 14/10): TODO trial vigente de varejo recebe,
+// inclusive cadastro novo sem venda e teste perto do fim.
+//
 // O que estes testes travam:
-//   1. A regra: o caso verdadeiro e cada um dos 7 critérios falhando
-//      sozinho (e as exclusões de conta interna, teste, canário, filial).
-//   2. O banner: texto, rota, validade de 7 dias, dedupe_key e INATIVO por
-//      padrão; só PUBLICAR=true cria ativo.
-//   3. Desligado não consulta nada; DRY_RUN não escreve; a chave que já
-//      existe não vira segundo banner.
+//   1. A regra: o caso verdadeiro, cada critério que ficou falhando sozinho
+//      e os critérios removidos (venda, dias restantes, conversa, aviso de
+//      fim de teste) que NÃO barram mais.
+//   2. O banner: texto, rota, validade de 7 dias, dedupe_key e ATIVO por
+//      padrão; PUBLICAR=false cria inativo.
+//   3. Kill switch (ENABLED=false não consulta nada); DRY_RUN não escreve;
+//      a chave que já existe (inclusive banner criado à mão) não vira
+//      segundo banner.
 //   4. Quem assinou tem o banner de indicação desativado.
 //   5. Horário: antes das 06h30 BRT não roda; depois roda uma vez por dia.
 // ============================================================
@@ -17,9 +22,8 @@
 const svc = require('../../src/services/bannerIndicacaoTrial');
 const job = require('../../src/jobs/bannerIndicacaoTrialJob');
 
-const { avaliarEmpresa, tickBannerIndicacaoTrial, montarBanner, dedupeKeyDe } = svc;
+const { avaliarEmpresa, tickBannerIndicacaoTrial, montarBanner, dedupeKeyDe, lerConfig } = svc;
 
-// 06h30 de 14/10/2026 em Brasília = 09h30 UTC.
 const AGORA = new Date('2026-10-14T12:00:00.000Z');
 const DIA = 24 * 3600 * 1000;
 const CID = '11111111-2222-3333-4444-555555555555';
@@ -37,9 +41,6 @@ const fatos = (extra = {}) => ({
   trial_ends_at: new Date(AGORA.getTime() + 8 * DIA).toISOString(),
   billing_status: 'trial',
   tem_assinatura: false,
-  tem_venda: true,
-  conversa_recente: false,
-  avisou_checkout: false,
   ja_tem_banner: false,
   ...extra,
 });
@@ -48,12 +49,32 @@ const avalia = (extra, opts) => avaliarEmpresa(fatos(extra), { agora: AGORA, ...
 
 // ── 1. a regra ──────────────────────────────────────────────
 describe('avaliarEmpresa', () => {
-  it('empresa que cumpre tudo é elegível', () => {
+  it('empresa em teste, de varejo, sem assinatura e com e-mail verificado é elegível', () => {
     expect(avalia()).toEqual({ elegivel: true, motivo: null });
   });
 
   it('shell ausente (NULL no banco já vira negocio na consulta) segue elegível', () => {
     expect(avalia({ shell: undefined }).elegivel).toBe(true);
+  });
+
+  describe('critérios removidos não barram mais', () => {
+    it('cadastro novo, sem nenhuma venda, entra', () => {
+      // fatos sem tem_venda (a regra nem olha mais para venda)
+      expect(avalia({ tem_venda: false }).elegivel).toBe(true);
+      expect(avalia({ tem_venda: undefined }).elegivel).toBe(true);
+    });
+
+    it('teste com menos de 3 dias restantes entra, desde que vigente', () => {
+      const amanha = new Date(AGORA.getTime() + DIA).toISOString();
+      const umMinuto = new Date(AGORA.getTime() + 60000).toISOString();
+      expect(avalia({ trial_ends_at: amanha }).elegivel).toBe(true);
+      expect(avalia({ trial_ends_at: umMinuto }).elegivel).toBe(true);
+    });
+
+    it('conversa recente e aviso de fim de teste não barram', () => {
+      expect(avalia({ conversa_recente: true }).elegivel).toBe(true);
+      expect(avalia({ avisou_checkout: true }).elegivel).toBe(true);
+    });
   });
 
   it.each([
@@ -70,7 +91,6 @@ describe('avaliarEmpresa', () => {
   it('conta de teste (is_sandbox) e o canário não recebem', () => {
     expect(avalia({ is_sandbox: true }).motivo).toBe('conta_de_teste');
     expect(avalia({ company_id: CANARIO.toUpperCase() }, { canaryId: CANARIO }).motivo).toBe('canario');
-    // sem CANARY_COMPANY_ID configurado, o id comum passa
     expect(avalia({ company_id: CANARIO }, { canaryId: null }).elegivel).toBe(true);
   });
 
@@ -78,17 +98,11 @@ describe('avaliarEmpresa', () => {
     expect(avalia({ paga_por_outra: true }).motivo).toBe('paga_por_outra');
   });
 
-  describe('2. em teste, com mais de 3 dias, sem assinatura', () => {
-    it('3 dias exatos NÃO bastam; 3 dias e 1 minuto bastam', () => {
-      const exato = new Date(AGORA.getTime() + 3 * DIA).toISOString();
-      const um = new Date(AGORA.getTime() + 3 * DIA + 60000).toISOString();
-      expect(avalia({ trial_ends_at: exato }).motivo).toBe('teste_perto_do_fim_ou_vencido');
-      expect(avalia({ trial_ends_at: um }).elegivel).toBe(true);
-    });
-
-    it('teste vencido ou sem data não recebe', () => {
+  describe('em teste e sem assinatura', () => {
+    it('teste vencido (inclusive no instante exato) ou sem data não recebe', () => {
       const ontem = new Date(AGORA.getTime() - DIA).toISOString();
-      expect(avalia({ trial_ends_at: ontem }).motivo).toBe('teste_perto_do_fim_ou_vencido');
+      expect(avalia({ trial_ends_at: ontem }).motivo).toBe('teste_vencido');
+      expect(avalia({ trial_ends_at: AGORA.toISOString() }).motivo).toBe('teste_vencido');
       expect(avalia({ trial_ends_at: null }).motivo).toBe('sem_fim_de_teste');
     });
 
@@ -98,25 +112,30 @@ describe('avaliarEmpresa', () => {
     });
   });
 
-  it('3. sem nenhuma venda válida não recebe', () => {
-    expect(avalia({ tem_venda: false }).motivo).toBe('sem_venda');
-  });
-
-  it('4. conversa registrada nos últimos 3 dias não recebe', () => {
-    expect(avalia({ conversa_recente: true }).motivo).toBe('conversa_recente');
-  });
-
-  it('5. quem já recebeu aviso de fim de teste não recebe', () => {
-    expect(avalia({ avisou_checkout: true }).motivo).toBe('aviso_de_fim_de_teste');
-  });
-
-  it('6. dono sem e-mail verificado não recebe', () => {
+  it('dono sem e-mail verificado não recebe', () => {
     expect(avalia({ email_verificado: false }).motivo).toBe('email_nao_verificado');
     expect(avalia({ email_verificado: null }).motivo).toBe('email_nao_verificado');
   });
 
-  it('7. quem já teve banner de indicação não recebe', () => {
+  it('quem já tem banner de indicação (inclusive criado à mão) não recebe', () => {
     expect(avalia({ ja_tem_banner: true }).motivo).toBe('ja_tem_banner');
+  });
+});
+
+// ── chaves de ambiente ──────────────────────────────────────
+describe('lerConfig', () => {
+  it('sem nenhuma chave: ligado e publicando, sem dry-run', () => {
+    expect(lerConfig({})).toMatchObject({ enabled: true, publicar: true, dryRun: false });
+  });
+
+  it('só "false" desliga ENABLED e PUBLICAR; só "true" liga DRY_RUN', () => {
+    expect(lerConfig({ BANNER_INDICACAO_TRIAL_ENABLED: 'false' }).enabled).toBe(false);
+    expect(lerConfig({ BANNER_INDICACAO_TRIAL_ENABLED: ' FALSE ' }).enabled).toBe(false);
+    expect(lerConfig({ BANNER_INDICACAO_TRIAL_ENABLED: '0' }).enabled).toBe(true);
+    expect(lerConfig({ BANNER_INDICACAO_TRIAL_PUBLICAR: 'false' }).publicar).toBe(false);
+    expect(lerConfig({ BANNER_INDICACAO_TRIAL_PUBLICAR: 'true' }).publicar).toBe(true);
+    expect(lerConfig({ BANNER_INDICACAO_TRIAL_DRY_RUN: 'true' }).dryRun).toBe(true);
+    expect(lerConfig({ BANNER_INDICACAO_TRIAL_DRY_RUN: '1' }).dryRun).toBe(false);
   });
 });
 
@@ -140,10 +159,10 @@ describe('montarBanner', () => {
     expect(new Date(b.expiresAt).getTime() - AGORA.getTime()).toBe(7 * DIA);
   });
 
-  it('nasce inativo por padrão e ativo só com publicar=true', () => {
-    expect(montarBanner(CID, { agora: AGORA }).isActive).toBe(false);
-    expect(montarBanner(CID, { agora: AGORA, publicar: false }).isActive).toBe(false);
+  it('nasce ativo por padrão e inativo só com publicar=false', () => {
+    expect(montarBanner(CID, { agora: AGORA }).isActive).toBe(true);
     expect(montarBanner(CID, { agora: AGORA, publicar: true }).isActive).toBe(true);
+    expect(montarBanner(CID, { agora: AGORA, publicar: false }).isActive).toBe(false);
   });
 });
 
@@ -176,91 +195,85 @@ function makeNotifications(impl) {
   };
 }
 
-const ENV_LIGADO = { BANNER_INDICACAO_TRIAL_ENABLED: 'true' };
 const escritas = (db) => db.calls.filter((c) => /^(UPDATE|INSERT|DELETE)/.test(c.s));
+const rodar = (db, notifications, env = {}) => tickBannerIndicacaoTrial({
+  db, notifications, now: AGORA.getTime(), env,
+});
 
 describe('tickBannerIndicacaoTrial', () => {
   let log;
   beforeEach(() => { log = jest.spyOn(console, 'log').mockImplementation(() => {}); });
   afterEach(() => { log.mockRestore(); });
 
-  it('desligado (padrão) não consulta nem escreve nada', async () => {
+  it('kill switch: ENABLED=false não consulta nem escreve nada', async () => {
     const db = makeDb();
     const notifications = makeNotifications();
-    const r = await tickBannerIndicacaoTrial({ db, notifications, now: AGORA.getTime(), env: {} });
+    const r = await rodar(db, notifications, { BANNER_INDICACAO_TRIAL_ENABLED: 'false' });
     expect(r.ligado).toBe(false);
     expect(db.query).not.toHaveBeenCalled();
     expect(notifications.createAppNotification).not.toHaveBeenCalled();
   });
 
-  it('ENABLED diferente de "true" também não liga', async () => {
-    const db = makeDb();
+  it('sem nenhuma chave de ambiente o job roda e cria o banner ATIVO', async () => {
+    const db = makeDb({ empresas: [fatos({ company_id: CID }), fatos({ company_id: CID2 })] });
     const notifications = makeNotifications();
-    await tickBannerIndicacaoTrial({
-      db, notifications, now: AGORA.getTime(), env: { BANNER_INDICACAO_TRIAL_ENABLED: '1' },
+    const r = await rodar(db, notifications, {});
+
+    expect(notifications.criados).toHaveLength(2);
+    expect(notifications.criados[0]).toMatchObject({
+      targetCompanyId: CID, dedupeKey: dedupeKeyDe(CID), isActive: true, ctaRoute: '/configuracoes',
     });
-    expect(db.query).not.toHaveBeenCalled();
+    expect(r).toMatchObject({ ligado: true, publicar: true, candidatas: 2, criadas: 2, falhas: 0 });
   });
 
-  it('ligado: cria o banner INATIVO só para quem passa na regra', async () => {
+  it('PUBLICAR=false cria o banner inativo', async () => {
+    const db = makeDb();
+    const notifications = makeNotifications();
+    await rodar(db, notifications, { BANNER_INDICACAO_TRIAL_PUBLICAR: 'false' });
+    expect(notifications.criados[0].isActive).toBe(false);
+  });
+
+  it('só cria para quem passa na regra (cadastro novo entra, sem e-mail verificado não)', async () => {
     const db = makeDb({
       empresas: [
         fatos({ company_id: CID }),
-        fatos({ company_id: CID2, tem_venda: false }),
-        fatos({ company_id: 'c3', conversa_recente: true }),
+        fatos({ company_id: CID2, email_verificado: false }),
+        fatos({ company_id: 'c3', shell: 'food' }),
       ],
     });
     const notifications = makeNotifications();
-    const r = await tickBannerIndicacaoTrial({ db, notifications, now: AGORA.getTime(), env: ENV_LIGADO });
-
-    expect(notifications.criados).toHaveLength(1);
-    expect(notifications.criados[0]).toMatchObject({
-      targetCompanyId: CID, dedupeKey: dedupeKeyDe(CID), isActive: false, ctaRoute: '/configuracoes',
-    });
-    expect(r).toMatchObject({ avaliadas: 3, candidatas: 1, criadas: 1, jaExistiam: 0, falhas: 0 });
-  });
-
-  it('PUBLICAR=true cria o banner ativo', async () => {
-    const db = makeDb();
-    const notifications = makeNotifications();
-    await tickBannerIndicacaoTrial({
-      db, notifications, now: AGORA.getTime(),
-      env: { ...ENV_LIGADO, BANNER_INDICACAO_TRIAL_PUBLICAR: 'true' },
-    });
-    expect(notifications.criados[0].isActive).toBe(true);
+    const r = await rodar(db, notifications);
+    expect(notifications.criados.map((p) => p.targetCompanyId)).toEqual([CID]);
+    expect(r).toMatchObject({ avaliadas: 3, candidatas: 1, criadas: 1 });
   });
 
   it('o canário (CANARY_COMPANY_ID) fica de fora', async () => {
     const db = makeDb({ empresas: [fatos({ company_id: CANARIO })] });
     const notifications = makeNotifications();
-    const r = await tickBannerIndicacaoTrial({
-      db, notifications, now: AGORA.getTime(), env: { ...ENV_LIGADO, CANARY_COMPANY_ID: CANARIO },
-    });
+    const r = await rodar(db, notifications, { CANARY_COMPANY_ID: CANARIO });
     expect(r.candidatas).toBe(0);
     expect(notifications.createAppNotification).not.toHaveBeenCalled();
   });
 
-  it('dedupe: chave que já existe (createAppNotification devolve null) conta como já existente', async () => {
-    const db = makeDb();
-    const notifications = makeNotifications(() => null);
-    const r = await tickBannerIndicacaoTrial({ db, notifications, now: AGORA.getTime(), env: ENV_LIGADO });
-    expect(r).toMatchObject({ candidatas: 1, criadas: 0, jaExistiam: 1 });
-  });
-
-  it('empresa com banner anterior (ja_tem_banner) nem chega a tentar criar', async () => {
+  it('banner criado à mão com a mesma chave: ja_tem_banner, o job não tenta criar outro', async () => {
     const db = makeDb({ empresas: [fatos({ ja_tem_banner: true })] });
     const notifications = makeNotifications();
-    await tickBannerIndicacaoTrial({ db, notifications, now: AGORA.getTime(), env: ENV_LIGADO });
+    const r = await rodar(db, notifications);
     expect(notifications.createAppNotification).not.toHaveBeenCalled();
+    expect(r).toMatchObject({ candidatas: 0, criadas: 0 });
+  });
+
+  it('corrida: a chave aparece entre a consulta e o insert (createAppNotification devolve null)', async () => {
+    const db = makeDb();
+    const notifications = makeNotifications(() => null);
+    const r = await rodar(db, notifications);
+    expect(r).toMatchObject({ candidatas: 1, criadas: 0, jaExistiam: 1 });
   });
 
   it('DRY_RUN só loga: nenhuma escrita e nenhum banner criado', async () => {
     const db = makeDb({ assinaram: [{ id: 'b-velho', company_id: CID2 }] });
     const notifications = makeNotifications();
-    const r = await tickBannerIndicacaoTrial({
-      db, notifications, now: AGORA.getTime(),
-      env: { ...ENV_LIGADO, BANNER_INDICACAO_TRIAL_DRY_RUN: 'true' },
-    });
+    const r = await rodar(db, notifications, { BANNER_INDICACAO_TRIAL_DRY_RUN: 'true' });
     expect(notifications.createAppNotification).not.toHaveBeenCalled();
     expect(escritas(db)).toHaveLength(0);
     expect(r).toMatchObject({ dryRun: true, candidatas: 1, criadas: 0, desativadas: 1 });
@@ -269,10 +282,10 @@ describe('tickBannerIndicacaoTrial', () => {
     expect(linhas).toContain('desativaria');
   });
 
-  it('desativa o banner de indicação de quem passou a ter assinatura ativa', async () => {
+  it('empresa que passou a ter assinatura ativa tem o banner de indicação desativado', async () => {
     const db = makeDb({ empresas: [], assinaram: [{ id: 'b1', company_id: CID }] });
     const notifications = makeNotifications();
-    const r = await tickBannerIndicacaoTrial({ db, notifications, now: AGORA.getTime(), env: ENV_LIGADO });
+    const r = await rodar(db, notifications);
 
     const upd = db.calls.find((c) => c.s.startsWith('UPDATE app_notifications SET is_active = false'));
     expect(upd).toBeTruthy();
@@ -290,26 +303,26 @@ describe('tickBannerIndicacaoTrial', () => {
       if (p.targetCompanyId === CID) throw new Error('boom');
       return { id: 'ok', ...p };
     });
-    const r = await tickBannerIndicacaoTrial({ db, notifications, now: AGORA.getTime(), env: ENV_LIGADO });
+    const r = await rodar(db, notifications);
     expect(r).toMatchObject({ candidatas: 2, criadas: 1, falhas: 1 });
     err.mockRestore();
   });
 });
 
 describe('buscarFatos (consulta)', () => {
-  it('lê só teste futuro sem assinatura e junta os sinais da regra', async () => {
+  it('lê teste vigente sem assinatura; sem filtro de venda, conversa ou aviso', async () => {
     const db = makeDb({ empresas: [] });
     await svc.buscarFatos(db, AGORA);
     const { s, params } = db.calls[0];
     expect(s).toContain('c.trial_ends_at > $1::timestamptz');
     expect(s).toContain('c.asaas_subscription_id IS NULL');
     expect(s).toContain("COALESCE(c.vertical_active, c.vertical, 'negocio') AS shell");
-    expect(s).toContain('FROM sales s');
-    expect(s).toContain('company_admin_notes n');
-    expect(s).toContain('n.canal IS NOT NULL');
-    expect(s).toContain("a.action = 'notify_checkout'");
-    expect(s).toContain('b.dedupe_key = $3::text || c.id::text');
-    expect(params).toEqual([AGORA.toISOString(), 3, 'indicacao-trial:']);
+    expect(s).toContain('c.billing_owner_company_id <> c.id');
+    expect(s).toContain('b.dedupe_key = $2::text || c.id::text');
+    expect(s).not.toContain('FROM sales');
+    expect(s).not.toContain('company_admin_notes');
+    expect(s).not.toContain('notify_checkout');
+    expect(params).toEqual([AGORA.toISOString(), 'indicacao-trial:']);
   });
 });
 
@@ -340,28 +353,27 @@ describe('jobs/bannerIndicacaoTrialJob', () => {
 
   describe('runOnce', () => {
     const db = require('../../src/config/database');
-    const notificationsReal = require('../../src/services/appNotifications');
     let logSpy;
     let errSpy;
+
+    const limpaEnv = () => {
+      delete process.env.BANNER_INDICACAO_TRIAL_ENABLED;
+      delete process.env.BANNER_INDICACAO_TRIAL_DRY_RUN;
+      delete process.env.BANNER_INDICACAO_TRIAL_PUBLICAR;
+    };
 
     beforeEach(() => {
       job._resetForTests();
       db.query.mockReset();
       logSpy = jest.spyOn(console, 'log').mockImplementation(() => {});
       errSpy = jest.spyOn(console, 'error').mockImplementation(() => {});
-      process.env.BANNER_INDICACAO_TRIAL_ENABLED = 'true';
-      delete process.env.BANNER_INDICACAO_TRIAL_DRY_RUN;
-      delete process.env.BANNER_INDICACAO_TRIAL_PUBLICAR;
-      db.query.mockImplementation(async (sql) => {
-        const s = sql.replace(/\s+/g, ' ');
-        if (s.includes('FROM companies c LEFT JOIN users')) return { rows: [] };
-        return { rows: [] };
-      });
+      limpaEnv();
+      db.query.mockImplementation(async () => ({ rows: [] }));
     });
     afterEach(() => {
       logSpy.mockRestore();
       errSpy.mockRestore();
-      delete process.env.BANNER_INDICACAO_TRIAL_ENABLED;
+      limpaEnv();
     });
 
     it('antes das 06h30 não consulta o banco', async () => {
@@ -370,7 +382,7 @@ describe('jobs/bannerIndicacaoTrialJob', () => {
       expect(db.query).not.toHaveBeenCalled();
     });
 
-    it('depois das 06h30 roda uma vez no dia e não repete', async () => {
+    it('depois das 06h30 roda uma vez no dia (sem nenhuma chave de ambiente) e não repete', async () => {
       const r1 = await job.runOnce(brt('2026-10-14', 6, 31));
       expect(r1).toMatchObject({ ligado: true });
       const chamadas = db.query.mock.calls.length;
@@ -380,17 +392,16 @@ describe('jobs/bannerIndicacaoTrialJob', () => {
       expect(r2).toBeNull();
       expect(db.query.mock.calls.length).toBe(chamadas);
 
-      // no dia seguinte, roda de novo
       const r3 = await job.runOnce(brt('2026-10-15', 6, 31));
       expect(r3).toMatchObject({ ligado: true });
     });
 
-    it('desligado não roda nem marca o dia', async () => {
-      delete process.env.BANNER_INDICACAO_TRIAL_ENABLED;
+    it('kill switch (ENABLED=false) não roda nem marca o dia', async () => {
+      process.env.BANNER_INDICACAO_TRIAL_ENABLED = 'false';
       expect(await job.runOnce(brt('2026-10-14', 8))).toBeNull();
       expect(db.query).not.toHaveBeenCalled();
-      // ligado depois, no mesmo dia, ainda roda
-      process.env.BANNER_INDICACAO_TRIAL_ENABLED = 'true';
+      // religado no mesmo dia, roda
+      delete process.env.BANNER_INDICACAO_TRIAL_ENABLED;
       expect(await job.runOnce(brt('2026-10-14', 9))).toMatchObject({ ligado: true });
     });
 
@@ -401,10 +412,10 @@ describe('jobs/bannerIndicacaoTrialJob', () => {
       expect(await job.runOnce(brt('2026-10-14', 7, 5))).toMatchObject({ ligado: true });
     });
 
-    it('com empresa elegível, grava o banner inativo pelo appNotifications', async () => {
+    it('com empresa elegível, grava o banner ATIVO pelo appNotifications', async () => {
       db.query.mockImplementation(async (sql) => {
         const s = sql.replace(/\s+/g, ' ');
-        if (s.includes('FROM companies c LEFT JOIN users')) {
+        if (s.startsWith('SELECT c.id AS company_id')) {
           return {
             rows: [fatos({
               trial_ends_at: new Date(brt('2026-10-14', 7) + 10 * DIA).toISOString(),
@@ -418,13 +429,14 @@ describe('jobs/bannerIndicacaoTrialJob', () => {
       expect(r).toMatchObject({ candidatas: 1, criadas: 1 });
       const ins = db.query.mock.calls.find((c) => /INSERT INTO app_notifications/.test(c[0]));
       expect(ins).toBeTruthy();
-      // [..., target_company_id, target_plan, target_vertical, expires_at, is_active, dedupe_key]
+      expect(ins[0]).toContain('ON CONFLICT (dedupe_key)');
+      // [type, title, body, html, cta_label, cta_url, cta_route, target_company_id,
+      //  target_plan, target_vertical, expires_at, is_active, dedupe_key]
       const p = ins[1];
       expect(p[0]).toBe('banner');
       expect(p[7]).toBe(CID);
-      expect(p[11]).toBe(false);
+      expect(p[11]).toBe(true);
       expect(p[12]).toBe('indicacao-trial:' + CID);
-      expect(notificationsReal.createAppNotification).toBeDefined();
     });
   });
 

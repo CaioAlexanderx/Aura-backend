@@ -1,23 +1,24 @@
 // ============================================================
 // AURA. — Banner "Indique um lojista" durante o teste (14/10/2026)
 //
-// Pedido do board (Teo, frente Tecnologia): a empresa que está testando a
-// Aura, já vendeu e ainda não foi abordada por ninguém recebe, no sininho,
-// o convite para indicar um lojista e ganhar o mês grátis.
-//
-// O banner nasce INATIVO. A Cassie aprova na leitura das 07h30 e o Teo
-// ativa por UPDATE (ver o SQL no PR). Só com BANNER_INDICACAO_TRIAL_PUBLICAR
-// =true ele nasce ativo. Sem migration: usa app_notifications (285) e o
-// dedupe_key para nunca criar dois banners para a mesma empresa.
+// Pedido do Caio: toda empresa de varejo que está testando a Aura (inclusive
+// o cadastro novo, sem nenhuma venda) recebe, no sininho, o convite para
+// indicar um lojista e ganhar o mês grátis. Um banner por empresa.
 //
 // A regra mora numa função pura (avaliarEmpresa) que recebe os fatos de uma
 // empresa; a consulta (buscarFatos) só junta esses fatos. Assim cada critério
 // é testável sozinho e o SQL não duplica a regra.
 //
+// Idempotência: dedupe_key 'indicacao-trial:<company_id>' (índice único
+// parcial da 285). Banner criado à mão com a mesma chave conta como "já tem
+// banner" e o job não cria outro por cima.
+//
 // Chaves de ambiente (lidas a cada volta, nada fica congelado no boot):
-//   BANNER_INDICACAO_TRIAL_ENABLED  = true  liga o job (padrão: desligado)
-//   BANNER_INDICACAO_TRIAL_DRY_RUN  = true  só loga quem seria criado
-//   BANNER_INDICACAO_TRIAL_PUBLICAR = true  banner nasce ativo (padrão: inativo)
+//   BANNER_INDICACAO_TRIAL_ENABLED  = false  DESLIGA o job (kill switch;
+//                                            padrão: ligado)
+//   BANNER_INDICACAO_TRIAL_DRY_RUN  = true   só loga quem seria criado
+//   BANNER_INDICACAO_TRIAL_PUBLICAR = false  cria o banner INATIVO
+//                                            (padrão: nasce ativo)
 //
 // Notificar nunca derruba nada: quem chama (job) só loga a falha.
 // ============================================================
@@ -25,11 +26,6 @@
 
 const PREFIXO_DEDUPE = 'indicacao-trial:';
 
-// Dias de teste que ainda precisam sobrar: perto do fim do teste o assunto
-// é a assinatura, não a indicação.
-const DIAS_MINIMOS_DE_TESTE = 3;
-// Janela da "conversa recente" (company_admin_notes com canal).
-const DIAS_SEM_CONVERSA = 3;
 // Quanto tempo o banner fica no ar depois de criado.
 const DIAS_NO_AR = 7;
 
@@ -47,15 +43,19 @@ const BANNER = Object.freeze({
 
 const DIA_MS = 24 * 3600 * 1000;
 
-const ehVerdadeiro = (v) => String(v == null ? '' : v).trim().toLowerCase() === 'true';
+const norm = (v) => String(v == null ? '' : v).trim().toLowerCase();
 
-/** Lê as três chaves de ambiente. `env` é injetável para teste. */
+/**
+ * Lê as chaves de ambiente. `env` é injetável para teste.
+ * ENABLED e PUBLICAR são ligados por padrão: só o texto "false" desliga.
+ * DRY_RUN é desligado por padrão: só o texto "true" liga.
+ */
 function lerConfig(env = process.env) {
   return {
-    enabled: ehVerdadeiro(env.BANNER_INDICACAO_TRIAL_ENABLED),
-    dryRun: ehVerdadeiro(env.BANNER_INDICACAO_TRIAL_DRY_RUN),
-    publicar: ehVerdadeiro(env.BANNER_INDICACAO_TRIAL_PUBLICAR),
-    canaryId: String(env.CANARY_COMPANY_ID || '').trim().toLowerCase() || null,
+    enabled: norm(env.BANNER_INDICACAO_TRIAL_ENABLED) !== 'false',
+    dryRun: norm(env.BANNER_INDICACAO_TRIAL_DRY_RUN) === 'true',
+    publicar: norm(env.BANNER_INDICACAO_TRIAL_PUBLICAR) !== 'false',
+    canaryId: norm(env.CANARY_COMPANY_ID) || null,
   };
 }
 
@@ -69,14 +69,13 @@ const ehInterna = (email) => /@getaura\.com\.br\s*$/i.test(String(email || '').t
  *
  * fatos: { company_id, shell, company_email, owner_email, is_sandbox,
  *          paga_por_outra, trial_ends_at, tem_assinatura, billing_status,
- *          tem_venda, conversa_recente, avisou_checkout, email_verificado,
- *          ja_tem_banner }
+ *          email_verificado, ja_tem_banner }
  */
 function avaliarEmpresa(fatos, { agora = new Date(), canaryId = null } = {}) {
   const f = fatos || {};
   const nao = (motivo) => ({ elegivel: false, motivo });
 
-  // 1. Varejo (shell Negócio), fora conta interna, de teste e o canário.
+  // Varejo (shell Negócio), fora conta interna, de teste e o canário.
   if ((f.shell || SHELL_VAREJO) !== SHELL_VAREJO) return nao('fora_do_shell_negocio');
   if (ehInterna(f.company_email) || ehInterna(f.owner_email)) return nao('conta_interna');
   if (f.is_sandbox === true) return nao('conta_de_teste');
@@ -84,26 +83,17 @@ function avaliarEmpresa(fatos, { agora = new Date(), canaryId = null } = {}) {
   // Filial paga por outra empresa: o teste e a assinatura são da matriz.
   if (f.paga_por_outra === true) return nao('paga_por_outra');
 
-  // 2. Em teste, com mais de 3 dias restantes, sem assinatura.
+  // Em teste (trial vigente) e sem assinatura.
   const fim = f.trial_ends_at ? new Date(f.trial_ends_at).getTime() : NaN;
   if (!Number.isFinite(fim)) return nao('sem_fim_de_teste');
-  if (!(fim > agora.getTime() + DIAS_MINIMOS_DE_TESTE * DIA_MS)) return nao('teste_perto_do_fim_ou_vencido');
+  if (!(fim > agora.getTime())) return nao('teste_vencido');
   if (f.tem_assinatura === true) return nao('com_assinatura');
   if ((f.billing_status == null ? 'trial' : String(f.billing_status)) === 'active') return nao('com_assinatura');
 
-  // 3. Pelo menos uma venda (cancelada não conta; a consulta já filtra).
-  if (f.tem_venda !== true) return nao('sem_venda');
-
-  // 4. Sem conversa registrada nos últimos 3 dias.
-  if (f.conversa_recente === true) return nao('conversa_recente');
-
-  // 5. Sem aviso de fim de teste.
-  if (f.avisou_checkout === true) return nao('aviso_de_fim_de_teste');
-
-  // 6. Dono com e-mail verificado.
+  // Dono com e-mail verificado.
   if (f.email_verificado !== true) return nao('email_nao_verificado');
 
-  // 7. Sem banner de indicação anterior.
+  // Um banner por empresa (inclui os criados à mão com a mesma chave).
   if (f.ja_tem_banner === true) return nao('ja_tem_banner');
 
   return { elegivel: true, motivo: null };
@@ -111,9 +101,9 @@ function avaliarEmpresa(fatos, { agora = new Date(), canaryId = null } = {}) {
 
 /**
  * Fatos das empresas que ainda podem ser candidatas. O corte barato fica no
- * SQL (teste no futuro e sem assinatura: dezenas de linhas); o resto da
- * regra é avaliarEmpresa. `agora` entra como parâmetro: o resultado de uma
- * volta não depende do relógio do banco.
+ * SQL (teste vigente e sem assinatura: dezenas de linhas); o resto da regra
+ * é avaliarEmpresa. `agora` entra como parâmetro: o resultado de uma volta
+ * não depende do relógio do banco.
  */
 async function buscarFatos(db, agora = new Date()) {
   const { rows } = await db.query(
@@ -128,33 +118,21 @@ async function buscarFatos(db, agora = new Date()) {
             c.trial_ends_at,
             c.billing_status,
             (c.asaas_subscription_id IS NOT NULL) AS tem_assinatura,
-            EXISTS (SELECT 1 FROM sales s
-                     WHERE s.company_id = c.id
-                       AND COALESCE(s.status, 'completed') NOT IN ('cancelled', 'canceled', 'refunded', 'estornada')
-            ) AS tem_venda,
-            EXISTS (SELECT 1 FROM company_admin_notes n
-                     WHERE n.company_id = c.id
-                       AND n.canal IS NOT NULL
-                       AND n.created_at > $1::timestamptz - make_interval(days => $2::int)
-            ) AS conversa_recente,
-            EXISTS (SELECT 1 FROM admin_audit_log a
-                     WHERE a.company_id = c.id AND a.action = 'notify_checkout'
-            ) AS avisou_checkout,
             EXISTS (SELECT 1 FROM app_notifications b
-                     WHERE b.dedupe_key = $3::text || c.id::text
+                     WHERE b.dedupe_key = $2::text || c.id::text
             ) AS ja_tem_banner
        FROM companies c
        LEFT JOIN users u ON u.id = c.owner_id
       WHERE c.trial_ends_at > $1::timestamptz
         AND c.asaas_subscription_id IS NULL
       ORDER BY c.trial_ends_at, c.id`,
-    [agora.toISOString(), DIAS_SEM_CONVERSA, PREFIXO_DEDUPE]
+    [agora.toISOString(), PREFIXO_DEDUPE]
   );
   return rows || [];
 }
 
 /** Payload de createAppNotification para a empresa. Puro. */
-function montarBanner(companyId, { agora = new Date(), publicar = false } = {}) {
+function montarBanner(companyId, { agora = new Date(), publicar = true } = {}) {
   return {
     type: BANNER.type,
     title: BANNER.title,
@@ -164,7 +142,7 @@ function montarBanner(companyId, { agora = new Date(), publicar = false } = {}) 
     targetCompanyId: companyId,
     expiresAt: new Date(agora.getTime() + DIAS_NO_AR * DIA_MS).toISOString(),
     dedupeKey: dedupeKeyDe(companyId),
-    isActive: publicar === true,
+    isActive: publicar !== false,
   };
 }
 
@@ -228,8 +206,8 @@ async function tickBannerIndicacaoTrial({ db, notifications, now = Date.now(), e
       const banner = await notifications.createAppNotification(
         montarBanner(f.company_id, { agora, publicar: cfg.publicar })
       );
-      // null = a chave já existe (outra instância, ou volta anterior) ou falha
-      // de escrita, que o appNotifications já logou.
+      // null = a chave já existe (outra instância, volta anterior ou banner
+      // criado à mão) ou falha de escrita, que o appNotifications já logou.
       if (banner) {
         resumo.criadas++;
         console.log(`[bannerIndicacaoTrial] banner criado (${cfg.publicar ? 'ativo' : 'inativo'}): `
@@ -254,8 +232,6 @@ module.exports = {
   lerConfig,
   dedupeKeyDe,
   PREFIXO_DEDUPE,
-  DIAS_MINIMOS_DE_TESTE,
-  DIAS_SEM_CONVERSA,
   DIAS_NO_AR,
   BANNER,
 };

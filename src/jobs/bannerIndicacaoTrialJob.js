@@ -2,15 +2,14 @@
 // Banner de indicação para trials (services/bannerIndicacaoTrial.js).
 // Mesmo padrão dos outros agendadores: setInterval + init/stop.
 //
-// Uma avaliação por dia, a partir das 06h30 de Brasília (a Cassie lê às
-// 07h30). A cada 5 min o job só confere duas coisas: já passou das 06h30 e
+// Uma avaliação por dia, a partir das 06h30 de Brasília. A cada 5 min o job só confere duas coisas: já passou das 06h30 e
 // ainda não rodou hoje? A guarda "rodou hoje" é em memória; a idempotência de
 // verdade vem do dedupe_key do banner — um reinício no mesmo dia roda de novo
 // e não cria nada em duplicidade. Volta que falha (banco fora do ar) não
 // marca o dia e é tentada de novo 5 min depois.
 //
-// Nasce desligado: só roda com BANNER_INDICACAO_TRIAL_ENABLED=true (lido a
-// cada volta, então ligar/desligar na Railway vale no próximo ciclo).
+// Nasce LIGADO: BANNER_INDICACAO_TRIAL_ENABLED=false é o kill switch (lido a
+// cada volta, então desligar na Railway vale no próximo ciclo, sem deploy).
 const { tickBannerIndicacaoTrial, lerConfig } = require('../services/bannerIndicacaoTrial');
 
 const INTERVALO_MS = 5 * 60 * 1000;
@@ -70,7 +69,7 @@ function initBannerIndicacaoTrialJob() {
   console.log('[bannerIndicacaoTrial] iniciado — '
     + (cfg.enabled
       ? `ligado${cfg.dryRun ? ' (dry-run)' : ''}, banner nasce ${cfg.publicar ? 'ATIVO' : 'inativo'}, 1x por dia após 06h30 BRT`
-      : 'desligado (BANNER_INDICACAO_TRIAL_ENABLED != true)'));
+      : 'desligado (BANNER_INDICACAO_TRIAL_ENABLED=false)'));
 }
 
 function stopBannerIndicacaoTrialJob() {
