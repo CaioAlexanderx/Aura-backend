@@ -18,6 +18,8 @@
 //           card_fee_credit_pct, card_fee_debit_pct
 //   NUMBER OU NULL (percentual 0-100): card_price_pct
 //   STRING (enum) OU NULL: label_size (99x21 | 30x25 | 58mm | 105x21 | 40x25)
+//   LISTA OU NULL: label_custom_specs (medidas proprias de etiqueta, ate 20)
+//   OBJETO OU NULL: label_printer_prefs (calibracao por modelo fixo)
 //
 // 26/05/2026: ampliada whitelist pra desbloquear UI Studio/Food. Antes,
 // app/studio/(estudio)/configuracoes.tsx tentava salvar studio_approval_*
@@ -144,6 +146,151 @@ const ALLOWED_RANGED_KEYS = {
   label_cols:      { min: 1,  max: 5, integer: true },
 };
 
+// 15/10/2026 — configuracao de impressao de etiqueta salva na CONTA (pedido
+// do Caio: "para nao perder a configuracao"). Antes vivia so no navegador
+// (aura-app customLabelStorage.ts e labelPrinterPrefs.ts); agora vale para a
+// loja inteira, em todos os computadores. Loja com duas impressoras que
+// erram diferente cria duas medidas ("40x25 balcao" e "40x25 estoque").
+// Sem migration: pdv_settings e jsonb.
+//
+// Politica de validacao (a mesma das demais chaves deste arquivo):
+//   - forma errada ou numero fora da faixa => 400 com o nome do campo e a
+//     faixa, e NADA e gravado (o app ja satura os valores antes de enviar,
+//     entao fora da faixa aqui e bug ou chamada manual);
+//   - chave desconhecida dentro de uma medida ou de um modelo => descartada;
+//   - numeros arredondados a decimos (o app trabalha em decimos de mm);
+//   - medida com id repetido => fica a primeira (igual ao app).
+// null = a loja nunca salvou na conta: o app usa o que tiver no navegador e
+// sobe uma vez (migracao unica). Lista vazia/objeto vazio = salvou "nada".
+
+// Espelha aura-app components/screens/estoque/labels/customLabel.ts
+// (MEDIDA_LIMITES e MEDIDA_PADRAO). Campos opcionais caem no padrao.
+const LABEL_CUSTOM_MAX_SPECS = 20;
+const LABEL_CUSTOM_ID_MAX = 64;
+const LABEL_CUSTOM_NOME_MAX = 40;
+const LABEL_CUSTOM_FIELDS = {
+  larguraMm:     { min: 15, max: 110, obrigatorio: true },
+  alturaMm:      { min: 10, max: 80,  obrigatorio: true },
+  colunas:       { min: 1,  max: 3,   padrao: 1, integer: true },
+  espacoLadoMm:  { min: 0,  max: 10,  padrao: 3 },
+  espacoLinhaMm: { min: 0,  max: 10,  padrao: 2 },
+  ajusteXMm:     { min: -8, max: 8,   padrao: 0 },
+  ajusteYMm:     { min: -8, max: 8,   padrao: 0 },
+};
+
+// Espelha aura-app labelPrinterPrefs.ts + buildLabelHtml.ts: so os modelos
+// fixos que aceitam calibracao (rolo com vao e 1 linha por pagina, ou
+// calibratable). Passo = altura da pagina do modelo +-3 mm, nunca menor que
+// a etiqueta (labelRowPitchMm); deslocamento vertical +-10 mm
+// (LABEL_OFFSET_Y_RANGE_MM). 99x21 (Finesse, LOCKED) e 58mm ficam de fora.
+const LABEL_PRINTER_MODELS = {
+  '105x21': { rowPitchMm: { min: 21, max: 26.5 } },
+  '30x25':  { rowPitchMm: { min: 25, max: 30 } },
+  '40x25':  { rowPitchMm: { min: 25, max: 30.5 } },
+};
+const LABEL_OFFSET_Y_MAX = 10;
+
+function decimos(n) {
+  const r = Math.round(n * 10) / 10;
+  return r === 0 ? 0 : r; // sem -0
+}
+
+// Numero de verdade (aceita string numerica com virgula, como o app); boolean,
+// null e lixo viram NaN.
+function numeroDe(v) {
+  if (typeof v === 'number') return v;
+  if (typeof v === 'string' && v.trim() !== '') return Number(v.trim().replace(',', '.'));
+  return NaN;
+}
+
+function numeroNaFaixa(campo, raw, { min, max, integer }) {
+  const n = numeroDe(raw);
+  const v = integer ? n : decimos(n);
+  if (!Number.isFinite(n) || v < min || v > max || (integer && !Number.isInteger(n))) {
+    throw new AppError(campo + ' deve ser numero entre ' + min + ' e ' + max + (integer ? ' (inteiro)' : ''), 400);
+  }
+  return v;
+}
+
+function validarMedidasDeEtiqueta(raw) {
+  if (raw === null) return null;
+  if (!Array.isArray(raw)) {
+    throw new AppError('label_custom_specs deve ser lista de medidas (ou null)', 400);
+  }
+  if (raw.length > LABEL_CUSTOM_MAX_SPECS) {
+    throw new AppError('label_custom_specs aceita ate ' + LABEL_CUSTOM_MAX_SPECS + ' medidas', 400);
+  }
+  const vistos = new Set();
+  const out = [];
+  raw.forEach((m, i) => {
+    const onde = 'label_custom_specs[' + i + ']';
+    if (!m || typeof m !== 'object' || Array.isArray(m)) {
+      throw new AppError(onde + ' deve ser objeto', 400);
+    }
+    const id = typeof m.id === 'string' ? m.id.trim() : '';
+    if (!id || id.length > LABEL_CUSTOM_ID_MAX) {
+      throw new AppError(onde + '.id deve ser texto de 1 a ' + LABEL_CUSTOM_ID_MAX + ' caracteres', 400);
+    }
+    const spec = { id };
+    for (const campo of Object.keys(LABEL_CUSTOM_FIELDS)) {
+      const regra = LABEL_CUSTOM_FIELDS[campo];
+      const valor = m[campo];
+      if (valor === undefined || valor === null || valor === '') {
+        if (regra.obrigatorio) throw new AppError(onde + '.' + campo + ' e obrigatorio', 400);
+        spec[campo] = regra.padrao;
+        continue;
+      }
+      spec[campo] = numeroNaFaixa(onde + '.' + campo, valor, regra);
+    }
+    if (m.nome !== undefined && m.nome !== null) {
+      if (typeof m.nome !== 'string' || m.nome.trim().length > LABEL_CUSTOM_NOME_MAX) {
+        throw new AppError(onde + '.nome deve ser texto de ate ' + LABEL_CUSTOM_NOME_MAX + ' caracteres', 400);
+      }
+      const nome = m.nome.trim();
+      if (nome) spec.nome = nome;
+    }
+    if (vistos.has(id)) return; // id repetido: fica a primeira
+    vistos.add(id);
+    out.push(spec);
+  });
+  return out;
+}
+
+function validarCalibracaoDaImpressora(raw) {
+  if (raw === null) return null;
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+    throw new AppError('label_printer_prefs deve ser objeto por modelo (ou null)', 400);
+  }
+  const out = {};
+  for (const modelo of Object.keys(raw)) {
+    const regras = LABEL_PRINTER_MODELS[modelo];
+    if (!regras) continue; // modelo sem calibracao ou desconhecido: descartado
+    const p = raw[modelo];
+    const onde = 'label_printer_prefs.' + modelo;
+    if (!p || typeof p !== 'object' || Array.isArray(p)) {
+      throw new AppError(onde + ' deve ser objeto', 400);
+    }
+    const pref = {};
+    if (p.continuous !== undefined) {
+      if (typeof p.continuous !== 'boolean') throw new AppError(onde + '.continuous deve ser boolean', 400);
+      pref.continuous = p.continuous;
+    }
+    if (p.rowPitchMm !== undefined && p.rowPitchMm !== null) {
+      pref.rowPitchMm = numeroNaFaixa(onde + '.rowPitchMm', p.rowPitchMm, regras.rowPitchMm);
+    }
+    if (p.offsetYMm !== undefined && p.offsetYMm !== null) {
+      pref.offsetYMm = numeroNaFaixa(onde + '.offsetYMm', p.offsetYMm, { min: -LABEL_OFFSET_Y_MAX, max: LABEL_OFFSET_Y_MAX });
+    }
+    out[modelo] = pref;
+  }
+  return out;
+}
+
+const LABEL_CONFIG_KEYS = {
+  label_custom_specs: validarMedidasDeEtiqueta,
+  label_printer_prefs: validarCalibracaoDaImpressora,
+};
+
 const DEFAULT_SETTINGS = {
   require_customer:          false,
   require_seller:            false,
@@ -195,6 +342,10 @@ const DEFAULT_SETTINGS = {
   label_cols:                3,
   label_size:                null,
   label_design:              'classico',
+  // 15/10/2026 — null = a loja nunca salvou na conta (o app segue no
+  // navegador e sobe uma vez). Ver validarMedidasDeEtiqueta.
+  label_custom_specs:        null,
+  label_printer_prefs:       null,
   warranty_terms:            null,
 };
 
@@ -302,6 +453,11 @@ function validateSettings(settings) {
       }
       clean[key] = num;
     }
+  }
+
+  // Configuracao de impressao de etiqueta (15/10/2026)
+  for (const key of Object.keys(LABEL_CONFIG_KEYS)) {
+    if (key in settings) clean[key] = LABEL_CONFIG_KEYS[key](settings[key] === undefined ? null : settings[key]);
   }
 
   return clean;
