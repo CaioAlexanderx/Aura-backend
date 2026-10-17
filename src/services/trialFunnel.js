@@ -60,34 +60,38 @@ function isCheckoutDue(company, now = new Date()) {
 
 // Grava audit_log checkout.viewed se não houver um nas últimas 24h para a
 // empresa. Nunca lança. Retorna true quando inseriu.
-async function recordCheckoutViewed({ companyId, userId = null, company = {} }) {
+//
+// 17/10/2026 (t2-04): a checagem das 24h e o INSERT agora são UMA instrução
+// (INSERT ... SELECT ... WHERE NOT EXISTS). Antes eram um SELECT e um INSERT
+// separados; com a tela de checkout chamando POST /billing/checkout-viewed e
+// GET /billing/status no mesmo instante, as duas passavam no SELECT e gravavam
+// duas linhas. `origem` diz de onde veio: 'tela' (POST, a tela abriu) ou
+// 'status' (GET /billing/status de conta com trial vencido).
+async function recordCheckoutViewed({ companyId, userId = null, company = {}, origem = 'status' }) {
   if (!companyId) return false;
   try {
-    const { rows } = await db.query(
-      `SELECT created_at FROM audit_log
-        WHERE company_id = $1 AND action = 'checkout.viewed'
-          AND created_at > NOW() - INTERVAL '24 hours'
-        ORDER BY created_at DESC
-        LIMIT 1`,
-      [companyId]
-    );
-    if (rows && rows.length) return false;
-    await db.query(
+    const trialAtivo = !!(company.trial_ends_at && new Date(company.trial_ends_at) > new Date());
+    const r = await db.query(
       `INSERT INTO audit_log (user_id, company_id, action, detail, metadata)
-       VALUES ($1, $2, $3, $4, $5)`,
+       SELECT $1::uuid, $2::uuid, 'checkout.viewed', $3::text, $4::jsonb
+        WHERE NOT EXISTS (
+          SELECT 1 FROM audit_log
+           WHERE company_id = $2::uuid AND action = 'checkout.viewed'
+             AND created_at > NOW() - INTERVAL '24 hours')`,
       [
         userId,
         companyId,
-        'checkout.viewed',
-        'Abriu o checkout sem cobrança ativa e sem trial valendo',
+        trialAtivo ? 'Abriu o checkout durante o trial' : 'Abriu o checkout sem cobrança ativa e sem trial valendo',
         JSON.stringify({
           plan: company.plan || null,
           billing_status: company.billing_status || null,
           trial_ends_at: company.trial_ends_at || null,
+          trial_ativo: trialAtivo,
+          origem,
         }),
       ]
     );
-    return true;
+    return !!(r && r.rowCount > 0);
   } catch (err) {
     if (!checkoutWarned) {
       checkoutWarned = true;

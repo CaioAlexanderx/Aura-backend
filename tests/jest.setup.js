@@ -73,6 +73,16 @@ jest.mock('../src/services/trialRegra', () => ({
   marcarTrialFixo: jest.fn(async () => false),
 }));
 
+// 17/10/2026 (t2-04): os ganchos que avançam companies.onboarding_step (venda,
+// produto, check-in) disparam um UPDATE a mais em db.query — mesmo problema
+// acima. No-op aqui; os testes do passo usam
+// jest.unmock('../src/services/onboardingProgress').
+jest.mock('../src/services/onboardingProgress', () => ({
+  ...jest.requireActual('../src/services/onboardingProgress'),
+  avancarPasso: jest.fn(async () => false),
+  avancarSemEsperar: jest.fn(),
+}));
+
 // 15/10/2026 (t2-09): o cadastro (POST /auth/register) consulta o CNPJ em
 // segundo plano para gravar a cidade. Nos testes a rede fica desligada: o
 // lookup falha de imediato (o cadastro ignora) e nao ha chamada externa nem

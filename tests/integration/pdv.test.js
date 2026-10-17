@@ -110,6 +110,9 @@ describe('POST /companies/:id/pdv/sale — venda atômica', () => {
         }],
       });
     expect([200, 201]).toContain(res.status);
+    // 17/10/2026 (t2-04): a primeira venda avanca onboarding_step para 'venda'.
+    expect(require('../../src/services/onboardingProgress').avancarSemEsperar)
+      .toHaveBeenCalledWith(cid, 'venda');
   });
 
   test('409 — estoque insuficiente', async () => {
@@ -128,6 +131,8 @@ describe('POST /companies/:id/pdv/sale — venda atômica', () => {
       });
     expect(res.status).toBe(409);
     expect(res.body.error).toMatch(/estoque/i);
+    // venda recusada nao e marco: o passo do cadastro nao avanca
+    expect(require('../../src/services/onboardingProgress').avancarSemEsperar).not.toHaveBeenCalled();
   });
 });
 

@@ -49,6 +49,7 @@ const router = require('express').Router({ mergeParams: true });
 const { normalizeGallery } = require('../services/productGallery');
 const { companyGroupWhere } = require('../utils/companyGroup');
 const db = require('../config/database');
+const { avancarSemEsperar } = require('../services/onboardingProgress');
 
 // ─── Fase 1 fornecedores (16/09/2026) ────────────────────────
 //
@@ -630,6 +631,8 @@ router.post('/', async (req, res) => {
     const supplierOut = supplierFields.supplier_id
       ? { id: supplierFields.supplier_id, name: supplierFields.supplier_name, cnpj: supplierFields.supplier_cnpj }
       : null;
+    // 17/10/2026 (t2-04): o primeiro produto avança o passo do cadastro.
+    avancarSemEsperar(cid, 'produto');
     res.status(201).json({ ...result.rows[0], card_price: cardPriceOut(result.rows[0].card_price), supplier: supplierOut, merge_suggestion });
   } catch (err) { console.error('[products] create error:', err.message); res.status(500).json({ error: 'Erro ao criar produto' }); }
 });
