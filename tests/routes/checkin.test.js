@@ -186,6 +186,40 @@ describe('GET /checkin', () => {
   });
 });
 
+describe('PUT /checkin avança o passo do cadastro (t2-04)', () => {
+  test('respondeu: onboarding_step vai para perfil', async () => {
+    mockBanco();
+    const { avancarSemEsperar } = require('../../src/services/onboardingProgress');
+    avancarSemEsperar.mockClear();
+    await request(buildApp()).put(url).set(dono).send({ comeco: 'vender', onde_anota: 'caderno', produtos_faixa: 'ate_50' });
+    expect(avancarSemEsperar).toHaveBeenCalledWith(cid, 'perfil');
+  });
+
+  test('pulou: onboarding_step também vai para perfil', async () => {
+    mockBanco();
+    const { avancarSemEsperar } = require('../../src/services/onboardingProgress');
+    avancarSemEsperar.mockClear();
+    await request(buildApp()).put(url).set(dono).send({ pulou: true });
+    expect(avancarSemEsperar).toHaveBeenCalledWith(cid, 'perfil');
+  });
+
+  test('PUT sem efeito ({ pulou: false }, não fecha a tela) não avança', async () => {
+    mockBanco();
+    const { avancarSemEsperar } = require('../../src/services/onboardingProgress');
+    avancarSemEsperar.mockClear();
+    await request(buildApp()).put(url).set(dono).send({ pulou: false });
+    expect(avancarSemEsperar).not.toHaveBeenCalled();
+  });
+
+  test('staff (403) não avança', async () => {
+    mockBanco();
+    const { avancarSemEsperar } = require('../../src/services/onboardingProgress');
+    avancarSemEsperar.mockClear();
+    await request(buildApp()).put(url).set(staff).send({ pulou: true });
+    expect(avancarSemEsperar).not.toHaveBeenCalled();
+  });
+});
+
 describe('PUT /checkin', () => {
   test('responde as 3 perguntas: grava, carimba no servidor e registra checkin.respondido', async () => {
     const visto = mockBanco();

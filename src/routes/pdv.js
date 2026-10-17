@@ -77,6 +77,7 @@ const comandaSaleHooks = require('../services/comandaSaleHooks');
 // 06/10/2026: chave "vender sem estoque" — ver cabecalho do util.
 const { vendaSemEstoqueLiberada } = require('../utils/vendaSemEstoque');
 const { iniciarTrialPelaPrimeiraVenda } = require('../services/trialRegra');
+const { avancarSemEsperar } = require('../services/onboardingProgress');
 
 const fmt = (v) => parseFloat(v || 0).toFixed(2);
 const SP_DATE_NOW = "(NOW() AT TIME ZONE 'America/Sao_Paulo')::date";
@@ -757,6 +758,9 @@ async function handleSale(req, res, opts = {}) {
     // (services/trialRegra). Sem await e sem lancar: nunca atrasa nem derruba
     // a venda.
     Promise.resolve().then(() => iniciarTrialPelaPrimeiraVenda(req.params.id)).catch(() => {});
+    // 17/10/2026 (t2-04): a primeira venda avança o passo do cadastro
+    // ('venda'). Mesmo molde: sem await, sem lançar, em memória depois da 1ª.
+    avancarSemEsperar(req.params.id, 'venda');
 
     const { rows: saleItems } = await db.query(
       `SELECT si.*, p.name AS product_name FROM sale_items si

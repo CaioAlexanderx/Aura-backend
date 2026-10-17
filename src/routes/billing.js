@@ -249,7 +249,9 @@ router.get('/status', requireAuth, async (req, res) => {
 
     // 12/10/2026: funil do trial — chegou ao checkout sem cobranca nem trial.
     // Sem await: o registro nunca atrasa nem derruba o status.
-    const isStaffAdmin = req.companyRole === 'admin' || (req.user && req.user.role === 'admin');
+    // 17/10/2026: só o role 'admin' do token é staff; companyRole 'admin' é
+    // também o papel de um membro comum e não pode tirar o cliente da conta.
+    const isStaffAdmin = !!(req.user && req.user.role === 'admin');
     if (!isStaffAdmin && isCheckoutDue(c)) {
       Promise.resolve()
         .then(() => recordCheckoutViewed({ companyId: c.id || req.params.id, userId: (req.user && req.user.id) || null, company: c }))
@@ -286,6 +288,41 @@ router.get('/status', requireAuth, async (req, res) => {
   } catch (err) {
     console.error('[BILLING] Status error:', err.message);
     res.status(500).json({ error: 'Erro ao buscar status' });
+  }
+});
+
+// POST /billing/checkout-viewed (17/10/2026, t2-04)
+// A tela de checkout do app avisa que abriu (uma vez por abertura da tela).
+// Até aqui o único registro de `checkout.viewed` vinha do GET /status e só
+// para conta COM trial vencido (isCheckoutDue) — quem abria o checkout ainda
+// dentro do trial, justamente o degrau "Viram checkout" do painel, nunca
+// aparecia (0 eventos para 30 cadastros). Aqui conta toda empresa sem
+// cobrança ativa, com ou sem trial valendo. No máximo uma linha por empresa
+// a cada 24h (services/trialFunnel); staff em modo admin não conta.
+// Resposta: { registrado } — false quando o limite das 24h, a cobrança ativa
+// ou o modo admin impediram a linha. Corpo opcional, ignorado.
+router.post('/checkout-viewed', requireAuth, async (req, res) => {
+  try {
+    const { rows } = await db.query(
+      'SELECT id, plan, billing_status, trial_ends_at FROM companies WHERE id = $1',
+      [req.params.id]
+    );
+    if (!rows.length) return res.status(404).json({ error: 'Empresa nao encontrada' });
+    const c = rows[0];
+    // Staff = role 'admin' no token. companyRole === 'admin' também é o papel
+    // de um membro comum da empresa (role_label), que é cliente e deve contar.
+    const isStaffAdmin = !!(req.user && req.user.role === 'admin');
+    if (isStaffAdmin || c.billing_status === 'active') return res.json({ registrado: false });
+    const registrado = await recordCheckoutViewed({
+      companyId: c.id,
+      userId: (req.user && req.user.id) || null,
+      company: c,
+      origem: 'tela',
+    });
+    res.json({ registrado });
+  } catch (err) {
+    console.error('[BILLING] checkout-viewed error:', err.message);
+    res.status(500).json({ error: 'Erro ao registrar' });
   }
 });
 

@@ -24,6 +24,7 @@ const db = require('../config/database');
 const { requireAuth } = require('../middleware/auth');
 const { linkImportedCategories } = require('../services/importCategoryLink');
 const { findOrCreateSupplierByCnpj } = require('../services/supplierLookup');
+const { avancarSemEsperar } = require('../services/onboardingProgress');
 const { gravarUltimaCompra, casarNotaComPedidos } = require('../services/matconPurchases');
 
 // ─── Mapeamento de colunas — fuzzy match ────────────────────
@@ -661,6 +662,9 @@ router.post('/products/import', requireAuth, async (req, res) => {
     // nao falhar o import por causa do log
   }
 
+  // 17/10/2026 (t2-04): o primeiro produto avança o passo do cadastro.
+  if (saved > 0) avancarSemEsperar(companyId, 'produto');
+
   res.status(201).json({
     saved,
     duplicates_skipped: dupes,
@@ -948,6 +952,8 @@ router.post('/products/import-nfe', requireAuth, async (req, res) => {
     console.error('[import-nfe] DB error:', err.message);
     return res.status(500).json({ error: 'Erro ao salvar produtos da NF-e', detail: err.message });
   } finally { client.release(); }
+
+  if (saved > 0) avancarSemEsperar(companyId, 'produto');
 
   res.status(201).json({
     saved,
