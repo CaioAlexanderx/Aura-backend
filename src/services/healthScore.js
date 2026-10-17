@@ -12,6 +12,19 @@
 //   - uso: vendas dos últimos 30 dias em sales (antes era transactions, que
 //     conta lançamento do financeiro e não o uso do Caixa).
 //
+// 17/10/2026 (card t2-08, pedido da CS): lançamento de crediário conta como
+// movimento, com o MESMO peso de uma venda, na atividade e no uso. Loja que
+// vive do crediário (lança dívida e recebe parcela sem passar pelo Caixa) caía
+// em "atenção" mesmo trabalhando todo dia. Conta em customer_credit_transactions:
+//   - type 'debit' (lançamento manual / dívida) e 'payment' (recebimento);
+//   - NÃO conta 'refund' (estorno/devolução) nem source 'reschedule'
+//     (renegociação do carnê gera débito/crédito sintético, não é movimento);
+//   - NÃO conta a linha ligada a uma venda existente e não cancelada: a venda
+//     no crediário pelo PDV já é uma linha em sales (a mesma operação), então
+//     o débito dela fica de fora e a venda segue contando uma vez só.
+// Cancelar/desfazer apaga a linha do razão, então estorno nunca chega aqui.
+// O pagamento da assinatura (payment_score) não muda.
+//
 // A gravação é um único INSERT em lote: com ~190 ms por ida ao banco, um
 // upsert por empresa custava mais de meio minuto.
 // ============================================================
@@ -21,9 +34,21 @@ const pool = require('../config/database');
 
 const DAY_MS = 86400000;
 
+// Lançamento de crediário que conta como movimento (ver cabeçalho). `t` é o
+// alias da linha de customer_credit_transactions.
+const CREDITO_CONTA = `t.type IN ('debit', 'payment')
+           AND COALESCE(t.source, 'sale') <> 'reschedule'
+           AND NOT EXISTS (SELECT 1 FROM sales sv
+                            WHERE sv.id = t.sale_id
+                              AND COALESCE(sv.status, 'completed') <> 'cancelled')`;
+
 // Pontuação de uma empresa. Pura: recebe a linha e o "agora".
 function calcularScore(c, agora = new Date()) {
-  const lastActive = c.last_active_at || c.last_sale_at || null;
+  // Na falta de last_active_at, o movimento mais recente: venda ou crediário.
+  const lastMove = [c.last_sale_at, c.last_credit_at]
+    .filter(Boolean)
+    .sort((a, b) => new Date(b) - new Date(a))[0] || null;
+  const lastActive = c.last_active_at || lastMove;
 
   let activityScore = 0;
   if (lastActive) {
@@ -33,7 +58,8 @@ function calcularScore(c, agora = new Date()) {
     else if (days <= 30) activityScore = 5;
   }
 
-  const sales = parseInt(c.sales_30d || 0, 10);
+  // Venda e lançamento de crediário valem igual (o SQL já tirou a duplicata).
+  const sales = parseInt(c.sales_30d || 0, 10) + parseInt(c.credit_30d || 0, 10);
   let usageScore = 0;
   if (sales >= 20) usageScore = 25;
   else if (sales >= 10) usageScore = 20;
@@ -73,7 +99,13 @@ async function recalculateAll({ db = pool, agora = new Date() } = {}) {
        (SELECT COUNT(*) FROM sales s
          WHERE s.company_id = c.id
            AND s.created_at >= NOW() - INTERVAL '30 days'
-           AND COALESCE(s.status, 'completed') <> 'cancelled') AS sales_30d
+           AND COALESCE(s.status, 'completed') <> 'cancelled') AS sales_30d,
+       (SELECT MAX(t.created_at) FROM customer_credit_transactions t
+         WHERE t.company_id = c.id AND ${CREDITO_CONTA}) AS last_credit_at,
+       (SELECT COUNT(*) FROM customer_credit_transactions t
+         WHERE t.company_id = c.id
+           AND t.created_at >= NOW() - INTERVAL '30 days'
+           AND ${CREDITO_CONTA}) AS credit_30d
      FROM companies c
      WHERE c.is_active = true AND (c.federation_id IS NULL OR c.federation_id = c.id)`
   );
@@ -104,4 +136,4 @@ async function recalculateAll({ db = pool, agora = new Date() } = {}) {
   return { updated: scores.length };
 }
 
-module.exports = { calcularScore, recalculateAll };
+module.exports = { calcularScore, recalculateAll, CREDITO_CONTA };
