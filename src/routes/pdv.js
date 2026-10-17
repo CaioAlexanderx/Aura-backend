@@ -59,6 +59,10 @@
 //   quote_id o gancho nao toca o banco. GET /sale/:saleId e GET /sales
 //   expoem has_pending_delivery (selo "saldo a entregar"), calculado DENTRO
 //   do SELECT que ja existia — nenhuma ida a mais ao banco.
+// 17/10/2026 (tq-15, migration 390): POST /sale (e /sale-com-sinal) aceita o
+//   cabecalho Idempotency-Key. A mesma chave da mesma empresa devolve a venda
+//   ja registrada sem gravar de novo (services/vendaIdempotente.js). Sem a
+//   chave, ou sem a 390 no banco, a rota e a de sempre.
 // ============================================================
 const router      = require('express').Router({ mergeParams: true });
 const db          = require('../config/database');
@@ -77,6 +81,8 @@ const comandaSaleHooks = require('../services/comandaSaleHooks');
 // 06/10/2026: chave "vender sem estoque" — ver cabecalho do util.
 const { vendaSemEstoqueLiberada } = require('../utils/vendaSemEstoque');
 const { iniciarTrialPelaPrimeiraVenda } = require('../services/trialRegra');
+// 17/10/2026 (migration 390): Idempotency-Key — ver cabecalho do servico.
+const vendaIdempotente = require('../services/vendaIdempotente');
 
 const fmt = (v) => parseFloat(v || 0).toFixed(2);
 const SP_DATE_NOW = "(NOW() AT TIME ZONE 'America/Sao_Paulo')::date";
@@ -362,9 +368,23 @@ async function handleSale(req, res, opts = {}) {
     });
   }
 
+  // 17/10/2026 (tq-15): null = venda sem chave, exatamente como antes.
+  const idemKey = await vendaIdempotente.chaveDaVenda(req);
+
   const client = await db.connect();
   try {
     await client.query('BEGIN');
+    // Mesma chave ja gerou venda: devolve a venda registrada, sem gravar
+    // nada. A trava faz a segunda requisicao simultanea esperar a primeira.
+    if (idemKey) {
+      const jaFeita = await vendaIdempotente.travarEBuscar(client, req.params.id, idemKey);
+      if (jaFeita) {
+        await client.query('ROLLBACK');
+        const respondeu = await vendaIdempotente.responderRepeticao(res, { companyId: req.params.id, key: idemKey, itens: items });
+        if (respondeu) return;
+        return res.status(500).json({ error: 'Erro ao registrar venda' });
+      }
+    }
     if (!sale_date) {
       const caixaCheck = await assertCaixaOpenOrAllowed(client, req.params.id);
       if (!caixaCheck.ok) {
@@ -520,12 +540,16 @@ async function handleSale(req, res, opts = {}) {
       creditAmount = (rawCreditAmount > 0 && customerId) ? rawCreditAmount : 0;
     }
     const cashAmount = parseFloat((totalAmount - creditAmount).toFixed(2));
+    // tq-15: com chave, ela entra no MESMO INSERT (o indice unico parcial da
+    // 390 e a garantia final). Sem chave, o SQL e o de sempre.
+    const idemCol = idemKey ? ',idempotency_key' : '';
+    const idemVal = idemKey ? `,$${sale_date ? 13 : 12}` : '';
     const { rows: sales } = await client.query(
       sale_date
-        ? `INSERT INTO sales (company_id,customer_id,seller_id,employee_id,seller_name,total_amount,discount_amount,payment_method,notes,coupon_id,coupon_code,status,created_at)
-           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,'completed',$12::date + INTERVAL '3 hours') RETURNING *`
-        : `INSERT INTO sales (company_id,customer_id,seller_id,employee_id,seller_name,total_amount,discount_amount,payment_method,notes,coupon_id,coupon_code,status)
-           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,'completed') RETURNING *`,
+        ? `INSERT INTO sales (company_id,customer_id,seller_id,employee_id,seller_name,total_amount,discount_amount,payment_method,notes,coupon_id,coupon_code,status,created_at${idemCol})
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,'completed',$12::date + INTERVAL '3 hours'${idemVal}) RETURNING *`
+        : `INSERT INTO sales (company_id,customer_id,seller_id,employee_id,seller_name,total_amount,discount_amount,payment_method,notes,coupon_id,coupon_code,status${idemCol})
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,'completed'${idemVal}) RETURNING *`,
       [
         req.params.id, customerId||null,
         seller_id||req.user?.id||null, employee_id||null, seller_name||null,
@@ -533,6 +557,7 @@ async function handleSale(req, res, opts = {}) {
         payment_method||(payments?.[0]?.method)||'dinheiro',
         notes||null, couponId, couponCodeUsed,
         ...(sale_date ? [sale_date] : []),
+        ...(idemKey ? [idemKey] : []),
       ]
     );
     const sale = sales[0];
@@ -781,7 +806,7 @@ async function handleSale(req, res, opts = {}) {
         installments:    creditSaleResult?.schedule || [],
       };
     }
-    res.status(201).json({
+    const corpo = {
       sale: { ...sale, items: saleItems },
       coupon_applied: couponCodeUsed ? { code: couponCodeUsed, discount: discountAmt } : null,
       credit: creditInfo,
@@ -807,9 +832,23 @@ async function handleSale(req, res, opts = {}) {
         : null,
       // Matcon M1: so aparece quando a venda veio de um orcamento.
       ...(matconResult ? { matcon: matconResult } : {}),
-    });
+    };
+    // tq-15: a repeticao da mesma chave devolve este mesmo corpo.
+    if (idemKey) vendaIdempotente.guardarResposta({ companyId: req.params.id, saleId: sale.id, corpo });
+    res.status(201).json(corpo);
   } catch (e) {
     await client.query('ROLLBACK');
+    // tq-15: outra requisicao com a mesma chave gravou primeiro (o indice
+    // unico barrou esta): devolve a venda dela.
+    if (idemKey && vendaIdempotente.ehColisaoDaChave(e)) {
+      try {
+        const respondeu = await vendaIdempotente.responderRepeticao(res, { companyId: req.params.id, key: idemKey, itens: items });
+        if (respondeu) return;
+      } catch (replayErr) {
+        console.error('[PDV] Repeticao da venda idempotente falhou:', replayErr.message);
+      }
+      return res.status(500).json({ error: 'Erro ao registrar venda' });
+    }
     // Hub F1.4.1: bloqueio MANUAL e o UNICO impeditivo. createCreditSale lanca
     // erro com .statusCode=422 / .code='CUSTOMER_BLOCKED' -> propaga 422 (nao 500).
     if (e && e.statusCode === 422 && e.code === 'CUSTOMER_BLOCKED') {
