@@ -1,5 +1,5 @@
 -- ============================================================
--- 389 — Telas visitadas: separar a abertura que vem do login (card t2-14)
+-- 391 — Telas visitadas: separar a abertura que vem do login (card t2-14)
 --
 -- Contexto (17/10/2026, pedido da Nina): a medição de telas (POST
 -- /usage/screens, desde 13/10) contava a primeira tela aberta logo depois do

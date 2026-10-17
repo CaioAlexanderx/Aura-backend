@@ -105,7 +105,7 @@ const SQL_BASE = `INSERT INTO screen_views (company_id, user_id, screen, dia, vi
          last_at = EXCLUDED.last_at
        WHERE EXCLUDED.last_at > screen_views.last_at`;
 
-// Lote com visitas vindas do login (migration 389): mesma regra de
+// Lote com visitas vindas do login (migration 391): mesma regra de
 // idempotência, e views_login soma junto com views.
 const SQL_COM_ORIGEM = `INSERT INTO screen_views (company_id, user_id, screen, dia, views, last_at, views_login)
        SELECT $1::uuid, $2::uuid, x.screen, x.dia, x.views, x.last_at, COALESCE(x.views_login, 0)
@@ -135,7 +135,7 @@ router.post('/screens', requireAuth, asyncHandler(async (req, res) => {
       ({ rowCount } = await pool.query(temOrigem ? SQL_COM_ORIGEM : SQL_BASE,
         [companyId, req.user.id, JSON.stringify(itens)]));
     } catch (err) {
-      // 42703: migration 389 (views_login) ainda não aplicada. A visita conta
+      // 42703: migration 391 (views_login) ainda não aplicada. A visita conta
       // do mesmo jeito, só sem a marca de origem — telemetria não se perde
       // por causa de coluna nova.
       if (!(temOrigem && err && err.code === '42703')) throw err;
