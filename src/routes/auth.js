@@ -96,7 +96,7 @@ const crypto  = require('crypto');
 const db      = require('../config/database');
 const { validateRuntimeEnv } = require('../config/env');
 const { requireAuth } = require('../middleware/auth');
-const { logAuditAction } = require('../middleware/auditLog');
+const { logAuditAction, contextoDaRequisicao } = require('../middleware/auditLog');
 const { sendSelfServeSignupNotification } = require('../services/mailer');
 const { issueVerification } = require('./verification');
 const { resolveKarateContext } = require('../config/karateRoles');
@@ -395,6 +395,12 @@ router.post('/register', async (req, res) => {
     if (!access_code && isSelfServe) {
       plan = 'negocio'; trialDays = trialRegra.DIAS_FIXO_LEGADO; codeType = 'self_serve';
     }
+    // 17/10/2026 (t1-14): o cadastro do site manda COMECAR ou REF- (indicacao).
+    // Plano, desconto e dias do codigo ficam como o codigo deu; so o relogio
+    // passa a contar da primeira venda (ligado abaixo, na mesma transacao).
+    const codigoNaPrimeiraVenda = !!access_code && trialRegra.codigoEntraNaPrimeiraVenda({
+      codigo: access_code, tipo: codeType, trialDays,
+    });
 
     const isStaff = email.toLowerCase().trim().endsWith('@getaura.com.br');
     const password_hash = await bcrypt.hash(password, 12);
@@ -473,7 +479,7 @@ router.post('/register', async (req, res) => {
       // 13/10/2026: self-service sem codigo (e que nao e dojo) entra no modo
       // primeira_venda. Sem as colunas da migration 379 volta null e os 7
       // dias fixos do INSERT ficam valendo.
-      if (codeType === 'self_serve' && !isDojoSignup) {
+      if ((codeType === 'self_serve' || codigoNaPrimeiraVenda) && !isDojoSignup) {
         const modo = await trialRegra.ligarPrimeiraVendaNoCadastro(client, company.id);
         if (modo) {
           company = { ...company, trial_ends_at: modo.trial_ends_at };
@@ -616,6 +622,36 @@ router.post('/register', async (req, res) => {
   finally { client.release(); }
 });
 
+// Motivos gravados em audit_log.metadata.motivo quando o login falha (17/10/2026,
+// t3-04). Antes so a senha errada era registrada, sem motivo e com ip_address
+// nulo; o resto (e-mail que nao existe, conta desativada, erro do servidor) nao
+// deixava rastro. Lista fechada: o painel agrupa por estes valores.
+const MOTIVOS_LOGIN_FALHO = Object.freeze({
+  USUARIO_INEXISTENTE: 'usuario_inexistente',
+  SENHA_ERRADA: 'senha_errada',
+  CONTA_DESATIVADA: 'conta_desativada',
+  ERRO_SERVIDOR: 'erro_servidor',
+});
+
+// E-mail mascarado para os motivos que antes nao gravavam nada ("ab***@dominio").
+function mascararEmail(email) {
+  if (typeof email !== 'string') return '(invalido)';
+  const [local, dominio] = email.toLowerCase().trim().split('@');
+  if (!dominio) return '(invalido)';
+  return local.slice(0, 2) + '***@' + dominio;
+}
+
+// Nunca grava a senha. A senha errada mantem o detail de sempre (que ja trazia o
+// e-mail); os demais motivos gravam so o e-mail mascarado. IP e user agent vao
+// nas colunas ip_address/user_agent; o ip segue tambem no metadata (compat).
+function registrarLoginFalho(req, motivo, { email, userId = null } = {}) {
+  const ctx = contextoDaRequisicao(req);
+  const detail = motivo === MOTIVOS_LOGIN_FALHO.SENHA_ERRADA
+    ? 'Failed login for ' + String(email).toLowerCase().trim()
+    : 'Failed login (' + motivo + ') for ' + mascararEmail(email);
+  logAuditAction(userId, null, 'login_failed', detail, { motivo, ip: ctx.ip }, ctx);
+}
+
 // POST /api/v1/auth/login
 router.post('/login', async (req, res) => {
   const { email, password } = req.body;
@@ -626,12 +662,21 @@ router.post('/login', async (req, res) => {
       'SELECT id, full_name AS name, email, password_hash, role, is_active, is_staff, totp_enabled, email_verified FROM users WHERE email = $1',
       [email.toLowerCase().trim()]
     );
-    if (!rows.length) return res.status(401).json({ error: 'Credenciais invalidas' });
+    if (!rows.length) {
+      registrarLoginFalho(req, MOTIVOS_LOGIN_FALHO.USUARIO_INEXISTENTE, { email });
+      return res.status(401).json({ error: 'Credenciais invalidas' });
+    }
     const user = rows[0];
-    if (!user.is_active) return res.status(403).json({ error: 'Conta desativada. Entre em contato com o suporte.' });
+    if (!user.is_active) {
+      registrarLoginFalho(req, MOTIVOS_LOGIN_FALHO.CONTA_DESATIVADA, { email, userId: user.id });
+      return res.status(403).json({ error: 'Conta desativada. Entre em contato com o suporte.' });
+    }
 
     const valid = await bcrypt.compare(password, user.password_hash);
-    if (!valid) { logAuditAction(null, null, 'login_failed', 'Failed login for ' + email.toLowerCase().trim(), { ip: req.ip }); return res.status(401).json({ error: 'Credenciais invalidas' }); }
+    if (!valid) {
+      registrarLoginFalho(req, MOTIVOS_LOGIN_FALHO.SENHA_ERRADA, { email });
+      return res.status(401).json({ error: 'Credenciais invalidas' });
+    }
     if (user.totp_enabled) return res.json({ requires_2fa: true, user_id: user.id, message: 'Autenticacao de dois fatores necessaria.' });
 
     const ctx = await resolveDefaultContext(user.id);
@@ -667,7 +712,11 @@ router.post('/login', async (req, res) => {
       consolidated_view: ctx.consolidated,
       company_count: ctx.count,
     });
-  } catch (err) { console.error('login error:', err); res.status(500).json({ error: 'Erro ao autenticar' }); }
+  } catch (err) {
+    console.error('login error:', err);
+    registrarLoginFalho(req, MOTIVOS_LOGIN_FALHO.ERRO_SERVIDOR, { email });
+    res.status(500).json({ error: 'Erro ao autenticar' });
+  }
 });
 
 // POST /api/v1/auth/refresh

@@ -90,9 +90,12 @@ router.put('/quotes/:qid/condicoes', async function(req, res) {
           SET condicoes      = $1,
               deposit_pct    = $2,
               deposit_amount = $3,
-              validity_days  = $4,
+              validity_days  = $4::int,
+              -- $4 tipado: usado como int (coluna) e no intervalo, o Postgres
+              -- recusava com "inconsistent types deduced for parameter $4"
+              -- (INC-2026-10-17-01: todo PUT /condicoes dava 500).
               expires_at     = CASE WHEN status = 'sent' AND sent_at IS NOT NULL
-                                    THEN sent_at + ($4 || ' days')::interval
+                                    THEN sent_at + make_interval(days => $4::int)
                                     ELSE expires_at END,
               updated_at     = NOW()
         WHERE id = $5 AND company_id = $6

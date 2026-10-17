@@ -164,6 +164,10 @@ describe('PUT /quotes/:qid/condicoes', () => {
     expect(r.body.valores.pix.valor).toBe(506.16);
     const upd = e.sqls.find((s) => /SET condicoes/.test(s));
     expect(upd).toMatch(/WHERE id = \$5 AND company_id = \$6/);
+    // INC-2026-10-17-01: $4 sem tipo, usado como int e como texto, fazia o
+    // Postgres recusar a query inteira ("inconsistent types deduced").
+    expect(upd).toMatch(/validity_days\s*=\s*\$4::int/);
+    expect(upd).not.toMatch(/\$4 \|\| ' days'/);
   });
 
   test('recusa condição inválida e orçamento fora do aberto', async () => {
