@@ -27,6 +27,7 @@ const router = require('express').Router({ mergeParams: true });
 const db = require('../config/database');
 const asyncHandler = require('../utils/asyncHandler');
 const checkin = require('../services/checkin');
+const { avancarSemEsperar } = require('../services/onboardingProgress');
 
 const FECHADO = { habilitado: false, respondido: false, pulou: false, versao: checkin.VERSAO, respostas: null };
 
@@ -139,6 +140,11 @@ router.put('/', asyncHandler(async (req, res) => {
 
   for (const ev of eventos) {
     await auditar(req, companyId, ev, ev === 'checkin.pulou' ? 'Check-in pulado' : 'Check-in respondido');
+  }
+  // 17/10/2026 (t2-04): check-in respondido ou pulado = cadastro concluído
+  // (último passo antes do Painel). Avança onboarding_step para 'perfil'.
+  if (eventos.includes('checkin.respondido') || eventos.includes('checkin.pulou')) {
+    avancarSemEsperar(companyId, 'perfil');
   }
   res.json({ checkin: gravado });
 }));

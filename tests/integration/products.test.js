@@ -157,6 +157,9 @@ describe('POST /companies/:id/products — plan limit enforcement', () => {
       .send({ name: 'Produto Novo', price: 10 });
 
     expect(res.status).toBe(201);
+    // 17/10/2026 (t2-04): o primeiro produto avanca onboarding_step para 'produto'.
+    expect(require('../../src/services/onboardingProgress').avancarSemEsperar)
+      .toHaveBeenCalledWith(cid, 'produto');
   });
 
   test('403 — bloqueia criacao quando no limite do plano (essencial)', async () => {
@@ -172,6 +175,7 @@ describe('POST /companies/:id/products — plan limit enforcement', () => {
     expect(res.body.error).toMatch(/Limite/);
     expect(res.body.limit).toBe(2000);
     expect(res.body.current).toBe(2000);
+    expect(require('../../src/services/onboardingProgress').avancarSemEsperar).not.toHaveBeenCalled();
   });
 
   test('403 — bloqueia para negocio no limite de 7000', async () => {

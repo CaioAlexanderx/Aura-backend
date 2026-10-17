@@ -11,6 +11,7 @@
 
 const router = require('express').Router({ mergeParams: true });
 const db = require('../config/database');
+const { avancarSemEsperar } = require('../services/onboardingProgress');
 const { linkImportedCategories } = require('../services/importCategoryLink');
 
 function getPlanLimit(plan) {
@@ -151,6 +152,9 @@ router.post('/batch-create', async (req, res) => {
     return res.status(500).json({ error: 'Erro ao criar produtos em lote', detail: err.message });
   }
   client.release();
+
+  // 17/10/2026 (t2-04): o primeiro produto avança o passo do cadastro.
+  if (created.length) avancarSemEsperar(cid, 'produto');
 
   return res.status(201).json({
     created,
