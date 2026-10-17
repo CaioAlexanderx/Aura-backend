@@ -7,6 +7,7 @@
 //   2. lancar abre a comanda; lancar de novo cai na MESMA comanda
 //   3. numero invalido e lista vazia: 400
 //   4. tirar um item, cancelar a comanda, e o numero volta a ficar livre
+//   4b. nome da comanda (389): grava, troca, mantem, e nao passa ao cartao reaberto
 //   5. a venda com comanda_id fecha a comanda; cobrar de novo e 409; comanda
 //      de outra loja e 404; venda sem comanda_id nao toca em nada
 //   6. cancelar a venda reabre a comanda — salvo se o numero ja foi reaberto
@@ -177,6 +178,37 @@ describe('comandas — rotas', () => {
     expect(nova.body.comanda.id).not.toBe(aberta.id);
     expect(nova.body.comanda).toMatchObject({ items_count: 1, subtotal: 18.5 });
     await request(app).post(`${base}/12/cancel`);
+  });
+
+  test('4b. nome (389): grava na abertura, troca com nome novo, fica sem nome, e o cartao reaberto nasce sem nome', async () => {
+    const a = await request(app).post(`${base}/50/items`).send({ items: [COPAO], name: '  João  ' });
+    expect(a.status).toBe(201);
+    expect(a.body.comanda).toMatchObject({ number: 50, name: 'João' });
+
+    // lancar sem nome (ou so com espaco) mantem o nome
+    const b = await request(app).post(`${base}/50/items`).send({ items: [DOSE], name: '   ' });
+    expect(b.body.comanda).toMatchObject({ id: a.body.comanda.id, name: 'João', items_count: 2 });
+
+    // nome novo troca, cortado em 40
+    const c = await request(app).post(`${base}/50/items`).send({ items: [DOSE], name: 'Mesa do fundo ' + 'x'.repeat(60) });
+    expect(c.body.comanda.name).toBe(('Mesa do fundo ' + 'x'.repeat(60)).slice(0, 40));
+
+    const get = await request(app).get(`${base}/50`);
+    expect(get.body.comanda.name).toBe(c.body.comanda.name);
+    const lista = await request(app).get(base);
+    expect(lista.body.comandas.find((x) => x.number === 50).name).toBe(c.body.comanda.name);
+
+    // comanda sem nome continua valendo: name null
+    const semNome = await request(app).post(`${base}/51/items`).send({ items: [DOSE] });
+    expect(semNome.body.comanda.name).toBeNull();
+
+    // o cartao 50 vai para outro cliente: o nome antigo nao vem junto
+    await request(app).post(`${base}/50/cancel`);
+    const nova = await request(app).post(`${base}/50/items`).send({ items: [DOSE] });
+    expect(nova.body.opened).toBe(true);
+    expect(nova.body.comanda.name).toBeNull();
+    await request(app).post(`${base}/50/cancel`);
+    await request(app).post(`${base}/51/cancel`);
   });
 });
 
