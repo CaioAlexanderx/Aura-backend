@@ -748,6 +748,14 @@ describe('limite de uso por conversa', () => {
 
 // ── (9) responderNoHub ──────────────────────────────────────
 describe('responderNoHub — o stub virou a persona', () => {
+  // A janela de 24 h do WhatsApp (waOutbox) mede contra Date.now(), não
+  // contra o `agora` do teste: com as falas datadas de 14/10, o teste passou
+  // a falhar sozinho em 17/10 (CI de todo PR do backend vermelho). Relógio
+  // fixo no fim da noite de 14/10, dentro da janela de todas as falas daqui.
+  let relogio;
+  beforeEach(() => { relogio = jest.spyOn(Date, 'now').mockReturnValue(brt(23, 30).getTime()); });
+  afterEach(() => { relogio.mockRestore(); });
+
   const msg = (id, texto, quando) => ({
     id, from: FONE, type: 'text', text: { body: texto }, timestamp: String(Math.floor(quando.getTime() / 1000)),
   });
