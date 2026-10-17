@@ -105,6 +105,86 @@ describe('POST /usage/screens — upsert', () => {
   });
 });
 
+describe('POST /usage/screens — origem da visita (apos_login, t2-14)', () => {
+  const sqlDe = (n = 0) => db.query.mock.calls[n][0].replace(/\s+/g, ' ');
+
+  test('lote sem apos_login: SQL e itens exatamente como antes (não depende da coluna)', async () => {
+    db.query.mockResolvedValue({ rows: [], rowCount: 1 });
+    await post({ views: [view()] });
+    expect(sqlDe()).not.toContain('views_login');
+    expect(JSON.parse(db.query.mock.calls[0][1][2])[0]).not.toHaveProperty('views_login');
+  });
+
+  test('apos_login > 0: grava views_login e soma junto com views', async () => {
+    db.query.mockResolvedValue({ rows: [], rowCount: 2 });
+    const res = await post({ views: [view({ screen: 'painel', count: 3, apos_login: 1 }), view({ screen: 'pdv', count: 2 })] });
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ ok: true, gravadas: 2 });
+    expect(sqlDe()).toContain('views_login = screen_views.views_login + EXCLUDED.views_login');
+    expect(sqlDe()).toContain('WHERE EXCLUDED.last_at > screen_views.last_at'); // idempotência intacta
+    expect(JSON.parse(db.query.mock.calls[0][1][2])).toEqual([
+      { screen: 'painel', dia: '2026-10-13', views: 3, last_at: '2026-10-13T11:40:00.000Z', views_login: 1 },
+      { screen: 'pdv', dia: '2026-10-13', views: 2, last_at: '2026-10-13T11:40:00.000Z' },
+    ]);
+  });
+
+  test('apos_login 0 ou nulo equivale a ausente', async () => {
+    db.query.mockResolvedValue({ rows: [], rowCount: 1 });
+    expect((await post({ views: [view({ apos_login: 0 })] })).status).toBe(200);
+    expect((await post({ views: [view({ apos_login: null })] })).status).toBe(200);
+    for (const [sql] of db.query.mock.calls) expect(sql).not.toContain('views_login');
+  });
+
+  test('a mesma tela duas vezes no lote soma views e views_login (e views_login nunca passa de views)', async () => {
+    db.query.mockResolvedValue({ rows: [], rowCount: 1 });
+    await post({ views: [view({ screen: 'painel', count: 1, apos_login: 1, last_at: '2026-10-13T10:00:00.000Z' }), view({ screen: 'painel', count: 4, apos_login: 0, last_at: '2026-10-13T11:00:00.000Z' })] });
+    expect(JSON.parse(db.query.mock.calls[0][1][2])).toEqual([
+      { screen: 'painel', dia: '2026-10-13', views: 5, last_at: '2026-10-13T11:00:00.000Z', views_login: 1 },
+    ]);
+  });
+
+  test('migration 389 pendente (42703): regrava o lote sem a origem, a visita não se perde', async () => {
+    const err = new Error('column "views_login" of relation "screen_views" does not exist');
+    err.code = '42703';
+    db.query.mockRejectedValueOnce(err).mockResolvedValueOnce({ rows: [], rowCount: 1 });
+    const res = await post({ views: [view({ screen: 'painel', count: 1, apos_login: 1 })] });
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ ok: true, gravadas: 1 });
+    expect(db.query).toHaveBeenCalledTimes(2);
+    expect(sqlDe(0)).toContain('views_login');
+    expect(sqlDe(1)).not.toContain('views_login');
+    expect(JSON.parse(db.query.mock.calls[1][1][2])[0]).toMatchObject({ screen: 'painel', views: 1 });
+  });
+
+  test('42703 num lote SEM origem não é engolido (é outro problema)', async () => {
+    const err = new Error('column "x" does not exist');
+    err.code = '42703';
+    db.query.mockRejectedValue(err);
+    const res = await post({ views: [view()] });
+    expect(res.status).toBe(500);
+    expect(db.query).toHaveBeenCalledTimes(1);
+  });
+
+  test.each([
+    ['apos_login maior que count', { screen: 'painel', count: 1, apos_login: 2 }],
+    ['apos_login negativo', { screen: 'painel', count: 1, apos_login: -1 }],
+    ['apos_login quebrado', { screen: 'painel', count: 2, apos_login: 0.5 }],
+    ['apos_login texto', { screen: 'painel', count: 2, apos_login: '1' }],
+    ['apos_login booleano', { screen: 'painel', count: 2, apos_login: true }],
+  ])('%s → 400', async (_nome, item) => {
+    const res = await post({ views: [item] });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/apos_login/);
+    expect(db.query).not.toHaveBeenCalled();
+  });
+
+  test('normalizarViews expõe views_login só quando há origem', () => {
+    const { normalizarViews } = require('../../src/routes/usageScreens');
+    const { itens } = normalizarViews({ views: [{ screen: 'painel', count: 2, apos_login: 1 }, { screen: 'pdv', count: 1 }] }, AGORA.getTime());
+    expect(itens.map((i) => i.views_login)).toEqual([1, undefined]);
+  });
+});
+
 describe('POST /usage/screens — limites e payload inválido (400, nunca 500)', () => {
   test('50 itens passam, 51 não', async () => {
     db.query.mockResolvedValue({ rows: [], rowCount: 50 });
