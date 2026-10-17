@@ -105,6 +105,29 @@ describe('montarTrial (bloco trial do /auth/me)', () => {
   });
 });
 
+describe('codigoEntraNaPrimeiraVenda (cadastro do site com código)', () => {
+  const ok = regra.codigoEntraNaPrimeiraVenda;
+  test('COMECAR (trial, 7 dias), em qualquer caixa, entra', () => {
+    expect(ok({ codigo: 'COMECAR', tipo: 'trial', trialDays: 7 })).toBe(true);
+    expect(ok({ codigo: ' comecar ', tipo: 'trial', trialDays: 7 })).toBe(true);
+  });
+  test('indicação (referral) entra', () => {
+    expect(ok({ codigo: 'REF-ANA1B2C', tipo: 'referral', trialDays: 7 })).toBe(true);
+  });
+  test('outro código trial, promo, manual e invite seguem fixos', () => {
+    expect(ok({ codigo: 'TRIAL-AURA', tipo: 'trial', trialDays: 7 })).toBe(false);
+    expect(ok({ codigo: 'COMECAR', tipo: 'promo', trialDays: 7 })).toBe(false);
+    expect(ok({ codigo: 'X', tipo: 'manual', trialDays: 7 })).toBe(false);
+    expect(ok({ codigo: 'X', tipo: 'invite', trialDays: 7 })).toBe(false);
+  });
+  test('sem dias de trial ou com mais dias que o teto: fica fixo (não encurta nem inventa trial)', () => {
+    expect(ok({ codigo: 'COMECAR', tipo: 'trial', trialDays: 0 })).toBe(false);
+    expect(ok({ codigo: 'REF-X', tipo: 'referral', trialDays: 30 })).toBe(false);
+    expect(ok({ codigo: 'REF-X', tipo: 'referral', trialDays: 15 })).toBe(true);
+    expect(ok()).toBe(false);
+  });
+});
+
 describe('iniciarTrialPelaPrimeiraVenda (gancho do POST /pdv/sale)', () => {
   test('o UPDATE carrega cada guarda da regra e as duas constantes', async () => {
     db.query.mockResolvedValueOnce({ rows: [{ trial_ends_at: dia('2026-10-22'), trial_started_by_sale_at: dia('2026-10-15') }] });

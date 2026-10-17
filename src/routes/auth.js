@@ -395,6 +395,12 @@ router.post('/register', async (req, res) => {
     if (!access_code && isSelfServe) {
       plan = 'negocio'; trialDays = trialRegra.DIAS_FIXO_LEGADO; codeType = 'self_serve';
     }
+    // 17/10/2026 (t1-14): o cadastro do site manda COMECAR ou REF- (indicacao).
+    // Plano, desconto e dias do codigo ficam como o codigo deu; so o relogio
+    // passa a contar da primeira venda (ligado abaixo, na mesma transacao).
+    const codigoNaPrimeiraVenda = !!access_code && trialRegra.codigoEntraNaPrimeiraVenda({
+      codigo: access_code, tipo: codeType, trialDays,
+    });
 
     const isStaff = email.toLowerCase().trim().endsWith('@getaura.com.br');
     const password_hash = await bcrypt.hash(password, 12);
@@ -473,7 +479,7 @@ router.post('/register', async (req, res) => {
       // 13/10/2026: self-service sem codigo (e que nao e dojo) entra no modo
       // primeira_venda. Sem as colunas da migration 379 volta null e os 7
       // dias fixos do INSERT ficam valendo.
-      if (codeType === 'self_serve' && !isDojoSignup) {
+      if ((codeType === 'self_serve' || codigoNaPrimeiraVenda) && !isDojoSignup) {
         const modo = await trialRegra.ligarPrimeiraVendaNoCadastro(client, company.id);
         if (modo) {
           company = { ...company, trial_ends_at: modo.trial_ends_at };
