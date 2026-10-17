@@ -104,7 +104,21 @@ describe('POST /auth/register', () => {
     expect(res.body.company.trial.teto_em).toBe(res.body.company.trial.ends_at);
   });
 
-  test('conta por código de acesso fica fixa: os dias do código, sem tocar no modo', async () => {
+  test('código de campanha (trial de outro nome) fica fixo: os dias do código, sem tocar no modo', async () => {
+    const estado = clienteDoCadastro({
+      codigo: { id: 'ac1', type: 'trial', plan: 'negocio', discount_pct: 0, trial_days: 7, max_uses: 10, uses: 0, expires_at: null, is_active: true, referrer_id: null },
+    });
+
+    const res = await cadastrar({ access_code: 'TRIAL-AURA', self_serve: true });
+
+    expect(res.status).toBe(201);
+    expect(estado.sqls.some((s) => s.includes('trial_mode'))).toBe(false);
+    expect(estado.sqls.some((s) => s.startsWith('SAVEPOINT'))).toBe(false);
+    expect(diasAte(estado.empresa.trial_ends_at)).toBeCloseTo(7, 2);
+    expect(res.body.company.trial).toMatchObject({ mode: 'fixo', teto_em: null, aguardando_primeira_venda: false });
+  });
+
+  test('código com mais dias que o teto fica fixo, mesmo sendo COMECAR (não encurta o que o código deu)', async () => {
     const estado = clienteDoCadastro({
       codigo: { id: 'ac1', type: 'trial', plan: 'negocio', discount_pct: 0, trial_days: 30, max_uses: 10, uses: 0, expires_at: null, is_active: true, referrer_id: null },
     });
@@ -113,9 +127,63 @@ describe('POST /auth/register', () => {
 
     expect(res.status).toBe(201);
     expect(estado.sqls.some((s) => s.includes('trial_mode'))).toBe(false);
-    expect(estado.sqls.some((s) => s.startsWith('SAVEPOINT'))).toBe(false);
     expect(diasAte(estado.empresa.trial_ends_at)).toBeCloseTo(30, 2);
-    expect(res.body.company.trial).toMatchObject({ mode: 'fixo', teto_em: null, aguardando_primeira_venda: false });
+    expect(res.body.company.trial.mode).toBe('fixo');
+  });
+
+  test('site com COMECAR: primeira_venda com o teto de 15 dias, Negócio e código preservados', async () => {
+    const estado = clienteDoCadastro({
+      codigo: { id: 'ac1', type: 'trial', plan: 'negocio', discount_pct: 0, trial_days: 7, max_uses: 99999, uses: 3, expires_at: null, is_active: true, referrer_id: null },
+    });
+
+    const res = await cadastrar({ access_code: 'comecar' });
+
+    expect(res.status).toBe(201);
+    expect(estado.empresa.trial_mode).toBe('primeira_venda');
+    expect(diasAte(estado.empresa.trial_ends_at)).toBeCloseTo(15, 2);
+    expect(estado.empresa.plan).toBe('negocio');
+    expect(estado.empresa.access_code_used).toBe('comecar');
+    // o uso do código segue contado
+    expect(estado.sqls.some((s) => s.startsWith('UPDATE access_codes SET uses = uses + 1'))).toBe(true);
+    const ordem = (trecho) => estado.sqls.findIndex((s) => s.startsWith(trecho));
+    expect(ordem('SAVEPOINT trial_primeira_venda')).toBeGreaterThan(ordem('INSERT INTO companies'));
+    expect(ordem('RELEASE SAVEPOINT trial_primeira_venda')).toBeLessThan(ordem('COMMIT'));
+    expect(res.body.company.trial).toMatchObject({ mode: 'primeira_venda', aguardando_primeira_venda: true });
+    expect(res.body.code_applied).toMatchObject({ type: 'trial', plan: 'negocio' });
+  });
+
+  test('site com REF- (indicação): primeira_venda e o desconto, o vínculo da indicação e o código ficam como estavam', async () => {
+    const estado = clienteDoCadastro({
+      codigo: { id: 'ac2', type: 'referral', plan: 'negocio', discount_pct: 20, trial_days: 7, max_uses: 5, uses: 1, expires_at: null, is_active: true, referrer_id: 'u-indicador' },
+    });
+
+    const res = await cadastrar({ access_code: 'REF-ANA1B2C' });
+
+    expect(res.status).toBe(201);
+    expect(estado.empresa.trial_mode).toBe('primeira_venda');
+    expect(diasAte(estado.empresa.trial_ends_at)).toBeCloseTo(15, 2);
+    expect(estado.empresa.plan).toBe('negocio');
+    expect(estado.empresa.access_code_used).toBe('REF-ANA1B2C');
+    expect(res.body.code_applied).toMatchObject({ type: 'referral', plan: 'negocio', discount_pct: 20 });
+    expect(res.body.company.trial.mode).toBe('primeira_venda');
+    // a indicação continua registrada, na mesma transação, antes do COMMIT
+    const iRef = estado.sqls.findIndex((s) => s.startsWith('INSERT INTO referrals'));
+    expect(iRef).toBeGreaterThan(-1);
+    expect(iRef).toBeLessThan(estado.sqls.indexOf('COMMIT'));
+  });
+
+  test('REF- com a migration 379 pendente: cadastro segue com os 7 dias do código', async () => {
+    const estado = clienteDoCadastro({
+      semMigration: true,
+      codigo: { id: 'ac2', type: 'referral', plan: 'negocio', discount_pct: 20, trial_days: 7, max_uses: 5, uses: 1, expires_at: null, is_active: true, referrer_id: 'u-indicador' },
+    });
+
+    const res = await cadastrar({ access_code: 'REF-ANA1B2C' });
+
+    expect(res.status).toBe(201);
+    expect(estado.sqls).toContain('ROLLBACK TO SAVEPOINT trial_primeira_venda');
+    expect(diasAte(res.body.company.trial_ends_at)).toBeCloseTo(7, 2);
+    expect(res.body.company.trial.mode).toBe('fixo');
   });
 
   test('cadastro interno (sem self_serve, sem código): sem trial e sem modo', async () => {

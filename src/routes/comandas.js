@@ -6,7 +6,8 @@
 //
 // GET    /comandas                      → {comandas} (so as abertas, com total)
 // GET    /comandas/:number              → {comanda} (a ABERTA com esse numero)
-// POST   /comandas/:number/items        → 201 {comanda} (abre se nao existir)
+// POST   /comandas/:number/items        → 201 {comanda} (abre se nao existir;
+//                                          `name` opcional, migration 389)
 // DELETE /comandas/:number/items/:iid   → {comanda}
 // POST   /comandas/:number/cancel       → {ok}
 //
@@ -22,6 +23,12 @@
 //
 // Sem baixa de estoque aqui: e na venda. Preco e nome ficam congelados no
 // lancamento (o cliente consumiu pelo preco daquela hora).
+//
+// NOME DA COMANDA (389, card tc-01): opcional ("Joao", "Mesa do fundo"), ate
+// 40 caracteres. Vai na abertura; lancar de novo com nome troca o nome;
+// lancar sem nome mantem o que ja estava. Sem a coluna (deploy antes da
+// migration) tudo segue igual, sem nome: a coluna e sondada e o "nao existe"
+// fica 60 s em cache.
 // ============================================================
 'use strict';
 
@@ -30,6 +37,7 @@ const db = require('../config/database');
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const MAX_ITEMS_PER_CALL = 100;
+const MAX_NOME = 40;
 
 const round2 = (n) => Math.round(n * 100) / 100;
 const round3 = (n) => Math.round(n * 1000) / 1000;
@@ -71,6 +79,43 @@ function numeroDaComanda(raw) {
   const n = parseInt(s, 10);
   return n >= 1 && n <= 9999 ? n : null;
 }
+
+// Nome da comanda: texto aparado, espacos internos colapsados, sem caractere
+// de controle, ate 40. Vazio, ausente ou nao-texto → null ("nao veio nome").
+function nomeDaComanda(raw) {
+  if (raw == null) return null;
+  if (typeof raw !== 'string' && typeof raw !== 'number') return null;
+  const s = String(raw).replace(/[\u0000-\u001f\u007f]/g, ' ').replace(/\s+/g, ' ').trim();
+  if (!s) return null;
+  return Array.from(s).slice(0, MAX_NOME).join('').trim();
+}
+
+// A coluna pdv_comandas.name (389) existe? true fica para sempre; false e
+// sondado de novo depois de 60 s (a migration chega com o app no ar).
+let _temNome = null;
+let _nomeCheckedAt = 0;
+
+async function temColunaNome(q) {
+  if (_temNome === true) return true;
+  const now = Date.now();
+  if (_temNome === false && (now - _nomeCheckedAt) < 60000) return false;
+  try {
+    const r = await q.query(
+      `SELECT EXISTS (
+         SELECT 1 FROM pg_attribute
+          WHERE attrelid = to_regclass('public.pdv_comandas')
+            AND attname = 'name' AND NOT attisdropped
+       ) AS ok`
+    );
+    _temNome = !!(r && r.rows && r.rows[0] && r.rows[0].ok);
+  } catch (e) {
+    _temNome = false;
+  }
+  _nomeCheckedAt = now;
+  return _temNome;
+}
+
+function _resetCache() { _temNome = null; _nomeCheckedAt = 0; }
 
 // Valida e normaliza os itens lancados. product_id que nao e uuid vira null
 // (o Caixa usa chaves proprias para item sem cadastro).
@@ -125,6 +170,7 @@ function comandaOut(c, itens) {
   return {
     id: c.id,
     number: Number(c.number),
+    name: c.name || null,
     status: c.status,
     opened_at: c.opened_at,
     items,
@@ -133,9 +179,9 @@ function comandaOut(c, itens) {
   };
 }
 
-async function carregarAberta(q, companyId, number) {
+async function carregarAberta(q, companyId, number, comNome) {
   const { rows } = await q.query(
-    `SELECT id, number, status, opened_at FROM pdv_comandas
+    `SELECT id, number, status, opened_at${comNome ? ', name' : ''} FROM pdv_comandas
       WHERE company_id = $1 AND number = $2 AND status = 'open'`,
     [companyId, number]
   );
@@ -153,8 +199,9 @@ async function carregarAberta(q, companyId, number) {
 // ─── GET /comandas ───────────────────────────────────────────
 router.get('/', async function (req, res) {
   try {
+    const comNome = await temColunaNome(db);
     const { rows } = await db.query(
-      `SELECT c.id, c.number, c.status, c.opened_at,
+      `SELECT c.id, c.number, c.status, c.opened_at,${comNome ? ' c.name,' : ''}
               COUNT(i.id)::int AS items_count,
               COALESCE(SUM(i.quantity * i.unit_price), 0) AS subtotal
          FROM pdv_comandas c
@@ -169,6 +216,7 @@ router.get('/', async function (req, res) {
       comandas: rows.map((r) => ({
         id: r.id,
         number: Number(r.number),
+        name: r.name || null,
         status: r.status,
         opened_at: r.opened_at,
         items_count: Number(r.items_count) || 0,
@@ -187,7 +235,7 @@ router.get('/:number', async function (req, res) {
   try {
     const number = numeroDaComanda(req.params.number);
     if (!number) return res.status(400).json({ error: 'Informe o número da comanda (1 a 9999).', code: 'COMANDA_NUMBER_INVALID' });
-    const comanda = await carregarAberta(db, req.params.id, number);
+    const comanda = await carregarAberta(db, req.params.id, number, await temColunaNome(db));
     if (!comanda) return res.status(404).json({ error: `Não há comanda ${number} aberta.`, code: 'COMANDA_NOT_FOUND' });
     res.json({ comanda });
   } catch (err) {
@@ -197,6 +245,8 @@ router.get('/:number', async function (req, res) {
 
 // ─── POST /comandas/:number/items ────────────────────────────
 // Lanca consumo. Abre a comanda se o numero ainda nao estiver aberto.
+// `name` opcional: grava na abertura; com a comanda ja aberta, troca o nome
+// (sem nome, o que estava fica).
 router.post('/:number/items', async function (req, res) {
   const companyId = req.params.id;
   let client = null;
@@ -207,19 +257,31 @@ router.post('/:number/items', async function (req, res) {
     const norm = normalizarItens((req.body || {}).items);
     if (norm.error) return res.status(400).json({ error: norm.error });
     const userId = req.user && UUID_RE.test(String(req.user.id || '')) ? req.user.id : null;
+    // Sondado ANTES do BEGIN: um 42703 dentro da transacao a abortaria.
+    const comNome = await temColunaNome(db);
+    const nome = comNome ? nomeDaComanda((req.body || {}).name) : null;
 
     client = await db.connect();
     await client.query('BEGIN');
     // Abre ou reaproveita a aberta. O DO UPDATE trava a linha: dois caixas
     // lancando na mesma comanda ao mesmo tempo caem na MESMA comanda.
-    const { rows } = await client.query(
-      `INSERT INTO pdv_comandas (company_id, number, opened_by)
-       VALUES ($1, $2, $3)
-       ON CONFLICT (company_id, number) WHERE status = 'open'
-       DO UPDATE SET updated_at = NOW()
-       RETURNING id, (xmax = 0) AS criada`,
-      [companyId, number, userId]
-    );
+    const { rows } = comNome
+      ? await client.query(
+          `INSERT INTO pdv_comandas (company_id, number, opened_by, name)
+           VALUES ($1, $2, $3, $4)
+           ON CONFLICT (company_id, number) WHERE status = 'open'
+           DO UPDATE SET updated_at = NOW(), name = COALESCE(EXCLUDED.name, pdv_comandas.name)
+           RETURNING id, (xmax = 0) AS criada`,
+          [companyId, number, userId, nome]
+        )
+      : await client.query(
+          `INSERT INTO pdv_comandas (company_id, number, opened_by)
+           VALUES ($1, $2, $3)
+           ON CONFLICT (company_id, number) WHERE status = 'open'
+           DO UPDATE SET updated_at = NOW()
+           RETURNING id, (xmax = 0) AS criada`,
+          [companyId, number, userId]
+        );
     const comandaId = rows[0].id;
     for (const it of norm.items) {
       await client.query(
@@ -229,7 +291,7 @@ router.post('/:number/items', async function (req, res) {
         [comandaId, companyId, it.product_id, it.variant_id, it.name, it.unit, it.quantity, it.unit_price, userId]
       );
     }
-    const comanda = await carregarAberta(client, companyId, number);
+    const comanda = await carregarAberta(client, companyId, number, comNome);
     await client.query('COMMIT');
     client.release();
     client = null;
@@ -260,7 +322,7 @@ router.delete('/:number/items/:iid', async function (req, res) {
       [req.params.iid, companyId, number]
     );
     if (!rowCount) return res.status(404).json({ error: 'Item não encontrado nesta comanda.' });
-    const comanda = await carregarAberta(db, companyId, number);
+    const comanda = await carregarAberta(db, companyId, number, await temColunaNome(db));
     res.json({ comanda });
   } catch (err) {
     falhar(res, err, 'DELETE:item');
@@ -292,3 +354,5 @@ router.post('/:number/cancel', async function (req, res) {
 module.exports = router;
 module.exports.numeroDaComanda = numeroDaComanda;
 module.exports.normalizarItens = normalizarItens;
+module.exports.nomeDaComanda = nomeDaComanda;
+module.exports._resetCache = _resetCache;

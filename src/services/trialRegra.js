@@ -188,6 +188,21 @@ async function ligarPrimeiraVendaNoCadastro(client, companyId) {
   }
 }
 
+// 17/10/2026 (t1-14): o cadastro pelo site manda access_code. COMECAR (tipo
+// 'trial') e os códigos de indicação REF- (tipo 'referral') são o mesmo
+// self-service com outro nome: entram em 'primeira_venda'. Convite, dojô e
+// códigos de campanha (tipo promo/manual/trial de outro nome) seguem 'fixo'.
+// Só vale se o código dá um trial curto (1..TETO_DIAS): um código que dá mais
+// dias que o teto não pode ser encurtado por esta regra.
+const CODIGO_SELF_SERVICE = 'COMECAR';
+function codigoEntraNaPrimeiraVenda({ codigo, tipo, trialDays } = {}) {
+  const dias = Number(trialDays) || 0;
+  if (dias < 1 || dias > TETO_DIAS) return false;
+  if (tipo === 'referral') return true;
+  return tipo === 'trial' && typeof codigo === 'string' &&
+    codigo.toUpperCase().trim() === CODIGO_SELF_SERVICE;
+}
+
 // Só para testes.
 function _resetForTests() {
   resolvidas.clear();
@@ -209,5 +224,6 @@ module.exports = {
   iniciarTrialPelaPrimeiraVenda,
   marcarTrialFixo,
   ligarPrimeiraVendaNoCadastro,
+  codigoEntraNaPrimeiraVenda,
   _resetForTests,
 };

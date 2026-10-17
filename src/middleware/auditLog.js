@@ -3,7 +3,24 @@
 // Logs sensitive actions to audit_log table
 // Usage: router.post('/endpoint', auditLog('action_name'), handler)
 // ============================================================
+const net = require('net');
 const db = require('../config/database');
+
+/**
+ * IP e user agent da requisicao, prontos para as colunas ip_address (INET) e
+ * user_agent (VARCHAR 200) do audit_log. req.ip ja respeita o `trust proxy`
+ * do app (app.js). Valor que nao e IP vira null: um INET invalido derrubaria
+ * o INSERT inteiro e a linha de auditoria se perderia.
+ */
+function contextoDaRequisicao(req) {
+  let ip = req && req.ip ? String(req.ip).trim() : '';
+  if (ip.startsWith('::ffff:') && net.isIPv4(ip.slice(7))) ip = ip.slice(7);
+  const ua = req && req.headers && req.headers['user-agent'];
+  return {
+    ip: net.isIP(ip) ? ip : null,
+    userAgent: ua ? String(ua).substring(0, 200) : null,
+  };
+}
 
 /**
  * Creates audit log middleware for a specific action.
@@ -65,9 +82,21 @@ function auditLog(action, opts = {}) {
 
 /**
  * Standalone function to log an action directly (not as middleware).
+ *
+ * `contexto` ({ ip, userAgent }, de contextoDaRequisicao) e opcional: sem ele o
+ * INSERT e o de sempre (5 colunas); com ele grava tambem ip_address e user_agent.
  */
-async function logAuditAction(userId, companyId, action, detail, metadata = {}) {
+async function logAuditAction(userId, companyId, action, detail, metadata = {}, contexto = null) {
   try {
+    if (contexto && (contexto.ip || contexto.userAgent)) {
+      await db.query(
+        `INSERT INTO audit_log (user_id, company_id, action, detail, metadata, ip_address, user_agent)
+         VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+        [userId, companyId, action, String(detail).substring(0, 500), JSON.stringify(metadata),
+          contexto.ip || null, contexto.userAgent || null]
+      );
+      return;
+    }
     await db.query(
       `INSERT INTO audit_log (user_id, company_id, action, detail, metadata)
        VALUES ($1, $2, $3, $4, $5)`,
@@ -76,4 +105,4 @@ async function logAuditAction(userId, companyId, action, detail, metadata = {}) 
   } catch (_) {}
 }
 
-module.exports = { auditLog, logAuditAction };
+module.exports = { auditLog, logAuditAction, contextoDaRequisicao };
