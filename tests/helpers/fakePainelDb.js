@@ -182,6 +182,31 @@ function dadosPadrao() {
       { mes: '2026-09', mrr_total: '310.83' },
       { mes: '2026-08', mrr_total: '140.83' },
     ],
+    // bloco Custos (migration 382), do mais novo ao mais antigo:
+    //   out: só o job gravou (MRR), sem custo lançado;
+    //   set: Anthropic paga pelo sócio + sobra sem abertura (como a 382 gravou);
+    //   ago: aberto por categoria; jul: sem linha; jun: total digitado, sem detalhe.
+    custosSnapshots: [
+      { mes: '2026-10', mrr_total: '553.00', total_costs: '0.00', gross_margin: '0.00', taxas_asaas: null, das: null, custos_detalhe: null, updated_at: ts('2026-10-13', '09:00') },
+      {
+        mes: '2026-09', mrr_total: '310.83', total_costs: '871.17', gross_margin: '-560.34', taxas_asaas: '26.95', das: '45.34',
+        custos_detalhe: {
+          anthropic: { valor: 550, origem: 'socio', observacao: 'paga em conta pessoal do socio' },
+          demais: { valor: 321.17, observacao: 'sem abertura por categoria neste snapshot' },
+        },
+        updated_at: ts('2026-10-01', '09:00'),
+      },
+      {
+        mes: '2026-08', mrr_total: '140.83', total_costs: '300.00', gross_margin: '-159.17', taxas_asaas: '12.00', das: null,
+        custos_detalhe: {
+          meta: { valor: 80, origem: 'empresa', lancado_em: ts('2026-09-02', '13:00') },
+          infraestrutura: { valor: 120, origem: 'empresa', observacao: 'Railway e Supabase', lancado_em: ts('2026-09-02', '13:00') },
+          outros: { valor: 100, origem: 'estimativa', lancado_em: ts('2026-09-02', '13:00') },
+        },
+        updated_at: ts('2026-09-02', '13:00'),
+      },
+      { mes: '2026-06', mrr_total: '90.00', total_costs: '250.00', gross_margin: '-160.00', taxas_asaas: null, das: null, custos_detalhe: null, updated_at: ts('2026-07-01', '09:00') },
+    ],
     asaasPorMes: [
       { mes: '2026-09', event: 'PAYMENT_RECEIVED', n: '3', total: '479.66' },
       { mes: '2026-10', event: 'PAYMENT_RECEIVED', n: '2', total: '309.83' },
@@ -369,6 +394,7 @@ function responder(dados, escritas, sql, params = []) {
   }
   if (s.startsWith('INSERT INTO client_health_scores')) return escrever('client_health_scores');
   if (s.startsWith('INSERT INTO aura_revenue_snapshot')) return escrever('aura_revenue_snapshot');
+  if (s.includes('-- custos:snapshot')) return dados.custosSnapshots.slice(0, params[1]);
   if (s.includes('FROM aura_revenue_snapshot')) return dados.snapshots;
 
   // ── modo do trial (migration 379): painel (company_id) e clients-360 (id) ──
