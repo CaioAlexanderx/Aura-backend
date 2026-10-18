@@ -10,9 +10,15 @@
 //
 // 18/10/2026 (card t3-01): entram Ótica, Entregas e Parceiros do Matcon,
 // Agenda e Cupons. Um módulo pode ter mais de uma fonte (`fontes`): a loja
-// conta uma vez, os eventos somam. Etiquetas segue SEM medida (SEM_MEDIDA):
-// imprimir é um GET que não grava nada, e o único rastro (a calibração em
-// companies.pdv_settings) não tem data — não dá para contar uso em 30 dias.
+// conta uma vez, os eventos somam.
+//
+// 18/10/2026 (card tq-23): Etiquetas passa a ter fonte. Imprimir é um GET; a
+// rota agora soma +1 em label_print_days (empresa, dia) a cada abertura, e o
+// evento aqui é a soma de `prints` (`soma`), não o número de linhas (dias).
+// `aguardaDado`: a medição nasceu agora, então enquanto NENHUMA loja tem linha
+// o módulo segue "sem medida" (zero seria afirmar que ninguém usa). Depois do
+// primeiro registro vira módulo normal; lojas que não imprimiram desde o
+// início da medição contam como sem uso.
 // ============================================================
 'use strict';
 
@@ -66,32 +72,40 @@ const MODULOS = [
   // Cupom de desconto aplicado numa venda do Caixa (sales.coupon_id). Cupom
   // criado não entra: aniversário, crediário e Matcon geram cupom sozinhos.
   { id: 'cupons', rotulo: 'Cupons', tabela: 'sales', coluna: 'created_at', filtro: 'coupon_id IS NOT NULL' },
+  // ── tq-23 ──
+  { id: 'etiquetas', rotulo: 'Etiquetas', tabela: 'label_print_days', coluna: 'last_at', soma: 'prints', aguardaDado: true },
 ];
 
 // Funcionalidades que o bloco lista mas NÃO consegue medir (sem fonte no banco).
-const SEM_MEDIDA = [
-  {
-    id: 'etiquetas', rotulo: 'Etiquetas',
-    motivo: 'imprimir etiqueta não grava nada no banco (só a calibração, sem data)',
-  },
-];
+// Vazia desde o tq-23 (Etiquetas ganhou fonte). Módulos com `aguardaDado` e
+// nenhuma linha ainda entram aqui em tempo de execução (ver `sem_dado`).
+const SEM_MEDIDA = [];
+
+const MOTIVO_AGUARDA_DADO = 'a medição começou agora e nenhuma loja imprimiu desde então';
 
 const EM_PARALELO = 4;
 
-const fontesDe = (m) => m.fontes || [{ tabela: m.tabela, coluna: m.coluna, filtro: m.filtro }];
+const fontesDe = (m) => m.fontes || [{ tabela: m.tabela, coluna: m.coluna, filtro: m.filtro, soma: m.soma }];
 
 // Para cada módulo: Map company_id → { e7, ep, total, ultimo }.
 // `ep` = eventos na janela `periodo`. Com companyId, só aquela loja.
 async function usoPorModulo({ db = b.pool, hoje, periodo = 30, companyId = null }) {
   const params = companyId ? [hoje, companyId] : [hoje];
 
+  // Fonte com `soma`: o evento é a soma dessa coluna (ex.: prints por dia),
+  // não o número de linhas.
+  const contar = (f, cond) => {
+    if (f.soma) return `COALESCE(SUM(${f.soma})${cond ? ` FILTER (WHERE ${cond})` : ''}, 0)`;
+    return `COUNT(*)${cond ? ` FILTER (WHERE ${cond})` : ''}`;
+  };
+
   const umaFonte = async (f) => {
     const rows = await b.opcional(
       db,
       `SELECT company_id,
-              COUNT(*) FILTER (WHERE ${f.coluna} >= ${b.desde(7)}) AS e7,
-              COUNT(*) FILTER (WHERE ${f.coluna} >= ${b.desde(periodo)}) AS ep,
-              COUNT(*) AS total,
+              ${contar(f, `${f.coluna} >= ${b.desde(7)}`)} AS e7,
+              ${contar(f, `${f.coluna} >= ${b.desde(periodo)}`)} AS ep,
+              ${contar(f)} AS total,
               MAX(${f.coluna}) AS ultimo
          FROM ${f.tabela}
         WHERE company_id IS NOT NULL${f.filtro ? ` AND ${f.filtro}` : ''}${companyId ? ' AND company_id = $2' : ''}
@@ -114,7 +128,7 @@ async function usoPorModulo({ db = b.pool, hoje, periodo = 30, companyId = null 
         if (novo.ultimo && (!atual.ultimo || new Date(novo.ultimo) > new Date(atual.ultimo))) atual.ultimo = novo.ultimo;
       }
     }
-    return { id: m.id, rotulo: m.rotulo, lojas };
+    return { id: m.id, rotulo: m.rotulo, lojas, sem_dado: !!m.aguardaDado && lojas.size === 0 };
   };
 
   const out = [];
@@ -124,4 +138,4 @@ async function usoPorModulo({ db = b.pool, hoje, periodo = 30, companyId = null 
   return out;
 }
 
-module.exports = { MODULOS, SEM_MEDIDA, usoPorModulo };
+module.exports = { MODULOS, SEM_MEDIDA, MOTIVO_AGUARDA_DADO, usoPorModulo };

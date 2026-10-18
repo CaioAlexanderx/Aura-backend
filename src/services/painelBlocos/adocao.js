@@ -7,7 +7,9 @@ const { usoPorModulo } = require('./_uso');
 
 async function calcular({ hoje, periodo = 30, db = b.pool, empresas, uso } = {}) {
   const emp = empresas || await b.carregarEmpresas(db);
-  const modulos = uso || await usoPorModulo({ db, hoje, periodo });
+  // Recurso recém-medido e sem nenhum registro (Etiquetas, tq-23) fica fora:
+  // 0/N seria afirmar que ninguém usa.
+  const modulos = (uso || await usoPorModulo({ db, hoje, periodo })).filter((m) => !m.sem_dado);
   const pagantes = emp.pagantes;
   const de = pagantes.length;
 

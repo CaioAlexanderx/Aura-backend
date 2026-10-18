@@ -409,7 +409,7 @@ describe('GET /admin/painel/blocos/:id — uma rota por bloco', () => {
       rotulo: 'Etiquetas', sem_medida: true,
       lojas_7d: null, lojas_periodo: null, eventos_periodo: null, lojas_total: null,
     });
-    expect(etiquetas.motivo).toMatch(/não grava nada/);
+    expect(etiquetas.motivo).toMatch(/nenhuma loja imprimiu/);
     expect(body.indicadores.find((i) => i.rotulo === 'Sem medida')).toEqual({ rotulo: 'Sem medida', valor: 1, nota: 'Etiquetas' });
     // não vira "sem uso" nem barra de zero
     expect(body.indicadores.find((i) => i.rotulo === 'Sem uso no período').nota).not.toMatch(/Etiquetas/);
@@ -419,6 +419,45 @@ describe('GET /admin/painel/blocos/:id — uma rota por bloco', () => {
     // nem na adoção (0/N seria afirmar que ninguém usa)
     const adocao = (await api('get', '/blocos/adocao')).body;
     expect(adocao.listas[0].linhas.map((l) => l.rotulo)).not.toContain('Etiquetas');
+  });
+
+  test('uso por funcionalidade: com impressões registradas (tq-23) Etiquetas sai de "sem medida" e conta como módulo', async () => {
+    // sem `gravados`: o bloco é calculado ao vivo, com a fonte nova
+    const dados = fake.dadosPadrao();
+    // [loja, eventos 7d, eventos no período, total]: soma de prints por dia
+    dados.uso.label_print_days = [[2, 3, 7, 12], [8, 0, 1, 1]];
+    fake.ligar(db.query, dados);
+    const { body } = await api('get', '/blocos/uso_funcionalidade');
+    const etiquetas = body.listas[0].linhas.find((l) => l.modulo === 'etiquetas');
+    expect(etiquetas).toMatchObject({ rotulo: 'Etiquetas', lojas_7d: 1, lojas_periodo: 2, eventos_periodo: 8, lojas_total: 2 });
+    expect(etiquetas.sem_medida).toBeUndefined();
+    expect(body.indicadores.find((i) => i.rotulo === 'Sem medida')).toEqual({ rotulo: 'Sem medida', valor: 0, nota: null });
+    expect(body.series[0].pontos.map((p) => p.rotulo)).toContain('Etiquetas');
+    expect(body.insight).not.toMatch(/Etiquetas está sem medida/);
+    expect(body.listas[1].linhas.filter((l) => l.modulo === 'Etiquetas').map((l) => [l.nome, l.eventos])).toEqual([['Mercado Bela Vista', 7], ['Papelaria Sol', 1]]);
+    const adocao = (await api('get', '/blocos/adocao')).body;
+    expect(adocao.listas[0].linhas.map((l) => l.rotulo)).toContain('Etiquetas');
+  });
+
+  test('uso por módulo: Etiquetas soma `prints` (não conta linhas) na janela certa', async () => {
+    const consultas = [];
+    const banco = {
+      query: async (sql, params) => {
+        if (sql.includes('AS e7')) consultas.push(sql.replace(/\s+/g, ' '));
+        return { rows: [] };
+      },
+    };
+    const { usoPorModulo } = require('../../src/services/painelBlocos/_uso');
+    const uso = await usoPorModulo({ db: banco, hoje: fake.HOJE, periodo: 30 });
+    const sql = consultas.find((s) => s.includes('FROM label_print_days'));
+    expect(sql).toMatch(/COALESCE\(SUM\(prints\) FILTER \(WHERE last_at >= /);
+    expect(sql).toMatch(/COALESCE\(SUM\(prints\), 0\) AS total/);
+    expect(sql).not.toMatch(/COUNT\(\*\)/);
+    // as demais fontes seguem contando linhas
+    expect(consultas.find((s) => s.includes('FROM sales WHERE'))).toMatch(/COUNT\(\*\) FILTER/);
+    // sem nenhuma linha: aguarda dado (sem medida); os outros módulos não
+    expect(uso.find((m) => m.id === 'etiquetas').sem_dado).toBe(true);
+    expect(uso.find((m) => m.id === 'caixa').sem_dado).toBe(false);
   });
 
   test('uso por módulo: a fonte de cada funcionalidade nova é a tabela certa, com filtro antes do corte da loja', async () => {
