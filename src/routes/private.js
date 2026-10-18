@@ -114,6 +114,9 @@ router.use('/guides', require('./guides'));
 router.use('/checklist', require('./checklist').checklistRouter);
 // 05/10/2026: primeiros passos da frente (companies.segment, migration 366).
 router.use('/onboarding', require('./onboardingFirstSteps'));
+// 18/10/2026 (f2-04): oferta "vamos configurar juntos" (20 min pelo WhatsApp) no
+// Painel de quem acabou de se cadastrar. Estado e eventos em audit_log, sem migration.
+router.use('/onboarding/setup-call', require('./onboardingSetupCall'));
 // 14/10/2026: check-in do prospect (migration 384) — 3 perguntas em chip depois da
 // escolha da frente. Qualquer membro da empresa; staff em modo admin so le.
 router.use('/checkin', require('./checkin'));
