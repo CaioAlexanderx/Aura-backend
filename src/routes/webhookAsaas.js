@@ -493,6 +493,25 @@ router.post('/', async function(req, res) {
       [newStatus, isPaid, payment.paymentDate || null, nextDue, company.id]
     );
 
+    // Segundo UPDATE, so com a data da Asaas e sem tocar em last_payment_date
+    // (cartao ti-03, 18/10/2026). O trigger tr_billing_renewal_from_due_date
+    // (migration 393) age quando last_payment_date muda: se a data informada
+    // no UPDATE acima for IGUAL a que ja estava gravada, ele le "nao informou"
+    // e soma 1 mes (ex.: pagamento atrasado depois da correcao de
+    // vencimentos — gravaria 15/12 em vez de 15/11). Aqui last_payment_date
+    // nao muda, o trigger nao age e vale a data da Asaas. COALESCE: nunca
+    // sobrescreve com NULL. Sem transacao, como o resto do handler: se este
+    // falhar, fica o resultado do UPDATE acima (o comportamento anterior).
+    if (nextDue) {
+      await db.query(
+        `UPDATE companies
+            SET next_billing_date = COALESCE($1::date, next_billing_date),
+                updated_at        = NOW()
+          WHERE id = $2`,
+        [nextDue, company.id]
+      );
+    }
+
     // ── MULTI-CNPJ: propaga pra filhas se for primary ────
     // billing_owner_company_id aponta pra primary; quando ela muda
     // de status, todas as filhas devem refletir (atender requisições
