@@ -371,6 +371,28 @@ async function createCreditSale(client, {
       schedule.push({ id: iid, installment_number: i, amount_due: amt, due_date: dueDateStr });
     }
 
+    // tq-22 (18/10/2026): com juros, o debito leva o total COM juros -- o
+    // mesmo que as parcelas somam. Mesma regra que o /manual-entry ganhou em
+    // 07/10 (migration 367, caso Kaio Cesar): debitar so o principal e
+    // parcelar com juros deixava o razao abaixo do carne, e quem pagasse
+    // tudo terminava com "credito" do tamanho dos juros. A taxa so e
+    // conhecida aqui (depende do carne e da config), por isso o debito e
+    // acertado depois das parcelas, na mesma transacao. SEM juros nada roda:
+    // a venda grava exatamente as mesmas queries de antes.
+    // O "A Receber" do Financeiro continua pelo principal (fora deste card):
+    // o que o cliente pagar acima dele entra como "Recebimento crediario",
+    // a sobra que o applyPayment ja grava.
+    if (totalWithInterest - amount > 0.005 && debitRows && debitRows[0] && debitRows[0].id) {
+      const upd = await client.query(
+        `UPDATE customer_credit_transactions
+            SET amount = $3
+          WHERE id = $1 AND company_id = $2 AND type = 'debit'
+          RETURNING *`,
+        [debitRows[0].id, companyId, totalWithInterest]
+      );
+      if (upd && upd.rows && upd.rows.length) debitRows = upd.rows;
+    }
+
     try {
       await client.query(
         // 17/08/2026: `is_installment` passa a ser $5 em vez de `true` fixo.
