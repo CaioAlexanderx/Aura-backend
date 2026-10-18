@@ -47,7 +47,7 @@
 'use strict';
 
 const { round2, MAX_INSTALLMENTS_CEILING } = require('./terms');
-const { computeReschedulePlan, insertLedger, reduceReceivables } = require('./reschedule');
+const { computeReschedulePlan, insertLedger, reduceReceivables, installmentExcess, ledgerBackedDiscount } = require('./reschedule');
 const { NO_ACCOUNT_KEY, CENT_TOLERANCE, selectDebitsForTarget } = require('./carnePurchases');
 const { classifyInstallments } = require('../../utils/buildCarneA4Html');
 const carneSummary = require('./carneSummary');
@@ -315,6 +315,10 @@ async function applyMerge(client, {
   );
   const dest = { id: destRows[0].id, name: destRows[0].name || plan.name };
 
+  // Antes de mexer em parcela: quanto do cronograma o razao NAO cobre (orfa).
+  // O desconto da juncao so sai do razao acima disso (18/10/2026, t3-08).
+  const excess = await installmentExcess(client, companyId, customerId);
+
   // 4. Parcelas das origens: abertas saem, pagas migram, paga em parte encurta.
   const cancelar = [];   // abertas sem nada pago
   const encurtar = [];   // abertas com parte paga -> viram 'paid' no destino
@@ -408,13 +412,20 @@ async function applyMerge(client, {
   let adjustment = null;
   if (plan.delta < -CENT_TOLERANCE) {
     const desconto = round2(-plan.delta);
-    await insertLedger(client, {
-      companyId, customerId, accountId: dest.id, createdBy,
-      type: 'refund', amount: desconto, paymentMethod: 'crediario_ajuste',
-      notes: 'Juncao de carnes - desconto no saldo',
-    });
-    await reduceReceivables(client, companyId, customerId, desconto);
+    const noRazao = ledgerBackedDiscount(desconto, excess);
+    if (noRazao > CENT_TOLERANCE) {
+      await insertLedger(client, {
+        companyId, customerId, accountId: dest.id, createdBy,
+        type: 'refund', amount: noRazao, paymentMethod: 'crediario_ajuste',
+        notes: 'Juncao de carnes - desconto no saldo',
+      });
+      await reduceReceivables(client, companyId, customerId, noRazao);
+    }
     adjustment = { type: 'discount', amount: desconto };
+    if (noRazao < desconto - CENT_TOLERANCE) {
+      adjustment.ledger_amount     = noRazao;
+      adjustment.absorbed_mismatch = round2(desconto - noRazao);
+    }
   } else if (plan.delta > CENT_TOLERANCE) {
     const acrescimo = round2(plan.delta);
     await insertLedger(client, {
