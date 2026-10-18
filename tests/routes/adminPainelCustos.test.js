@@ -449,7 +449,7 @@ describe('bloco Custos', () => {
     ]);
     const d = await bloco.calcular({ hoje: '2026-10-18', db: { query: banco.query } });
     expect(d.valor).toBe(730.4);
-    expect(d.resumo).toBe('Margem de outubro: R$ 1.113,53 · MRR R$ 1.843,93');
+    expect(d.resumo).toBe('Margem de outubro: R$ 1.113,53 · receita do snapshot R$ 1.843,93');
     expect(d.detalhe.indicadores.map((i) => [i.rotulo, i.valor])).toEqual([
       ['Custos · Out', 730.4], ['Margem bruta · Out', 1113.53], ['Custos · Set', 871.17], ['Resultado · Set', 192.61],
     ]);
@@ -458,6 +458,28 @@ describe('bloco Custos', () => {
       ['Infraestrutura', 180.4, 'Conta da empresa'], ['Anthropic', 550, 'Conta pessoal do sócio'],
     ]);
     expect(d.detalhe.insight).toMatch(/R\$ 321,17 sem abertura por categoria \(Set\)/);
+  });
+
+  test('rótulos da Financeiro (18/10): DAS pago (do snapshot), receita do snapshot e aporte do sócio', async () => {
+    const banco = criarBanco([
+      { reference_month: '2026-10-01', mrr_total: 1843.93, total_costs: 550, custos_detalhe: { anthropic: { valor: 550, origem: 'socio' } } },
+      { reference_month: '2026-09-01', mrr_total: 1136.07, total_costs: 871.17, taxas_asaas: 26.95, das: 45.34, custos_detalhe: { anthropic: { valor: 550, origem: 'socio' }, infraestrutura: { valor: 321.17, origem: 'empresa' } } },
+    ]);
+    const d = await bloco.calcular({ hoje: '2026-10-18', db: { query: banco.query } });
+    const porMes = d.detalhe.listas.find((l) => l.titulo === 'Por mês');
+    expect(porMes.colunas.map((c) => c.rotulo)).toEqual(['Mês', 'Receita do snapshot', 'Custos', 'Margem', 'Taxas Asaas', 'DAS pago (do snapshot)', 'Resultado', 'Situação']);
+    expect(d.detalhe.indicadores.find((i) => i.rotulo === 'Margem bruta · Out').nota).toBe('receita do snapshot − custos');
+    expect(d.detalhe.indicadores.find((i) => i.rotulo === 'Resultado · Set').nota).toBe('depois de taxas da Asaas e DAS pago (do snapshot) · provisório até o fechamento do mês');
+    const cat = d.detalhe.listas[0];
+    expect(cat.colunas.map((c) => c.chave)).toContain('status');
+    expect(cat.linhas.map((l) => l.status)).toEqual(['Aporte do sócio']);
+    expect(d.detalhe.insight).toContain('Resultado depois de taxas e DAS é provisório até o fechamento do mês');
+    expect(d.detalhe.insight).toContain('O DAS pago (do snapshot) está deslocado em um mês em relação à receita: o DAS gravado num mês é o da receita do mês anterior');
+    expect(d.detalhe.insight).toContain('De set a receita do snapshot é a cobrança com vencimento no mês, não o MRR contratual: a comparação mês a mês não é da mesma medida');
+    expect(d.detalhe.insight).toContain('R$ 550,00 de Out é aporte do sócio: custo de competência que não saiu do caixa da empresa');
+    // nada disso muda o cálculo
+    expect(d.valor).toBe(550);
+    expect(d.detalhe.indicadores.find((i) => i.rotulo === 'Resultado · Set').valor).toBe(192.61);
   });
 
   test('soma das categorias diferente do total gravado aparece no insight', async () => {

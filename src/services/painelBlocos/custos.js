@@ -1,13 +1,23 @@
 // Bloco "Custos" (18/10/2026, card f5-06): o custo de cada mês, lido do
 // snapshot mensal (aura_revenue_snapshot.custos_detalhe e total_costs,
-// migration 382), com a margem e o resultado depois de taxas e DAS.
+// migration 382), com a margem e o resultado depois de taxas e DAS pago.
 //
 // O número do card é o custo do mês corrente. Mês sem lançamento fica SEM
 // número (null) e o resumo diz qual foi o último mês lançado: R$ 0 seria
 // mentira — era o que a tela antiga mostrava lendo aura_operational_costs.
 //
-// Margem = mrr_total (que o job grava todo dia) − total_costs, calculada aqui
-// na leitura. Resultado = margem − taxas da Asaas − DAS (fora de total_costs).
+// Margem = receita do snapshot (mrr_total) − total_costs, calculada aqui na
+// leitura. Resultado = margem − taxas da Asaas − DAS pago (fora de total_costs).
+//
+// Rótulos combinados com a Financeiro (18/10/2026):
+//   - o snapshot guarda o DAS PAGO, não o devido: sempre "DAS pago (do
+//     snapshot)". Ele está deslocado em um mês: o DAS gravado num mês é o da
+//     receita do mês anterior (o insight avisa; o cálculo não muda);
+//   - mrr_total de maio a setembro é a cobrança com vencimento no mês (cupom a
+//     valor cheio); só de outubro em diante é MRR contratual. A base da margem
+//     é "receita do snapshot", e o insight avisa que a série mistura medidas;
+//   - origem 'socio' é custo de competência que não saiu do caixa da empresa:
+//     a linha ganha a etiqueta "Aporte do sócio".
 // O lançamento é POST /admin/painel/custos (routes/adminPainelCustos.js).
 'use strict';
 
@@ -19,6 +29,10 @@ const MESES_EXTENSO = ['janeiro', 'fevereiro', 'março', 'abril', 'maio', 'junho
 const rotuloMes = (ym) => MESES[parseInt(String(ym).slice(5, 7), 10) - 1] || ym;
 const extenso = (ym) => MESES_EXTENSO[parseInt(String(ym).slice(5, 7), 10) - 1] || ym;
 const mesAno = (ym) => `${rotuloMes(ym)}/${String(ym).slice(0, 4)}`;
+// Primeiro mês com MRR contratual no snapshot; antes dele, mrr_total é a
+// cobrança com vencimento no mês (migration 382).
+const MRR_CONTRATUAL_DESDE = '2026-10';
+const APORTE_DO_SOCIO = 'Aporte do sócio';
 const ouNull = (v) => (v === null || v === undefined ? null : b.round2(v));
 
 // Meses mostrados: o corrente e os 5 anteriores.
@@ -97,6 +111,7 @@ async function calcular({ hoje, db = b.pool } = {}) {
       categoria: i.rotulo,
       valor: i.valor,
       origem: origem(i),
+      status: i.origem === 'socio' ? APORTE_DO_SOCIO : null,
       observacao: i.observacao,
       lancado_em: i.lancado_em,
     }))
@@ -119,6 +134,7 @@ async function calcular({ hoje, db = b.pool } = {}) {
         categoria: i.rotulo,
         valor: i.valor,
         origem: origem(i),
+        status: i.origem === 'socio' ? APORTE_DO_SOCIO : null,
         observacao: i.observacao,
         lancado_em: i.lancado_em,
       });
@@ -128,7 +144,7 @@ async function calcular({ hoje, db = b.pool } = {}) {
   const Mes = (ym) => extenso(ym).replace(/^./, (c) => c.toUpperCase());
   let resumo;
   if (atual.lancado) {
-    resumo = `Margem de ${extenso(atual.mes)}: ${b.brl(atual.margem)} · MRR ${b.brl(atual.mrr)}`;
+    resumo = `Margem de ${extenso(atual.mes)}: ${b.brl(atual.margem)} · receita do snapshot ${b.brl(atual.mrr)}`;
   } else if (ultimoFechado) {
     resumo = `${Mes(atual.mes)} sem custo lançado · ${extenso(ultimoFechado.mes)}: ${b.brl(ultimoFechado.custos)}`;
   } else {
@@ -144,6 +160,24 @@ async function calcular({ hoje, db = b.pool } = {}) {
     const total = b.round2(comSobra.reduce((t, m) => t + m.sem_abertura, 0));
     avisos.push(`${b.plural(comSobra.length, 'mês tem', 'meses têm')} ${b.brl(total)} sem abertura por categoria (${comSobra.map((m) => rotuloMes(m.mes)).join(', ')})`);
   }
+  const comResultado = meses.filter((m) => m.lancado && m.resultado !== null);
+  if (comResultado.length) {
+    avisos.push('Resultado depois de taxas e DAS é provisório até o fechamento do mês');
+  }
+  if (meses.some((m) => m.das !== null)) {
+    avisos.push('O DAS pago (do snapshot) está deslocado em um mês em relação à receita: o DAS gravado num mês é o da receita do mês anterior');
+  }
+  const cobranca = meses.filter((m) => m.mrr !== null && m.mes < MRR_CONTRATUAL_DESDE);
+  if (cobranca.length) {
+    const faixa = cobranca.length === 1
+      ? rotuloMes(cobranca[0].mes).toLowerCase()
+      : `${rotuloMes(cobranca[0].mes).toLowerCase()} a ${rotuloMes(cobranca[cobranca.length - 1].mes).toLowerCase()}`;
+    avisos.push(`De ${faixa} a receita do snapshot é a cobrança com vencimento no mês, não o MRR contratual: a comparação mês a mês não é da mesma medida`);
+  }
+  const doSocio = referencia ? referencia.itens.filter((i) => i.origem === 'socio') : [];
+  if (doSocio.length) {
+    avisos.push(`${b.brl(doSocio.reduce((t, i) => t + i.valor, 0))} de ${rotuloMes(referencia.mes)} é aporte do sócio: custo de competência que não saiu do caixa da empresa`);
+  }
   const divergentes = meses.filter((m) => m.divergente);
   if (divergentes.length) {
     avisos.push(`Soma das categorias diferente do total gravado em ${divergentes.map((m) => rotuloMes(m.mes)).join(', ')}`);
@@ -158,7 +192,7 @@ async function calcular({ hoje, db = b.pool } = {}) {
     fonte: 'aura_revenue_snapshot (custos_detalhe, lançamento mensal)',
     indicadores: [
       b.indicador(`Custos · ${rotuloMes(atual.mes)}`, atual.custos, atual.lancado ? b.plural(atual.itens.length, 'categoria', 'categorias') : 'sem lançamento'),
-      b.indicador(`Margem bruta · ${rotuloMes(atual.mes)}`, atual.margem, atual.lancado ? 'MRR − custos' : 'sem custo lançado'),
+      b.indicador(`Margem bruta · ${rotuloMes(atual.mes)}`, atual.margem, atual.lancado ? 'receita do snapshot − custos' : 'sem custo lançado'),
       b.indicador(
         ultimoFechado ? `Custos · ${rotuloMes(ultimoFechado.mes)}` : 'Último mês lançado',
         ultimoFechado ? ultimoFechado.custos : null,
@@ -167,24 +201,24 @@ async function calcular({ hoje, db = b.pool } = {}) {
       b.indicador(
         ultimoFechado ? `Resultado · ${rotuloMes(ultimoFechado.mes)}` : 'Resultado',
         ultimoFechado ? ultimoFechado.resultado : null,
-        'depois de taxas da Asaas e DAS'
+        'depois de taxas da Asaas e DAS pago (do snapshot) · provisório até o fechamento do mês'
       ),
     ],
     listas: [
       b.lista(
         referencia ? `Por categoria · ${mesAno(referencia.mes)}` : 'Por categoria',
-        [b.col('categoria', 'Categoria'), b.col('valor', 'Valor', 'moeda'), b.col('origem', 'Origem'), b.col('observacao', 'Observação'), b.col('lancado_em', 'Lançado em', 'data_hora')],
+        [b.col('categoria', 'Categoria'), b.col('valor', 'Valor', 'moeda'), b.col('origem', 'Origem'), b.col('status', 'Caixa'), b.col('observacao', 'Observação'), b.col('lancado_em', 'Lançado em', 'data_hora')],
         porCategoria
       ),
       b.lista(
         'Por mês',
-        [b.col('mes_rotulo', 'Mês'), b.col('mrr', 'MRR', 'moeda'), b.col('custos', 'Custos', 'moeda'), b.col('margem', 'Margem', 'moeda'),
-          b.col('taxas_asaas', 'Taxas Asaas', 'moeda'), b.col('das', 'DAS', 'moeda'), b.col('resultado', 'Resultado', 'moeda'), b.col('situacao', 'Situação')],
+        [b.col('mes_rotulo', 'Mês'), b.col('mrr', 'Receita do snapshot', 'moeda'), b.col('custos', 'Custos', 'moeda'), b.col('margem', 'Margem', 'moeda'),
+          b.col('taxas_asaas', 'Taxas Asaas', 'moeda'), b.col('das', 'DAS pago (do snapshot)', 'moeda'), b.col('resultado', 'Resultado', 'moeda'), b.col('situacao', 'Situação')],
         porMesLista
       ),
       b.lista(
         'Lançamentos por mês e categoria',
-        [b.col('mes_rotulo', 'Mês'), b.col('categoria', 'Categoria'), b.col('valor', 'Valor', 'moeda'), b.col('origem', 'Origem'), b.col('observacao', 'Observação')],
+        [b.col('mes_rotulo', 'Mês'), b.col('categoria', 'Categoria'), b.col('valor', 'Valor', 'moeda'), b.col('origem', 'Origem'), b.col('status', 'Caixa'), b.col('observacao', 'Observação')],
         lancamentos
       ),
     ],

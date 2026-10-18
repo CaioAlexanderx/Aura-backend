@@ -3,7 +3,7 @@
 //
 // Os custos de cada mês moram em aura_revenue_snapshot (migration 382):
 //   custos_detalhe  jsonb { categoria: { valor, origem, observacao, ... } }
-//   total_costs     soma das categorias (SEM taxas da Asaas e SEM DAS)
+//   total_costs     soma das categorias (SEM taxas da Asaas e SEM DAS pago)
 //   gross_margin    mrr_total - total_costs no momento do lançamento
 //
 // Quem escreve o quê na MESMA linha (reference_month = dia 1 do mês):
@@ -25,11 +25,12 @@ const pool = require('../config/database');
 // abertura que a migration 382 gravou de maio a setembro: dá para corrigir
 // (redistribuir e zerar), não é oferecida para mês novo.
 const CATEGORIAS = [
-  { id: 'infraestrutura', rotulo: 'Infraestrutura', ajuda: 'Railway, Supabase, Cloudflare, domínio' },
+  // Ajudas combinadas com a Financeiro (18/10/2026).
+  { id: 'infraestrutura', rotulo: 'Infraestrutura', ajuda: 'Supabase, Railway e domínio' },
   { id: 'anthropic', rotulo: 'Anthropic', ajuda: 'API e assinatura do Claude' },
-  { id: 'meta', rotulo: 'Meta', ajuda: 'WhatsApp Business e anúncios' },
-  { id: 'outros', rotulo: 'Outros', ajuda: 'Ferramentas e o que não cabe acima' },
-  { id: 'demais', rotulo: 'Demais (sem abertura)', ajuda: 'Total antigo sem categoria', legado: true },
+  { id: 'meta', rotulo: 'Meta', ajuda: 'Anúncios' },
+  { id: 'outros', rotulo: 'Outros', ajuda: 'Jim.com, Pássaro Marrom, alimentação' },
+  { id: 'demais', rotulo: 'Demais (sem abertura)', ajuda: 'Só o que ainda não tem categoria', legado: true },
 ];
 const POR_CATEGORIA = new Map(CATEGORIAS.map((c) => [c.id, c]));
 
@@ -37,6 +38,7 @@ const POR_CATEGORIA = new Map(CATEGORIAS.map((c) => [c.id, c]));
 // para a Anthropic paga na conta pessoal.
 const ORIGENS = [
   { id: 'empresa', rotulo: 'Conta da empresa' },
+  // aporte do sócio: custo de competência que não sai do caixa da empresa
   { id: 'socio', rotulo: 'Conta pessoal do sócio' },
   { id: 'estimativa', rotulo: 'Estimativa' },
 ];
