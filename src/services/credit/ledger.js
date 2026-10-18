@@ -9,6 +9,7 @@ const { computeLateCharges } = require('./lateCharges');
 const { scoreLabel, scoreWarning, _recalculateScore } = require('./score');
 const { computeUnifyPlan } = require('./unify');
 const carneAuto = require('./carneAuto');
+const { returnReleasedCoverage } = require('./releasedCoverage');
 
 const SP_DATE_NOW = "(NOW() AT TIME ZONE 'America/Sao_Paulo')::date";
 
@@ -1040,13 +1041,36 @@ async function cancelCreditSale(client, { companyId, saleId }) {
     [companyId, 'pdv-credit-receivable-' + saleId + '-%']
   );
 
-  await client.query(
-    `UPDATE credit_installments
-       SET status = 'cancelled', covered_amount = 0, updated_at = NOW()
-     WHERE sale_id = $1 AND company_id = $2
-       AND status IN ('pending', 'overdue')`,
+  // tq-21 (18/10/2026): todas as parcelas vivas da venda saem -- inclusive as
+  // ja PAGAS, que antes ficavam 'paid' numa venda cancelada segurando o
+  // dinheiro do cliente. A CTE devolve quanto cada uma tinha de cobertura
+  // ANTES de zerar (o RETURNING de um UPDATE so ve o valor novo).
+  const cancelRes = await client.query(
+    `WITH alvo AS (
+       SELECT id, covered_amount AS prev_covered
+         FROM credit_installments
+        WHERE sale_id = $1 AND company_id = $2
+          AND status IN ('pending', 'overdue', 'paid')
+        FOR UPDATE
+     )
+     UPDATE credit_installments ci
+        SET status = 'cancelled', covered_amount = 0, updated_at = NOW()
+       FROM alvo
+      WHERE ci.id = alvo.id
+     RETURNING ci.id AS installment_id, alvo.prev_covered AS covered`,
     [saleId, companyId]
   );
+
+  // tq-21: o pagamento que estava nessas parcelas continua no razao. Ele volta
+  // ao FIFO das outras parcelas abertas do cliente, com teto no quanto elas
+  // passam do saldo; o resto fica como credito (src/services/credit/releasedCoverage.js).
+  // Sem cobertura liberada, nenhuma query nova roda.
+  const released = ((cancelRes && cancelRes.rows) || [])
+    .filter(r => (Number(r.covered) || 0) > 0.005);
+  let coverage = { released: 0, reallocated: 0, credit_left: 0 };
+  if (customerId && released.length) {
+    coverage = await returnReleasedCoverage(client, { companyId, customerId, released });
+  }
 
   // 10/10/2026 (um carne por compra): a venda cancelada era a unica coisa do
   // carne dela -> o carne sai da ficha em vez de ficar aberto e vazio. Se o
@@ -1059,7 +1083,13 @@ async function cancelCreditSale(client, { companyId, saleId }) {
     await _updateCreditUsed(client, companyId, customerId);
   }
 
-  return { ok: true, cancelled_account_ids: cancelledAccountIds };
+  return {
+    ok: true,
+    cancelled_account_ids: cancelledAccountIds,
+    released_coverage:     coverage.released,
+    reallocated_amount:    coverage.reallocated,
+    credit_left:           coverage.credit_left,
+  };
 }
 
 async function getCustomerCreditPreview(companyId, customerId) {
