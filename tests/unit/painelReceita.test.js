@@ -154,7 +154,8 @@ describe('gravarSnapshot', () => {
     const [sql, params] = db.query.mock.calls[0];
     expect(sql).toContain("date_trunc('month', $1::date)::date");
     expect(sql).toContain('ON CONFLICT (reference_month) DO UPDATE');
-    expect(sql).not.toMatch(/total_costs|gross_margin|notes/);
+    // custos são do lançamento mensal (/admin/painel/custos): o job não os cita
+    expect(sql).not.toMatch(/total_costs|gross_margin|notes|custos_detalhe|taxas_asaas|das/);
     // dia, clientes ess/neg/exp/total, mrr ess/neg/exp/addons/total
     expect(params).toEqual(['2026-10-13', 1, 1, 0, 2, 0, 169, 0, 0, 169]);
   });

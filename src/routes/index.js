@@ -80,6 +80,8 @@ router.use('/admin/painel/asaas', require('./adminPainelAsaas'));
 router.use('/admin/painel/ofx', require('./adminPainelOfx'));
 // O que vai faltar por loja (ao vivo, sem linha do job): antes do prefixo.
 router.use('/admin/painel/ruptura', require('./adminPainelRuptura'));
+// Lançamento mensal de custos (card f5-06, 18/10/2026)
+router.use('/admin/painel/custos', require('./adminPainelCustos'));
 router.use('/admin/painel', require('./adminPainel'));
 
 router.use('/webhooks/asaas',     require('./webhookAsaas'));
