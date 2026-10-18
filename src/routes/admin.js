@@ -11,6 +11,7 @@ const { analyzeCNPJ } = require('../services/cnpjAnalysis');
 const { MODULE_PLAN_MAP, getModuleMap, getVisibleModules } = require('../services/modules');
 const asyncHandler = require('../utils/asyncHandler');
 const AppError = require('../errors/AppError');
+const custosMensais = require('../services/custosMensais');
 
 const adminOnly = [requireAuth, requireRole('admin')];
 const analystAccess = [requireAuth, requireRole('admin', 'analyst')];
@@ -43,18 +44,35 @@ router.get('/dashboard', ...adminOnly, asyncHandler(async (req, res) => {
   const mrrEstimated = counts.essencial * PLAN_PRICES.essencial + counts.negocio * PLAN_PRICES.negocio + counts.expansao * PLAN_PRICES.expansao;
 
   const { rows: snapshot } = await pool.query(`SELECT * FROM aura_revenue_snapshot ORDER BY reference_month DESC LIMIT 1`);
-  const now = new Date();
-  const firstOfMonth = new Date(now.getFullYear(), now.getMonth(), 1);
-  const { rows: costs } = await pool.query(`SELECT COALESCE(SUM(amount), 0) AS total FROM aura_operational_costs WHERE reference_month = $1`, [firstOfMonth]);
-  const totalCosts = parseFloat(costs[0]?.total || 0);
-  const grossMargin = mrrEstimated - totalCosts;
+  // Custos e margem vêm do snapshot do mês (card t2-21), a mesma fonte do bloco
+  // Custos do painel. Mês sem custo lançado: null, nunca R$ 0.
+  const custo = await custosMensais.custoDoMes({ db: pool });
 
   res.json({
     reference_date: new Date().toISOString(),
     clients: { total: totalClients, essencial: counts.essencial, negocio: counts.negocio, expansao: counts.expansao },
     mrr: { estimated: mrrEstimated, last_snapshot: snapshot[0]?.mrr_total || null },
-    costs: { current_month: totalCosts },
-    gross_margin: { estimated: grossMargin, margin_pct: mrrEstimated > 0 ? Math.round((grossMargin / mrrEstimated) * 100) : null },
+    // current_month e gross_margin.estimated são null quando o mês não tem custo
+    // lançado (lancado=false, rotulo 'sem custo lançado'). A margem é receita do
+    // snapshot − custos; mrr.estimated segue sendo planos × preço.
+    costs: {
+      current_month: custo.total,
+      mes: custo.mes,
+      lancado: custo.lancado,
+      rotulo: custo.rotulo,
+      fonte: 'aura_revenue_snapshot',
+      taxas_asaas: custo.taxas_asaas,
+      das: custo.das,
+      das_rotulo: custo.das_rotulo,
+      das_obs: custo.das_obs,
+    },
+    gross_margin: {
+      estimated: custo.margem,
+      margin_pct: custo.margem_pct,
+      base: custo.receita_base,
+      receita: custo.receita,
+      receita_obs: custo.receita_obs,
+    },
   });
 }));
 

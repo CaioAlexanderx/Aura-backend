@@ -180,6 +180,91 @@ async function lerMes({ db = pool, mes }) {
   return rows[0] || null;
 }
 
+// ── Leitura para as rotas da Gestão Aura (dashboard, overview, unit-economics) ──
+// 18/10/2026, card t2-21: essas rotas somavam aura_operational_costs (4 linhas,
+// todas de abril) e outubro dava custo R$ 0 e margem = MRR. A fonte é a mesma
+// do bloco Custos do painel: a linha do mês em aura_revenue_snapshot.
+// Rótulos da Financeiro: mês sem custo lançado é null ("sem custo lançado"),
+// nunca R$ 0; a base é "receita do snapshot"; o DAS é "DAS pago (do snapshot)".
+const SEM_CUSTO = 'sem custo lançado';
+const BASE_RECEITA = 'receita do snapshot';
+const DAS_ROTULO = 'DAS pago (do snapshot)';
+// Primeiro mês com MRR contratual no snapshot; antes dele, mrr_total é a
+// cobrança com vencimento no mês (migration 382).
+const MRR_CONTRATUAL_DESDE = '2026-10';
+const SEM_ABERTURA = new Set(['demais', 'sem_abertura']);
+
+// Dia de hoje em Brasília, 'YYYY-MM-DD'.
+function hojeBRT(agora = Date.now()) {
+  return new Date(agora - 3 * 3600000).toISOString().slice(0, 10);
+}
+
+// Deploy antes da migration 382: sem a coluna, é "sem custo lançado".
+const faltaMigration = (err) => !!err && (err.code === '42P01' || err.code === '42703');
+
+const ouNull = (v) => (v === null || v === undefined ? null : round2(v));
+
+// O mês de `hoje` visto pelas rotas. Mês sem custo lançado: lancado=false e
+// total/margem/margem_pct null (nunca 0).
+async function custoDoMes({ db = pool, hoje = hojeBRT() } = {}) {
+  const mes = mesDe(hoje);
+  let linha = null;
+  try {
+    linha = await lerMes({ db, mes });
+  } catch (err) {
+    if (!faltaMigration(err)) throw err;
+    console.warn('[admin] custos sem a migration 382:', err.message);
+  }
+  const lancado = temCusto(linha);
+  const receita = linha ? round2(linha.mrr_total) : null;
+  const total = lancado ? round2(linha.total_costs) : null;
+  const margem = lancado ? round2(receita - total) : null;
+  return {
+    mes,
+    lancado,
+    rotulo: lancado ? null : SEM_CUSTO,
+    total,
+    receita,
+    receita_base: BASE_RECEITA,
+    receita_obs: mes < MRR_CONTRATUAL_DESDE ? 'cobrança com vencimento no mês, não o MRR contratual' : null,
+    margem,
+    margem_pct: lancado && receita > 0 ? Math.round((margem / receita) * 100) : null,
+    taxas_asaas: ouNull(linha && linha.taxas_asaas),
+    das: ouNull(linha && linha.das),
+    das_rotulo: DAS_ROTULO,
+    das_obs: 'deslocado em um mês: o DAS gravado num mês é o da receita do mês anterior',
+    itens: lancado ? itensDoMes(linha) : [],
+  };
+}
+
+// Anúncios (categoria `meta`) dos últimos `meses` meses, para o CAC. Só entra
+// mês com custo lançado E aberto por categoria: mês com sobra "sem abertura"
+// não diz quanto foi de anúncio. Sem nenhum mês assim: valor null.
+async function marketingDosMeses({ db = pool, hoje = hojeBRT(), meses = 3 } = {}) {
+  let linhas = [];
+  try {
+    linhas = await lerMeses({ db, hoje, meses });
+  } catch (err) {
+    if (!faltaMigration(err)) throw err;
+    console.warn('[admin] custos sem a migration 382:', err.message);
+  }
+  let valor = 0; let comAbertura = 0; let lancados = 0;
+  for (const l of linhas) {
+    if (!temCusto(l)) continue;
+    lancados += 1;
+    const itens = itensDoMes(l);
+    if (!itens.length || itens.some((i) => SEM_ABERTURA.has(i.categoria))) continue;
+    comAbertura += 1;
+    valor += itens.filter((i) => i.categoria === 'meta').reduce((t, i) => t + i.valor, 0);
+  }
+  return {
+    valor: comAbertura ? round2(valor) : null,
+    meses_consultados: meses,
+    meses_lancados: lancados,
+    meses_com_abertura: comAbertura,
+  };
+}
+
 // O que o formulário precisa para um mês: cada categoria com o valor atual.
 function formularioDoMes(mes, linha) {
   const det = (linha && linha.custos_detalhe) || {};
@@ -308,6 +393,13 @@ module.exports = {
   temCusto,
   lerMeses,
   lerMes,
+  custoDoMes,
+  marketingDosMeses,
+  hojeBRT,
+  SEM_CUSTO,
+  BASE_RECEITA,
+  DAS_ROTULO,
+  MRR_CONTRATUAL_DESDE,
   formularioDoMes,
   lancarCustos,
 };
