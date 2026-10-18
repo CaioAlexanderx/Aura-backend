@@ -475,15 +475,23 @@ router.post('/quotes/:qid/send', async function(req, res) {
 // pelo aprovar (a lojista aprova no painel depois da conversa no WhatsApp,
 // orçamento em vídeo 3D, 28/09/2026). Roda dentro da transação de quem chama.
 // M2: auto-cria marco de sinal em studio_payments se deposit_amount > 0.
-async function criarPedidoDoOrcamento(client, { quote, items, cid, userId, notas }) {
+async function criarPedidoDoOrcamento(client, { quote, items, cid, notas }) {
+  // Colunas conferidas no banco de producao em 18/10/2026: o total do pedido
+  // e `total` (+ `subtotal`), nao existe `total_amount` nem `created_by`, e
+  // `order_number` e NOT NULL sem default (vem de next_digital_order_number,
+  // como na vitrine). customer_name/customer_phone tambem sao NOT NULL, e o
+  // orcamento pode nascer sem eles. Antes disto o INSERT falhava sempre (42703)
+  // e nenhum orcamento virou pedido: 4 orcamentos, 0 com order_id.
+  // 'confirmed' (e nao 'pending_payment') de proposito: a lojista ja fechou a
+  // venda, e o job lojaPixExpiradoJob cancela 'pending_payment' pago em Pix.
   const ordRes = await client.query(
     `INSERT INTO digital_orders
-       (company_id, vertical, status, studio_production_status,
+       (company_id, order_number, vertical, status, studio_production_status,
         customer_name, customer_phone,
-        total_amount, deposit_required, deposit_paid,
-        notes, created_by)
-     VALUES ($1, 'studio', 'pending', 'pending_art',
-             $2, $3, $4, $5, false, $6, $7)
+        subtotal, total, deposit_required, deposit_paid,
+        notes, confirmed_at)
+     VALUES ($1, next_digital_order_number($1), 'studio', 'confirmed', 'pending_art',
+             COALESCE($2, 'Cliente'), COALESCE($3, ''), $4, $4, $5, false, $6, NOW())
      RETURNING id`,
     [
       cid,
@@ -492,24 +500,27 @@ async function criarPedidoDoOrcamento(client, { quote, items, cid, userId, notas
       parseFloat(quote.total) || 0,
       quote.deposit_amount != null ? parseFloat(quote.deposit_amount) : null,
       notas !== undefined ? notas : (quote.notes || null),
-      userId || null,
     ]
   );
   const orderId = ordRes.rows[0].id;
 
-  // Cria itens do pedido
+  // Cria itens do pedido. digital_order_items.subtotal e NOT NULL sem default
+  // (conferido em producao): e quantidade x preco, como na vitrine.
   for (const it of items) {
+    const qtd = parseFloat(it.quantity);
+    const preco = parseFloat(it.unit_price);
     await client.query(
       `INSERT INTO digital_order_items
-         (order_id, product_id, product_name, quantity, unit_price, customization)
-       VALUES ($1, $2, $3, $4, $5, $6)`,
+         (order_id, product_id, product_name, quantity, unit_price, subtotal, customization)
+       VALUES ($1, $2, $3, $4, $5, $6, $7)`,
       [
         orderId,
         it.product_id || null,
         String(it.description),
-        parseFloat(it.quantity),
-        parseFloat(it.unit_price),
-        it.customization || null,
+        qtd,
+        preco,
+        Math.round(qtd * preco * 100) / 100,
+        it.customization ? JSON.stringify(it.customization) : null,
       ]
     );
   }
@@ -532,72 +543,98 @@ async function criarPedidoDoOrcamento(client, { quote, items, cid, userId, notas
   return orderId;
 }
 
-async function itensDoOrcamento(qid) {
-  const iRes = await db.query(
+async function itensDoOrcamento(client, qid) {
+  const iRes = await client.query(
     `SELECT * FROM studio_quote_items WHERE quote_id = $1 ORDER BY sort_order, created_at`,
     [qid]
   );
   return iRes.rows;
 }
 
-// ─── POST /quotes/:qid/convert ───────────────────────────────
-// Cria digital_order vertical='studio' + itens. Idempotente.
-router.post('/quotes/:qid/convert', async function(req, res) {
+// Converte o orcamento em pedido DENTRO de uma transacao que trava a linha do
+// orcamento (SELECT ... FOR UPDATE). Antes o orcamento era lido antes do BEGIN
+// e sem trava: clique duplo ou duas abas passavam as duas pelo "ja tem
+// order_id?" e criavam dois pedidos (o segundo UPDATE vencia e o primeiro
+// pedido ficava orfao na esteira). Agora a segunda requisicao espera a
+// primeira commitar, le o order_id e devolve o pedido ja criado.
+//   statusAceitos / msgStatus: o que cada rota aceita converter.
+//   exigeItens: o aprovar recusa orcamento sem itens.
+//   notasDoPedido(quote): notas do pedido (so o aprovar monta as suas).
+//   camposExtras: SET adicional do UPDATE do orcamento (aprovar).
+async function converterOrcamento(req, res, { statusAceitos, msgStatus, exigeItens, notasDoPedido, camposExtras, tag, msgErro }) {
   const cid = req.params.id;
   const qid = req.params.qid;
-
+  let client;
+  let aberta = false;
   try {
-    const qRes = await db.query(
-      `SELECT * FROM studio_quotes WHERE id = $1 AND company_id = $2 LIMIT 1`,
+    client = await db.connect();
+    await client.query('BEGIN');
+    aberta = true;
+
+    const qRes = await client.query(
+      `SELECT * FROM studio_quotes WHERE id = $1 AND company_id = $2 LIMIT 1 FOR UPDATE`,
       [qid, cid]
     );
-    if (!qRes.rows.length) return res.status(404).json({ error: 'Orçamento não encontrado' });
+    if (!qRes.rows.length) {
+      await client.query('ROLLBACK'); aberta = false;
+      return res.status(404).json({ error: 'Orçamento não encontrado' });
+    }
     const quote = qRes.rows[0];
 
-    // Idempotente: já convertido
+    // Idempotente: ja convertido (inclui quem perdeu a corrida)
     if (quote.order_id) {
+      await client.query('ROLLBACK'); aberta = false;
       return res.json({ order_id: quote.order_id, quote });
     }
-
-    if (quote.status !== 'accepted') {
-      return res.status(400).json({
-        error: `Orçamento precisa estar aceito (accepted) para converter. Status atual: '${quote.status}'`,
-      });
+    if (!statusAceitos.includes(quote.status)) {
+      await client.query('ROLLBACK'); aberta = false;
+      return res.status(400).json({ error: msgStatus(quote.status) });
     }
 
-    const items = await itensDoOrcamento(qid);
-
-    const client = await db.connect();
-    try {
-      await client.query('BEGIN');
-
-      const orderId = await criarPedidoDoOrcamento(client, {
-        quote, items, cid, userId: req.user?.id,
-      });
-
-      // Marca orçamento como convertido
-      const updRes = await client.query(
-        `UPDATE studio_quotes
-            SET status     = 'converted',
-                order_id   = $1,
-                updated_at = NOW()
-          WHERE id = $2 AND company_id = $3
-          RETURNING *`,
-        [orderId, qid, cid]
-      );
-
-      await client.query('COMMIT');
-      res.json({ order_id: orderId, quote: updRes.rows[0] });
-    } catch (err) {
-      await client.query('ROLLBACK');
-      throw err;
-    } finally {
-      client.release();
+    const items = await itensDoOrcamento(client, qid);
+    if (exigeItens && !items.length) {
+      await client.query('ROLLBACK'); aberta = false;
+      return res.status(400).json({ error: 'Orçamento sem itens' });
     }
+
+    const orderId = await criarPedidoDoOrcamento(client, {
+      quote, items, cid,
+      notas: notasDoPedido ? notasDoPedido(quote) : undefined,
+    });
+
+    const updRes = await client.query(
+      `UPDATE studio_quotes
+          SET status        = 'converted',
+              order_id      = $1,${camposExtras}
+              updated_at    = NOW()
+        WHERE id = $2 AND company_id = $3
+        RETURNING *`,
+      [orderId, qid, cid]
+    );
+
+    await client.query('COMMIT'); aberta = false;
+    return res.json({ order_id: orderId, quote: updRes.rows[0] });
   } catch (err) {
-    console.error('[studio/quotes/:qid/convert]', err.message);
-    res.status(500).json({ error: 'Erro ao converter orçamento em pedido' });
+    if (aberta) { try { await client.query('ROLLBACK'); } catch (_) { /* conexao ja caiu */ } }
+    console.error(tag, err.message);
+    return res.status(500).json({ error: msgErro });
+  } finally {
+    if (client) client.release();
   }
+}
+
+// ─── POST /quotes/:qid/convert ───────────────────────────────
+// Cria digital_order vertical='studio' + itens. Idempotente e seguro contra
+// clique duplo (ver converterOrcamento).
+router.post('/quotes/:qid/convert', function(req, res) {
+  return converterOrcamento(req, res, {
+    statusAceitos: ['accepted'],
+    msgStatus: (st) => `Orçamento precisa estar aceito (accepted) para converter. Status atual: '${st}'`,
+    exigeItens: false,
+    camposExtras: '',
+    tag: '[studio/quotes/:qid/convert]',
+    msgErro: 'Erro ao converter orçamento em pedido',
+  });
 });
 
 // ─── POST /quotes/:qid/aprovar ───────────────────────────────
@@ -606,61 +643,18 @@ router.post('/quotes/:qid/convert', async function(req, res) {
 // orçamento vira pedido e entra na esteira da Produção com os itens, a
 // arte (customization), os valores e as condições combinadas (nas notas).
 // Aceita rascunho, enviado ou aceito. Idempotente.
-router.post('/quotes/:qid/aprovar', async function(req, res) {
-  const cid = req.params.id;
-  const qid = req.params.qid;
-
-  try {
-    const qRes = await db.query(
-      `SELECT * FROM studio_quotes WHERE id = $1 AND company_id = $2 LIMIT 1`,
-      [qid, cid]
-    );
-    if (!qRes.rows.length) return res.status(404).json({ error: 'Orçamento não encontrado' });
-    const quote = qRes.rows[0];
-
-    if (quote.order_id) {
-      return res.json({ order_id: quote.order_id, quote });
-    }
-    if (!['draft', 'sent', 'accepted'].includes(quote.status)) {
-      return res.status(400).json({ error: `Não é possível aprovar orçamento com status '${quote.status}'` });
-    }
-
-    const items = await itensDoOrcamento(qid);
-    if (!items.length) return res.status(400).json({ error: 'Orçamento sem itens' });
-
-    const client = await db.connect();
-    try {
-      await client.query('BEGIN');
-
-      const orderId = await criarPedidoDoOrcamento(client, {
-        quote, items, cid, userId: req.user?.id,
-        notas: notasDoPedidoAprovado(quote),
-      });
-
-      const updRes = await client.query(
-        `UPDATE studio_quotes
-            SET status        = 'converted',
-                order_id      = $1,
-                responded_at  = COALESCE(responded_at, NOW()),
-                response_note = COALESCE(response_note, 'Aprovado pela loja'),
-                updated_at    = NOW()
-          WHERE id = $2 AND company_id = $3
-          RETURNING *`,
-        [orderId, qid, cid]
-      );
-
-      await client.query('COMMIT');
-      res.json({ order_id: orderId, quote: updRes.rows[0] });
-    } catch (err) {
-      await client.query('ROLLBACK');
-      throw err;
-    } finally {
-      client.release();
-    }
-  } catch (err) {
-    console.error('[studio/quotes/:qid/aprovar]', err.message);
-    res.status(500).json({ error: 'Erro ao aprovar o orçamento' });
-  }
+router.post('/quotes/:qid/aprovar', function(req, res) {
+  return converterOrcamento(req, res, {
+    statusAceitos: ['draft', 'sent', 'accepted'],
+    msgStatus: (st) => `Não é possível aprovar orçamento com status '${st}'`,
+    exigeItens: true,
+    notasDoPedido: notasDoPedidoAprovado,
+    camposExtras: `
+              responded_at  = COALESCE(responded_at, NOW()),
+              response_note = COALESCE(response_note, 'Aprovado pela loja'),`,
+    tag: '[studio/quotes/:qid/aprovar]',
+    msgErro: 'Erro ao aprovar o orçamento',
+  });
 });
 
 module.exports = router;
