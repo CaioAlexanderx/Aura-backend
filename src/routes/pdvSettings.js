@@ -12,12 +12,12 @@
 //         food_nfce_manual_enabled, food_comanda_print_enabled,
 //         card_fee_enabled, os_enabled, otica_enabled, card_price_enabled,
 //         allow_sale_without_stock, comanda_enabled, vale_troca_enabled (true)
-//   STRING (enum): studio_approval_mode (wa_me | whatsapp_business),
-//                  label_design (classico | editorial)
+//   STRING (enum): studio_approval_mode (wa_me | whatsapp_business)
 //   NUMBER: service_fee_pct, food_service_fee_pct,
 //           card_fee_credit_pct, card_fee_debit_pct
 //   NUMBER OU NULL (percentual 0-100): card_price_pct
-//   STRING (enum) OU NULL: label_size (99x21 | 30x25 | 58mm | 105x21 | 40x25)
+//   STRING (enum) OU NULL: label_size (99x21 | 30x25 | 58mm | 105x21 | 40x25),
+//                          label_design (classico | editorial)
 //   LISTA OU NULL: label_custom_specs (medidas proprias de etiqueta, ate 20)
 //   OBJETO OU NULL: label_printer_prefs (calibracao por modelo fixo)
 //
@@ -89,10 +89,6 @@ const ALLOWED_STRING_ARRAY_KEYS = {
 // String enum: studio_approval_mode pode ser "wa_me" ou "whatsapp_business"
 const ALLOWED_STRING_KEYS = {
   studio_approval_mode: ['wa_me', 'whatsapp_business'],
-  // 13/10/2026 — desenho da etiqueta (independe do label_size, que e o
-  // formato do papel). 'classico' = o de sempre; 'editorial' = o novo
-  // desenho. Nao aceita null: sem escolha e 'classico' (ver DEFAULT_SETTINGS).
-  label_design: ['classico', 'editorial'],
 };
 
 // 24/09/2026 — modelo de etiqueta escolhido pela loja (aura-app
@@ -104,8 +100,18 @@ const ALLOWED_STRING_KEYS = {
 // 105mm (Divina D'Lux).
 // 14/10/2026 — 40x25: etiqueta 40x25mm em 2 colunas, impressora termica de
 // cupom 80mm, desenho editorial compacto (Toda Linda).
+// 18/10/2026 (card f1-16) — desenho da etiqueta, independente do label_size
+// (formato do papel): 'classico' (o da Finesse) ou 'editorial' (Montserrat,
+// loja no topo, ajuste automatico). null = a loja nunca escolheu: o app usa
+// o desenho padrao do MODELO (105x21 e 40x25 editoriais, os outros
+// classicos) — exatamente o que imprime hoje. Por isso o default NAO pode
+// ser 'classico' (era, em #813): um GET devolvia 'classico' para todo mundo,
+// o app (Configuracoes do Caixa, migracao do vale-troca) salva o objeto
+// inteiro que leu, e o 'classico' que ninguem escolheu ia parar no banco
+// (8 lojas em 18/10; limpas na migration 394).
 const ALLOWED_NULLABLE_STRING_KEYS = {
   label_size: ['99x21', '30x25', '58mm', '105x21', '40x25'],
+  label_design: ['classico', 'editorial'],
 };
 
 // 01/10/2026 — Modelo dos termos da Garantia de produto (texto livre). null/''
@@ -341,7 +347,8 @@ const DEFAULT_SETTINGS = {
   label_offset_mm:           0,
   label_cols:                3,
   label_size:                null,
-  label_design:              'classico',
+  // 18/10/2026 — null = desenho padrao do modelo (ver ALLOWED_NULLABLE_STRING_KEYS).
+  label_design:              null,
   // 15/10/2026 — null = a loja nunca salvou na conta (o app segue no
   // navegador e sobe uma vez). Ver validarMedidasDeEtiqueta.
   label_custom_specs:        null,
