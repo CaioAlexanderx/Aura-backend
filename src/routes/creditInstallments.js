@@ -43,6 +43,11 @@
  *   - GET /plan-config devolve first_due_date_max_days.
  *   - /pdv/sale e /credit/manual-entry ja aceitavam first_due_date (venda
  *     retroativa) e seguem sem a janela.
+ * tq-20 (18/10/2026): POST /installments e PATCH /installments/:iid/cancel
+ *   DESLIGADAS (410 Gone). Mexiam em parcela sem mexer no razao e nao tinham
+ *   chamador no app. Caminhos certos: POST /credit/manual-entry e
+ *   DELETE /credit/transaction/:txid. A janela da primeira parcela continua
+ *   em services/credit/terms.js (validateFirstDueDate) e no GET /plan-config.
  */
 
 const express = require('express');
@@ -65,6 +70,12 @@ const overdueRule = require('../services/credit/overdue');
 const { findOwnerScopedCustomer, CUSTOMER_NOT_FOUND_BODY } = require('../utils/customerScope');
 
 const nz = (v) => (v === undefined || v === null || v === '') ? null : v;
+
+// tq-20 (18/10/2026): rota desligada responde 410 Gone sem abrir conexao nem
+// tocar no banco. O corpo diz o caminho certo.
+function rotaDesligada(body) {
+  return (req, res) => res.status(410).json(body);
+}
 
 // F2 PR1: epsilon p/ comparacao de teto (evita falso-positivo por float).
 const CAP_EPS = 1e-9;
@@ -597,140 +608,21 @@ router.put('/plan-config', async (req, res) => {
   } finally { client.release(); }
 });
 
-// ─── POST /credit/installments ───────────────────────────────────────────
-// F3: aceita account_id para vincular parcelas ao carne
-// Hub F1.4.1: aviso de score NAO-impeditivo (warnings[]). UNICO impeditivo
-//             continua sendo o bloqueio MANUAL (status === 'blocked' -> 422).
-// B2: pix_link fake aposentado — parcelas novas gravam NULL; o Pix real (EMV)
-//     e gerado on-demand via GET /installments/:iid/pix.
-router.post('/installments', async (req, res) => {
-  const companyId = req.params.id;
-  const { customer_id, sale_id, total_amount, installments,
-          period_unit, period_count, account_id } = req.body;
-  if (!customer_id || !total_amount || !installments) {
-    return res.status(400).json({ error: 'customer_id, total_amount e installments sao obrigatorios.' });
-  }
-  // 13/10/2026: first_due_date e OPCIONAL. Sem ele a primeira parcela vence 1
-  // mes depois de hoje (mesmo default de /manual-entry e do PDV). Com ele:
-  // nao pode estar no passado nem alem de FIRST_DUE_MAX_DAYS (90) dias a frente
-  // -- vender em dezembro com a primeira parcela em janeiro. As demais parcelas
-  // seguem a periodicidade a partir dela.
-  let firstDue;
-  if (req.body.first_due_date === undefined || req.body.first_due_date === null || req.body.first_due_date === '') {
-    firstDue = creditLedger.defaultFirstDueDate();
-  } else {
-    const chk = creditLedger.validateFirstDueDate(req.body.first_due_date);
-    if (!chk.ok) {
-      const { status, ...body } = chk;
-      delete body.ok;
-      return res.status(status).json(body);
-    }
-    firstDue = chk.date;
-  }
-  const n = parseInt(installments);
-  const total = parseFloat(total_amount);
-  const CEILING = creditLedger.MAX_INSTALLMENTS_CEILING || 500;
-  if (isNaN(n) || n < 1 || n > CEILING) {
-    return res.status(400).json({ error: `installments deve ser entre 1 e ${CEILING}.` });
-  }
-  if (isNaN(total) || total <= 0)   return res.status(400).json({ error: 'total_amount invalido.' });
-
-  const client = await pool.connect();
-  try {
-    await client.query('BEGIN');
-    const profile = await creditLedger._getOrCreateProfile(client, companyId, customer_id);
-    // UNICO impeditivo: bloqueio MANUAL do cliente.
-    if (profile?.status === 'blocked') {
-      await client.query('ROLLBACK');
-      return res.status(422).json({
-        error: `Cliente com credito bloqueado. Motivo: ${profile.blocked_reason || 'Bloqueio manual'}.`,
-        code: 'CUSTOMER_BLOCKED',
-      });
-    }
-    const config = await creditLedger._getOrCreatePlanConfig(client, companyId);
-    // Teto da LOJA (config). Desde 21/08/2026 o default e alto (500): o 12 era
-    // default intocado que barrava quem vende em 36x/54x. Continua sendo erro
-    // explicito -- nunca corte silencioso.
-    const storeMax = parseInt(config?.max_installments, 10);
-    if (Number.isFinite(storeMax) && n > storeMax) {
-      await client.query('ROLLBACK');
-      return res.status(400).json({
-        error: `Maximo de ${storeMax} parcelas configurado (pedido: ${n}x).`,
-        code: 'MAX_INSTALLMENTS_EXCEEDED',
-      });
-    }
-
-    // Aviso de score NAO-impeditivo. NUNCA retorna erro por score.
-    const scoreWarn = creditLedger.scoreWarning(parseInt(profile?.credit_score, 10) || 500, config);
-    const warnings = scoreWarn
-      ? [{ code: 'SCORE_BELOW_MIN', threshold: scoreWarn.threshold, actual: scoreWarn.actual }]
-      : [];
-
-    const period = creditLedger.resolvePeriod(period_unit, period_count, config);
-    const effectiveRate = parseFloat(config?.interest_rate) || 0;
-    const totalWithInterest = effectiveRate > 0
-      ? parseFloat((total * (1 + effectiveRate * n)).toFixed(2))
-      : total;
-    const baseAmount = Math.floor((totalWithInterest / n) * 100) / 100;
-    const remainder  = Math.round((totalWithInterest - baseAmount * n) * 100) / 100;
-
-    const createdInstallments = [];
-    for (let i = 1; i <= n; i++) {
-      const amount     = i === n ? baseAmount + remainder : baseAmount;
-      const dueDateStr = creditLedger.dueDateForIndex(firstDue, period.unit, period.count, i - 1);
-      let row;
-      try {
-        const ins = await client.query(
-          `INSERT INTO credit_installments
-             (company_id, sale_id, customer_id, installment_number, total_installments,
-              amount_due, due_date, status, covered_amount, account_id)
-           VALUES ($1,$2,$3,$4,$5,$6,$7,'pending',0,$8) RETURNING *`,
-          [companyId, sale_id || null, customer_id, i, n, amount, dueDateStr, account_id || null]
-        );
-        row = ins.rows[0];
-      } catch (e) {
-        if (e.code === '42703') {
-          const ins = await client.query(
-            `INSERT INTO credit_installments
-               (company_id, sale_id, customer_id, installment_number, total_installments,
-                amount_due, due_date, status, covered_amount)
-             VALUES ($1,$2,$3,$4,$5,$6,$7,'pending',0) RETURNING *`,
-            [companyId, sale_id || null, customer_id, i, n, amount, dueDateStr]
-          );
-          row = ins.rows[0];
-        } else throw e;
-      }
-      // B2: sem UPDATE de pix_link — o campo fica NULL (link fake aposentado).
-      createdInstallments.push(row);
-    }
-    if (sale_id) {
-      try {
-        await client.query(
-          `UPDATE sales SET is_installment=true, total_installments=$2, credit_plan_snapshot=$3
-           WHERE id=$1 AND company_id=$4`,
-          [sale_id, n, JSON.stringify({ installments: n, total_amount: total, interest_rate: effectiveRate,
-                                        period_unit: period.unit, period_count: period.count }), companyId]
-        );
-      } catch (e) { if (e.code !== '42703' && e.code !== '42P01') throw e; }
-    }
-    await creditLedger._updateCreditUsed(client, companyId, customer_id);
-    await client.query('COMMIT');
-    // due_dates: as datas como texto (YYYY-MM-DD), sem depender de como o driver
-    // serializa a coluna DATE de cada parcela.
-    const dueDates = createdInstallments.map((r) =>
-      (r.due_date instanceof Date ? r.due_date.toISOString() : String(r.due_date || '')).slice(0, 10));
-    res.status(201).json({
-      installments: createdInstallments,
-      first_due_date: firstDue,
-      due_dates: dueDates,
-      warnings,
-    });
-  } catch (err) {
-    await client.query('ROLLBACK');
-    console.error('POST /credit/installments', err.message);
-    res.status(500).json({ error: err.message });
-  } finally { client.release(); }
-});
+// ─── POST /credit/installments -- DESLIGADA (410) ──────────────────────────
+// tq-20 (18/10/2026, achado do t3-08 / Aura-backend#858): criava parcelas SEM
+// debito no razao (customer_credit_transactions) e com juros lineares
+// multiplicados pelo numero de parcelas -- o bug de 13/08. Parcela sem debito
+// e exatamente a "orfa" que o t3-08 mediu (R$ 50 mil em 14 clientes). Nenhum
+// chamador no aura-app (creditApi.createInstallments sem uso). O caminho certo
+// e POST /credit/manual-entry (debito + parcelas na mesma transacao) ou a
+// venda no crediario pelo Caixa.
+router.post('/installments', rotaDesligada({
+  code: 'ROUTE_GONE_USE_MANUAL_ENTRY',
+  error: 'Esta rota foi desligada: ela criava parcelas sem lancar a divida no saldo do cliente. '
+       + 'Para lancar uma compra no crediario use o lancamento manual (POST /credit/manual-entry) '
+       + 'ou a venda no crediario pelo Caixa.',
+  use_instead: [{ method: 'POST', path: '/credit/manual-entry' }],
+}));
 
 // ─── GET /credit/installments ──────────────────────────────────────────────
 // F2 PR1: cada parcela e enriquecida com encargos lazy (mora/multa) + total_due.
@@ -976,33 +868,21 @@ router.patch('/installments/:iid/pay', async (req, res) => {
   } finally { client.release(); }
 });
 
-// ─── PATCH /credit/installments/:iid/cancel ─────────────────────────────────
-router.patch('/installments/:iid/cancel', async (req, res) => {
-  const companyId     = req.params.id;
-  const installmentId = req.params.iid;
-  const client = await pool.connect();
-  try {
-    await client.query('BEGIN');
-    const r = await client.query(
-      `UPDATE credit_installments
-         SET status='cancelled', updated_at=NOW()
-       WHERE id=$1 AND company_id=$2 AND status IN ('pending','overdue')
-       RETURNING *`,
-      [installmentId, companyId]
-    );
-    if (!r.rows.length) {
-      await client.query('ROLLBACK');
-      return res.status(404).json({ error: 'Parcela nao encontrada ou nao pode ser cancelada.' });
-    }
-    await creditLedger._updateCreditUsed(client, companyId, r.rows[0].customer_id);
-    await client.query('COMMIT');
-    res.json(r.rows[0]);
-  } catch (err) {
-    await client.query('ROLLBACK');
-    console.error('PATCH /credit/installments/:iid/cancel', err.message);
-    res.status(500).json({ error: err.message });
-  } finally { client.release(); }
-});
+// ─── PATCH /credit/installments/:iid/cancel -- DESLIGADA (410) ─────────────
+// tq-20 (18/10/2026, achado do t3-08 / Aura-backend#858): cancelava a parcela
+// sem mexer no razao nem devolver ao FIFO o que ela ja tinha coberto -- o
+// saldo do cliente e as parcelas deixavam de bater. Nenhum chamador no
+// aura-app (creditApi.cancelInstallment sem uso). O caminho certo e desfazer o
+// lancamento (DELETE /credit/transaction/:txid), que cancela as parcelas,
+// devolve a cobertura ao FIFO e apaga o debito na mesma transacao; parcela de
+// venda sai cancelando a venda.
+router.patch('/installments/:iid/cancel', rotaDesligada({
+  code: 'ROUTE_GONE_USE_UNDO_ENTRY',
+  error: 'Esta rota foi desligada: ela cancelava a parcela sem tirar a divida do saldo do cliente. '
+       + 'Para desfazer um lancamento use "Desfazer lancamento" (DELETE /credit/transaction/:txid); '
+       + 'parcela de venda sai cancelando a venda.',
+  use_instead: [{ method: 'DELETE', path: '/credit/transaction/:txid' }],
+}));
 
 // ─── PATCH /credit/installments/:iid/due-date ────────────────────────────────────
 // F3.1: edita a data de vencimento de uma parcela com cascata nas parcelas seguintes
