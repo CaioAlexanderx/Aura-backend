@@ -5,15 +5,12 @@
 // janeiro. O campo `first_due_date` ja existia em POST /credit/installments
 // (obrigatorio); agora e OPCIONAL, tem janela e a resposta devolve as datas.
 //
-// O que estes testes travam:
-//   1. sem o campo: 1a parcela = hoje + 1 mes (mesmo default de manual-entry/PDV)
-//   2. com o campo (janeiro): a 1a parcela e a data pedida e as demais seguem
-//      mensalmente a partir dela
-//   3. passado => 422 FIRST_DUE_DATE_PAST; > 90 dias => 422 FIRST_DUE_DATE_TOO_FAR;
-//      formato/data impossivel => 400; hoje e hoje+90 passam (limites inclusivos)
-//   4. recusa nao grava nada (nenhum INSERT, nenhum BEGIN)
-//   5. dia 31 nao pula fevereiro; periodicidade semanal/dias continua igual
-//   6. GET /plan-config devolve first_due_date_max_days
+// tq-20 (18/10/2026): POST /credit/installments foi DESLIGADA (410, ver
+// creditRotasSemRazao.test.js) -- criava parcela sem debito no razao. A janela
+// e o default da primeira parcela seguem travados em
+// tests/unit/creditTermsDueDates.test.js (validateFirstDueDate /
+// defaultFirstDueDate). Aqui fica so:
+//   - GET /plan-config devolve first_due_date_max_days
 //
 // Mock por CONTEUDO DO SQL, nunca fila posicional.
 // ============================================================
@@ -85,123 +82,6 @@ function mockBanco({ config = {} } = {}) {
   db.connect.mockResolvedValue(client);
   return client;
 }
-
-const post = (body) => request(buildApp())
-  .post(`/api/v1/companies/${cid}/credit/installments`).set(adminAuth)
-  .send({ customer_id: cust, total_amount: 300, installments: 3, ...body });
-
-const gravacoes = (client) => client.query.mock.calls
-  .filter((c) => /INSERT INTO credit_installments/i.test(String(c[0] || ''))).length;
-const begins = (client) => client.query.mock.calls
-  .filter((c) => /^BEGIN$/i.test(String(c[0] || '').trim())).length;
-
-describe('POST /credit/installments -- sem first_due_date (comportamento de sempre)', () => {
-  test('campo omitido: 1a parcela hoje + 1 mes, demais mensais', async () => {
-    const client = mockBanco();
-    const res = await post({});
-    expect(res.status).toBe(201);
-    expect(res.body.first_due_date).toBe('2027-01-10');
-    expect(res.body.due_dates).toEqual(['2027-01-10', '2027-02-10', '2027-03-10']);
-    expect(gravacoes(client)).toBe(3);
-  });
-
-  test('null e string vazia contam como omitido', async () => {
-    mockBanco();
-    const a = await post({ first_due_date: null });
-    const b = await post({ first_due_date: '' });
-    expect(a.status).toBe(201);
-    expect(b.status).toBe(201);
-    expect(a.body.due_dates).toEqual(['2027-01-10', '2027-02-10', '2027-03-10']);
-    expect(b.body.due_dates).toEqual(['2027-01-10', '2027-02-10', '2027-03-10']);
-  });
-
-  test('o que ja era obrigatorio continua: sem customer_id => 400', async () => {
-    const client = mockBanco();
-    const res = await request(buildApp())
-      .post(`/api/v1/companies/${cid}/credit/installments`).set(adminAuth)
-      .send({ total_amount: 100, installments: 2 });
-    expect(res.status).toBe(400);
-    expect(begins(client)).toBe(0);
-  });
-});
-
-describe('POST /credit/installments -- primeira parcela em janeiro', () => {
-  test('vende em 10/12 e a 1a parcela e 15/01; demais seguem mensalmente', async () => {
-    const client = mockBanco();
-    const res = await post({ first_due_date: '2027-01-15', installments: 4, total_amount: 400 });
-    expect(res.status).toBe(201);
-    expect(res.body.first_due_date).toBe('2027-01-15');
-    expect(res.body.due_dates).toEqual(['2027-01-15', '2027-02-15', '2027-03-15', '2027-04-15']);
-    expect(res.body.installments).toHaveLength(4);
-    expect(res.body.installments.map((i) => i.installment_number)).toEqual([1, 2, 3, 4]);
-    expect(gravacoes(client)).toBe(4);
-  });
-
-  test('aceita data com horario: o dia vale', async () => {
-    mockBanco();
-    const res = await post({ first_due_date: '2027-01-15T00:00:00.000Z' });
-    expect(res.status).toBe(201);
-    expect(res.body.first_due_date).toBe('2027-01-15');
-  });
-
-  test('hoje e o limite de 90 dias passam (inclusivos)', async () => {
-    mockBanco();
-    const hoje = await post({ first_due_date: '2026-12-10' });
-    const limite = await post({ first_due_date: '2027-03-10' });
-    expect(hoje.status).toBe(201);
-    expect(limite.status).toBe(201);
-    expect(hoje.body.due_dates[0]).toBe('2026-12-10');
-    expect(limite.body.due_dates[0]).toBe('2027-03-10');
-  });
-
-  test('dia 31 nao pula fevereiro nem repete marco', async () => {
-    mockBanco();
-    const res = await post({ first_due_date: '2027-01-31', installments: 4, total_amount: 400 });
-    expect(res.status).toBe(201);
-    expect(res.body.due_dates).toEqual(['2027-01-31', '2027-02-28', '2027-03-31', '2027-04-30']);
-  });
-
-  test('periodicidade semanal da loja segue valendo a partir da data informada', async () => {
-    mockBanco({ config: { period_unit: 'week', period_count: 2 } });
-    const res = await post({ first_due_date: '2027-01-05' });
-    expect(res.status).toBe(201);
-    expect(res.body.due_dates).toEqual(['2027-01-05', '2027-01-19', '2027-02-02']);
-  });
-});
-
-describe('POST /credit/installments -- janela da primeira parcela', () => {
-  test('no passado => 422 FIRST_DUE_DATE_PAST e nada e gravado', async () => {
-    const client = mockBanco();
-    const res = await post({ first_due_date: '2026-12-09' });
-    expect(res.status).toBe(422);
-    expect(res.body.code).toBe('FIRST_DUE_DATE_PAST');
-    expect(res.body.today).toBe('2026-12-10');
-    expect(begins(client)).toBe(0);
-    expect(gravacoes(client)).toBe(0);
-  });
-
-  test('alem de 90 dias => 422 FIRST_DUE_DATE_TOO_FAR com o limite', async () => {
-    const client = mockBanco();
-    const res = await post({ first_due_date: '2027-03-11' });
-    expect(res.status).toBe(422);
-    expect(res.body).toMatchObject({ code: 'FIRST_DUE_DATE_TOO_FAR', max_days: 90, max_date: '2027-03-10' });
-    expect(begins(client)).toBe(0);
-    expect(gravacoes(client)).toBe(0);
-  });
-
-  test.each([
-    ['texto livre', 'janeiro'],
-    ['dia impossivel', '2027-02-30'],
-    ['formato brasileiro', '15/01/2027'],
-    ['numero', 20270115],
-  ])('data invalida (%s) => 400 FIRST_DUE_DATE_INVALID', async (_nome, valor) => {
-    const client = mockBanco();
-    const res = await post({ first_due_date: valor });
-    expect(res.status).toBe(400);
-    expect(res.body.code).toBe('FIRST_DUE_DATE_INVALID');
-    expect(gravacoes(client)).toBe(0);
-  });
-});
 
 describe('GET /credit/plan-config', () => {
   test('devolve first_due_date_max_days junto da configuracao', async () => {
