@@ -319,6 +319,80 @@ describe('GET /admin/painel/blocos/:id — uma rota por bloco', () => {
     const os = body.listas[0].linhas.find((l) => l.modulo === 'ordens_servico');
     expect(os).toMatchObject({ lojas_7d: 0, lojas_periodo: 0, lojas_total: 1 });
   });
+
+  test('uso por funcionalidade: Ótica, Entregas e Parceiros do Matcon, Agenda e Cupons (t3-01), com mais de uma fonte somada por loja', async () => {
+    comDiaGravado();
+    const { body } = await api('get', '/blocos/uso_funcionalidade');
+    const linha = (id) => body.listas[0].linhas.find((l) => l.modulo === id);
+    // Ótica = OS de ótica (3) + receitas (4) da mesma loja: uma loja, 7 eventos
+    expect(linha('otica')).toMatchObject({ rotulo: 'Ótica', lojas_7d: 1, lojas_periodo: 1, eventos_periodo: 7, lojas_total: 1 });
+    expect(linha('otica').lojas).toEqual([{ company_id: fake.id(5), nome: 'Ótica Visão' }]);
+    expect(linha('entregas_matcon')).toMatchObject({ rotulo: 'Entregas Matcon', lojas_periodo: 1, eventos_periodo: 2 });
+    // Parceiros = parceiro cadastrado (1) + movimentos de pontos (2)
+    expect(linha('parceiros_matcon')).toMatchObject({ rotulo: 'Parceiros Matcon', lojas_7d: 1, lojas_periodo: 1, eventos_periodo: 3 });
+    // Agenda = barbearia/salão + clínica; a loja que só tem agenda antiga já usou, mas não usa há 30 dias
+    expect(linha('agenda')).toMatchObject({ rotulo: 'Agenda', lojas_7d: 1, lojas_periodo: 1, eventos_periodo: 12, lojas_total: 2 });
+    // Cupons = vendas com cupom aplicado
+    expect(linha('cupons')).toMatchObject({ rotulo: 'Cupons', lojas_7d: 2, lojas_periodo: 2, eventos_periodo: 10, lojas_total: 2 });
+    // e entram nas listas por loja e na adoção por recurso
+    expect(body.listas[1].linhas.filter((l) => l.modulo === 'Cupons').map((l) => [l.nome, l.eventos])).toEqual([['Mercado Bela Vista', 9], ['Papelaria Sol', 1]]);
+    const adocao = (await api('get', '/blocos/adocao')).body;
+    expect(adocao.listas[0].linhas.find((l) => l.rotulo === 'Cupons')).toMatchObject({ usam: 2 });
+  });
+
+  test('uso por funcionalidade: Etiquetas aparece como sem medida, fora da série e das contas de uso', async () => {
+    comDiaGravado();
+    const { body } = await api('get', '/blocos/uso_funcionalidade');
+    const etiquetas = body.listas[0].linhas.find((l) => l.modulo === 'etiquetas');
+    expect(etiquetas).toMatchObject({
+      rotulo: 'Etiquetas', sem_medida: true,
+      lojas_7d: null, lojas_periodo: null, eventos_periodo: null, lojas_total: null,
+    });
+    expect(etiquetas.motivo).toMatch(/não grava nada/);
+    expect(body.indicadores.find((i) => i.rotulo === 'Sem medida')).toEqual({ rotulo: 'Sem medida', valor: 1, nota: 'Etiquetas' });
+    // não vira "sem uso" nem barra de zero
+    expect(body.indicadores.find((i) => i.rotulo === 'Sem uso no período').nota).not.toMatch(/Etiquetas/);
+    for (const s of body.series) expect(s.pontos.map((p) => p.rotulo)).not.toContain('Etiquetas');
+    expect(body.listas[1].linhas.some((l) => l.modulo === 'Etiquetas')).toBe(false);
+    expect(body.insight).toMatch(/Etiquetas está sem medida/);
+    // nem na adoção (0/N seria afirmar que ninguém usa)
+    const adocao = (await api('get', '/blocos/adocao')).body;
+    expect(adocao.listas[0].linhas.map((l) => l.rotulo)).not.toContain('Etiquetas');
+  });
+
+  test('uso por módulo: a fonte de cada funcionalidade nova é a tabela certa, com filtro antes do corte da loja', async () => {
+    const consultas = [];
+    const banco = {
+      query: async (sql, params) => {
+        if (sql.includes('AS e7')) consultas.push(sql.replace(/\s+/g, ' '));
+        return { rows: fake.responder(fake.dadosPadrao(), [], sql, params) };
+      },
+    };
+    const { usoPorModulo } = require('../../src/services/painelBlocos/_uso');
+    await usoPorModulo({ db: banco, hoje: fake.HOJE, periodo: 30, companyId: fake.id(5) });
+    const de = (tabela) => consultas.filter((s) => s.includes(`FROM ${tabela} WHERE`));
+    expect(de('service_orders').some((s) => s.includes(`WHERE company_id IS NOT NULL AND kind = 'otica' AND company_id = $2 GROUP BY`))).toBe(true);
+    expect(de('sales').some((s) => s.includes('WHERE company_id IS NOT NULL AND coupon_id IS NOT NULL AND company_id = $2 GROUP BY'))).toBe(true);
+    for (const t of ['optical_prescriptions', 'matcon_deliveries', 'matcon_professionals', 'matcon_professional_points_ledger', 'barbershop_appointments', 'dental_appointments']) {
+      expect(de(t)).toHaveLength(1);
+    }
+  });
+
+  test('uso por módulo: uma fonte ausente (42P01) não zera as outras do mesmo módulo', async () => {
+    const dados = fake.dadosPadrao();
+    const banco = {
+      query: async (sql, params) => {
+        if (sql.includes('FROM dental_appointments')) throw Object.assign(new Error('relation "dental_appointments" does not exist'), { code: '42P01' });
+        return { rows: fake.responder(dados, [], sql, params) };
+      },
+    };
+    jest.spyOn(console, 'warn').mockImplementation(() => {});
+    const { usoPorModulo } = require('../../src/services/painelBlocos/_uso');
+    const agenda = (await usoPorModulo({ db: banco, hoje: fake.HOJE, periodo: 30 })).find((m) => m.id === 'agenda');
+    expect(agenda.lojas.get(fake.id(2))).toMatchObject({ ep: 12, total: 40 });
+    expect(agenda.lojas.has(fake.id(8))).toBe(false);
+    console.warn.mockRestore();
+  });
 });
 
 describe('GET /admin/painel/clientes/:cid/ficha', () => {

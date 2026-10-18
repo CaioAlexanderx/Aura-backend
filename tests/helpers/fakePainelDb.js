@@ -177,6 +177,15 @@ function dadosPadrao() {
       matcon_quotes: [[3, 2, 7, 19]],
       studio_orders: [[1, 0, 1, 44]],
       report_deliveries: [[2, 1, 4, 20]],
+      // t3-01: módulos com mais de uma fonte somam por loja; filtro entra na chave
+      "service_orders kind = 'otica'": [[5, 2, 3, 3]],
+      optical_prescriptions: [[5, 2, 4, 4]],
+      matcon_deliveries: [[3, 1, 2, 2]],
+      matcon_professionals: [[3, 0, 1, 1]],
+      matcon_professional_points_ledger: [[3, 1, 2, 2]],
+      barbershop_appointments: [[2, 5, 12, 40]],
+      dental_appointments: [[8, 0, 0, 5]],
+      'sales coupon_id IS NOT NULL': [[2, 3, 9, 50], [8, 1, 1, 1]],
     },
     snapshots: [
       { mes: '2026-09', mrr_total: '310.83' },
@@ -351,8 +360,10 @@ function responder(dados, escritas, sql, params = []) {
 
   // ── uso por módulo ──
   if (s.includes('AS e7')) {
-    const tabela = /FROM (\w+) WHERE company_id IS NOT NULL/.exec(s)[1];
-    return usoRows(dados.uso[tabela], s.includes('company_id = $2') ? params[1] : null);
+    // fonte = tabela + filtro opcional ("service_orders kind = 'otica'")
+    const m = /FROM (\w+) WHERE company_id IS NOT NULL(?: AND (.+?))? GROUP BY/.exec(s.replace(' AND company_id = $2 GROUP BY', ' GROUP BY'));
+    const chave = m[2] ? `${m[1]} ${m[2]}` : m[1];
+    return usoRows(dados.uso[chave], s.includes('company_id = $2') ? params[1] : null);
   }
 
   // ── empresas, receita, health ──

@@ -3,7 +3,7 @@
 'use strict';
 
 const b = require('./_base');
-const { usoPorModulo } = require('./_uso');
+const { usoPorModulo, SEM_MEDIDA } = require('./_uso');
 
 // "Uso amplo" = pelo menos um quarto das lojas que entraram no período.
 const FATIA_AMPLO = 0.25;
@@ -36,6 +36,14 @@ async function calcular({ hoje, periodo = 30, db = b.pool, empresas, uso } = {})
     };
   }).sort((x, y) => y.lojas_periodo - x.lojas_periodo || y.lojas_total - x.lojas_total);
 
+  // Funcionalidades sem fonte no banco (Etiquetas): aparecem na lista, com o
+  // motivo, mas ficam fora de série, uso amplo/nicho e "sem uso" — zero aqui
+  // seria afirmar que ninguém usa, e a verdade é que ninguém consegue medir.
+  const semMedida = SEM_MEDIDA.map((m) => ({
+    modulo: m.id, rotulo: m.rotulo, sem_medida: true, motivo: m.motivo,
+    lojas_7d: null, lojas_periodo: null, eventos_periodo: null, lojas_total: null, lojas: [],
+  }));
+
   const corte = Math.max(1, Math.ceil(base * FATIA_AMPLO));
   const amplos = linhas.filter((l) => l.lojas_periodo >= corte && l.lojas_periodo > 0);
   const nicho = linhas.filter((l) => l.lojas_periodo > 0 && l.lojas_periodo < corte);
@@ -54,6 +62,7 @@ async function calcular({ hoje, periodo = 30, db = b.pool, empresas, uso } = {})
       b.indicador('Uso amplo', amplos.length, `${corte}+ lojas em ${periodo} dias`),
       b.indicador('De nicho', nicho.length),
       b.indicador('Sem uso no período', parados.length, parados.map((l) => l.rotulo).join(', ') || null),
+      b.indicador('Sem medida', semMedida.length, semMedida.map((l) => l.rotulo).join(', ') || null),
       b.indicador('Lojas com login', base, `${periodo} dias`),
     ],
     listas: [
@@ -61,7 +70,7 @@ async function calcular({ hoje, periodo = 30, db = b.pool, empresas, uso } = {})
         b.col('rotulo', 'Módulo'), b.col('lojas_7d', 'Lojas 7d', 'numero'),
         b.col('lojas_periodo', `Lojas ${periodo}d`, 'numero'), b.col('eventos_periodo', `Eventos ${periodo}d`, 'numero'),
         b.col('lojas_total', 'Já usaram', 'numero'),
-      ], linhas),
+      ], [...linhas, ...semMedida]),
       b.lista(`Lojas por módulo · ${periodo} dias`, [
         b.col('modulo', 'Módulo'), b.colLoja(), b.col('eventos', 'Eventos', 'numero'), b.col('ultimo_uso', 'Último uso', 'data'),
       ], porLoja),
@@ -70,7 +79,8 @@ async function calcular({ hoje, periodo = 30, db = b.pool, empresas, uso } = {})
       b.serieDe(`Lojas por módulo · ${periodo} dias`, 'barras_h', serie),
       b.serieDe('Menos usados', 'barras_h', serie.filter((p) => p.valor < corte).slice().reverse()),
     ],
-    insight: 'O uso é inferido pelas tabelas de cada módulo. Telas só de leitura (Relatórios, Painel, Etiquetas) aparecem em "Telas visitadas".',
+    insight: 'O uso é inferido pelas tabelas de cada módulo. Telas só de leitura (Relatórios, Painel) aparecem em "Telas visitadas". '
+      + semMedida.map((m) => `${m.rotulo} está sem medida: ${m.motivo}.`).join(' '),
   });
 }
 
