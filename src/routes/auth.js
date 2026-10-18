@@ -218,6 +218,7 @@ async function resolveDefaultContext(userId, dbConn) {
             c.trial_ends_at, c.module_overrides, c.billing_status,
             c.access_code_used, c.vertical_active, c.vertical, c.ai_enabled, c.ai_consent_at,
             c.federation_id, c.segment,
+            c.is_sandbox,
             c.is_primary, c.created_at,
             CASE
               WHEN c.owner_id = $1 THEN 'owner'
@@ -288,6 +289,10 @@ function shapeCompany(company, fallbackMemberRole) {
     segment: company.segment || null,
     ai_enabled: !!(company.ai_enabled),
     ai_consent_at: company.ai_consent_at || null,
+    // 18/10/2026 (f4-12): empresa de teste (migration 320). O app libera a
+    // pagina Black Friday para conta de teste lendo company.is_sandbox.
+    // Sempre booleano: ausente/null no banco vira false.
+    is_sandbox: company.is_sandbox === true,
     member_role,
     federation_id: karate.federation_id,
     karate_role: karate.karate_role,
@@ -803,6 +808,7 @@ router.post('/me', requireAuth, async (req, res) => {
                 c.trial_ends_at, c.module_overrides, c.billing_status,
                 c.access_code_used, c.vertical_active, c.vertical, c.ai_enabled, c.ai_consent_at,
                 c.federation_id, c.segment,
+                c.is_sandbox,
                 CASE
                   WHEN c.owner_id = $1 THEN 'owner'
                   ELSE COALESCE(cm.role_label, 'member')

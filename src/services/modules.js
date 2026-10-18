@@ -23,6 +23,12 @@ const MODULE_PLAN_MAP = {
   // plano, so o app usa isto pra esconder/mostrar o item de menu.
   'estoque.fornecedores': 'essencial',
   configuracoes:  'essencial',
+  // 18/10/2026 (f4-12) — página Black Friday do app (app#1061, rota
+  // /black-friday). Chave própria, mesmo plano do estoque. Sem ela o PUT de
+  // override do ClientsAdmin com "black_friday" voltava 400. A página só
+  // existe de 13/10/2026 a 02/02/2027 (regra no app) e fica oculta, só staff
+  // e conta de teste (companies.is_sandbox, devolvido no login e no /auth/me).
+  black_friday:   'essencial',
   // 15/09/2026 — Ótica (migration 334). A configuração fica no Essencial
   // para o admin poder dar override do módulo inteiro por empresa; o
   // laboratório e as receitas são Negócio. Sem gate de rota: otica.js e
