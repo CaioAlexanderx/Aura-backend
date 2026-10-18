@@ -280,23 +280,32 @@ describe('ciclo do orçamento sem página pública', () => {
     expect((await request(app()).post(`/companies/${CID}/studio/quotes/${QID}/fechar`)).status).toBe(400);
   });
 
-  test('aprovar vira pedido na esteira com itens, arte, sinal e as condições nas notas', async () => {
-    const q = orcamento({
-      status: 'sent', deposit_pct: '50', deposit_amount: '266.40',
-      condicoes: { pix_desconto_pct: 5, parcelas: 6, prazo_dias_uteis: 5 },
-    });
-    bancoCom(q);
-    const chamadas = [];
-    db.connect.mockImplementation(() => ({
+  // Cliente de transação de mentira: o aprovar/convert agora lê o orçamento
+  // DENTRO da transação (SELECT ... FOR UPDATE), então tudo passa pelo client.
+  function clienteCom(q, chamadas) {
+    return {
       query: jest.fn(async (sql, params) => {
         const s = String(sql);
         chamadas.push({ s, params });
+        if (/SELECT \* FROM studio_quotes/.test(s)) return { rows: q && params[1] === q.company_id ? [q] : [] };
+        if (/SELECT \* FROM studio_quote_items/.test(s)) {
+          return { rows: [{ product_id: 'p1', description: 'Caneca 325 ml', quantity: '12', unit_price: '39.90', customization: { texto: 'Mari & Léo' } }] };
+        }
         if (/INSERT INTO digital_orders/.test(s)) return { rows: [{ id: 'o1' }] };
         if (/UPDATE studio_quotes/.test(s)) return { rows: [{ ...q, status: 'converted', order_id: 'o1' }] };
         return { rows: [] };
       }),
       release: jest.fn(),
-    }));
+    };
+  }
+
+  test('aprovar vira pedido na esteira com itens, arte, sinal e as condições nas notas', async () => {
+    const q = orcamento({
+      status: 'sent', deposit_pct: '50', deposit_amount: '266.40',
+      condicoes: { pix_desconto_pct: 5, parcelas: 6, prazo_dias_uteis: 5 },
+    });
+    const chamadas = [];
+    db.connect.mockImplementation(() => clienteCom(q, chamadas));
     const r = await request(app()).post(`/companies/${CID}/studio/quotes/${QID}/aprovar`);
     expect(r.status).toBe(200);
     expect(r.body.order_id).toBe('o1');
@@ -304,25 +313,39 @@ describe('ciclo do orçamento sem página pública', () => {
 
     const pedido = chamadas.find((c) => /INSERT INTO digital_orders/.test(c.s));
     expect(pedido.s).toMatch(/'pending_art'/);
+    // colunas que existem de verdade em digital_orders (conferido em producao)
+    expect(pedido.s).toMatch(/next_digital_order_number\(\$1\)/);
+    expect(pedido.s).not.toMatch(/total_amount|created_by/);
     expect(pedido.params[0]).toBe(CID);
     expect(pedido.params[3]).toBe(532.8);
     expect(pedido.params[5]).toMatch(/Pix: R\$ 506,16/);
     const item = chamadas.find((c) => /INSERT INTO digital_order_items/.test(c.s));
-    expect(item.params[5]).toEqual({ texto: 'Mari & Léo' });
+    expect(item.params[5]).toBe(478.8); // 12 x 39,90, subtotal NOT NULL
+    expect(JSON.parse(item.params[6])).toEqual({ texto: 'Mari & Léo' });
     expect(chamadas.some((c) => /INSERT INTO studio_payments/.test(c.s))).toBe(true);
-    expect(chamadas.map((c) => c.s)).toEqual(expect.arrayContaining(['BEGIN', 'COMMIT']));
+    // o orçamento é lido já travado, dentro da transação
+    const ordem = chamadas.map((c) => c.s);
+    expect(ordem[0]).toBe('BEGIN');
+    expect(ordem[1]).toMatch(/SELECT \* FROM studio_quotes[\s\S]*FOR UPDATE/);
+    expect(ordem).toContain('COMMIT');
   });
 
   test('aprovar é idempotente e recusa orçamento fechado', async () => {
-    bancoCom(orcamento({ status: 'converted', order_id: 'o9' }));
+    let chamadas = [];
+    db.connect.mockImplementation(() => clienteCom(orcamento({ status: 'converted', order_id: 'o9' }), chamadas));
     const r = await request(app()).post(`/companies/${CID}/studio/quotes/${QID}/aprovar`);
     expect(r.body.order_id).toBe('o9');
-    bancoCom(orcamento({ status: 'closed' }));
+    expect(chamadas.some((c) => /INSERT INTO digital_orders/.test(c.s))).toBe(false);
+    expect(chamadas.map((c) => c.s)).toContain('ROLLBACK');
+
+    chamadas = [];
+    db.connect.mockImplementation(() => clienteCom(orcamento({ status: 'closed' }), chamadas));
     expect((await request(app()).post(`/companies/${CID}/studio/quotes/${QID}/aprovar`)).status).toBe(400);
+    expect(chamadas.map((c) => c.s)).toContain('ROLLBACK');
   });
 
   test('convert do cliente (página pública) continua exigindo accepted', async () => {
-    bancoCom(orcamento({ status: 'sent' }));
+    db.connect.mockImplementation(() => clienteCom(orcamento({ status: 'sent' }), []));
     expect((await request(app()).post(`/companies/${CID}/studio/quotes/${QID}/convert`)).status).toBe(400);
   });
 });
