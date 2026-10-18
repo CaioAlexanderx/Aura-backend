@@ -32,7 +32,7 @@ function hojeBRT(agora = Date.now()) {
 async function calcularBlocos({ hoje, db = pool, ids = null, mrr = null } = {}) {
   const alvo = ids ? ids.map((id) => POR_ID.get(id)).filter(Boolean) : BLOCOS;
   const empresas = await carregarEmpresas(db);
-  // uso_funcionalidade e adocao leem as mesmas 16 tabelas: uma leitura só.
+  // uso_funcionalidade e adocao leem as mesmas tabelas (_uso.MODULOS): uma leitura só.
   const precisaUso = alvo.filter((b) => b.id === 'uso_funcionalidade' || b.id === 'adocao');
   const uso = precisaUso.length === 2 ? await usoPorModulo({ db, hoje, periodo: 30 }) : undefined;
 
