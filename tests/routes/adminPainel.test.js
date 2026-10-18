@@ -310,6 +310,67 @@ describe('GET /admin/painel/blocos/:id — uma rota por bloco', () => {
     console.warn.mockRestore();
   });
 
+  test('telas visitadas: entrada e retorno por tela, e o total de visitas segue o mesmo', async () => {
+    comDiaGravado();
+    const { body } = await api('get', '/blocos/telas_visitadas');
+    const pdv = body.listas[0].linhas.find((l) => l.tela === 'pdv');
+    // total = o que o bloco já mostrava; entrada + retorno só dos dias com marca
+    expect(pdv).toMatchObject({ lojas_periodo: 2, visitas_periodo: 735, entrada_periodo: 5, retorno_periodo: 245 });
+    expect(body.listas[0].colunas.map((c) => c.rotulo)).toEqual([
+      'Tela', 'Lojas 7d', 'Lojas 30d', 'Visitas 30d', 'Entrada', 'Retorno',
+    ]);
+    expect(body.listas.map((l) => l.titulo)).toEqual(['Por tela · entrada e retorno desde 17/10', 'Lojas por tela · entrada e retorno desde 17/10']);
+    const bela = body.listas[1].linhas.find((l) => l.tela === 'pdv' && l.nome === 'Mercado Bela Vista');
+    expect(bela).toMatchObject({ visitas: 640, entrada: 4, retorno: 206 });
+    expect(body.indicadores.find((i) => i.rotulo === 'Entradas (após login)')).toEqual({ rotulo: 'Entradas (após login)', valor: 5, nota: 'desde 17/10' });
+    expect(body.indicadores.find((i) => i.rotulo === 'Retornos').valor).toBe(251);
+    expect(body.indicadores.find((i) => i.rotulo === 'Visitas').valor).toBe(760);
+    // a série de entrada x retorno só tem tela com visita marcada
+    expect(body.series[1].titulo).toBe('Entrada e retorno por tela · desde 17/10');
+    expect(body.series[1].pontos.map((p) => [p.rotulo, p.texto])).toEqual([
+      ['pdv', '5 entrada · 245 retorno'], ['relatorios', '0 entrada · 6 retorno'],
+    ]);
+    // o bloco diz desde quando a separação vale
+    expect(body.insight).toMatch(/desde 17\/10/);
+  });
+
+  test('telas visitadas: a consulta só separa entrada e retorno dos dias a partir de 17/10', async () => {
+    const consultas = [];
+    const banco = {
+      query: async (sql, params) => {
+        if (sql.includes('FROM screen_views')) consultas.push({ sql, params });
+        return { rows: fake.responder(fake.dadosPadrao(), [], sql, params) };
+      },
+    };
+    const { calcular, ENTRADA_RETORNO_DESDE } = require('../../src/services/painelBlocos/telas_visitadas');
+    await calcular({ hoje: fake.HOJE, periodo: 30, db: banco });
+    expect(consultas).toHaveLength(1);
+    expect(consultas[0].params).toEqual([fake.HOJE, 30, ENTRADA_RETORNO_DESDE]);
+    expect(ENTRADA_RETORNO_DESDE).toBe('2026-10-17');
+    expect(consultas[0].sql).toMatch(/FILTER \(WHERE dia >= \$3::date\)/);
+    // views_login > views não vira entrada maior que o total, nem retorno negativo
+    expect(consultas[0].sql).toMatch(/LEAST\(views_login, views\)/);
+    expect(consultas[0].sql).toMatch(/GREATEST\(views - views_login, 0\)/);
+  });
+
+  test('telas visitadas sem a migration 391: o total segue e entrada/retorno ficam sem valor (não zero)', async () => {
+    const dados = fake.dadosPadrao();
+    const banco = {
+      query: async (sql, params) => {
+        if (sql.includes('views_login')) throw Object.assign(new Error('column "views_login" does not exist'), { code: '42703' });
+        return { rows: fake.responder(dados, [], sql, params) };
+      },
+    };
+    jest.spyOn(console, 'warn').mockImplementation(() => {});
+    const bloco = await require('../../src/services/painelBlocos/telas_visitadas').calcular({ hoje: fake.HOJE, periodo: 30, db: banco });
+    const pdv = bloco.lista.find((l) => l.tela === 'pdv');
+    expect(pdv).toMatchObject({ visitas_periodo: 735, entrada_periodo: null, retorno_periodo: null });
+    expect(bloco.detalhe.indicadores.find((i) => i.rotulo === 'Visitas').valor).toBe(760);
+    expect(bloco.detalhe.indicadores.find((i) => i.rotulo === 'Retornos')).toEqual({ rotulo: 'Retornos', valor: null, nota: 'sem a marca ainda' });
+    expect(bloco.detalhe.series).toHaveLength(1);
+    console.warn.mockRestore();
+  });
+
   test('uso por funcionalidade: lojas distintas em 7 dias, no período e desde sempre', async () => {
     comDiaGravado();
     const { body } = await api('get', '/blocos/uso_funcionalidade');

@@ -159,10 +159,12 @@ function dadosPadrao() {
       { company_id: id(2), nome: 'Mercado Bela Vista', telefone: '(11) 99990-0002' },
     ],
     telas: [
-      { screen: 'pdv', company_id: id(2), v7: '210', vp: '640', ultimo: ts('2026-10-13', '11:00') },
-      { screen: 'pdv', company_id: id(8), v7: '40', vp: '95', ultimo: ts('2026-10-12') },
-      { screen: 'relatorios', company_id: id(2), v7: '6', vp: '22', ultimo: ts('2026-10-12') },
-      { screen: 'etiquetas', company_id: id(3), v7: '0', vp: '3', ultimo: ts('2026-10-02') },
+      // ent/ret: entrada (1ª tela depois do login) e retorno, só dos dias >= 17/10
+      // (migration 391). vp é o total do período, inclusive o de antes da marca.
+      { screen: 'pdv', company_id: id(2), v7: '210', vp: '640', ent: '4', ret: '206', ultimo: ts('2026-10-13', '11:00') },
+      { screen: 'pdv', company_id: id(8), v7: '40', vp: '95', ent: '1', ret: '39', ultimo: ts('2026-10-12') },
+      { screen: 'relatorios', company_id: id(2), v7: '6', vp: '22', ent: '0', ret: '6', ultimo: ts('2026-10-12') },
+      { screen: 'etiquetas', company_id: id(3), v7: '0', vp: '3', ent: '0', ret: '0', ultimo: ts('2026-10-02') },
     ],
     // uso por módulo, por tabela
     uso: {
