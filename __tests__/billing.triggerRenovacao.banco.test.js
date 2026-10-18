@@ -272,24 +272,53 @@ describe('billing_status e eventos que não são pagamento novo', () => {
   });
 });
 
-// ── caso de borda documentado no PR ──────────────────────────────────────
+// ── caso de borda: data informada IGUAL à gravada ───────────────────────
 
-test('borda: data informada IGUAL à gravada é lida como "não informou" e soma 1 mês', async () => {
-  // Cobrança de 15/10 em atraso (OVERDUE, fora da lista de pendentes); alguém
-  // já tinha corrigido o cadastro para 15/11 (a próxima pendente). O
-  // pagamento atrasado entra e a Asaas devolve 15/11 de novo: o trigger não
-  // distingue de "não informou" e grava 15/12. Comportamento conhecido — ver
-  // a descrição do PR.
-  const id = await novaEmpresa({ next: '2026-11-15', last: '2026-09-15', customer: 'cus_393d', sub: 'sub_393' });
-  ligarAsaas({ nextDueDate: '2026-12-15', pendentes: ['2026-11-15'] });
-
-  await webhook({
-    event: 'PAYMENT_RECEIVED',
-    payment: {
-      id: 'pay_393d', customer: 'cus_393d', subscription: 'sub_393', value: 140.83,
-      dueDate: '2026-10-15', paymentDate: '2026-10-20', status: 'RECEIVED', externalReference: id,
-    },
+describe('borda: a data informada é a mesma que já estava gravada', () => {
+  test('trigger sozinho (caminho 2, troca de plano no cartão no mesmo dia do mês): soma 1 mês', async () => {
+    // UPDATE que mexe nas duas colunas ao mesmo tempo, como o checkout com
+    // cartão. Igual à gravada é lido como "não informou". Fica documentado.
+    const id = await novaEmpresa({ next: '2026-11-18', last: '2026-10-01', status: 'active' });
+    await client.query(
+      `UPDATE companies SET last_payment_date = $1, next_billing_date = $2 WHERE id = $3`,
+      ['2026-10-18', '2026-11-18', id]
+    );
+    expect((await ler(id)).next).toBe('2026-12-18');
   });
 
-  expect(await ler(id)).toEqual({ next: '2026-12-15', last: '2026-10-20', status: 'active' });
+  test('webhook (caminho 1): pagamento atrasado depois da correção de vencimento fica com 15/11, não 15/12', async () => {
+    // Cobrança de 15/10 em atraso (OVERDUE, fora da lista de pendentes); a
+    // rotina de correção já tinha gravado 15/11 (a próxima pendente). O
+    // pagamento atrasado entra em 20/10 e a Asaas devolve 15/11 de novo. O
+    // segundo UPDATE do webhook, que não mexe em last_payment_date, faz valer
+    // a data da Asaas mesmo quando ela coincide com a gravada.
+    const id = await novaEmpresa({ next: '2026-11-15', last: '2026-09-15', customer: 'cus_393d', sub: 'sub_393' });
+    ligarAsaas({ nextDueDate: '2026-12-15', pendentes: ['2026-11-15'] });
+
+    const res = await webhook({
+      event: 'PAYMENT_RECEIVED',
+      payment: {
+        id: 'pay_393d', customer: 'cus_393d', subscription: 'sub_393', value: 140.83,
+        dueDate: '2026-10-15', paymentDate: '2026-10-20', status: 'RECEIVED', externalReference: id,
+      },
+    });
+
+    expect(res.body).toMatchObject({ handled: true, status: 'active', next_billing_date: '2026-11-15' });
+    expect(await ler(id)).toEqual({ next: '2026-11-15', last: '2026-10-20', status: 'active' });
+  });
+
+  test('webhook: o pagamento seguinte, em dia, anda um ciclo só (15/11 → 15/12)', async () => {
+    const id = await novaEmpresa({ next: '2026-11-15', last: '2026-10-20', customer: 'cus_393e', sub: 'sub_393' });
+    ligarAsaas({ nextDueDate: '2027-01-15', pendentes: ['2026-12-15'] });
+
+    await webhook({
+      event: 'PAYMENT_RECEIVED',
+      payment: {
+        id: 'pay_393e', customer: 'cus_393e', subscription: 'sub_393', value: 140.83,
+        dueDate: '2026-11-15', paymentDate: '2026-11-15', status: 'RECEIVED', externalReference: id,
+      },
+    });
+
+    expect(await ler(id)).toEqual({ next: '2026-12-15', last: '2026-11-15', status: 'active' });
+  });
 });

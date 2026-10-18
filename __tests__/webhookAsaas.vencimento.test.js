@@ -45,6 +45,9 @@ function ligarBanco(db, empresa) {
   const chamada = (re) => db.query.mock.calls.find(([sql]) => re.test(sql));
   return {
     update: () => chamada(/UPDATE\s+companies\s+SET billing_status/i),
+    // Segundo UPDATE (ti-03, 18/10): só next_billing_date, depois do primeiro.
+    vencimento: () => chamada(/UPDATE\s+companies\s+SET next_billing_date/i),
+    ordem: () => db.query.mock.calls.map(([sql]) => sql),
     log: () => chamada(/INSERT INTO webhook_logs/i),
   };
 }
@@ -98,6 +101,29 @@ describe('pagamento recebido: next_billing_date é o próximo vencimento', () =>
     expect(params).toEqual(['active', true, '2026-09-15', '2026-10-15', EMPRESA]);
   });
 
+  test('a data da Asaas é gravada de novo num segundo UPDATE, que não mexe em last_payment_date', async () => {
+    // O trigger da 393 soma 1 mês quando a data informada é igual à gravada;
+    // sem mudar last_payment_date ele não age e vale a data da Asaas.
+    const { app, db, asaas } = buildApp();
+    const banco = ligarBanco(db, empresa());
+    ligarAsaas(asaas, { assinatura: { id: 'sub_1', status: 'ACTIVE', nextDueDate: '2026-10-15' } });
+
+    await enviar(app, { event: 'PAYMENT_RECEIVED', payment: pagamento() });
+
+    const [sql, params] = banco.vencimento();
+    expect(sql).toContain('next_billing_date = COALESCE($1::date, next_billing_date)');
+    expect(sql).not.toContain('last_payment_date');
+    expect(sql).not.toContain('billing_status');
+    expect(params).toEqual(['2026-10-15', EMPRESA]);
+    const ordem = banco.ordem();
+    const primeiro = ordem.findIndex((s) => /UPDATE\s+companies\s+SET billing_status/i.test(s));
+    const segundo = ordem.findIndex((s) => /UPDATE\s+companies\s+SET next_billing_date/i.test(s));
+    const log = ordem.findIndex((s) => /INSERT INTO webhook_logs/i.test(s));
+    expect(primeiro).toBeGreaterThan(-1);
+    expect(segundo).toBe(primeiro + 1);
+    expect(log).toBeGreaterThan(segundo);
+  });
+
   test('cobrança do próximo ciclo já criada (40 dias antes): vale a pendente, não o nextDueDate', async () => {
     const { app, db, asaas } = buildApp();
     const banco = ligarBanco(db, empresa());
@@ -127,6 +153,7 @@ describe('pagamento recebido: next_billing_date é o próximo vencimento', () =>
     expect(params[3]).toBeNull(); // COALESCE($4, next_billing_date) preserva o que estava
     expect(params[2]).toBe('2026-09-15'); // last_payment_date continua avançando
     expect(params).not.toContain('2026-10-15');
+    expect(banco.vencimento()).toBeUndefined(); // sem data da Asaas, sem segundo UPDATE
   });
 
   test('o dueDate da cobrança paga nunca vira next_billing_date, em evento nenhum', async () => {
@@ -137,6 +164,7 @@ describe('pagamento recebido: next_billing_date é o próximo vencimento', () =>
       await enviar(app, { event, payment: pagamento({ dueDate: '2026-09-15', paymentDate: null }) });
       expect(banco.update()[1][3]).toBeNull();
       expect(banco.update()[1]).not.toContain('2026-09-15');
+      expect(banco.vencimento()).toBeUndefined();
     }
   });
 
