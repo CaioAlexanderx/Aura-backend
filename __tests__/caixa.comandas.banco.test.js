@@ -11,6 +11,9 @@
 //   5. a venda com comanda_id fecha a comanda; cobrar de novo e 409; comanda
 //      de outra loja e 404; venda sem comanda_id nao toca em nada
 //   6. cancelar a venda reabre a comanda — salvo se o numero ja foi reaberto
+//   7. fechamento parcial (392, tc-04): cobrar so alguns itens (e parte de
+//      uma linha) deixa a comanda aberta com o resto; o mesmo item de novo e
+//      409; cancelar a venda da parte devolve os itens e reabre a comanda
 //
 // Mesmo padrao de credito.editarPagamento.banco.test.js: tudo dentro de UMA
 // transacao revertida no afterAll; o client das rotas delega ao da transacao
@@ -272,5 +275,59 @@ describe('comandas — ganchos da venda', () => {
 
     // venda sem comanda: nada
     expect(await hooks.afterSaleCancel(client, { companyId, saleId: (await venda()).id })).toEqual({ comandas_reopened: 0 });
+  });
+
+  test('7. fechamento parcial (392): parte dos itens, item cobrado de novo, parte da linha, cancelar devolve', async () => {
+    const AGUA = { name: 'Água', quantity: 1, unit_price: 6 };
+    const c = (await request(app).post(`${base}/60/items`).send({ items: [COPAO, DOSE, AGUA] })).body.comanda;
+    const [copao, dose, agua] = c.items;
+
+    // cobra a dose e a agua: a comanda segue aberta so com o copao
+    const vendaA = await venda();
+    expect(await hooks.afterSaleInsert(client, {
+      companyId, sale: vendaA, body: { comanda_id: c.id, comanda_item_ids: [dose.id, agua.id] },
+    })).toEqual({ comanda_id: c.id, comanda_number: 60, comanda_open: true });
+    expect((await estado(c.id)).status).toBe('open');
+    const parcial = (await request(app).get(`${base}/60`)).body.comanda;
+    expect(parcial).toMatchObject({ items_count: 1, subtotal: 50, parcial: true, paid_subtotal: 24.5 });
+    expect(parcial.items.map((i) => i.id)).toEqual([copao.id]);
+    const lista = (await request(app).get(base)).body.comandas.find((x) => x.number === 60);
+    expect(lista).toMatchObject({ items_count: 1, subtotal: 50, parcial: true, paid_subtotal: 24.5 });
+
+    // a dose de novo: 409, nada muda
+    await expect(hooks.afterSaleInsert(client, {
+      companyId, sale: await venda(), body: { comanda_id: c.id, comanda_item_ids: [dose.id] },
+    })).rejects.toMatchObject({ statusCode: 409, code: 'COMANDA_ITEM_ALREADY_CHARGED' });
+
+    // um dos dois copoes: a linha e dividida
+    const vendaB = await venda();
+    expect(await hooks.afterSaleInsert(client, {
+      companyId, sale: vendaB, body: { comanda_id: c.id, comanda_item_ids: [copao.id], comanda_item_qty: { [copao.id]: 1 } },
+    })).toMatchObject({ comanda_open: true });
+    const { rows: linhas } = await client.query(
+      `SELECT quantity, sale_id FROM pdv_comanda_items WHERE comanda_id = $1 AND name = $2 ORDER BY seq`,
+      [c.id, COPAO.name]
+    );
+    expect(linhas.map((l) => [Number(l.quantity), l.sale_id])).toEqual([[1, null], [1, vendaB.id]]);
+
+    // o resto, sem ids (como hoje): fecha
+    const vendaC = await venda();
+    expect(await hooks.afterSaleInsert(client, { companyId, sale: vendaC, body: { comanda_id: c.id } }))
+      .toEqual({ comanda_id: c.id, comanda_number: 60 });
+    expect(await estado(c.id)).toMatchObject({ status: 'closed', sale_id: vendaC.id });
+
+    // cancelar a venda da dose e da agua: os dois voltam e a comanda reabre
+    expect(await hooks.afterSaleCancel(client, { companyId, saleId: vendaA.id })).toEqual({ comandas_reopened: 1 });
+    const volta = (await request(app).get(`${base}/60`)).body.comanda;
+    expect(volta.id).toBe(c.id);
+    expect(volta).toMatchObject({ items_count: 2, subtotal: 24.5, parcial: true, paid_subtotal: 50 });
+    expect(volta.items.map((i) => i.id)).toEqual([dose.id, agua.id]);
+
+    // item ja cobrado nao sai pelo DELETE
+    const { rows: [cobrado] } = await client.query(
+      `SELECT id FROM pdv_comanda_items WHERE comanda_id = $1 AND sale_id = $2`, [c.id, vendaC.id]
+    );
+    expect((await request(app).delete(`${base}/60/items/${cobrado.id}`)).status).toBe(404);
+    await request(app).post(`${base}/60/cancel`);
   });
 });
