@@ -42,6 +42,9 @@ router.use('/me/financeiro', require('./financeiroComparative').meRouter);
 // Gestão Aura lê em screen_views. Empresa e usuário vêm do token.
 router.use('/usage', require('./usageScreens'));
 
+// 18/10/2026 (t3-05): GET /fiscal/ncm/:codigo — o NCM existe na tabela da Receita?
+router.use('/fiscal', require('./fiscalNcm'));
+
 router.use('/companies/:id', privateCompaniesRouter);
 
 // ── WhatsApp Cloud API por company (FONTE ÚNICA: connect, status,
