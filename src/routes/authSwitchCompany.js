@@ -182,6 +182,7 @@ router.post('/switch-company', requireAuth, async (req, res) => {
          c.vertical_active, c.is_primary, c.module_overrides,
          c.billing_status, c.trial_ends_at, c.ai_enabled, c.ai_consent_at,
          c.logo_url, c.onboarding_step, c.access_code_used, c.segment,
+         c.is_sandbox,
          CASE
            WHEN c.owner_id = $2 THEN 'owner'
            ELSE cm.role_label
@@ -270,6 +271,7 @@ router.post('/switch-company', requireAuth, async (req, res) => {
         access_code_used: !!company.access_code_used,
         logo_url: company.logo_url,
         onboarding_step: company.onboarding_step,
+        is_sandbox: company.is_sandbox === true, // 18/10/2026 (f4-12), igual ao login e ao /me
         member_role: company.role,
       },
       consolidated_view: false,
