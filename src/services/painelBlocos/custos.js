@@ -29,9 +29,7 @@ const MESES_EXTENSO = ['janeiro', 'fevereiro', 'março', 'abril', 'maio', 'junho
 const rotuloMes = (ym) => MESES[parseInt(String(ym).slice(5, 7), 10) - 1] || ym;
 const extenso = (ym) => MESES_EXTENSO[parseInt(String(ym).slice(5, 7), 10) - 1] || ym;
 const mesAno = (ym) => `${rotuloMes(ym)}/${String(ym).slice(0, 4)}`;
-// Primeiro mês com MRR contratual no snapshot; antes dele, mrr_total é a
-// cobrança com vencimento no mês (migration 382).
-const MRR_CONTRATUAL_DESDE = '2026-10';
+const { MRR_CONTRATUAL_DESDE } = custos;
 const APORTE_DO_SOCIO = 'Aporte do sócio';
 const ouNull = (v) => (v === null || v === undefined ? null : b.round2(v));
 

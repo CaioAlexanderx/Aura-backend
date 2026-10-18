@@ -10,6 +10,7 @@ const router = require('express').Router();
 const pool = require('../config/database');
 const { requireAuth, requireRole } = require('../middleware/auth');
 const asyncHandler = require('../utils/asyncHandler');
+const custosMensais = require('../services/custosMensais');
 
 const adminOnly = [requireAuth, requireRole('admin')];
 const PLAN_PRICES = { essencial: 89, negocio: 199, expansao: 299 };
@@ -97,42 +98,56 @@ router.get('/metrics/unit-economics', ...adminOnly, asyncHandler(async (req, res
   const ltvMonths = monthlyChurnRate > 0 ? Math.round(1 / monthlyChurnRate) : 24;
 
   // CAC (custo de aquisicao — marketing dividido por novos clientes)
-  // Custos de marketing dos ultimos 3 meses
-  const { rows: mktCosts } = await pool.query(
-    `SELECT COALESCE(SUM(amount), 0) AS total FROM aura_operational_costs WHERE category='marketing' AND reference_month >= NOW() - INTERVAL '90 days'`
-  );
-  const mktSpend3m = parseFloat(mktCosts[0]?.total || 0);
+  // Anuncios (categoria Meta) dos ultimos 3 meses, do snapshot (card t2-21).
+  // Sem nenhum mes lancado e aberto por categoria: null (nao R$ 0).
+  const mkt = await custosMensais.marketingDosMeses({ db: pool, meses: 3 });
+  const mktSpend3m = mkt.valor;
   const { rows: newClients3m } = await pool.query(
     `SELECT COUNT(*) AS total FROM companies WHERE is_active=true AND created_at >= NOW() - INTERVAL '90 days'`
   );
   const newCount3m = parseInt(newClients3m[0]?.total || 0);
-  const cac = newCount3m > 0 ? mktSpend3m / newCount3m : 0;
+  const cac = mktSpend3m === null ? null : (newCount3m > 0 ? mktSpend3m / newCount3m : 0);
   const ltvCacRatio = cac > 0 ? Math.round((ltv / cac) * 10) / 10 : null;
 
-  // Custos por categoria
-  const { rows: costBreakdown } = await pool.query(
-    `SELECT category, COALESCE(SUM(amount),0) AS total FROM aura_operational_costs
-     WHERE reference_month >= date_trunc('month', NOW())
-     GROUP BY category ORDER BY total DESC`
-  );
-
-  // Margem bruta
-  const totalCosts = costBreakdown.reduce((s, r) => s + parseFloat(r.total), 0);
-  const grossMargin = mrr - totalCosts;
-  const marginPct = mrr > 0 ? Math.round((grossMargin / mrr) * 100) : 0;
+  // Custos do mes por categoria e margem: do snapshot (card t2-21), a mesma
+  // fonte do bloco Custos do painel. Mes sem custo lancado: null, nunca R$ 0.
+  // A margem usa a receita do snapshot, nao o mrr calculado acima.
+  const custo = await custosMensais.custoDoMes({ db: pool });
+  const breakdown = custo.itens
+    .slice()
+    .sort((a, b) => b.valor - a.valor)
+    .map((i) => ({ category: i.categoria, label: i.rotulo, amount: i.valor }));
 
   res.json({
     paying_clients: payingClients,
     mrr, arpu: Math.round(arpu * 100) / 100,
     churn: { rate_pct: churnPct, count_3m: churnCount3m },
     ltv: { value: Math.round(ltv), months: ltvMonths },
-    cac: { value: Math.round(cac * 100) / 100, marketing_spend_3m: mktSpend3m, new_clients_3m: newCount3m },
-    ltv_cac_ratio: ltvCacRatio,
-    costs: {
-      total: totalCosts,
-      breakdown: costBreakdown.map(r => ({ category: r.category, amount: parseFloat(r.total) })),
+    cac: {
+      value: cac === null ? null : Math.round(cac * 100) / 100,
+      marketing_spend_3m: mktSpend3m,
+      new_clients_3m: newCount3m,
+      // marketing = categoria Meta (anuncios) do snapshot; null se nenhum dos 3
+      // meses tem custo lancado e aberto por categoria
+      marketing_meses_com_abertura: mkt.meses_com_abertura,
+      marketing_meses_lancados: mkt.meses_lancados,
     },
-    margin: { gross: grossMargin, pct: marginPct },
+    ltv_cac_ratio: ltvCacRatio,
+    // total e margin.* sao null quando o mes nao tem custo lancado (lancado=false,
+    // rotulo 'sem custo lancado'); breakdown fica vazio.
+    costs: {
+      total: custo.total,
+      breakdown,
+      mes: custo.mes,
+      lancado: custo.lancado,
+      rotulo: custo.rotulo,
+      fonte: 'aura_revenue_snapshot',
+      taxas_asaas: custo.taxas_asaas,
+      das: custo.das,
+      das_rotulo: custo.das_rotulo,
+      das_obs: custo.das_obs,
+    },
+    margin: { gross: custo.margem, pct: custo.margem_pct, base: custo.receita_base, receita: custo.receita, receita_obs: custo.receita_obs },
   });
 }));
 

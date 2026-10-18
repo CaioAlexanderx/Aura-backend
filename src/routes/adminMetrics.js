@@ -15,6 +15,7 @@ const { RECOVERY_WINDOW_DAYS } = require('../services/clientLifecycle');
 const { recalculateAll } = require('../services/healthScore');
 // Filial cujo plano é pago por outra empresa: a mesma regra do MRR e do painel.
 const { PAGA_POR_OUTRA } = require('../services/painelBlocos/_base');
+const custosMensais = require('../services/custosMensais');
 
 const adminOnly = [requireAuth, requireRole('admin')];
 
@@ -68,16 +69,9 @@ router.get('/metrics/overview', ...adminOnly, asyncHandler(async (req, res) => {
   const churnMRR = parseFloat(churnRows[0]?.mrr_lost || 0);
   const churnRate = totalClients > 0 ? Math.round((churnCount / totalClients) * 1000) / 10 : 0;
 
-  // Custos do mes
-  const firstOfMonth = new Date();
-  firstOfMonth.setDate(1); firstOfMonth.setHours(0,0,0,0);
-  const { rows: costRows } = await pool.query(
-    `SELECT COALESCE(SUM(amount),0) AS total FROM aura_operational_costs WHERE reference_month >= $1`,
-    [firstOfMonth]
-  );
-  const totalCosts = parseFloat(costRows[0]?.total || 0);
-  const grossMargin = mrrTotal - totalCosts;
-  const marginPct = mrrTotal > 0 ? Math.round((grossMargin / mrrTotal) * 100) : 0;
+  // Custos do mes: do snapshot (card t2-21), a mesma fonte do bloco Custos do
+  // painel. Mes sem custo lancado: null, nunca R$ 0.
+  const custo = await custosMensais.custoDoMes({ db: pool });
 
   // Meta do mes
   const { rows: goalRows } = await pool.query(
@@ -115,8 +109,8 @@ router.get('/metrics/overview', ...adminOnly, asyncHandler(async (req, res) => {
     },
     arpu,
     churn: { count: churnCount, mrr_lost: churnMRR, rate_pct: churnRate },
-    costs: { current_month: totalCosts },
-    margin: { gross: grossMargin, pct: marginPct },
+    costs: { current_month: custo.total, mes: custo.mes, lancado: custo.lancado, rotulo: custo.rotulo, fonte: 'aura_revenue_snapshot' },
+    margin: { gross: custo.margem, pct: custo.margem_pct, base: custo.receita_base, receita: custo.receita, receita_obs: custo.receita_obs },
     goal: goal ? {
       mrr_target: parseFloat(goal.mrr_target || 0),
       clients_target: parseInt(goal.clients_target || 0),
