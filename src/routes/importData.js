@@ -26,6 +26,8 @@ const { linkImportedCategories } = require('../services/importCategoryLink');
 const { findOrCreateSupplierByCnpj } = require('../services/supplierLookup');
 const { avancarSemEsperar } = require('../services/onboardingProgress');
 const { gravarUltimaCompra, casarNotaComPedidos } = require('../services/matconPurchases');
+// t3-05: NCM fora da tabela da Receita so AVISA (ncm_avisos na resposta), nunca bloqueia a importacao.
+const { resumirAvisosNcm } = require('../services/ncmTable');
 
 // ─── Mapeamento de colunas — fuzzy match ────────────────────
 
@@ -543,9 +545,15 @@ router.post('/products/import', requireAuth, async (req, res) => {
   }
   duplicatas.sort((a, b) => a.index - b.index);
 
+  // t3-05: NCM que a Receita nao conhece. Conta so o que vai entrar (toInsert);
+  // so aparece na resposta quando ha algum.
+  const ncmAvisos = resumirAvisosNcm(toInsert);
+  const comNcmAvisos = ncmAvisos ? { ncm_avisos: ncmAvisos } : {};
+
   if (dry_run) {
     return res.json({
       dry_run:       true,
+      ...comNcmAvisos,
       total:         rows.length,
       valid:         valid.length,
       error_count:   errors.length,
@@ -683,6 +691,7 @@ router.post('/products/import', requireAuth, async (req, res) => {
     unidades_desconhecidas: resumoUnidades,
     // So aparece quando a base ainda nao tem a migration 351.
     ...(cardPriceIgnorado ? { card_price_ignorado: true } : {}),
+    ...comNcmAvisos,
   });
 });
 
@@ -832,18 +841,23 @@ router.post('/products/import-nfe', requireAuth, async (req, res) => {
     return res.status(422).json({ error: 'Nenhum produto encontrado no XML da NF-e' });
   }
 
+  // t3-05: NCM que a Receita nao conhece so AVISA, nunca bloqueia a nota.
+  const ncmAvisosPreview = resumirAvisosNcm(parsed.products);
+
   if (!save) {
     return res.json({
       preview:     true,
       nfe_info:    parsed.nfe_info,
       products:    parsed.products,
       total_items: parsed.products.length,
+      ...(ncmAvisosPreview ? { ncm_avisos: ncmAvisosPreview } : {}),
     });
   }
 
   const toSave = Array.isArray(confirmedProducts) && confirmedProducts.length > 0
     ? confirmedProducts
     : parsed.products;
+  const ncmAvisosSave = resumirAvisosNcm(toSave);
 
   const batchId = uuidv4();
   let saved = 0, dupes = 0;
@@ -960,6 +974,7 @@ router.post('/products/import-nfe', requireAuth, async (req, res) => {
     stock_updated: dupes,
     batch_id: batchId,
     nfe_info: parsed.nfe_info,
+    ...(ncmAvisosSave ? { ncm_avisos: ncmAvisosSave } : {}),
   });
 });
 

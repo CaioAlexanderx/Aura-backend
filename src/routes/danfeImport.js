@@ -21,6 +21,12 @@ const router  = express.Router({ mergeParams: true });
 const db      = require('../config/database');
 const { extractFromPdf, parseJsonResponse } = require('../services/claudeClient');
 const { parseNFeXML } = require('../utils/nfeParser');
+// t3-05: NCM fora da tabela da Receita so AVISA (ncm_avisos), nunca tira o item da lista.
+const { resumirAvisosNcm } = require('../services/ncmTable');
+const avisosDeNcm = (items) => {
+  const r = resumirAvisosNcm(items, { nome: (i) => i.description });
+  return r ? { ncm_avisos: r } : {};
+};
 
 // ── POST /import-danfe-xml ──────────────────────────────────
 // Aceita: { xml_content: string }  (conteúdo bruto do .xml)
@@ -79,6 +85,7 @@ router.post('/import-danfe-xml', async (req, res) => {
       elapsed_ms:      elapsedMs,
       source:          'xml',
     },
+    ...avisosDeNcm(parsed.items),
   });
 });
 
@@ -263,6 +270,7 @@ router.post('/import-danfe-preview', async (req, res) => {
         source:          'ai',
       },
       quota: { used: quota.used + 1, limit: quota.limit },
+      ...avisosDeNcm(cleanItems),
     });
   } catch (err) {
     console.error('[danfeImport] error:', err.message);

@@ -50,6 +50,8 @@ const { normalizeGallery } = require('../services/productGallery');
 const { companyGroupWhere } = require('../utils/companyGroup');
 const db = require('../config/database');
 const { avancarSemEsperar } = require('../services/onboardingProgress');
+// t3-05 (18/10/2026): NCM fora da tabela da Receita so AVISA (ncm_aviso), nunca bloqueia.
+const { avisoDeNcm } = require('../services/ncmTable');
 
 // ─── Fase 1 fornecedores (16/09/2026) ────────────────────────
 //
@@ -633,7 +635,9 @@ router.post('/', async (req, res) => {
       : null;
     // 17/10/2026 (t2-04): o primeiro produto avança o passo do cadastro.
     avancarSemEsperar(cid, 'produto');
-    res.status(201).json({ ...result.rows[0], card_price: cardPriceOut(result.rows[0].card_price), supplier: supplierOut, merge_suggestion });
+    // t3-05: aviso de NCM (sem bloquear). O campo so aparece quando ha o que avisar.
+    const ncmAviso = avisoDeNcm(ncm);
+    res.status(201).json({ ...result.rows[0], card_price: cardPriceOut(result.rows[0].card_price), supplier: supplierOut, merge_suggestion, ...(ncmAviso ? { ncm_aviso: ncmAviso } : {}) });
   } catch (err) { console.error('[products] create error:', err.message); res.status(500).json({ error: 'Erro ao criar produto' }); }
 });
 
@@ -844,7 +848,9 @@ router.patch('/:pid', async (req, res) => {
     const supplierOut = row.supplier_id
       ? { id: row.supplier_id, name: row.supplier_name, cnpj: row.supplier_cnpj }
       : null;
-    res.json({ ...row, card_price: cardPriceOut(row.card_price), supplier: supplierOut });
+    // t3-05: so quando o PATCH mexeu no NCM; sem o campo no body a resposta e a mesma de antes.
+    const ncmAviso = req.body.ncm !== undefined ? avisoDeNcm(req.body.ncm) : null;
+    res.json({ ...row, card_price: cardPriceOut(row.card_price), supplier: supplierOut, ...(ncmAviso ? { ncm_aviso: ncmAviso } : {}) });
   } catch (err) { console.error('[products] update error:', err.message); res.status(500).json({ error: 'Erro ao atualizar produto' }); }
 });
 
