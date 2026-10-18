@@ -775,6 +775,8 @@ async function handleSale(req, res, opts = {}) {
     if (comandaResult) {
       sale.comanda_id = comandaResult.comanda_id;
       sale.comanda_number = comandaResult.comanda_number;
+      // 392 (tc-04): cobranca parcial — a comanda continua aberta com o resto.
+      if (comandaResult.comanda_open) sale.comanda_open = true;
     }
 
     await client.query('COMMIT');

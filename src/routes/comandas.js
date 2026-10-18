@@ -29,11 +29,20 @@
 // lancar sem nome mantem o que ja estava. Sem a coluna (deploy antes da
 // migration) tudo segue igual, sem nome: a coluna e sondada e o "nao existe"
 // fica 60 s em cache.
+//
+// FECHAMENTO PARCIAL (392, card tc-04): a venda pode cobrar so alguns itens
+// (services/comandaSaleHooks.js). Daqui em diante a comanda mostra so os
+// itens PENDENTES (pdv_comanda_items.sale_id NULL): items, items_count e
+// subtotal sao o que falta cobrar. `parcial: true` quando algum item ja foi
+// cobrado, e `paid_subtotal` e o consumo ja cobrado. Item cobrado nao sai
+// pelo DELETE. Sem a coluna (deploy antes da 392) tudo segue igual e os dois
+// campos nao vem — e por eles que o app sabe que pode cobrar em partes.
 // ============================================================
 'use strict';
 
 const router = require('express').Router({ mergeParams: true });
 const db = require('../config/database');
+const { temItemVenda } = require('../services/comandaSaleHooks');
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const MAX_ITEMS_PER_CALL = 100;
@@ -165,9 +174,10 @@ function itemOut(r) {
   };
 }
 
-function comandaOut(c, itens) {
+// `pago` so com a 392: {count, subtotal} dos itens ja cobrados.
+function comandaOut(c, itens, pago) {
   const items = (itens || []).map(itemOut);
-  return {
+  const out = {
     id: c.id,
     number: Number(c.number),
     name: c.name || null,
@@ -177,9 +187,14 @@ function comandaOut(c, itens) {
     items_count: items.length,
     subtotal: round2(items.reduce((s, it) => s + it.total, 0)),
   };
+  if (pago) {
+    out.parcial = (Number(pago.count) || 0) > 0;
+    out.paid_subtotal = round2(Number(pago.subtotal) || 0);
+  }
+  return out;
 }
 
-async function carregarAberta(q, companyId, number, comNome) {
+async function carregarAberta(q, companyId, number, comNome, comVenda) {
   const { rows } = await q.query(
     `SELECT id, number, status, opened_at${comNome ? ', name' : ''} FROM pdv_comandas
       WHERE company_id = $1 AND number = $2 AND status = 'open'`,
@@ -189,21 +204,39 @@ async function carregarAberta(q, companyId, number, comNome) {
   const { rows: itens } = await q.query(
     `SELECT id, product_id, variant_id, name, unit, quantity, unit_price, created_at
        FROM pdv_comanda_items
-      WHERE comanda_id = $1
+      WHERE comanda_id = $1${comVenda ? ' AND sale_id IS NULL' : ''}
       ORDER BY seq ASC`,
     [rows[0].id]
   );
-  return comandaOut(rows[0], itens);
+  let pago = null;
+  if (comVenda) {
+    const { rows: p } = await q.query(
+      `SELECT COUNT(*)::int AS count, COALESCE(SUM(quantity * unit_price), 0) AS subtotal
+         FROM pdv_comanda_items
+        WHERE comanda_id = $1 AND sale_id IS NOT NULL`,
+      [rows[0].id]
+    );
+    pago = p[0] || { count: 0, subtotal: 0 };
+  }
+  return comandaOut(rows[0], itens, pago);
 }
 
 // ─── GET /comandas ───────────────────────────────────────────
 router.get('/', async function (req, res) {
   try {
     const comNome = await temColunaNome(db);
+    const comVenda = await temItemVenda(db);
+    // 392: o total e so o pendente; o ja cobrado vem a parte.
+    const agregados = comVenda
+      ? `COUNT(i.id) FILTER (WHERE i.sale_id IS NULL)::int AS items_count,
+              COALESCE(SUM(i.quantity * i.unit_price) FILTER (WHERE i.sale_id IS NULL), 0) AS subtotal,
+              COUNT(i.id) FILTER (WHERE i.sale_id IS NOT NULL)::int AS paid_count,
+              COALESCE(SUM(i.quantity * i.unit_price) FILTER (WHERE i.sale_id IS NOT NULL), 0) AS paid_subtotal`
+      : `COUNT(i.id)::int AS items_count,
+              COALESCE(SUM(i.quantity * i.unit_price), 0) AS subtotal`;
     const { rows } = await db.query(
       `SELECT c.id, c.number, c.status, c.opened_at,${comNome ? ' c.name,' : ''}
-              COUNT(i.id)::int AS items_count,
-              COALESCE(SUM(i.quantity * i.unit_price), 0) AS subtotal
+              ${agregados}
          FROM pdv_comandas c
          LEFT JOIN pdv_comanda_items i ON i.comanda_id = c.id
         WHERE c.company_id = $1 AND c.status = 'open'
@@ -221,6 +254,10 @@ router.get('/', async function (req, res) {
         opened_at: r.opened_at,
         items_count: Number(r.items_count) || 0,
         subtotal: round2(Number(r.subtotal) || 0),
+        ...(comVenda ? {
+          parcial: (Number(r.paid_count) || 0) > 0,
+          paid_subtotal: round2(Number(r.paid_subtotal) || 0),
+        } : {}),
       })),
     });
   } catch (err) {
@@ -235,7 +272,7 @@ router.get('/:number', async function (req, res) {
   try {
     const number = numeroDaComanda(req.params.number);
     if (!number) return res.status(400).json({ error: 'Informe o número da comanda (1 a 9999).', code: 'COMANDA_NUMBER_INVALID' });
-    const comanda = await carregarAberta(db, req.params.id, number, await temColunaNome(db));
+    const comanda = await carregarAberta(db, req.params.id, number, await temColunaNome(db), await temItemVenda(db));
     if (!comanda) return res.status(404).json({ error: `Não há comanda ${number} aberta.`, code: 'COMANDA_NOT_FOUND' });
     res.json({ comanda });
   } catch (err) {
@@ -259,6 +296,7 @@ router.post('/:number/items', async function (req, res) {
     const userId = req.user && UUID_RE.test(String(req.user.id || '')) ? req.user.id : null;
     // Sondado ANTES do BEGIN: um 42703 dentro da transacao a abortaria.
     const comNome = await temColunaNome(db);
+    const comVenda = await temItemVenda(db);
     const nome = comNome ? nomeDaComanda((req.body || {}).name) : null;
 
     client = await db.connect();
@@ -291,7 +329,7 @@ router.post('/:number/items', async function (req, res) {
         [comandaId, companyId, it.product_id, it.variant_id, it.name, it.unit, it.quantity, it.unit_price, userId]
       );
     }
-    const comanda = await carregarAberta(client, companyId, number, comNome);
+    const comanda = await carregarAberta(client, companyId, number, comNome, comVenda);
     await client.query('COMMIT');
     client.release();
     client = null;
@@ -305,7 +343,8 @@ router.post('/:number/items', async function (req, res) {
 });
 
 // ─── DELETE /comandas/:number/items/:iid ─────────────────────
-// Tira um lancamento feito por engano. So da comanda ABERTA.
+// Tira um lancamento feito por engano. So da comanda ABERTA, e so item que
+// ainda nao foi cobrado (392).
 router.delete('/:number/items/:iid', async function (req, res) {
   const companyId = req.params.id;
   try {
@@ -314,15 +353,16 @@ router.delete('/:number/items/:iid', async function (req, res) {
     if (!number || !UUID_RE.test(String(req.params.iid))) {
       return res.status(404).json({ error: 'Item não encontrado nesta comanda.' });
     }
+    const comVenda = await temItemVenda(db);
     const { rowCount } = await db.query(
       `DELETE FROM pdv_comanda_items i
         USING pdv_comandas c
         WHERE i.id = $1 AND i.comanda_id = c.id
-          AND c.company_id = $2 AND c.number = $3 AND c.status = 'open'`,
+          AND c.company_id = $2 AND c.number = $3 AND c.status = 'open'${comVenda ? ' AND i.sale_id IS NULL' : ''}`,
       [req.params.iid, companyId, number]
     );
     if (!rowCount) return res.status(404).json({ error: 'Item não encontrado nesta comanda.' });
-    const comanda = await carregarAberta(db, companyId, number, await temColunaNome(db));
+    const comanda = await carregarAberta(db, companyId, number, await temColunaNome(db), comVenda);
     res.json({ comanda });
   } catch (err) {
     falhar(res, err, 'DELETE:item');
