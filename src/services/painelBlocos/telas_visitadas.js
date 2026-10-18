@@ -84,8 +84,8 @@ async function calcular({ hoje, periodo = 30, db = b.pool, empresas } = {}) {
 
   const totalEntrada = separado ? linhas.reduce((s, l) => s + l.entrada_periodo, 0) : null;
   const totalRetorno = separado ? linhas.reduce((s, l) => s + l.retorno_periodo, 0) : null;
-  const colEntrada = b.col('entrada_periodo', `Entrada (desde ${DESDE_ROTULO})`, 'numero');
-  const colRetorno = b.col('retorno_periodo', `Retorno (desde ${DESDE_ROTULO})`, 'numero');
+  const colEntrada = b.col('entrada_periodo', 'Entrada', 'numero');
+  const colRetorno = b.col('retorno_periodo', 'Retorno', 'numero');
 
   // Entrada x retorno por tela, só as telas que tiveram visita com marca.
   const serieEntradaRetorno = separado
@@ -118,11 +118,11 @@ async function calcular({ hoje, periodo = 30, db = b.pool, empresas } = {}) {
       b.indicador('Retornos', totalRetorno, separado ? `desde ${DESDE_ROTULO}` : 'sem a marca ainda'),
     ],
     listas: [
-      b.lista('Por tela', [
+      b.lista(`Por tela · entrada e retorno desde ${DESDE_ROTULO}`, [
         b.col('tela', 'Tela'), b.col('lojas_7d', 'Lojas 7d', 'numero'), b.col('lojas_periodo', `Lojas ${periodo}d`, 'numero'),
         b.col('visitas_periodo', `Visitas ${periodo}d`, 'numero'), colEntrada, colRetorno,
       ], linhas),
-      b.lista('Lojas por tela', [
+      b.lista(`Lojas por tela · entrada e retorno desde ${DESDE_ROTULO}`, [
         b.col('tela', 'Tela'), b.colLoja(), b.col('visitas', 'Visitas', 'numero'),
         b.col('entrada', 'Entrada', 'numero'), b.col('retorno', 'Retorno', 'numero'),
         b.col('ultima_visita', 'Última visita', 'data'),

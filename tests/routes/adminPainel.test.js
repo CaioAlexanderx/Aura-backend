@@ -317,8 +317,9 @@ describe('GET /admin/painel/blocos/:id — uma rota por bloco', () => {
     // total = o que o bloco já mostrava; entrada + retorno só dos dias com marca
     expect(pdv).toMatchObject({ lojas_periodo: 2, visitas_periodo: 735, entrada_periodo: 5, retorno_periodo: 245 });
     expect(body.listas[0].colunas.map((c) => c.rotulo)).toEqual([
-      'Tela', 'Lojas 7d', 'Lojas 30d', 'Visitas 30d', 'Entrada (desde 17/10)', 'Retorno (desde 17/10)',
+      'Tela', 'Lojas 7d', 'Lojas 30d', 'Visitas 30d', 'Entrada', 'Retorno',
     ]);
+    expect(body.listas.map((l) => l.titulo)).toEqual(['Por tela · entrada e retorno desde 17/10', 'Lojas por tela · entrada e retorno desde 17/10']);
     const bela = body.listas[1].linhas.find((l) => l.tela === 'pdv' && l.nome === 'Mercado Bela Vista');
     expect(bela).toMatchObject({ visitas: 640, entrada: 4, retorno: 206 });
     expect(body.indicadores.find((i) => i.rotulo === 'Entradas (após login)')).toEqual({ rotulo: 'Entradas (após login)', valor: 5, nota: 'desde 17/10' });
