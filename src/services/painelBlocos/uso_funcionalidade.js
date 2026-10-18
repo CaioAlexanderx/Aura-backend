@@ -3,7 +3,7 @@
 'use strict';
 
 const b = require('./_base');
-const { usoPorModulo, SEM_MEDIDA } = require('./_uso');
+const { usoPorModulo, SEM_MEDIDA, MOTIVO_AGUARDA_DADO } = require('./_uso');
 
 // "Uso amplo" = pelo menos um quarto das lojas que entraram no período.
 const FATIA_AMPLO = 0.25;
@@ -16,8 +16,12 @@ async function calcular({ hoje, periodo = 30, db = b.pool, empresas, uso } = {})
   ]);
   const base = [...acesso.keys()].filter((id) => emp.porId.has(id)).length;
 
+  // Módulo recém-medido (Etiquetas, tq-23) sem nenhuma linha ainda: fica como
+  // "sem medida", igual a antes, até a primeira loja registrar uso.
+  const aguardando = modulos.filter((m) => m.sem_dado);
+
   const porLoja = [];
-  const linhas = modulos.map((m) => {
+  const linhas = modulos.filter((m) => !m.sem_dado).map((m) => {
     const lojas = [...m.lojas.entries()].filter(([id]) => emp.porId.has(id));
     const noPeriodo = lojas.filter(([, u]) => u.ep > 0);
     for (const [id, u] of noPeriodo) {
@@ -36,10 +40,14 @@ async function calcular({ hoje, periodo = 30, db = b.pool, empresas, uso } = {})
     };
   }).sort((x, y) => y.lojas_periodo - x.lojas_periodo || y.lojas_total - x.lojas_total);
 
-  // Funcionalidades sem fonte no banco (Etiquetas): aparecem na lista, com o
-  // motivo, mas ficam fora de série, uso amplo/nicho e "sem uso" — zero aqui
-  // seria afirmar que ninguém usa, e a verdade é que ninguém consegue medir.
-  const semMedida = SEM_MEDIDA.map((m) => ({
+  // Funcionalidades sem fonte (ou ainda sem nenhum registro): aparecem na
+  // lista, com o motivo, mas ficam fora de série, uso amplo/nicho e "sem uso"
+  // — zero aqui seria afirmar que ninguém usa, e a verdade é que ninguém
+  // consegue medir.
+  const semMedida = [
+    ...SEM_MEDIDA,
+    ...aguardando.map((m) => ({ id: m.id, rotulo: m.rotulo, motivo: MOTIVO_AGUARDA_DADO })),
+  ].map((m) => ({
     modulo: m.id, rotulo: m.rotulo, sem_medida: true, motivo: m.motivo,
     lojas_7d: null, lojas_periodo: null, eventos_periodo: null, lojas_total: null, lojas: [],
   }));

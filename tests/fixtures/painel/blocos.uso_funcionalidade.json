@@ -394,7 +394,7 @@
           "modulo": "etiquetas",
           "rotulo": "Etiquetas",
           "sem_medida": true,
-          "motivo": "imprimir etiqueta não grava nada no banco (só a calibração, sem data)",
+          "motivo": "a medição começou agora e nenhuma loja imprimiu desde então",
           "lojas_7d": null,
           "lojas_periodo": null,
           "eventos_periodo": null,
@@ -821,5 +821,5 @@
       ]
     }
   ],
-  "insight": "O uso é inferido pelas tabelas de cada módulo. Telas só de leitura (Relatórios, Painel) aparecem em \"Telas visitadas\". Etiquetas está sem medida: imprimir etiqueta não grava nada no banco (só a calibração, sem data)."
+  "insight": "O uso é inferido pelas tabelas de cada módulo. Telas só de leitura (Relatórios, Painel) aparecem em \"Telas visitadas\". Etiquetas está sem medida: a medição começou agora e nenhuma loja imprimiu desde então."
 }

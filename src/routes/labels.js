@@ -16,6 +16,7 @@ const express = require('express');
 const router = express.Router({ mergeParams: true });
 const pool = require('../config/database');
 const { requireAuth } = require('../middleware/auth');
+const { registrarImpressao } = require('../services/etiquetaUso');
 
 const LABEL_W = 33;
 const LABEL_H = 21;
@@ -397,6 +398,15 @@ function applyOffset() {
 <\/script>
 </body>
 </html>`;
+
+    // Uso para a Gestão Aura (tq-23): +1 em label_print_days, sem esperar e
+    // sem poder falhar (etiquetaUso engole tudo). Fora: staff em modo admin
+    // (não é uso do cliente) e o recarregamento do "Aplicar e imprimir"
+    // (save=1), que re-renderiza a mesma impressão com a calibração nova.
+    // Nada disto muda o HTML devolvido.
+    if (save !== '1' && !(req.user && req.user.role === 'admin')) {
+      registrarImpressao(pool, { companyId: company_id, qty: quantity });
+    }
 
     res.setHeader('Content-Type', 'text/html; charset=utf-8');
     res.send(html);
