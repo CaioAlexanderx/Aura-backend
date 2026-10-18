@@ -156,6 +156,36 @@ async function getUnscheduledBalance(db, companyId, customerId) {
 }
 
 // -------------------------------------------------------------
+// Quanto as parcelas abertas do CLIENTE passam do saldo do razao (>= 0).
+//
+// 18/10/2026 (t3-08): parcela orfa (debito apagado pelo "Excluir" antigo)
+// entra no open_remaining como se fosse divida. Renegociar com desconto em
+// cima dela gravava no razao um ESTORNO de dinheiro que o razao nunca cobrou
+// -- o cliente ficava com "credito" falso (Fernanda: -R$2.128,90 sem nenhum
+// debito; Valen: -R$1.580). O desconto so pode sair do razao na parte que o
+// razao reconhece; o resto apenas encolhe o cronograma de volta ao saldo.
+// Leitura simples, dentro da transacao do chamador.
+// -------------------------------------------------------------
+async function installmentExcess(db, companyId, customerId) {
+  const { rows } = await db.query(
+    `SELECT COALESCE((SELECT SUM(GREATEST(amount_due - COALESCE(covered_amount, 0), 0))
+                        FROM credit_installments
+                       WHERE company_id = $1 AND customer_id = $2
+                         AND status IN ('pending', 'overdue')), 0)
+          - COALESCE((SELECT balance FROM customer_credit_balances
+                       WHERE company_id = $1 AND customer_id = $2), 0) AS excess`,
+    [companyId, customerId]
+  );
+  const v = round2(parseFloat(rows && rows[0] && rows[0].excess) || 0);
+  return v > 0.005 ? v : 0;
+}
+
+/** Parte do desconto que o razao reconhece: o que passa do excesso de parcelas. */
+function ledgerBackedDiscount(discount, excess) {
+  return round2(Math.max(0, round2(discount) - Math.max(0, round2(excess))));
+}
+
+// -------------------------------------------------------------
 // applyReschedule -- aplica a renegociacao (DENTRO de uma transacao).
 //   1. Lock das parcelas abertas do escopo -> open_remaining + ids substituidos.
 //   2. Guard: precisa existir parcela aberta (senao um delta>0 dobraria o saldo
@@ -180,6 +210,8 @@ async function applyReschedule(client, {
   const openRows = await loadOpenInstallments(client, companyId, customerId, accountId, true);
   const openRemaining = sumRemaining(openRows);
   const replacedIds = (openRows || []).map((i) => i.id).filter(Boolean);
+  // Antes de cancelar qualquer parcela: quanto do cronograma o razao NAO cobre.
+  const excess = await installmentExcess(client, companyId, customerId);
 
   // 2. Base da renegociacao. Sem parcela aberta, a base vira o saldo do ledger
   //    SEM cronograma ("Parcelar saldo", 10/07): delta = total - saldo_sem_agenda,
@@ -251,16 +283,26 @@ async function applyReschedule(client, {
   let adjustment = null;
 
   if (delta < -0.005) {
-    // DESCONTO: type='refund' (a view subtrai) reduz a divida.
+    // DESCONTO: type='refund' (a view subtrai) reduz a divida -- so a parte
+    // que o razao reconhece (installmentExcess, 18/10/2026).
     const discount = round2(-delta);
-    await insertLedger(client, {
-      companyId, customerId, accountId, createdBy,
-      type: 'refund', amount: discount, paymentMethod: 'crediario_ajuste',
-      notes: 'Renegociacao - desconto no saldo',
-    });
-    // Reduz best-effort o "A Receber" pendente (Financeiro nao superestimar).
-    await reduceReceivables(client, companyId, customerId, discount);
+    const ledgerDiscount = ledgerBackedDiscount(discount, excess);
+    if (ledgerDiscount > 0.005) {
+      await insertLedger(client, {
+        companyId, customerId, accountId, createdBy,
+        type: 'refund', amount: ledgerDiscount, paymentMethod: 'crediario_ajuste',
+        notes: 'Renegociacao - desconto no saldo',
+      });
+      // Reduz best-effort o "A Receber" pendente (Financeiro nao superestimar).
+      await reduceReceivables(client, companyId, customerId, ledgerDiscount);
+    }
     adjustment = { type: 'discount', amount: discount };
+    // So aparece quando a parcela orfa absorveu parte do desconto -- o formato
+    // de sempre fica intacto para quem nao tem divergencia.
+    if (ledgerDiscount < discount - 0.005) {
+      adjustment.ledger_amount     = ledgerDiscount;
+      adjustment.absorbed_mismatch = round2(discount - ledgerDiscount);
+    }
   } else if (delta > 0.005) {
     // ACRESCIMO: type='debit' (a view soma) aumenta a divida. Sem "A Receber"
     // novo -> capturado no caixa como saldo legado no proximo recebimento.
@@ -361,6 +403,7 @@ async function reduceReceivables(client, companyId, customerId, amount) {
 
 module.exports = {
   computeReschedulePlan, applyReschedule, loadOpenInstallments, sumRemaining, getUnscheduledBalance,
+  installmentExcess, ledgerBackedDiscount,
   // 10/10/2026: a juncao de carnes (mergeCarnes.js) lanca o delta do total do
   // MESMO jeito da renegociacao -- reusa em vez de copiar.
   insertLedger, reduceReceivables,

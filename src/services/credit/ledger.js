@@ -891,29 +891,77 @@ async function applyPayment(client, {
     } else throw err;
   }
 
-  for (const inst of installments) {
-    if (toAllocate <= 0.005) break;
-    const currentCovered = parseFloat(inst.covered_amount);
-    const amountDue      = parseFloat(inst.amount_due);
-    const uncovered      = amountDue - currentCovered;
-    if (uncovered <= 0.005) continue;
+  async function coverInstallments(list) {
+    for (const inst of list) {
+      if (toAllocate <= 0.005) break;
+      const currentCovered = parseFloat(inst.covered_amount);
+      const amountDue      = parseFloat(inst.amount_due);
+      const uncovered      = amountDue - currentCovered;
+      if (uncovered <= 0.005) continue;
 
-    const coverNow   = Math.min(toAllocate, uncovered);
-    const newCovered = Math.round((currentCovered + coverNow) * 100) / 100;
-    const newStatus  = newCovered >= amountDue - 0.005 ? 'paid' : inst.status;
+      const coverNow   = Math.min(toAllocate, uncovered);
+      const newCovered = Math.round((currentCovered + coverNow) * 100) / 100;
+      const newStatus  = newCovered >= amountDue - 0.005 ? 'paid' : inst.status;
 
-    await client.query(
-      `UPDATE credit_installments
-         SET covered_amount = $3,
-             status         = $4,
-             paid_at        = CASE WHEN $5 THEN ${BACKDATE_TS('$6')} ELSE paid_at END,
-             updated_at     = NOW()
-       WHERE id = $1 AND company_id = $2`,
-      [inst.id, companyId, newCovered, newStatus, newStatus === 'paid', paidAt]
+      await client.query(
+        `UPDATE credit_installments
+           SET covered_amount = $3,
+               status         = $4,
+               paid_at        = CASE WHEN $5 THEN ${BACKDATE_TS('$6')} ELSE paid_at END,
+               updated_at     = NOW()
+         WHERE id = $1 AND company_id = $2`,
+        [inst.id, companyId, newCovered, newStatus, newStatus === 'paid', paidAt]
+      );
+
+      coveredInstallments.push({ id: inst.id, covered: coverNow, status: newStatus });
+      toAllocate = Math.round((toAllocate - coverNow) * 100) / 100;
+    }
+  }
+
+  await coverInstallments(installments);
+
+  // 18/10/2026 (t3-08, Valen): SOBRA do pagamento direcionado. Com accountId
+  // (ou saleId) o FIFO acima so enxerga as parcelas daquele carne/encomenda.
+  // Quando elas ja estavam pagas -- a lojista escolheu na tela um carne que
+  // acabara de quitar --, o pagamento entrava inteiro no razao e NAO abatia
+  // parcela nenhuma: o carne passava a cobrar o que o cliente ja tinha pago
+  // (6 clientes, R$1.933,75 medidos em producao). O razao e por CLIENTE, entao
+  // a sobra segue para as demais parcelas abertas dele, na mesma ordem
+  // (vencimento mais antigo primeiro). Sem sobra, nenhuma query nova roda.
+  //
+  // Limite: so ate onde as parcelas abertas do cliente passam do saldo do
+  // razao (ja com este pagamento). Se o carne/encomenda tem divida SEM parcela
+  // (fiado 1x, venda sem data), a sobra e o pagamento DELA e nao pode abater
+  // parcela de outra compra -- isso abriria a divergencia ao contrario.
+  if (toAllocate > 0.005 && (accountId || saleId)) {
+    const gapRes = await client.query(
+      `SELECT COALESCE((SELECT SUM(GREATEST(amount_due - COALESCE(covered_amount, 0), 0))
+                          FROM credit_installments
+                         WHERE company_id = $1 AND customer_id = $2
+                           AND status IN ('pending', 'overdue')), 0)
+            - COALESCE((SELECT balance FROM customer_credit_balances
+                         WHERE company_id = $1 AND customer_id = $2), 0) AS excess`,
+      [companyId, customerId]
     );
-
-    coveredInstallments.push({ id: inst.id, covered: coverNow, status: newStatus });
-    toAllocate = Math.round((toAllocate - coverNow) * 100) / 100;
+    const excess = round2(parseFloat(gapRes && gapRes.rows && gapRes.rows[0] && gapRes.rows[0].excess) || 0);
+    const spill  = round2(Math.min(toAllocate, Math.max(0, excess)));
+    if (spill > 0.005) {
+      const alreadySeen = installments.map((i) => i.id);
+      const othersRes = await client.query(
+        `SELECT id, amount_due, covered_amount, status, due_date
+           FROM credit_installments
+          WHERE company_id = $1 AND customer_id = $2
+            AND status IN ('pending', 'overdue')
+            AND NOT (id = ANY($3::uuid[]))
+          ORDER BY due_date ASC
+          FOR UPDATE`,
+        [companyId, customerId, alreadySeen]
+      );
+      const keep = round2(toAllocate - spill);
+      toAllocate = spill;
+      await coverInstallments((othersRes && othersRes.rows) || []);
+      toAllocate = round2(toAllocate + keep);
+    }
   }
 
   if (coveredInstallments.some(c => c.status === 'paid')) {
