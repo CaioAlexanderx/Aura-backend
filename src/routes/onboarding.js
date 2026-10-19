@@ -66,7 +66,9 @@ router.post('/cnpj-lookup', async (req, res) => {
       suggested_segment: suggestSegmentFromCnae(principal, data.cnaes_secundarios),
     });
   } catch (e) {
-    const status = e.message.includes('não encontrado') ? 404
+    // 503: nenhuma fonte da Receita respondeu (INC-2026-10-19-03)
+    const status = e.status === 503                     ? 503
+                 : e.message.includes('não encontrado') ? 404
                  : e.message.includes('Limite')         ? 429 : 500;
     res.status(status).json({ error: e.message });
   }
@@ -209,7 +211,9 @@ router.post('/step/cnpj', requireAuth, async (req, res) => {
       rf_data: rf,
     });
   } catch (e) {
-    const status = e.message.includes('não encontrado') ? 404
+    // 503: nenhuma fonte da Receita respondeu (INC-2026-10-19-03)
+    const status = e.status === 503                     ? 503
+                 : e.message.includes('não encontrado') ? 404
                  : e.message.includes('Limite')         ? 429 : 500;
     res.status(status).json({ error: e.message });
   }
