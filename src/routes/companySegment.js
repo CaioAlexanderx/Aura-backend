@@ -29,7 +29,8 @@
 // proposito, como sempre.
 //
 // Resposta (mesmo formato de PATCH /admin/clients/:cid/segment):
-//   { segment, segment_source, vertical_active, flags: {...}, applied: true }
+//   { segment, segment_source, vertical_active, flags: {...} }
+// (com only_if_empty === true acrescenta applied: true ao gravar)
 //
 // Sem migration: companies.segment/segment_source ja existem (366) e
 // audit_log e a tabela da migration 023.
@@ -136,7 +137,8 @@ router.patch('/segment', asyncHandler(async (req, res) => {
     console.warn('[companies/segment] audit log falhou:', err.message);
   }
 
-  res.json({ ...state, applied: true });
+  // Caminho antigo (sem o campo): resposta identica a de sempre, sem `applied`.
+  res.json(onlyIfEmpty ? { ...state, applied: true } : state);
 }));
 
 module.exports = router;

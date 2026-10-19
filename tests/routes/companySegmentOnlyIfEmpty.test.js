@@ -98,7 +98,8 @@ describe('PATCH /companies/:id/segment com only_if_empty', () => {
     expect(r.body.segment_source).toBe('user');
     expect(r.body.flags.otica_enabled).toBe(true);
     expect(r.body.flags.matcon_enabled).toBe(false);
-    expect(r.body.applied).toBe(true);
+    expect(r.body).not.toHaveProperty('applied');   // caminho antigo: resposta identica a de hoje
+    expect(Object.keys(r.body).sort()).toEqual(['flags', 'segment', 'segment_source', 'vertical_active']);
     expect(fake.state.companies[cid].segment).toBe('otica');
     expect(auditorias()).toHaveLength(1);
   });
@@ -107,7 +108,7 @@ describe('PATCH /companies/:id/segment com only_if_empty', () => {
     setup({ segment: 'matcon', segment_source: 'staff', pdv_settings: { matcon_enabled: true } });
     const r = await patch({ segment: 'otica', only_if_empty: valor });
     expect(r.status).toBe(200);
-    expect(r.body.applied).toBe(true);
+    expect(r.body).not.toHaveProperty('applied');
     expect(fake.state.companies[cid].segment).toBe('otica');
   });
 
