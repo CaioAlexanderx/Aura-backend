@@ -32,7 +32,6 @@ const db = require('../config/database');
 const plantao = require('./plantao');
 const { PLANS, ANNUAL_DISCOUNT, SEAT_PRICE_BRL, getPlanValue } = require('./billingPricing');
 const { SEATS_PER_PLAN } = require('./memberSeats');
-const promocoes = require('./promocoes');
 const { listarClients360 } = require('./clients360');
 const { estenderTrial } = require('./trialExtension');
 
@@ -93,7 +92,7 @@ const TOOLS = [
   },
   {
     name: 'link_do_checkout',
-    description: 'Devolve o link da tela de assinatura do app, a tabela de planos e a promoção vigente (se houver). Use quando a pessoa quiser assinar ou pedir o link.',
+    description: 'Devolve o link da tela de assinatura do app e a tabela de planos. Use quando a pessoa quiser assinar ou pedir o link.',
     input_schema: { type: 'object', properties: {} },
   },
   {
@@ -487,7 +486,6 @@ const FERRAMENTAS = {
   },
 
   async link_do_checkout(ctx) {
-    const promo = promocoes.dentroDoPrazo(ctx.agora) ? promocoes.getPromocao() : null;
     const link = urlDoCheckout();
     return {
       ok: true,
@@ -495,7 +493,6 @@ const FERRAMENTAS = {
       mensagem: `Para assinar é por aqui: ${link} — entre com o seu login, escolha o plano e pague no Pix ou no cartão.`,
       planos: tabelaDePlanos(),
       acesso_extra_por_mes: brl(SEAT_PRICE_BRL),
-      promocao_vigente: promo ? { titulo: promo.titulo, descricao: promo.descricao, vale_para: 'quem ainda não assinou' } : null,
     };
   },
 

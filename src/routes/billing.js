@@ -68,21 +68,22 @@
 //   empresa a cada 24h, fire-and-forget (services/trialFunnel). A resposta do
 //   status nao muda. Staff em modo admin nao conta.
 //
-// 13/10/2026 — PROMOCAO "PRIMEIRO MES PELO CALENDARIO" (services/promocoes.js):
-//   Quem assina ate 31/10 nao paga novembro. A Asaas nao cobra R$ 0, entao o
-//   efeito e o do cupom de DIAS GRATIS (nenhuma cobranca agora, assinatura
-//   agendada), com a 1a cobranca numa data de calendario (01/12). O /subscribe
-//   aplica o cupom PRIMEIROMES sozinho para empresa elegivel que nao informou
-//   cupom; cupom informado prevalece (nao acumula). GET /promocao-ativa alimenta
-//   o aviso do checkout. Prazo, data e regra: so em services/promocoes.js.
+// 19/10/2026 — CAMPANHA PRIMEIROMES REMOVIDA (decisao do Caio):
+//   A campanha de 13/10 ("assine ate 31/10 e nao pague novembro") saiu do
+//   produto: nada de cupom aplicado sozinho no /subscribe nem de regra de
+//   calendario no /validate-coupon. O codigo esta desativado no banco
+//   (access_codes.is_active=false), entao digitado ele volta "Cupom desativado.".
+//   Quem ja resgatou fica como esta: a data gravada (trial_ends_at /
+//   next_billing_date) e a assinatura na Asaas nao sao reescritas por nada aqui.
+//   GET /promocao-ativa ficou so por compatibilidade (sempre elegivel:false).
 //
 // 14/10/2026 — ASSINATURA COM VALOR CUSTOMIZADO POR EMPRESA (migration 386):
 //   A equipe combina um valor mensal total com o cliente (ex.: R$ 211,20 para
 //   2 lojas no Negocio anual) e grava na Gestao Aura (PUT /admin/clients/:cid/
 //   custom-subscription). O checkout e' o mesmo (PIX/cartao); o valor da
 //   assinatura vem de billingPricing.valorDaAssinatura: o combinado quando
-//   plano E ciclo batem, senao a tabela de sempre. Cupom e promocao seguem
-//   como hoje, calculados sobre esse valor. GET /billing/quote devolve o valor
+//   plano E ciclo batem, senao a tabela de sempre. O cupom segue como hoje,
+//   calculado sobre esse valor. GET /billing/quote devolve o valor
 //   por empresa para a tela mostrar o numero certo. Detalhes na migration 386.
 // ============================================================
 
@@ -112,7 +113,6 @@ const {
   recordRedemption,
 } = require('../services/checkoutCoupon');
 const subscriptionDiscount = require('../services/subscriptionDiscount');
-const promocoes = require('../services/promocoes');
 // 21/09/2026: o Asaas nao cobra cliente sem CPF/CNPJ e a maioria das empresas
 // nao tem CNPJ cadastrado. O documento agora vem do checkout (cpf_cnpj).
 const {
@@ -488,19 +488,21 @@ router.post('/tokenize', requireAuth, requireRole('client', 'admin'), async (req
   }
 });
 
-// GET /billing/promocao-ativa — aviso do checkout ("Assine ate 31/10 e nao pague
-// novembro"). `elegivel` e o que o /subscribe vai fazer: false fora do prazo,
-// com assinatura anterior, se ja resgatou ou se a linha do cupom nao existe.
-// Regra e textos em services/promocoes.js.
-router.get('/promocao-ativa', requireAuth, async (req, res) => {
-  try {
-    const { rows } = await db.query('SELECT * FROM companies WHERE id=$1', [req.params.id]);
-    if (!rows.length) return res.status(404).json({ error: 'Empresa nao encontrada' });
-    res.json(await promocoes.promocaoAtiva(rows[0]));
-  } catch (err) {
-    console.error('[BILLING] promocao-ativa error:', err.message);
-    res.status(500).json({ error: 'Erro ao consultar promocao' });
-  }
+// GET /billing/promocao-ativa — SO COMPATIBILIDADE (19/10/2026).
+// A campanha PRIMEIROMES foi removida. O app antigo em cache ainda chama esta
+// rota e esconde o aviso quando elegivel=false; por isso ela responde sempre o
+// mesmo formato com os campos nulos, sem ler o banco. Pode sair quando o app
+// sem o hook usePromocaoAtiva estiver no ar.
+const PROMOCAO_INATIVA = Object.freeze({
+  codigo: null,
+  titulo: null,
+  descricao: null,
+  termina_em: null,
+  primeira_cobranca_em: null,
+  elegivel: false,
+});
+router.get('/promocao-ativa', requireAuth, (req, res) => {
+  res.json({ ...PROMOCAO_INATIVA });
 });
 
 // GET /billing/quote?plan=&cycle=&billing_type= — valor RECORRENTE da assinatura
@@ -508,8 +510,8 @@ router.get('/promocao-ativa', requireAuth, async (req, res) => {
 // que o /subscribe vai cobrar (mesma funcao: valorDaAssinatura), para o
 // checkout mostrar o valor certo, inclusive o valor combinado com a equipe.
 // custom diz se e' o valor combinado; table_value o que a tabela cobraria
-// (plano + acessos extras). Cupom/promocao nao entram aqui (vem do
-// /validate-coupon e do /promocao-ativa). A observacao interna do combinado
+// (plano + acessos extras). Cupom nao entra aqui (vem do /validate-coupon).
+// A observacao interna do combinado
 // NUNCA vai na resposta (e' da equipe).
 router.get('/quote', requireAuth, async (req, res) => {
   const plan = String(req.query.plan || '').toLowerCase();
@@ -551,9 +553,7 @@ router.post('/validate-coupon', requireAuth, requireRole('client', 'admin'), asy
     if (!companies.length) return res.status(404).json({ error: 'Empresa nao encontrada' });
     const company = companies[0];
 
-    // Cupom da campanha (PRIMEIROMES) vira periodo gratis de calendario; os
-    // demais passam intactos (promocoes.aplicarCampanha).
-    const coupon = promocoes.aplicarCampanha(await validateCoupon(code, company.id), company);
+    const coupon = await validateCoupon(code, company.id);
     if (!coupon.valid) {
       return res.json({ valid: false, error: coupon.error });
     }
@@ -589,12 +589,9 @@ router.post('/validate-coupon', requireAuth, requireRole('client', 'admin'), asy
       // O que o cliente paga HOJE e o que ele passa a pagar depois.
       first_charge_value: first,
       recurring_value: recurring,
-      first_charge_date: coupon.trial_days > 0
-        ? (coupon.first_charge_date || addDaysIso(coupon.trial_days))
-        : addDaysIso(0),
+      first_charge_date: coupon.trial_days > 0 ? addDaysIso(coupon.trial_days) : addDaysIso(0),
       // O que o cupom abate da 1a mensalidade (dias gratis: ela inteira).
       discount_amount: coupon.trial_days > 0 ? recurring : discountAmount,
-      campaign: coupon.campaign === true,
       // Desconto de varios meses: valor de cada mensalidade com desconto e
       // quando comeca a cheia. Para cupom de 1 mes, discounted_months = 1.
       discounted_value: coupon.trial_days > 0 ? null : first,
@@ -701,19 +698,14 @@ router.post('/subscribe', requireAuth, requireRole('client', 'admin'), async (re
                         (pricing.custom ? ' (valor combinado)' : '');
 
     // ── Cupom (13/07/2026) ────────────────────────────────────
+    // 19/10/2026: so o cupom informado. Sem access_code nenhum cupom e
+    // aplicado (a promocao automatica PRIMEIROMES foi removida).
     let coupon = null;
-    // 13/10: true quando o cupom foi aplicado pelo backend (promocao), nao digitado.
-    let couponAutomatico = false;
     if (access_code) {
-      // Cupom informado PREVALECE: a promocao automatica nao e somada a ele.
-      coupon = promocoes.aplicarCampanha(await validateCoupon(access_code, company.id), company);
+      coupon = await validateCoupon(access_code, company.id);
       if (!coupon.valid) {
         return res.status(400).json({ error: coupon.error, stage: 'coupon' });
       }
-    } else {
-      // Sem cupom informado: empresa elegivel entra na promocao sozinha.
-      coupon = await promocoes.buscarCupomAutomatico(company);
-      couponAutomatico = !!coupon;
     }
     const discountPct = coupon ? coupon.discount_pct : 0;
     const discountValue = coupon ? coupon.discount_value : 0;
@@ -781,23 +773,14 @@ router.post('/subscribe', requireAuth, requireRole('client', 'admin'), async (re
     const tomorrowStr = tomorrow.toISOString().split('T')[0];
 
     // Data da primeira cobranca: hoje (ou amanha no Pix) — ou D+N com cupom de
-    // dias gratis. Promocao de calendario traz a data pronta (first_charge_date):
-    // nao recalcular por dias, senao o fuso (UTC x Brasilia) a empurra um dia.
-    const trialEndsStr = trialDays > 0
-      ? ((coupon && coupon.first_charge_date) || addDaysIso(trialDays))
-      : null;
+    // dias gratis.
+    const trialEndsStr = trialDays > 0 ? addDaysIso(trialDays) : null;
     // Texto do periodo gratis nas descricoes que o cliente ve no Asaas.
     const freeSuffix = trialDays > 0
-      ? (coupon.campaign
-        ? ' — promoção ' + coupon.code + ' (1ª cobrança em ' + trialEndsStr.split('-').reverse().join('/') + ')'
-        : ' — ' + trialDays + ' dias gratis (' + coupon.code + ')')
+      ? ' — ' + trialDays + ' dias gratis (' + coupon.code + ')'
       : '';
     const freeMessage = trialDays > 0
-      ? (coupon.campaign
-        ? 'Promoção ' + coupon.code + ' aplicada! Nenhuma cobrança até ' +
-          trialEndsStr.split('-').reverse().join('/') + ' — a primeira mensalidade de R$ ' +
-          value.toFixed(2).replace('.', ',') + ' será nessa data.'
-        : trialDays + ' dias gratis ativados! A primeira cobranca sera em ' + trialEndsStr + '.')
+      ? trialDays + ' dias gratis ativados! A primeira cobranca sera em ' + trialEndsStr + '.'
       : undefined;
 
     const cardHolderInfo = credit_card_holder_name ? {
@@ -844,7 +827,8 @@ router.post('/subscribe', requireAuth, requireRole('client', 'admin'), async (re
          WHERE id=$6`,
         [plan, subscription.id, cycle, trialEndsStr, subscription.nextDueDate || trialEndsStr, company.id]
       );
-      // 13/10/2026: a data do cupom (dias gratis / PRIMEIROMES) vale como esta.
+      // 13/10/2026: a data do cupom de dias gratis vale como esta (a primeira
+      // venda nao a encurta — services/trialRegra).
       await marcarTrialFixo(company.id);
 
       await recordRedemption({
@@ -871,19 +855,16 @@ router.post('/subscribe', requireAuth, requireRole('client', 'admin'), async (re
         extra_seats: extraSeats,
         coupon: {
           code: coupon.code, trial_days: trialDays, discount_pct: discountPct,
-          // 13/10: quanto o cupom deixou de cobrar (a 1a mensalidade inteira) e
-          // se foi aplicado pelo backend (promocao) ou digitado.
-          discount_amount: value, automatic: couponAutomatico, campaign: coupon.campaign === true,
+          // 13/10: quanto o cupom deixou de cobrar (a 1a mensalidade inteira).
+          discount_amount: value,
           first_charge_date: trialEndsStr,
         },
         charged_now: 0,
         trial_ends_at: trialEndsStr,
         next_due_date: subscription.nextDueDate || trialEndsStr,
         confirmed: true,
-        message: coupon.campaign
-          ? freeMessage + ' Seu cartão ficou salvo.'
-          : trialDays + ' dias gratis ativados! Seu cartao ficou salvo e a primeira cobranca de ' +
-            'R$ ' + value.toFixed(2).replace('.', ',') + ' sera em ' + trialEndsStr + '.',
+        message: trialDays + ' dias gratis ativados! Seu cartao ficou salvo e a primeira cobranca de ' +
+          'R$ ' + value.toFixed(2).replace('.', ',') + ' sera em ' + trialEndsStr + '.',
       });
     }
 
@@ -1006,7 +987,7 @@ router.post('/subscribe', requireAuth, requireRole('client', 'admin'), async (re
           coupon: coupon ? {
             code: coupon.code, discount_pct: discountPct, discount_value: discountValue,
             discount_months: discountMonths, trial_days: 0,
-            discount_amount: discountAmount, automatic: couponAutomatico,
+            discount_amount: discountAmount,
           } : null,
           confirmed: isPaid,
           warning: 'Primeira mensalidade capturada com sucesso, mas falha ao agendar recorrência. Suporte foi notificado para reconciliação manual.',
@@ -1058,7 +1039,7 @@ router.post('/subscribe', requireAuth, requireRole('client', 'admin'), async (re
           code: coupon.code, discount_pct: discountPct, discount_value: discountValue,
           discount_months: discountMonths, trial_days: 0,
           discounted_value: firstValue, first_full_due_date: firstFullDueDate,
-          discount_amount: discountAmount, automatic: couponAutomatico,
+          discount_amount: discountAmount,
         } : null,
         payment_status: firstPayment.status,
         next_due_date: subscription.nextDueDate,
@@ -1141,7 +1122,7 @@ router.post('/subscribe', requireAuth, requireRole('client', 'admin'), async (re
        WHERE id=$7`,
       [plan, subscription.id, pixStatus, cycle, subscription.nextDueDate || pixFirstDue, trialEndsStr, company.id]
     );
-    // 13/10/2026: so quando o cupom escreveu trial_ends_at (dias gratis / PRIMEIROMES).
+    // 13/10/2026: so quando o cupom de dias gratis escreveu trial_ends_at.
     if (trialEndsStr) await marcarTrialFixo(company.id);
 
     let pixFirstFullDueDate = null;
@@ -1176,7 +1157,6 @@ router.post('/subscribe', requireAuth, requireRole('client', 'admin'), async (re
         discounted_value: trialDays > 0 ? null : firstValue, first_full_due_date: pixFirstFullDueDate,
         // 13/10: valor que o cupom deixou de cobrar na 1a mensalidade.
         discount_amount: trialDays > 0 ? value : discountAmount,
-        automatic: couponAutomatico, campaign: coupon.campaign === true,
         first_charge_date: trialDays > 0 ? trialEndsStr : null,
       } : null,
       trial_ends_at: trialEndsStr,

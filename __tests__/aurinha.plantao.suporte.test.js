@@ -373,7 +373,7 @@ describe('intenções — a ferramenta certa, com efeito de verdade', () => {
     expect(eventos('ferramenta_suporte').map((e) => e.detail.ferramenta)).toEqual(['consultar_conta_pelo_telefone', 'estender_trial']);
   });
 
-  it('link do checkout: URL do app + mensagem + tabela + promoção vigente', async () => {
+  it('link do checkout: URL do app + mensagem + tabela, sem promoção (PRIMEIROMES removida em 19/10)', async () => {
     const conv = conversaCom(['quero assinar, me manda o link']);
     roteiro(usa('link_do_checkout'), diz('É por aqui: https://app.getaura.com.br/checkout'));
 
@@ -384,16 +384,17 @@ describe('intenções — a ferramenta certa, com efeito de verdade', () => {
     expect(r.mensagem).toContain('https://app.getaura.com.br/checkout');
     expect(r.planos).toHaveLength(3);
     expect(r.planos[0]).toMatchObject({ mensal: 'R$ 89,00', anual_por_mes: 'R$ 74,17' });
-    expect(r.promocao_vigente.titulo).toBe('Assine até 31/10 e não pague novembro');
+    expect(r).not.toHaveProperty('promocao_vigente');
+    expect(JSON.stringify(r)).not.toMatch(/PRIMEIROMES|novembro/i);
   });
 
-  it('link do checkout: promoção some depois do prazo; APP_URL do ambiente vale', async () => {
+  it('link do checkout: APP_URL do ambiente vale; nenhuma promoção dentro do antigo prazo', async () => {
     process.env.APP_URL = 'https://staging.getaura.com.br/';
     const conv = conversaCom(['link pra assinar']);
-    const ctx = await ctxDe(conv, new Date('2026-11-02T15:00:00Z'));
+    const ctx = await ctxDe(conv, new Date('2026-10-20T15:00:00Z'));
     const r = await suporte.executarFerramenta(ctx, 'link_do_checkout', {});
     expect(r.link).toBe('https://staging.getaura.com.br/checkout');
-    expect(r.promocao_vigente).toBeNull();
+    expect(r).not.toHaveProperty('promocao_vigente');
   });
 
   it('agendar: grava o pedido com 2 opções e avisa que o Caio confirma', async () => {

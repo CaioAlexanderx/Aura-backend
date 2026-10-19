@@ -6,7 +6,7 @@
 // (PIX/cartao); a equipe grava o valor na Gestao Aura.
 //
 // Cobre: valor combinado casa/nao casa plano e ciclo, cartao e PIX, cupom
-// (desconto e dias gratis), promocao, descricao "(valor combinado)", minimo do
+// (desconto e dias gratis), descricao "(valor combinado)", minimo do
 // provedor, GET /billing/quote por empresa (sem a nota interna) e
 // /validate-coupon. E a regressao: empresa SEM valor combinado cobra
 // exatamente o que cobrava.
@@ -19,12 +19,11 @@ jest.mock('../../src/services/asaasClient', () => ({
 const request = require('supertest');
 const jwt     = require('jsonwebtoken');
 
-let app, db, asaas, promocoes, getTotalValue;
+let app, db, asaas, getTotalValue;
 beforeAll(() => {
   ({ app } = require('../../src/index'));
   db = require('../../src/config/database');
   ({ asaas } = require('../../src/services/asaasClient'));
-  promocoes = require('../../src/services/promocoes');
   ({ getTotalValue } = require('../../src/services/billingPricing'));
 });
 
@@ -92,7 +91,6 @@ beforeEach(() => {
   jest.clearAllMocks();
   db.query.mockReset();
   asaas.mockReset();
-  promocoes._resetAvisos();
   jest.spyOn(console, 'log').mockImplementation(() => {});
   jest.spyOn(console, 'error').mockImplementation(() => {});
 });
