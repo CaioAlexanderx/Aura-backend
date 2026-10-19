@@ -27,6 +27,7 @@ const crypto  = require('crypto');
 const db      = require('../config/database');
 const { notasDoPedidoAprovado } = require('../services/orcamentoEmVideo');
 const frequentes = require('../services/produtosFrequentesDoOrcamento');
+const { inserirPedidoStudio, inserirItemPedidoStudio } = require('../services/studioPedido');
 
 // ─── helpers ────────────────────────────────────────────────
 
@@ -476,53 +477,28 @@ router.post('/quotes/:qid/send', async function(req, res) {
 // orçamento em vídeo 3D, 28/09/2026). Roda dentro da transação de quem chama.
 // M2: auto-cria marco de sinal em studio_payments se deposit_amount > 0.
 async function criarPedidoDoOrcamento(client, { quote, items, cid, notas }) {
-  // Colunas conferidas no banco de producao em 18/10/2026: o total do pedido
-  // e `total` (+ `subtotal`), nao existe `total_amount` nem `created_by`, e
-  // `order_number` e NOT NULL sem default (vem de next_digital_order_number,
-  // como na vitrine). customer_name/customer_phone tambem sao NOT NULL, e o
-  // orcamento pode nascer sem eles. Antes disto o INSERT falhava sempre (42703)
-  // e nenhum orcamento virou pedido: 4 orcamentos, 0 com order_id.
-  // 'confirmed' (e nao 'pending_payment') de proposito: a lojista ja fechou a
-  // venda, e o job lojaPixExpiradoJob cancela 'pending_payment' pago em Pix.
-  const ordRes = await client.query(
-    `INSERT INTO digital_orders
-       (company_id, order_number, vertical, status, studio_production_status,
-        customer_name, customer_phone,
-        subtotal, total, deposit_required, deposit_paid,
-        notes, confirmed_at)
-     VALUES ($1, next_digital_order_number($1), 'studio', 'confirmed', 'pending_art',
-             COALESCE($2, 'Cliente'), COALESCE($3, ''), $4, $4, $5, false, $6, NOW())
-     RETURNING id`,
-    [
-      cid,
-      quote.customer_name || null,
-      quote.customer_phone || null,
-      parseFloat(quote.total) || 0,
-      quote.deposit_amount != null ? parseFloat(quote.deposit_amount) : null,
-      notas !== undefined ? notas : (quote.notes || null),
-    ]
-  );
-  const orderId = ordRes.rows[0].id;
+  // O INSERT (schema real de digital_orders / digital_order_items, order_number,
+  // subtotal, 'confirmed') vive em services/studioPedido.js e e compartilhado
+  // com a conversao de evento em lote. Antes do #863 ele falhava sempre
+  // (42703): 4 orcamentos, 0 com order_id.
+  const orderId = await inserirPedidoStudio(client, {
+    cid,
+    customerName: quote.customer_name,
+    customerPhone: quote.customer_phone,
+    total: quote.total,
+    depositRequired: quote.deposit_amount,
+    notes: notas !== undefined ? notas : (quote.notes || null),
+  });
 
-  // Cria itens do pedido. digital_order_items.subtotal e NOT NULL sem default
-  // (conferido em producao): e quantidade x preco, como na vitrine.
   for (const it of items) {
-    const qtd = parseFloat(it.quantity);
-    const preco = parseFloat(it.unit_price);
-    await client.query(
-      `INSERT INTO digital_order_items
-         (order_id, product_id, product_name, quantity, unit_price, subtotal, customization)
-       VALUES ($1, $2, $3, $4, $5, $6, $7)`,
-      [
-        orderId,
-        it.product_id || null,
-        String(it.description),
-        qtd,
-        preco,
-        Math.round(qtd * preco * 100) / 100,
-        it.customization ? JSON.stringify(it.customization) : null,
-      ]
-    );
+    await inserirItemPedidoStudio(client, {
+      orderId,
+      productId: it.product_id,
+      productName: it.description,
+      quantity: it.quantity,
+      unitPrice: it.unit_price,
+      customization: it.customization,
+    });
   }
 
   // M2: Auto-cria marco de sinal quando deposit_amount estava definido.
