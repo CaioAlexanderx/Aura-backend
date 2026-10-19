@@ -17,8 +17,9 @@
 //
 //   Todo o resto é 'fixo' (trial_ends_at vale como está): conta por código de
 //   acesso, convite, Gestão Aura, dojô, e qualquer conta em que alguém
-//   escreveu trial_ends_at depois — estender trial, cupom de dias grátis,
-//   PRIMEIROMES. Quem escreve trial_ends_at chama marcarTrialFixo, senão a
+//   escreveu trial_ends_at depois — estender trial, cupom de dias grátis
+//   (inclusive quem resgatou o PRIMEIROMES, campanha removida em 19/10, cuja
+//   data segue valendo). Quem escreve trial_ends_at chama marcarTrialFixo, senão a
 //   primeira venda encurtaria a data que o cupom acabou de dar.
 //
 //   Venda depois do vencimento não reinicia nada (Caixa vivo, app#1043: trial
@@ -143,7 +144,7 @@ async function iniciarTrialPelaPrimeiraVenda(companyId, { conn = db, agora = Dat
 }
 
 // Quem escreve trial_ends_at por outro motivo (estender trial, cupom de dias
-// grátis, PRIMEIROMES) chama isto logo depois. Query separada de propósito:
+// grátis) chama isto logo depois. Query separada de propósito:
 // dentro do UPDATE principal, a coluna ausente (42703) derrubaria a cobrança
 // ou a extensão. Nunca lança.
 async function marcarTrialFixo(companyId, { conn = db } = {}) {
