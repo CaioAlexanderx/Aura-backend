@@ -69,8 +69,10 @@ async function tickPixExpirado({ db, lojaEvents }) {
 // expiracao — Pix MANUAL nao tem data, e os pedidos ficavam meses em
 // "Precisa agir" (Finesse: tres de 21/05).
 //
-// Pode cancelar sem devolver nada: o estoque so e baixado na confirmacao
-// (digitalOrderConfirmation) e pedido pendente nao tem lancamento.
+// Pedido pendente nao baixou estoque (a baixa e na confirmacao,
+// digitalOrderConfirmation) nem tem lancamento. Mesmo assim, todo
+// cancelamento passa pela devolucao (19/10/2026): o RETURNING traz o
+// marcador da baixa e so quem tem stock_deducted = TRUE e devolvido.
 //
 // Fora de proposito:
 //   - awaiting_approval: a cliente disse "ja paguei", alguem precisa olhar.
@@ -162,7 +164,7 @@ function sqlDoCancelamento({ comComprovante }) {
          FOR UPDATE SKIP LOCKED
       )
         AND status = 'pending_payment'
-      RETURNING id, company_id, order_number, customer_name, total, vertical, created_at`;
+      RETURNING id, company_id, order_number, customer_name, total, vertical, created_at, stock_deducted`;
 }
 
 /**
@@ -225,6 +227,16 @@ async function tickCancelarPixVencido({ db, lojaEvents }) {
   const limiteDoAviso = Date.now() - JANELA_DIAS * 24 * 3600 * 1000;
   for (const pedido of rows) {
     resumo.cancelados++;
+    if (pedido.stock_deducted === true) {
+      try {
+        // require aqui, como o db em initPixExpiradoJob: o modulo do job
+        // nao carrega o banco ao ser importado (os testes injetam o db).
+        const { devolverEstoqueDoPedido } = require('../services/devolucaoDoEstoqueDoPedido');
+        await devolverEstoqueDoPedido(pedido.id, { db });
+      } catch (e) {
+        console.error('[pix-expirado] devolver estoque falhou:', pedido.id, e.message);
+      }
+    }
     if (new Date(pedido.created_at).getTime() < limiteDoAviso) continue;
     const quem = pedido.customer_name ? ` de ${pedido.customer_name}` : '';
     const criado = await lojaEvents.emitLojaEvent('loja_pix_expirado', pedido, {
