@@ -51,6 +51,8 @@ const companyId = uuid();
 const produtoSimples = uuid();
 const produtoComGrade = uuid();
 const variante = uuid();
+const clienteId = uuid();
+const lancamentoId = uuid();
 let seq = 0;
 
 async function saldoDoProduto(id) {
@@ -79,13 +81,17 @@ async function entradas(orderId) {
 async function criarPedido({ status, paymentMethod = 'pix', productId, variantId = null, qtd, criadoHa = 0 }) {
   const id = uuid();
   seq += 1;
+  // Cliente e lancamento ja ligados: a confirmacao pula os passos 3 e 4 e
+  // roda so a BAIXA (passo 2), que e o assunto. O INSERT do lancamento da
+  // confirmacao usa transactions.payment_method, que o banco do CI nao tem.
   await pool.query(
     `INSERT INTO digital_orders
        (id, company_id, order_number, customer_name, customer_phone,
-        subtotal, total, status, payment_method, created_at)
+        subtotal, total, status, payment_method, created_at, customer_id, transaction_id)
      VALUES ($1, $2, $3, 'Cliente Fixture', '11999990000',
-             10, 10, $4, $5, NOW() - ($6 || ' hours')::interval)`,
-    [id, companyId, 'FX-' + String(seq).padStart(4, '0'), status, paymentMethod, String(criadoHa)]
+             10, 10, $4, $5, NOW() - ($6 || ' hours')::interval, $7, $8)`,
+    [id, companyId, 'FX-' + String(seq).padStart(4, '0'), status, paymentMethod, String(criadoHa),
+      clienteId, lancamentoId]
   );
   await pool.query(
     `INSERT INTO digital_order_items
@@ -129,6 +135,15 @@ beforeAll(async () => {
   await pool.query(
     `INSERT INTO companies (id, owner_id, legal_name) VALUES ($1, $2, 'Fixture Canal')`,
     [companyId, userId]
+  );
+  await pool.query(
+    `INSERT INTO customers (id, company_id, name) VALUES ($1, $2, 'Cliente Fixture')`,
+    [clienteId, companyId]
+  );
+  await pool.query(
+    `INSERT INTO transactions (id, company_id, type, status, amount, description, category, due_date)
+     VALUES ($1, $2, 'income', 'pending', 10, 'Fixture Canal', 'Canal Digital', CURRENT_DATE)`,
+    [lancamentoId, companyId]
   );
   await pool.query(
     `INSERT INTO products (id, company_id, name, price, stock_qty) VALUES ($1, $2, 'Cerveja', 5, 10)`,
