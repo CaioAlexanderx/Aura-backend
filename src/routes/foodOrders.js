@@ -442,7 +442,7 @@ router.patch('/:oid/status', guard, async (req, res) => {
 
           // B5 — lock the product row antes do UPDATE.
           const { rows: lockedProducts } = await client.query(
-            `SELECT id, stock_quantity FROM products
+            `SELECT id, stock_qty FROM products
              WHERE id=$1 AND company_id=$2 FOR UPDATE`,
             [recipe.product_id, req.params.id]
           );
@@ -453,7 +453,7 @@ router.patch('/:oid/status', guard, async (req, res) => {
 
           await client.query(
             `UPDATE products
-             SET stock_quantity = GREATEST(0, stock_quantity - $1),
+             SET stock_qty = GREATEST(0, stock_qty - $1),
                  updated_at = NOW()
              WHERE id=$2 AND company_id=$3`,
             [totalDeduct, recipe.product_id, req.params.id]

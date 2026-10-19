@@ -177,7 +177,7 @@ router.post('/appointments', requireAuth, requireRole('client','analyst','admin'
         );
         for (const mat of mats) {
           await client.query(
-            'UPDATE products SET stock_quantity=GREATEST(stock_quantity-$1,0) WHERE id=$2 AND company_id=$3',
+            'UPDATE products SET stock_qty=GREATEST(stock_qty-$1,0) WHERE id=$2 AND company_id=$3',
             [mat.quantity_per_use, mat.product_id, req.params.id]
           );
         }
