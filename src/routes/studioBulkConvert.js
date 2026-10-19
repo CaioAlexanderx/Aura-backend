@@ -14,7 +14,9 @@
 //   - studio_production_status='pending_art' (entra no KDS aguardando arte)
 //   - vertical='studio'
 //   - customer_name = recipient_name (ou nome do contratante se for vazio)
-//   - customer_phone do evento
+//   - customer_phone do evento ('' se o evento nao tem: coluna NOT NULL)
+//   - order_number e subtotal preenchidos (services/studioPedido.js, o mesmo
+//     INSERT do orcamento; antes faltavam e a conversao falhava sempre)
 //   - studio_bulk_event_id apontando pro evento (rastreabilidade)
 //   - total = base_unit_price * (1 - discount_pct/100)
 //   - 1 digital_order_items por order com customization JSONB do item
@@ -25,6 +27,7 @@
 const express = require('express');
 const router  = express.Router({ mergeParams: true });
 const db      = require('../config/database');
+const { inserirPedidoStudio, inserirItemPedidoStudio } = require('../services/studioPedido');
 
 // GET /studio/bulk-events/:eid/orders
 // Lista todas as digital_orders já geradas pra este evento, com info do item
@@ -113,30 +116,30 @@ router.post('/bulk-events/:eid/convert', async function(req, res) {
       // Cria digital_orders pra este item
       const customerName = item.recipient_name || event.customer_name || 'Cliente do evento';
 
-      const orderRes = await client.query(
-        `INSERT INTO digital_orders
-           (company_id, vertical, status, studio_production_status,
-            studio_bulk_event_id, customer_name, customer_phone, total)
-         VALUES ($1, 'studio', 'confirmed', 'pending_art', $2, $3, $4, $5)
-         RETURNING id`,
-        [req.params.id, req.params.eid, customerName, event.customer_phone || null, unitPrice]
-      );
-      const orderId = orderRes.rows[0].id;
+      // Mesmo INSERT do orcamento (services/studioPedido.js): schema real,
+      // order_number do contador atomico por empresa (um por item, sem
+      // colisao dentro do lote), subtotal do item, pedido 'confirmed'.
+      // O item do lote nao tem telefone proprio (studio_bulk_event_items so
+      // tem recipient_name); vale o telefone do evento e, sem ele, '' (a
+      // coluna e NOT NULL), como no orcamento.
+      const orderId = await inserirPedidoStudio(client, {
+        cid: req.params.id,
+        customerName,
+        customerPhone: event.customer_phone,
+        total: unitPrice,
+        bulkEventId: req.params.eid,
+      });
       generatedOrderIds.push(orderId);
 
       // Cria digital_order_items (1 linha = 1 produto = qty 1)
-      await client.query(
-        `INSERT INTO digital_order_items
-           (order_id, product_id, product_name, quantity, unit_price, customization)
-         VALUES ($1, $2, $3, 1, $4, $5)`,
-        [
-          orderId,
-          event.product_id || null,
-          event.product_name_snapshot || 'Produto personalizado',
-          unitPrice,
-          item.customization ? JSON.stringify(item.customization) : null,
-        ]
-      );
+      await inserirItemPedidoStudio(client, {
+        orderId,
+        productId: event.product_id,
+        productName: event.product_name_snapshot || 'Produto personalizado',
+        quantity: 1,
+        unitPrice,
+        customization: item.customization,
+      });
 
       // Liga o item de volta ao order
       await client.query(
@@ -165,7 +168,8 @@ router.post('/bulk-events/:eid/convert', async function(req, res) {
       message: `${convertedCount} pedido(s) criado(s) no KDS`,
     });
   } catch (err) {
-    await client.query('ROLLBACK');
+    // Se a conexao ja caiu o ROLLBACK tambem falha: nao pode engolir a resposta.
+    try { await client.query('ROLLBACK'); } catch (_) { /* conexao ja caiu */ }
     console.error('[studio/bulk-events/convert]', err.message);
     res.status(500).json({ error: 'Erro ao converter evento em pedidos' });
   } finally {
