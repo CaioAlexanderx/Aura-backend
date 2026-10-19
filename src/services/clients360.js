@@ -11,6 +11,8 @@
 const pool = require('../config/database');
 const { getExtraSeatsMap } = require('./extraSeats');
 const { classifyLifecycle } = require('./clientLifecycle');
+// 19/10/2026 (decisão do Caio): dojô não aparece nem conta na Gestão Aura.
+const { semDojo } = require('../utils/empresasDaGestao');
 
 // ── Funil do trial (12/10/2026) ───────────────────────────────
 // Importou estoque conta planilha/XML de produtos (import_logs module
@@ -84,6 +86,9 @@ async function listarClients360({ companyId = null } = {}) {
   // Filtro: (federation_id IS NULL OR federation_id = id) mantém a federação
   // (federation_id NULL) e exclui os dojôs-membros. Na ficha (companyId) o
   // filtro não vale: quem pede uma empresa pelo id quer aquela empresa.
+  // 19/10/2026 (decisão do Caio): além disso, nenhum dojô (vertical
+  // 'karate_dojo') entra na lista, mesmo sem federation_id. A ficha por id
+  // continua abrindo o dojô, para o suporte.
   const { rows } = await pool.query(`
     SELECT c.id, c.trade_name, c.legal_name, c.plan, c.is_active,
        c.billing_status, c.billing_cycle, c.module_overrides,
@@ -116,7 +121,7 @@ async function listarClients360({ companyId = null } = {}) {
         FROM audit_log a
        WHERE a.company_id = c.id AND a.action = 'checkout.viewed'
     ) ck ON true
-    WHERE ${companyId ? 'c.id = $1' : '(c.federation_id IS NULL OR c.federation_id = c.id)'}
+    WHERE ${companyId ? 'c.id = $1' : `(c.federation_id IS NULL OR c.federation_id = c.id) AND ${semDojo('c')}`}
     ORDER BY h.score ASC NULLS LAST, c.created_at DESC
   `, companyId ? [companyId] : []);
 

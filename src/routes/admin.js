@@ -12,6 +12,8 @@ const { MODULE_PLAN_MAP, getModuleMap, getVisibleModules } = require('../service
 const asyncHandler = require('../utils/asyncHandler');
 const AppError = require('../errors/AppError');
 const custosMensais = require('../services/custosMensais');
+// 19/10/2026 (decisão do Caio): dojô não aparece nem conta na Gestão Aura.
+const { semDojo } = require('../utils/empresasDaGestao');
 
 const adminOnly = [requireAuth, requireRole('admin')];
 const analystAccess = [requireAuth, requireRole('admin', 'analyst')];
@@ -36,7 +38,7 @@ function normalizeProfile(profile) {
 
 router.get('/dashboard', ...adminOnly, asyncHandler(async (req, res) => {
   const { rows: planCounts } = await pool.query(
-    `SELECT plan, COUNT(*) AS total FROM companies WHERE is_active = true AND (federation_id IS NULL OR federation_id = id) GROUP BY plan`
+    `SELECT plan, COUNT(*) AS total FROM companies WHERE is_active = true AND (federation_id IS NULL OR federation_id = id) AND ${semDojo()} GROUP BY plan`
   );
   const counts = { essencial: 0, negocio: 0, expansao: 0 };
   planCounts.forEach((r) => { counts[r.plan] = parseInt(r.total, 10); });
@@ -239,7 +241,7 @@ router.get('/clients', ...adminOnly, asyncHandler(async (req, res) => {
             -- 05/10/2026: frente da empresa (migration 366) pro painel de gestao
             c.segment, c.segment_source, c.segment_suggested, c.cnae_principal
      FROM companies c LEFT JOIN users u ON u.id = c.owner_id
-     WHERE (c.federation_id IS NULL OR c.federation_id = c.id)
+     WHERE (c.federation_id IS NULL OR c.federation_id = c.id) AND ${semDojo('c')}
      ORDER BY c.created_at DESC`
   );
   res.json({

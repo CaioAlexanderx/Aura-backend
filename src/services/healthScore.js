@@ -31,6 +31,8 @@
 'use strict';
 
 const pool = require('../config/database');
+// 19/10/2026 (decisão do Caio): dojô não aparece nem conta na Gestão Aura.
+const { semDojo } = require('../utils/empresasDaGestao');
 
 const DAY_MS = 86400000;
 
@@ -107,7 +109,7 @@ async function recalculateAll({ db = pool, agora = new Date() } = {}) {
            AND t.created_at >= NOW() - INTERVAL '30 days'
            AND ${CREDITO_CONTA}) AS credit_30d
      FROM companies c
-     WHERE c.is_active = true AND (c.federation_id IS NULL OR c.federation_id = c.id)`
+     WHERE c.is_active = true AND (c.federation_id IS NULL OR c.federation_id = c.id) AND ${semDojo('c')}`
   );
 
   const scores = companies.map((c) => calcularScore(c, agora));

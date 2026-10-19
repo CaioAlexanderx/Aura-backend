@@ -28,6 +28,8 @@
 
 const b = require('./_base');
 const regra = require('../checkin');
+// 19/10/2026 (decisão do Caio): dojô não aparece nem conta na Gestão Aura.
+const { semDojo } = require('../../utils/empresasDaGestao');
 
 const H = 3600000;
 const BASE_PRODUTO_24H = 57;
@@ -167,6 +169,7 @@ async function calcular({ hoje, periodo = 30, db = b.pool, agora = Date.now() } 
               GROUP BY company_id) m
        JOIN companies c ON c.id = m.company_id
        LEFT JOIN users u ON u.id = c.owner_id
+      WHERE ${semDojo('c')}
       ORDER BY m.pedida_em DESC NULLS LAST`,
     []
   );

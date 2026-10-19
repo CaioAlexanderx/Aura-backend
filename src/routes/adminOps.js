@@ -14,6 +14,9 @@ const { requireAuth, requireRole } = require('../middleware/auth');
 const asyncHandler = require('../utils/asyncHandler');
 const AppError = require('../errors/AppError');
 
+// 19/10/2026 (decisão do Caio): dojô não aparece nem conta na Gestão Aura.
+const { semDojo } = require('../utils/empresasDaGestao');
+
 const adminOnly = [requireAuth, requireRole('admin')];
 
 // — GET /admin/onboarding/pipeline ——————————————————————
@@ -26,7 +29,7 @@ router.get('/onboarding/pipeline', ...adminOnly, asyncHandler(async (req, res) =
        (SELECT COUNT(*) FROM products WHERE company_id=c.id) AS prod_count,
        (SELECT COUNT(*) FROM sales WHERE company_id=c.id) AS sales_count
      FROM companies c LEFT JOIN users u ON u.id=c.owner_id
-     WHERE c.is_active=true ORDER BY c.created_at DESC`
+     WHERE c.is_active=true AND ${semDojo('c')} ORDER BY c.created_at DESC`
   );
 
   const pipeline = { signup: [], cnpj: [], perfil: [], first_sale: [], active: [] };
