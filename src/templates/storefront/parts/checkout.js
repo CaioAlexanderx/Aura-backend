@@ -27,7 +27,23 @@
 'use strict';
 
 module.exports = `
+// Loja fechada (19/10/2026): o servidor recusa o pedido fora do horario
+// (409 LOJA_FECHADA, mesma regra do selo). Aqui o botao de finalizar fica
+// desligado com o aviso, pra cliente nao preencher tres etapas a toa. A
+// sacola continua guardada (sacola.js) para quando a loja abrir.
+function lojaFechadaAgora(){ return !!(SITE && SITE.is_open_now===false); }
+function textoLojaFechada(){
+  var t=(SITE && SITE.next_open_text)||'';
+  return 'A loja está fechada agora'+(t?' · '+t:'')+'. Sua sacola fica guardada para finalizar quando a loja abrir.';
+}
+function aplicarLojaFechada(){
+  var fechada=lojaFechadaAgora();
+  var btn=document.getElementById('checkoutBtn'), aviso=document.getElementById('cartFechada');
+  if(btn){ btn.disabled=fechada; btn.textContent=fechada?'Loja fechada':'Finalizar compra →'; }
+  if(aviso){ aviso.hidden=!fechada; aviso.textContent=fechada?textoLojaFechada():''; }
+}
 function openCheckout(){
+  if(lojaFechadaAgora()){ aplicarLojaFechada(); showToast(textoLojaFechada()); return; }
   // Pré-preenche customerData com dados salvos (se houver) pra não redigitar
   var saved=loadSavedCustomer();
   if(saved){
@@ -656,6 +672,12 @@ function submitOrder(){
   fetch(API_BASE + '/api/v1/storefront/'+SLUG+'/order',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)})
   .then(function(r){return r.json().then(function(d){return{ok:r.ok,data:d};});})
   .then(function(res){
+    if(!res.ok && res.data && res.data.code==='LOJA_FECHADA'){
+      // A loja fechou com a pagina aberta: o servidor e quem decide.
+      SITE.is_open_now=false; SITE.next_open_text=res.data.next_open_text||'';
+      aplicarLojaFechada(); closeCheckout(); showToast(res.data.error||textoLojaFechada());
+      return;
+    }
     if(!res.ok){showToast(res.data.error||'Erro ao criar pedido');btn.disabled=false;btn.textContent='Ir para pagamento';return;}
     currentOrder=res.data; paymentMarked=false;
     saveCustomerToLocalStorage();

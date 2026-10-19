@@ -69,6 +69,8 @@ function camposParaApagar(body) {
 }
 // Fase 5 da vitrine Studio: a peca do destaque da home sem banner.
 const { lerPecaDoDestaque } = require('../services/pecaDoDestaque');
+// Horario que vira a meia-noite e valido; abertura igual ao fechamento nao (19/10/2026).
+const { problemasDoHorario, mensagemDosProblemas } = require('../services/horarioDaLoja');
 
 const ALLOWED_ICONS = ['truck','pkg','shield','sparkle','leaf','heart','star','pix','card','receipt','bag','user'];
 
@@ -605,6 +607,31 @@ router.put('/', requireRole('client', 'analyst', 'admin'), async (req, res) => {
   if (card_style && !['editorial','minimal','image-heavy'].includes(card_style)) {
     return res.status(400).json({ error: 'card_style deve ser editorial|minimal|image-heavy' });
   }
+  // Horario de funcionamento (19/10/2026). Desde que "Fechada" passou a
+  // recusar pedido, um horario sem sentido fecha a loja de verdade. Fechar
+  // depois da meia-noite (18:00 -> 02:00) e valido: vale ate 02:00 do dia
+  // seguinte. Abertura igual ao fechamento nao e intervalo e e recusado.
+  // So o dia EDITADO e barrado: dia que chega igual ao ja gravado passa,
+  // para quem ja tem horario salvo continuar salvando o resto do
+  // formulario. A leitura do gravado so acontece quando ha problema.
+  if (business_hours && typeof business_hours === 'object') {
+    let problemas = problemasDoHorario(business_hours, null);
+    if (problemas.length) {
+      try {
+        const { rows: atual } = await db.query(
+          'SELECT business_hours FROM digital_channel_config WHERE company_id = $1', [cid]);
+        problemas = problemasDoHorario(business_hours, atual[0] && atual[0].business_hours);
+      } catch (e) {
+        console.error('[canal-horario] ler horario gravado:', e.message);
+      }
+      if (problemas.length) {
+        return res.status(400).json({
+          error: mensagemDosProblemas(problemas), code: 'HORARIO_INVALIDO', dias: problemas,
+        });
+      }
+    }
+  }
+
   // BE-3 — validado ANTES de gravar qualquer coisa: um ID de GA4 errado
   // devolve 400 e o resto do formulario nao fica salvo pela metade.
   const pedidosPelaLoja = sanitizarPedidosPelaLoja(req.body);

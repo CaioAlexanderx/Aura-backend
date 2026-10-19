@@ -340,7 +340,8 @@ ${whatsBlock}
     <div class="cart-summary-row"><span id="deliveryLabel">Entrega</span><span id="deliveryVal">—</span></div>
     <div class="cart-summary-row total"><span>Total</span><span id="cartTotal">R$ 0,00</span></div>
     <div class="cart-summary-row pix" id="cartPixRow" hidden><span>Pagando no Pix</span><span id="cartPixVal"></span></div>
-    <button class="checkout-btn" onclick="openCheckout()">Finalizar compra →</button>
+    <p class="cart-fechada" id="cartFechada" role="status" hidden></p>
+    <button class="checkout-btn" id="checkoutBtn" onclick="openCheckout()">Finalizar compra →</button>
   </div>
 </div>
 

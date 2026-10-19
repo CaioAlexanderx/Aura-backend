@@ -47,6 +47,8 @@ const {
   galeriaDaPeca,
   // Previa do link da vitrine Studio (BE-1, 25/09/2026).
   pecaDaVitrineStudio, urlDaLoja,
+  // Loja fechada recusa o pedido (19/10/2026): o mesmo calculo do selo.
+  computeOpenState,
 } = require('../services/storefrontBuilder');
 // Empresa em modo Studio: este endereco serve a vitrine de
 // personalizados, nao a loja comum. Ver services/vitrineStudioShell.js.
@@ -531,6 +533,24 @@ router.post('/:slug/order', async (req, res) => {
     if (!configs.length) return res.status(404).json({ error: 'Loja nao encontrada' });
     const config = configs[0];
     const cid = config.company_id;
+
+    // Loja fechada nao recebe pedido (19/10/2026). Ate aqui "Fechada" era
+    // so um selo: a vitrine mostrava e o pedido entrava do mesmo jeito, e a
+    // lojista acordava com pedido feito de madrugada. A regra e a MESMA do
+    // selo (computeOpenState -> horarioDaLoja.estaAberta), entao os dois
+    // nunca discordam. Sem horario cadastrado ou "Sempre aberta" = aberta,
+    // como sempre foi.
+    const horario = computeOpenState(config.business_hours, config.always_open === true);
+    if (!horario.is_open_now) {
+      return res.status(409).json({
+        error: 'A loja está fechada agora e não está recebendo pedidos'
+          + (horario.next_open_text ? `. ${horario.next_open_text}.` : '.')
+          + ' Sua sacola fica guardada: é só finalizar quando a loja abrir.',
+        code: 'LOJA_FECHADA',
+        motivo: 'fora_do_horario', // mesmo formato do 409 do Studio (modoDaLoja)
+        next_open_text: horario.next_open_text || '',
+      });
+    }
 
     // MP Fase 1 (20/05/2026): detecta gateway MP da empresa
     let mpGateway = null;

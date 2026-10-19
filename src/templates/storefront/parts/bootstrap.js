@@ -9,6 +9,7 @@
 module.exports = `
 carregarSacola();
 updateCartUI();
+aplicarLojaFechada();
 renderTopNav();
 renderFooterNav();
 renderTiraCategorias();
