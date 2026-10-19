@@ -10,7 +10,8 @@
 // junta com o universo de empresas em JS (carregarEmpresas). Assim o filtro
 // de quem conta fica num lugar só:
 //   - fora as contas internas (e-mail da empresa @getaura.com.br);
-//   - só billing_status 'trial' ou 'active'.
+//   - só billing_status 'trial' ou 'active';
+//   - fora os dojôs (vertical 'karate_dojo'), decisão do Caio de 19/10/2026.
 // Uma loja fora do universo some de todos os blocos de uma vez.
 // Dentro do universo, `emp.pagantes` é só quem conta como pagante da Aura:
 // filial paga pela matriz e dojô sem assinatura própria ficam em `emp.lista`
@@ -19,6 +20,7 @@
 'use strict';
 
 const pool = require('../../config/database');
+const { semDojo } = require('../../utils/empresasDaGestao');
 
 const TZ = 'America/Sao_Paulo';
 
@@ -37,8 +39,11 @@ const ID_CANARY = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}
 // blocos. JKA Teste, os 10 dojôs de teste da JKA e a empresa Aura de teste
 // eram contados como pagantes porque a regra só olhava e-mail e o id do
 // canário (pedido de Produto e Financeiro; card P1).
+// 19/10/2026 (decisão do Caio): dojô (vertical 'karate_dojo') sai do universo
+// inteiro: é dado da federação, não cliente da Aura (utils/empresasDaGestao).
 const SEM_INTERNAS = `COALESCE(c.email, '') NOT ILIKE '%@getaura.com.br'`
   + ` AND c.is_sandbox IS NOT TRUE`
+  + ` AND ${semDojo('c')}`
   + (ID_CANARY ? ` AND c.id <> '${ID_CANARY}'::uuid` : '');
 
 // 14/10/2026 (card t1-11, estende o #820): quem NÃO conta como pagante da Aura.

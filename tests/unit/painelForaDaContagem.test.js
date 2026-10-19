@@ -6,6 +6,11 @@
 // Os dados vêm de tests/helpers/fakePainelDb.js, com três empresas a mais:
 // uma filial (Villa Branca, vence_em de 18/06), um dojô sem assinatura e um
 // dojô com assinatura própria.
+//
+// 19/10/2026 (decisão do Caio): na consulta real o dojô (vertical
+// 'karate_dojo') nem entra no universo (SEM_INTERNAS; ver
+// tests/routes/adminSemDojos.test.js). O banco de mentira daqui devolve as
+// linhas prontas, então este arquivo segue testando só a regra em JS.
 // ============================================================
 'use strict';
 

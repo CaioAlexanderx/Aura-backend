@@ -40,6 +40,8 @@ const sefazSp = require('../services/sefazSp');
 const engineBreaker = require('../services/sefazSp/engineBreaker');
 const { encryptString, hasMasterKey } = require('../utils/secretCrypto');
 const g = require('../services/auraNotas/gestao');
+// 19/10/2026 (decisão do Caio): dojô não aparece nem conta na Gestão Aura.
+const { semDojo } = require('../utils/empresasDaGestao');
 const { ENDPOINTS: SEFAZ_SP_ENDPOINTS_65 } = require('../services/sefazSp/endpoints');
 
 // ── Staff-gate: só contas internas da Aura (is_staff no JWT) ──────────────
@@ -148,6 +150,7 @@ router.get('/companies', async (req, res) => {
       `SELECT nc.*, COALESCE(c.trade_name, c.legal_name) AS name, c.cnpj
          FROM nfce_config nc
          JOIN companies c ON c.id = nc.company_id
+        WHERE ${semDojo('c')}
         ORDER BY COALESCE(c.trade_name, c.legal_name) NULLS LAST`);
 
     const [certs, stats, lasts] = await Promise.all([certMap(), statsMap(), lastEmissionMap()]);
@@ -203,7 +206,7 @@ router.get('/empresas-sem-config', async (req, res) => {
   const q = String((req.query || {}).q || '').trim();
   try {
     const params = [];
-    let where = 'WHERE c.is_active = true AND nc.company_id IS NULL';
+    let where = `WHERE c.is_active = true AND nc.company_id IS NULL AND ${semDojo('c')}`;
     if (q) {
       params.push(`%${q}%`);
       where += ` AND (c.legal_name ILIKE $${params.length} OR c.trade_name ILIKE $${params.length} OR c.cnpj ILIKE $${params.length})`;

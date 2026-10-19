@@ -194,9 +194,11 @@ describe('empresa de teste fora do universo do painel (_base.SEM_INTERNAS)', () 
     return base;
   }
 
-  test('sem CANARY_COMPANY_ID, as regras do e-mail interno e da conta de teste (is_sandbox)', () => {
+  test('sem CANARY_COMPANY_ID, as regras do e-mail interno, da conta de teste (is_sandbox) e do dojô', () => {
+    // 19/10/2026 (decisão do Caio): dojô sai do universo do painel.
     expect(carregarBase().SEM_INTERNAS).toBe(
       `COALESCE(c.email, '') NOT ILIKE '%@getaura.com.br' AND c.is_sandbox IS NOT TRUE`
+      + ` AND c.vertical IS DISTINCT FROM 'karate_dojo'`
     );
   });
 
