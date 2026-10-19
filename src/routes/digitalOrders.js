@@ -20,6 +20,8 @@ const db     = require('../config/database');
 const { requireRole } = require('../middleware/auth');
 const notify = require('../services/digitalOrderNotifications');
 const { onOrderConfirmed } = require('../services/digitalOrderConfirmation');
+// Cancelar devolve o estoque, so quando houve baixa (19/10/2026).
+const { devolverEstoqueDoPedido } = require('../services/devolucaoDoEstoqueDoPedido');
 const lojaEvents = require('../services/lojaEvents');
 
 // GET — Lista pedidos com filtro por status e paginação
@@ -156,6 +158,15 @@ router.patch('/:oid/status', requireRole('client', 'analyst', 'admin'), async (r
       RETURNING *
     `, [status, oid, cid, motivoDoCancelamento]);
 
+    // Cancelado: devolve o estoque se o pedido deu baixa (pago, ou pagar na
+    // entrega). Esperado ANTES da resposta, para o painel ja ver o saldo
+    // certo. Se falhar, o cancelamento continua valendo e o pedido fica com
+    // stock_deducted = TRUE — e esse par (cancelled + stock_deducted) e
+    // exatamente o que denuncia a devolucao pendente.
+    if (status === 'cancelled') {
+      await devolverNoCancelamento(oid, updated[0]);
+    }
+
     res.json({ order: updated[0], updated: true });
 
     if (status === 'confirmed' && current !== 'confirmed') {
@@ -243,6 +254,23 @@ router.post('/:oid/approve-payment', requireRole('client', 'analyst', 'admin'), 
 // o caminho que o painel ja usa fora dessa situacao. Fora dela: 409 com o
 // que fazer, em portugues, e nada gravado.
 // ============================================================
+/**
+ * Devolve o estoque de um pedido recem-cancelado sem derrubar a rota.
+ * `linha` e o RETURNING do UPDATE: o marcador e atualizado nela para a
+ * resposta nao mostrar stock_deducted = TRUE de um pedido ja devolvido.
+ */
+async function devolverNoCancelamento(oid, linha) {
+  try {
+    const r = await devolverEstoqueDoPedido(oid);
+    if (r && r.devolvido && linha) linha.stock_deducted = false;
+    return r;
+  } catch (err) {
+    console.error('[orders] devolver estoque no cancelamento falhou (pedido segue cancelado, stock_deducted TRUE):',
+      oid, err.message);
+    return null;
+  }
+}
+
 const ESPERANDO_PAGAMENTO = ['pending_payment', 'awaiting_approval'];
 const PAGAMENTO_ENTROU = ['confirmed', 'paid', 'received'];
 
@@ -304,6 +332,11 @@ router.post('/:oid/reject-payment', requireRole('client', 'analyst', 'admin'), a
         error: 'O pedido mudou enquanto você recusava o pagamento. Atualize a página e confira a situação.',
       });
     }
+
+    // Pedido esperando pagamento nao baixou estoque: na pratica nao devolve
+    // nada. Chamado assim mesmo porque a regra e "todo cancelamento passa
+    // pela devolucao" — quem decide se houve baixa e o marcador do pedido.
+    await devolverNoCancelamento(oid, updated[0]);
 
     res.json({ order: updated[0], rejected: true });
 
