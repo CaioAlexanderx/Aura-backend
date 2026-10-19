@@ -177,7 +177,7 @@ router.patch('/orders/:orderId', requireAuth, requireRole('client','analyst','ad
 router.get('/product-map/:connId', requireAuth, async (req, res) => {
   try {
     const { rows } = await db.query(
-      `SELECT pm.*, p.name AS product_name, p.price AS aura_price, p.stock_quantity
+      `SELECT pm.*, p.name AS product_name, p.price AS aura_price, p.stock_qty
        FROM marketplace_product_map pm
        JOIN products p ON p.id=pm.product_id
        WHERE pm.connection_id=$1 AND pm.company_id=$2
