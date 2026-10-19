@@ -47,6 +47,8 @@ const {
   galeriaDaPeca,
   // Previa do link da vitrine Studio (BE-1, 25/09/2026).
   pecaDaVitrineStudio, urlDaLoja,
+  // Pedido com a loja fechada (19/10/2026): o mesmo calculo do selo.
+  computeOpenState,
 } = require('../services/storefrontBuilder');
 // Empresa em modo Studio: este endereco serve a vitrine de
 // personalizados, nao a loja comum. Ver services/vitrineStudioShell.js.
@@ -502,6 +504,26 @@ router.get('/:slug/shipping-quote', async (req, res) => {
   }
 });
 
+/**
+ * A linha que o pedido feito com a loja fechada leva nas observacoes
+ * (painel, "Observacoes" do pedido). Data e hora de Sao Paulo.
+ */
+function marcaDeLojaFechada(abreEm, agora = new Date()) {
+  const quando = new Intl.DateTimeFormat('pt-BR', {
+    timeZone: 'America/Sao_Paulo', day: '2-digit', month: '2-digit',
+    hour: '2-digit', minute: '2-digit', hour12: false,
+  }).format(agora).replace(',', ' às');
+  return `Pedido feito com a loja fechada (${quando}). `
+    + (abreEm
+      ? `O cliente foi avisado de que o pedido será preparado a partir de ${abreEm}.`
+      : 'O cliente foi avisado de que o pedido será preparado quando a loja abrir.');
+}
+
+function juntarNotas(...partes) {
+  const txt = partes.map((p) => (p == null ? '' : String(p).trim())).filter(Boolean).join('\n');
+  return txt || null;
+}
+
 router.post('/:slug/order', async (req, res) => {
   const slug = req.params.slug.toLowerCase().trim();
   const {
@@ -531,6 +553,18 @@ router.post('/:slug/order', async (req, res) => {
     if (!configs.length) return res.status(404).json({ error: 'Loja nao encontrada' });
     const config = configs[0];
     const cid = config.company_id;
+
+    // Pedido com a loja fechada (decisao do Caio, 19/10/2026): ENTRA, a
+    // qualquer hora. A vitrine avisa o cliente que sera preparado/entregue
+    // quando a loja abrir, e o pedido leva uma linha nas observacoes para a
+    // lojista ver no painel. A regra de "fechada" e a MESMA do selo
+    // (computeOpenState -> horarioDaLoja.estaAberta). Sem horario
+    // cadastrado ou "Sempre aberta" = aberta, como sempre foi.
+    const horario = computeOpenState(config.business_hours, config.always_open === true);
+    const notasDoPedido = juntarNotas(
+      horario.is_open_now ? null : marcaDeLojaFechada(horario.next_open_when),
+      notes
+    );
 
     // MP Fase 1 (20/05/2026): detecta gateway MP da empresa
     let mpGateway = null;
@@ -793,7 +827,7 @@ router.post('/:slug/order', async (req, res) => {
       `, [
         cid, customer_name, customer_phone, customer_email || null,
         dtype, composedAddress, delivery_fee, subtotal, total,
-        initialStatus, initialPaymentStatus, pmethod, notes || null,
+        initialStatus, initialPaymentStatus, pmethod, notasDoPedido,
         cpfNorm || null, !!request_nfce,
         address_zip ? String(address_zip).replace(/\D/g, '') : null,
         address_street || null, address_number || null, address_complement || null,
@@ -944,6 +978,10 @@ router.post('/:slug/order', async (req, res) => {
       status:         initialStatus,
       payment_method: pmethod,
       shipping:       shippingMeta,
+      // A tela de pedido concluido repete o aviso com o que o SERVIDOR viu:
+      // a loja pode ter fechado com a pagina aberta.
+      loja_fechada:   !horario.is_open_now,
+      abre_em:        horario.is_open_now ? '' : (horario.next_open_when || ''),
       pix: pixData ? {
         qrcode:     pixData.qrcode,
         payload:    pixData.payload,
@@ -1085,3 +1123,4 @@ router.get('/:slug/order/:oid', async (req, res) => {
 module.exports = router;
 // Exposto para teste: a lista e contrato com as rotas do app.
 module.exports.PAGINAS_DA_VITRINE_STUDIO = PAGINAS_DA_VITRINE_STUDIO;
+module.exports.marcaDeLojaFechada = marcaDeLojaFechada;

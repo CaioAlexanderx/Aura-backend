@@ -48,6 +48,8 @@
 'use strict';
 
 const db = require('../config/database');
+// Aberta/fechada: uma regra so, compartilhada com o aviso do pedido feito com a loja fechada (19/10/2026).
+const { estaAberta, momentoNoFuso, parseHHMM } = require('./horarioDaLoja');
 // O rodape institucional e o MESMO nas duas lojas — ver o modulo.
 const { montarRodape } = require('./rodapeInstitucional');
 const { rastreadoresDaLoja } = require('./rastreadores');
@@ -304,46 +306,12 @@ function parseBusinessHours(raw) {
   return obj;
 }
 
-function getNowInSaoPaulo() {
-  const fmt = new Intl.DateTimeFormat('en-US', {
-    timeZone: 'America/Sao_Paulo',
-    weekday: 'short',
-    hour: '2-digit',
-    minute: '2-digit',
-    hour12: false,
-  });
-  const parts = fmt.formatToParts(new Date());
-  const map = {};
-  parts.forEach(p => { map[p.type] = p.value; });
-
-  const dayMap = { Sun: 0, Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6 };
-  const dayIndex = dayMap[map.weekday] ?? 0;
-  let hour = parseInt(map.hour, 10);
-  if (hour === 24) hour = 0;
-  const minute = parseInt(map.minute, 10);
-  return { hour, minute, dayIndex };
-}
-
 /**
- * "HH:MM" em minutos desde a meia-noite. Estrito: 24:00 nao passa.
+ * A loja esta aberta agora? E, se nao, quando abre?
  *
- * Chegou a aceitar 24:00 como "fim do dia", pra loja 24h fechar depois
- * do ultimo minuto. Era a pergunta errada: 24h nao e um intervalo que
- * por acaso cobre o dia, e um ESTADO — ver always_open logo abaixo.
- * Horario invalido volta a ser so horario invalido.
- */
-function parseHHMM(str) {
-  if (!str || typeof str !== 'string') return null;
-  const m = /^(\d{1,2}):(\d{2})$/.exec(str.trim());
-  if (!m) return null;
-  const h = parseInt(m[1], 10);
-  const mn = parseInt(m[2], 10);
-  if (h < 0 || h > 23 || mn < 0 || mn > 59) return null;
-  return h * 60 + mn;
-}
-
-/**
- * A loja esta aberta agora?
+ * O "aberta?" e de services/horarioDaLoja.js (estaAberta) — a mesma regra
+ * que marca o pedido feito com a loja fechada em POST /storefront/:slug/order.
+ * Aqui so moram os textos: "Abre ..." do selo e o "quando" do aviso.
  *
  * @param businessHours mapa dia -> { open, close, closed }.
  * @param alwaysOpen loja 24h (migration 310). Curto-circuita tudo: e um
@@ -351,40 +319,17 @@ function parseHHMM(str) {
  *   tentativa de expressar 24h como 00:00–23:59 deixava a loja Fechada
  *   no ultimo minuto de todo dia; como 00:00–24:00, o parse rejeitava e
  *   ela ficava Fechada o dia INTEIRO. Aconteceu em producao (29/08/2026).
- * @param agora opcional, so pra teste: { hour, minute, dayIndex }. Sem
- *   ele usa o relogio de Sao Paulo. Existe porque a unica forma de
- *   verificar "aberta as 23:59" era recortar a funcao com regex do
- *   arquivo — e o recorte trazia junto os `require` do modulo.
+ * @param agora opcional: Date, ms ou { hour, minute, dayIndex } (teste).
+ *   Sem ele usa o relogio de Sao Paulo.
  */
 function computeOpenState(businessHours, alwaysOpen, agora) {
-  if (alwaysOpen === true) return { is_open_now: true, next_open_text: '' };
+  const aberta = { is_open_now: true, next_open_text: '', next_open_when: '' };
+  if (alwaysOpen === true) return aberta;
   const hours = parseBusinessHours(businessHours);
-  if (!hours || !Object.keys(hours).length) {
-    return { is_open_now: true, next_open_text: '' };
-  }
+  if (estaAberta(hours, agora)) return aberta;
 
-  const { hour, minute, dayIndex } = agora || getNowInSaoPaulo();
+  const { hour, minute, dayIndex } = momentoNoFuso(agora);
   const nowMinutes = hour * 60 + minute;
-
-  const todayKey = WEEK_KEYS[dayIndex];
-  const today = hours[todayKey];
-
-  if (today && !today.closed) {
-    const openM = parseHHMM(today.open);
-    const closeM = parseHHMM(today.close);
-    // Dia marcado como aberto mas com horario ilegivel: erro de
-    // cadastro, nao fechamento. Antes caia direto no laco de baixo e a
-    // loja anunciava "Fechada, abre amanha" o dia todo — sem erro, sem
-    // sinal, e a lojista so descobre pela venda que nao veio. Entre
-    // errar pra aberta e errar pra fechada, aberta custa menos.
-    if (openM == null || closeM == null) {
-      console.error('[storefront] horario ilegivel em', todayKey, today);
-      return { is_open_now: true, next_open_text: '' };
-    }
-    if (nowMinutes >= openM && nowMinutes < closeM) {
-      return { is_open_now: true, next_open_text: '' };
-    }
-  }
 
   for (let i = 0; i < 7; i++) {
     const checkIdx = (dayIndex + i) % 7;
@@ -393,23 +338,29 @@ function computeOpenState(businessHours, alwaysOpen, agora) {
     if (!day || day.closed) continue;
     const openM = parseHHMM(day.open);
     if (openM == null) continue;
+    // next_open_when: o mesmo momento em texto corrido ("hoje às 18:00",
+    // "amanhã às 18:00", "terça às 18:00") para o aviso da sacola e do
+    // checkout — "será entregue a partir de <next_open_when>" (19/10/2026).
     if (i === 0 && nowMinutes < openM) {
       return {
         is_open_now: false,
         next_open_text: `Abre hoje às ${day.open}`,
+        next_open_when: `hoje às ${day.open}`,
       };
     }
     if (i > 0) {
       const label = WEEK_LABELS[checkIdx];
       const prefix = i === 1 ? 'Abre amanhã' : `Abre ${label}`;
+      const quando = i === 1 ? 'amanhã' : label.toLowerCase();
       return {
         is_open_now: false,
         next_open_text: `${prefix} às ${day.open}`,
+        next_open_when: `${quando} às ${day.open}`,
       };
     }
   }
 
-  return { is_open_now: false, next_open_text: '' };
+  return { is_open_now: false, next_open_text: '', next_open_when: '' };
 }
 
 /** 12.345.678/0001-90 — ou '' quando o CNPJ nao tem 14 digitos. */
@@ -1057,7 +1008,7 @@ async function buildStorefront(config) {
   // always_open chega undefined enquanto a migration 310 nao rodou; o
   // `=== true` la dentro trata isso como "nao e 24h", que e o padrao.
   const alwaysOpen = config.always_open === true;
-  const { is_open_now, next_open_text } = computeOpenState(businessHours, alwaysOpen);
+  const { is_open_now, next_open_text, next_open_when } = computeOpenState(businessHours, alwaysOpen);
 
   return {
     site: {
@@ -1092,6 +1043,7 @@ async function buildStorefront(config) {
       service_cards: serviceCards,
       is_open_now,
       next_open_text,
+      next_open_when,
     },
     contact: {
       phone:     config.phone     || '',

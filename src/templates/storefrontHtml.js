@@ -340,6 +340,7 @@ ${whatsBlock}
     <div class="cart-summary-row"><span id="deliveryLabel">Entrega</span><span id="deliveryVal">—</span></div>
     <div class="cart-summary-row total"><span>Total</span><span id="cartTotal">R$ 0,00</span></div>
     <div class="cart-summary-row pix" id="cartPixRow" hidden><span>Pagando no Pix</span><span id="cartPixVal"></span></div>
+    <p class="aviso-fechada" id="cartFechada" role="status" hidden></p>
     <button class="checkout-btn" onclick="openCheckout()">Finalizar compra →</button>
   </div>
 </div>
@@ -376,6 +377,7 @@ ${whatsBlock}
               </div>
             </div>
             <div class="checkout-body" id="checkoutBody"></div>
+            <p class="aviso-fechada" id="checkoutFechada" role="status" hidden></p>
           </div>
           <div class="checkout-foot">
             <button type="button" class="prev-btn" id="prevBtn" onclick="checkoutBack()" hidden>← Voltar</button>
