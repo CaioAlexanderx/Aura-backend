@@ -634,9 +634,10 @@ body.card-style-image-heavy .product-desc{display:none;}
 .cart-summary-row.total span:last-child{font-family:${fontMono};}
 .checkout-btn{width:100%;padding:16px;background:var(--sf-brand);color:#fff;border:none;border-radius:var(--sf-r);font-size:15px;font-weight:600;cursor:pointer;display:flex;align-items:center;justify-content:center;gap:8px;font-family:${fontSans};letter-spacing:0.2px;transition:transform var(--sf-motion) var(--sf-ease),box-shadow var(--sf-motion) var(--sf-ease),background var(--sf-motion) var(--sf-ease);}
 .checkout-btn:hover{transform:translateY(var(--sf-lift));box-shadow:var(--sf-shadow-hover);}
-/* Loja fechada (19/10/2026): o botao nao finaliza e o aviso diz quando abre. */
-.checkout-btn:disabled{background:var(--sf-ink-3);cursor:not-allowed;transform:none;box-shadow:none;}
-.cart-fechada{margin:0 0 12px;font-size:13px;line-height:1.45;color:var(--sf-ink-2);font-family:${fontSans};}
+/* Loja fechada (19/10/2026): aviso de quando o pedido sera preparado. Informa, nao e erro. */
+.aviso-fechada{margin:0 0 12px;padding:10px 12px;border-radius:var(--sf-r);background:var(--sf-bg);border:1px solid var(--sf-border);font-size:13px;line-height:1.45;color:var(--sf-ink-2);font-family:${fontSans};}
+.checkout-body + .aviso-fechada{margin:12px 0 0;}
+.confirm-screen .aviso-fechada{max-width:320px;margin:12px auto 0;}
 
 /* ============================================================
    Checkout

@@ -2,8 +2,9 @@
 // AURA. — A loja esta aberta agora? (Canal Digital, 19/10/2026)
 //
 // Uma regra so, pura, usada pelo selo "Fechada" da vitrine
-// (storefrontBuilder.computeOpenState) e pela recusa do pedido fora do
-// horario (POST /storefront/:slug/order). Antes o selo era a unica coisa
+// (storefrontBuilder.computeOpenState) e pelo aviso de pedido feito com a
+// loja fechada (POST /storefront/:slug/order: o pedido entra e a vitrine
+// diz quando sera preparado; decisao do Caio, 19/10/2026). Antes o selo era a unica coisa
 // que olhava o horario, e olhava errado para quem fecha depois da
 // meia-noite: abre 18:00 e fecha 02:00 dava `agora >= 1080 && agora < 120`,
 // que nunca e verdade — a adega aparecia Fechada a noite inteira.

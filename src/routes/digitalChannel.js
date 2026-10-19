@@ -607,8 +607,9 @@ router.put('/', requireRole('client', 'analyst', 'admin'), async (req, res) => {
   if (card_style && !['editorial','minimal','image-heavy'].includes(card_style)) {
     return res.status(400).json({ error: 'card_style deve ser editorial|minimal|image-heavy' });
   }
-  // Horario de funcionamento (19/10/2026). Desde que "Fechada" passou a
-  // recusar pedido, um horario sem sentido fecha a loja de verdade. Fechar
+  // Horario de funcionamento (19/10/2026). Um horario sem sentido poe o
+  // selo "Fechada" e o aviso "sera entregue a partir de..." no lugar
+  // errado, e o pedido chega a lojista marcado como feito fora de hora. Fechar
   // depois da meia-noite (18:00 -> 02:00) e valido: vale ate 02:00 do dia
   // seguinte. Abertura igual ao fechamento nao e intervalo e e recusado.
   // So o dia EDITADO e barrado: dia que chega igual ao ja gravado passa,

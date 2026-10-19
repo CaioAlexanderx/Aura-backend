@@ -27,23 +27,42 @@
 'use strict';
 
 module.exports = `
-// Loja fechada (19/10/2026): o servidor recusa o pedido fora do horario
-// (409 LOJA_FECHADA, mesma regra do selo). Aqui o botao de finalizar fica
-// desligado com o aviso, pra cliente nao preencher tres etapas a toa. A
-// sacola continua guardada (sacola.js) para quando a loja abrir.
+// Loja fechada (decisao do Caio, 19/10/2026): o pedido ENTRA a qualquer
+// hora. Com a loja fechada (mesma regra do selo), a sacola, o checkout e a
+// tela de pedido concluido dizem, sem cara de erro, quando ele sera
+// preparado. O "quando" vem do servidor (SITE.next_open_when: "hoje às
+// 18:00"); na tela final vale o que o servidor viu ao criar o pedido.
 function lojaFechadaAgora(){ return !!(SITE && SITE.is_open_now===false); }
-function textoLojaFechada(){
-  var t=(SITE && SITE.next_open_text)||'';
-  return 'A loja está fechada agora'+(t?' · '+t:'')+'. Sua sacola fica guardada para finalizar quando a loja abrir.';
+function avisoDaLojaFechada(tipo, quando){
+  var q=(quando===undefined)?((SITE && SITE.next_open_when)||''):(quando||'');
+  var retirada=(tipo==='pickup'||tipo==='courier');
+  if(!q) return 'A loja está fechada agora. Seu pedido será '+(retirada?'separado':'preparado e entregue')+' quando ela abrir.';
+  return retirada
+    ? 'A loja está fechada agora. Seu pedido estará pronto para retirar a partir de '+q+'.'
+    : 'A loja está fechada agora. Seu pedido será preparado e entregue a partir de '+q+'.';
 }
 function aplicarLojaFechada(){
   var fechada=lojaFechadaAgora();
-  var btn=document.getElementById('checkoutBtn'), aviso=document.getElementById('cartFechada');
-  if(btn){ btn.disabled=fechada; btn.textContent=fechada?'Loja fechada':'Finalizar compra →'; }
-  if(aviso){ aviso.hidden=!fechada; aviso.textContent=fechada?textoLojaFechada():''; }
+  var tipo=(typeof selectedDelivery!=='undefined' && selectedDelivery) ? selectedDelivery : (SETTINGS && SETTINGS.pickup_enabled===false ? 'delivery' : 'pickup');
+  var aviso=document.getElementById('cartFechada');
+  if(aviso){ aviso.hidden=!fechada; aviso.textContent=fechada?avisoDaLojaFechada(tipo):''; }
+  var noCheckout=document.getElementById('checkoutFechada');
+  // No checkout, so ate o pedido existir: a tela de concluido traz a frase.
+  var mostrar=fechada && !(typeof currentOrder!=='undefined' && currentOrder && checkoutStep===3);
+  if(noCheckout){ noCheckout.hidden=!mostrar; noCheckout.textContent=mostrar?avisoDaLojaFechada(tipo):''; }
+}
+/** A frase da tela de pedido concluido, ou '' com a loja aberta. */
+function avisoDoPedidoConcluido(){
+  if(!currentOrder) return '';
+  var fechada=(currentOrder.loja_fechada!==undefined)?currentOrder.loja_fechada:lojaFechadaAgora();
+  if(!fechada) return '';
+  return avisoDaLojaFechada(selectedDelivery, currentOrder.abre_em!==undefined?currentOrder.abre_em:undefined);
+}
+function htmlDoAvisoConcluido(){
+  var t=avisoDoPedidoConcluido();
+  return t?'<p class="aviso-fechada">'+esc(t)+'</p>':'';
 }
 function openCheckout(){
-  if(lojaFechadaAgora()){ aplicarLojaFechada(); showToast(textoLojaFechada()); return; }
   // Pré-preenche customerData com dados salvos (se houver) pra não redigitar
   var saved=loadSavedCustomer();
   if(saved){
@@ -385,6 +404,7 @@ function renderCheckoutStep(){
   var prev=document.getElementById('prevBtn');
   if(prev) prev.hidden=!(s>1&&s<3);
   if(typeof renderResumoDoCheckout==='function') renderResumoDoCheckout();
+  aplicarLojaFechada();
   var sub=getSubtotal(),fee=getFee(),body=document.getElementById('checkoutBody');
   if(s===1){
     var nfceChecked=customerData.request_nfce?'checked':'';
@@ -486,6 +506,7 @@ function renderCheckoutStep(){
         +'<div class="confirm-icon">✅</div>'
         +'<div class="confirm-title">Pedido confirmado!</div>'
         +'<div class="confirm-desc">Pedido <strong>#'+esc(currentOrder.order_number)+'</strong>. Você pagará '+fmt(currentOrder.total)+' na entrega.</div>'
+        +htmlDoAvisoConcluido()
         +(selectedDelivery==='delivery'
           ?'<p style="font-size:12px;color:var(--text-3);max-width:300px;margin:8px auto;">Aguarde nosso contato pra combinar a entrega.</p>'
           :'<p style="font-size:12px;color:var(--text-3);max-width:300px;margin:8px auto;">Vá retirar na loja: '+esc((CONTACT && CONTACT.pickup_address) || (CONTACT && CONTACT.address) || '')+'</p>')
@@ -503,6 +524,7 @@ function renderCheckoutStep(){
           +'<div class="confirm-icon" style="background:#fef3c7;">⏳</div>'
           +'<div class="confirm-title">Aguardando confirmação</div>'
           +'<div class="confirm-desc">Pedido <strong>#'+esc(currentOrder.order_number)+'</strong>. A loja vai confirmar seu pagamento em breve.</div>'
+          +htmlDoAvisoConcluido()
           +(currentOrder.payment_proof_url
             ?'<p style="font-size:12px;color:var(--green);margin-top:12px;">✓ Comprovante enviado</p>'
             :'<p style="font-size:12px;color:var(--text-3);margin-top:12px;">Sem comprovante anexado</p>')
@@ -520,6 +542,7 @@ function renderCheckoutStep(){
         +'<div style="font-size:11px;color:var(--text-3);margin-bottom:14px;">Copie o código e pague no app do banco</div>'
         +'<div class="pix-key-box"><span class="pix-key" id="pixPayload">'+esc(payload||'Indisponível')+'</span><span class="pix-copy" id="pixCopyBtn">Copiar código</span></div>'
         +'</div>'
+        +htmlDoAvisoConcluido()
         +'<div class="proof-box">'
         +'<label for="proofInput" style="display:flex;align-items:center;gap:10px;cursor:pointer;font-size:13px;color:var(--text-2);font-weight:600;"><span id="proofLabel">Anexar comprovante (opcional)</span></label>'
         +'<input type="file" id="proofInput" accept="image/*,application/pdf" style="display:none;">'
@@ -587,6 +610,7 @@ function bindAddressFormEvents(){
 
 function selectDelivery(type){
   selectedDelivery=type;
+  aplicarLojaFechada();
   // Reset state da cotacao ao alternar
   if(type==='pickup'){ shippingOutOfArea=false; }
   var op=document.getElementById('opt_pickup'),od=document.getElementById('opt_delivery');
@@ -672,12 +696,6 @@ function submitOrder(){
   fetch(API_BASE + '/api/v1/storefront/'+SLUG+'/order',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)})
   .then(function(r){return r.json().then(function(d){return{ok:r.ok,data:d};});})
   .then(function(res){
-    if(!res.ok && res.data && res.data.code==='LOJA_FECHADA'){
-      // A loja fechou com a pagina aberta: o servidor e quem decide.
-      SITE.is_open_now=false; SITE.next_open_text=res.data.next_open_text||'';
-      aplicarLojaFechada(); closeCheckout(); showToast(res.data.error||textoLojaFechada());
-      return;
-    }
     if(!res.ok){showToast(res.data.error||'Erro ao criar pedido');btn.disabled=false;btn.textContent='Ir para pagamento';return;}
     currentOrder=res.data; paymentMarked=false;
     saveCustomerToLocalStorage();

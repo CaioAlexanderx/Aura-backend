@@ -48,7 +48,7 @@
 'use strict';
 
 const db = require('../config/database');
-// Aberta/fechada: uma regra so, compartilhada com a recusa do pedido (19/10/2026).
+// Aberta/fechada: uma regra so, compartilhada com o aviso do pedido feito com a loja fechada (19/10/2026).
 const { estaAberta, momentoNoFuso, parseHHMM } = require('./horarioDaLoja');
 // O rodape institucional e o MESMO nas duas lojas — ver o modulo.
 const { montarRodape } = require('./rodapeInstitucional');
@@ -310,8 +310,8 @@ function parseBusinessHours(raw) {
  * A loja esta aberta agora? E, se nao, quando abre?
  *
  * O "aberta?" e de services/horarioDaLoja.js (estaAberta) — a mesma regra
- * que recusa o pedido fora do horario em POST /storefront/:slug/order. Aqui
- * so mora o texto "Abre ..." do selo.
+ * que marca o pedido feito com a loja fechada em POST /storefront/:slug/order.
+ * Aqui so moram os textos: "Abre ..." do selo e o "quando" do aviso.
  *
  * @param businessHours mapa dia -> { open, close, closed }.
  * @param alwaysOpen loja 24h (migration 310). Curto-circuita tudo: e um
@@ -323,9 +323,10 @@ function parseBusinessHours(raw) {
  *   Sem ele usa o relogio de Sao Paulo.
  */
 function computeOpenState(businessHours, alwaysOpen, agora) {
-  if (alwaysOpen === true) return { is_open_now: true, next_open_text: '' };
+  const aberta = { is_open_now: true, next_open_text: '', next_open_when: '' };
+  if (alwaysOpen === true) return aberta;
   const hours = parseBusinessHours(businessHours);
-  if (estaAberta(hours, agora)) return { is_open_now: true, next_open_text: '' };
+  if (estaAberta(hours, agora)) return aberta;
 
   const { hour, minute, dayIndex } = momentoNoFuso(agora);
   const nowMinutes = hour * 60 + minute;
@@ -337,23 +338,29 @@ function computeOpenState(businessHours, alwaysOpen, agora) {
     if (!day || day.closed) continue;
     const openM = parseHHMM(day.open);
     if (openM == null) continue;
+    // next_open_when: o mesmo momento em texto corrido ("hoje às 18:00",
+    // "amanhã às 18:00", "terça às 18:00") para o aviso da sacola e do
+    // checkout — "será entregue a partir de <next_open_when>" (19/10/2026).
     if (i === 0 && nowMinutes < openM) {
       return {
         is_open_now: false,
         next_open_text: `Abre hoje às ${day.open}`,
+        next_open_when: `hoje às ${day.open}`,
       };
     }
     if (i > 0) {
       const label = WEEK_LABELS[checkIdx];
       const prefix = i === 1 ? 'Abre amanhã' : `Abre ${label}`;
+      const quando = i === 1 ? 'amanhã' : label.toLowerCase();
       return {
         is_open_now: false,
         next_open_text: `${prefix} às ${day.open}`,
+        next_open_when: `${quando} às ${day.open}`,
       };
     }
   }
 
-  return { is_open_now: false, next_open_text: '' };
+  return { is_open_now: false, next_open_text: '', next_open_when: '' };
 }
 
 /** 12.345.678/0001-90 — ou '' quando o CNPJ nao tem 14 digitos. */
@@ -1001,7 +1008,7 @@ async function buildStorefront(config) {
   // always_open chega undefined enquanto a migration 310 nao rodou; o
   // `=== true` la dentro trata isso como "nao e 24h", que e o padrao.
   const alwaysOpen = config.always_open === true;
-  const { is_open_now, next_open_text } = computeOpenState(businessHours, alwaysOpen);
+  const { is_open_now, next_open_text, next_open_when } = computeOpenState(businessHours, alwaysOpen);
 
   return {
     site: {
@@ -1036,6 +1043,7 @@ async function buildStorefront(config) {
       service_cards: serviceCards,
       is_open_now,
       next_open_text,
+      next_open_when,
     },
     contact: {
       phone:     config.phone     || '',

@@ -1,11 +1,12 @@
 // ============================================================
-// AURA. — Horario da loja: a virada da meia-noite e a loja fechada
-// recusando o pedido (Canal Digital, 19/10/2026)
+// AURA. — Horario da loja: a virada da meia-noite e o pedido feito com
+// a loja fechada (Canal Digital, 19/10/2026)
 //
 // Antes: abre 18:00 e fecha 02:00 aparecia "Fechada" o tempo todo (o
-// selo comparava `agora >= 18h && agora < 2h` no mesmo dia) e "Fechada"
-// era so um selo — o pedido entrava igual. Agora uma regra so
-// (horarioDaLoja.estaAberta) decide o selo e a recusa do servidor.
+// selo comparava `agora >= 18h && agora < 2h` no mesmo dia). Agora uma
+// regra so (horarioDaLoja.estaAberta) decide o selo e o aviso. Decisao do
+// Caio (19/10): loja fechada NAO recusa o pedido — ele entra, o cliente e
+// avisado de quando sera preparado e a lojista ve a marca no painel.
 // ============================================================
 'use strict';
 
@@ -144,7 +145,8 @@ describe('estaAberta — fuso', () => {
 
 describe('computeOpenState (o selo) usa a mesma regra', () => {
   test('adega aberta no sabado as 19h: sem "Abre hoje"', () => {
-    expect(computeOpenState(ADEGA, false, as(SAB, '19:00'))).toEqual({ is_open_now: true, next_open_text: '' });
+    expect(computeOpenState(ADEGA, false, as(SAB, '19:00')))
+      .toEqual({ is_open_now: true, next_open_text: '', next_open_when: '' });
   });
 
   test('domingo 01:00 ainda e a noite de sabado', () => {
@@ -153,12 +155,18 @@ describe('computeOpenState (o selo) usa a mesma regra', () => {
 
   test('sabado 10:00: fechada, abre hoje as 18:00', () => {
     expect(computeOpenState(ADEGA, false, as(SAB, '10:00'))).toEqual({
-      is_open_now: false, next_open_text: 'Abre hoje às 18:00',
+      is_open_now: false, next_open_text: 'Abre hoje às 18:00', next_open_when: 'hoje às 18:00',
     });
   });
 
   test('domingo 03:00: fechada, abre terca', () => {
-    expect(computeOpenState(ADEGA, false, as(DOM, '03:00')).next_open_text).toBe('Abre Terça às 18:00');
+    const r = computeOpenState(ADEGA, false, as(DOM, '03:00'));
+    expect(r.next_open_text).toBe('Abre Terça às 18:00');
+    expect(r.next_open_when).toBe('terça às 18:00');
+  });
+
+  test('segunda 03:00 (seg sem expediente): abre amanha', () => {
+    expect(computeOpenState(ADEGA, false, as(SEG, '03:00')).next_open_when).toBe('amanhã às 18:00');
   });
 
   test('always_open continua vencendo', () => {
@@ -193,11 +201,12 @@ describe('problemasDoHorario — o que o PUT do canal aceita salvar', () => {
   });
 });
 
-// ── O servidor recusa o pedido com a loja fechada ─────────────────────
+// ── Loja fechada: o pedido entra, marcado para a lojista ──────────────
 describe('POST /storefront/:slug/order com a loja fechada', () => {
   const express = require('express');
   const request = require('supertest');
   const db = require('../src/config/database');
+  const { marcaDeLojaFechada } = require('../src/routes/storefront');
 
   const PRODUTO = { id: 'p1', name: 'CERVEJA', price: '9.90', stock_qty: 10, image_url: null, is_active: true };
   const SEM_EXPEDIENTE = {
@@ -205,6 +214,7 @@ describe('POST /storefront/:slug/order com a loja fechada', () => {
     qui: { closed: true }, sex: { closed: true }, sab: { open: '18:00', close: '02:00', closed: true },
   };
   let loja;
+  let consultasDoPedido;
 
   function makeApp() {
     const app = express();
@@ -215,6 +225,7 @@ describe('POST /storefront/:slug/order com a loja fechada', () => {
 
   beforeEach(() => {
     loja = { company_id: 'c1', pickup_enabled: true, pix_key: 'chave', company_display_name: 'Adega' };
+    consultasDoPedido = [];
     db.query.mockReset();
     db.connect.mockReset();
     db.query.mockImplementation((sql) => {
@@ -223,43 +234,143 @@ describe('POST /storefront/:slug/order com a loja fechada', () => {
       return Promise.resolve({ rows: [] });
     });
     db.connect.mockImplementation(() => ({
-      query: jest.fn((sql) => /INSERT INTO digital_orders/.test(String(sql))
-        ? Promise.resolve({ rows: [{ id: 'o1', order_number: 7, company_id: 'c1' }] })
-        : Promise.resolve({ rows: [] })),
+      query: jest.fn((sql, params) => {
+        consultasDoPedido.push([String(sql), params]);
+        return /INSERT INTO digital_orders/.test(String(sql))
+          ? Promise.resolve({ rows: [{ id: 'o1', order_number: 7, company_id: 'c1' }] })
+          : Promise.resolve({ rows: [] });
+      }),
       release: jest.fn(),
     }));
   });
 
-  const pedir = () => request(makeApp()).post('/storefront/adega/order').send({
+  const pedir = (extra = {}) => request(makeApp()).post('/storefront/adega/order').send({
     customer_name: 'Cliente', customer_phone: '11999999999',
     delivery_type: 'pickup', payment_method: 'pix',
     items: [{ product_id: 'p1', quantity: 1 }],
+    ...extra,
   });
-  const criouPedido = () => db.connect.mock.calls.length > 0;
+  // notes e o 13o parametro do INSERT do pedido (ver routes/storefront.js).
+  const notasGravadas = () => {
+    const ins = consultasDoPedido.find(([sql]) => /INSERT INTO digital_orders/.test(sql));
+    return ins ? ins[1][12] : undefined;
+  };
 
-  test('fora do horario: 409 com mensagem para o cliente e nenhum pedido criado', async () => {
+  test('fora do horario: o pedido e CRIADO, com a marca para a lojista e o aviso na resposta', async () => {
     loja.business_hours = SEM_EXPEDIENTE;
     const res = await pedir();
-    expect(res.status).toBe(409);
-    expect(res.body.code).toBe('LOJA_FECHADA');
-    expect(res.body.error).toMatch(/loja está fechada agora/);
-    expect(res.body.error).toMatch(/sacola fica guardada/);
-    expect(criouPedido()).toBe(false);
+    expect(res.status).toBe(201);
+    expect(res.body.code).toBeUndefined();
+    expect(res.body.order_id).toBe('o1');
+    expect(res.body.loja_fechada).toBe(true);
+    expect(res.body.abre_em).toBe(''); // nenhum dia com expediente
+    expect(notasGravadas()).toMatch(/^Pedido feito com a loja fechada \(\d{2}\/\d{2} às \d{2}:\d{2}\)\. /);
+    expect(notasGravadas()).toMatch(/quando a loja abrir/);
   });
 
-  test('sem horario cadastrado: pedido segue como hoje', async () => {
+  test('a observacao do cliente continua, depois da marca', async () => {
+    loja.business_hours = SEM_EXPEDIENTE;
+    await pedir({ notes: 'Troco para 100' });
+    expect(notasGravadas()).toMatch(/^Pedido feito com a loja fechada[^\n]*\nTroco para 100$/);
+  });
+
+  test('sem horario cadastrado: pedido como hoje, sem marca', async () => {
     loja.business_hours = {};
     const res = await pedir();
-    expect(res.status).not.toBe(409);
-    expect(criouPedido()).toBe(true);
+    expect(res.status).toBe(201);
+    expect(res.body.loja_fechada).toBe(false);
+    expect(notasGravadas()).toBeNull();
   });
 
   test('"Sempre aberta" ignora o horario', async () => {
     loja.business_hours = SEM_EXPEDIENTE;
     loja.always_open = true;
-    const res = await pedir();
-    expect(res.status).not.toBe(409);
-    expect(criouPedido()).toBe(true);
+    const res = await pedir({ notes: 'Sem cebola' });
+    expect(res.status).toBe(201);
+    expect(res.body.loja_fechada).toBe(false);
+    expect(notasGravadas()).toBe('Sem cebola');
+  });
+
+  test('a marca diz a hora de Sao Paulo e quando o pedido sera preparado', () => {
+    // 2026-10-18 02:30 UTC = 17/10 23:30 em Sao Paulo.
+    expect(marcaDeLojaFechada('amanhã às 18:00', new Date('2026-10-18T02:30:00Z')))
+      .toBe('Pedido feito com a loja fechada (17/10 às 23:30). O cliente foi avisado de que o pedido será preparado a partir de amanhã às 18:00.');
+  });
+});
+
+// ── Vitrine: aviso calmo na sacola, no checkout e no pedido concluido ──
+describe('vitrine com a loja fechada', () => {
+  const fonte = require('../src/templates/storefront/parts/checkout.js');
+
+  function montar(site, { selectedDelivery = 'pickup', currentOrder = null, checkoutStep = 1 } = {}) {
+    const els = {
+      cartFechada: { hidden: true, textContent: '' },
+      checkoutFechada: { hidden: true, textContent: '' },
+      checkoutOverlay: { classList: { add: jest.fn(), remove: jest.fn() } },
+    };
+    const renderCheckoutStep = jest.fn();
+    const esc = (x) => String(x);
+    const f = new Function(
+      'SITE', 'SETTINGS', 'document', 'showToast', 'loadSavedCustomer', 'closeCart', '__render', 'esc',
+      `var selectedDelivery=${JSON.stringify(selectedDelivery)}, currentOrder=${JSON.stringify(currentOrder)}, checkoutStep=${checkoutStep}, customerData={};\n`
+      + fonte
+      // A etapa desenhada nao e o assunto: troca-se a de verdade por um espiao.
+      + '; renderCheckoutStep = __render; return { aplicarLojaFechada, avisoDaLojaFechada, avisoDoPedidoConcluido, openCheckout,'
+      + ' setOrder: function(o){ currentOrder=o; checkoutStep=3; } };'
+    );
+    const api = f(site, { pickup_enabled: true }, { getElementById: (id) => els[id], body: { style: {} } },
+      jest.fn(), () => null, jest.fn(), renderCheckoutStep, esc);
+    return { api, els, renderCheckoutStep };
+  }
+  const FECHADA = { is_open_now: false, next_open_text: 'Abre hoje às 18:00', next_open_when: 'hoje às 18:00' };
+
+  test('a sacola e o checkout mostram quando o pedido fica pronto (retirada)', () => {
+    const { api, els } = montar(FECHADA);
+    api.aplicarLojaFechada();
+    const frase = 'A loja está fechada agora. Seu pedido estará pronto para retirar a partir de hoje às 18:00.';
+    expect(els.cartFechada).toEqual({ hidden: false, textContent: frase });
+    expect(els.checkoutFechada).toEqual({ hidden: false, textContent: frase });
+  });
+
+  test('entrega: "sera preparado e entregue a partir de"', () => {
+    const { api, els } = montar(FECHADA, { selectedDelivery: 'delivery' });
+    api.aplicarLojaFechada();
+    expect(els.checkoutFechada.textContent)
+      .toBe('A loja está fechada agora. Seu pedido será preparado e entregue a partir de hoje às 18:00.');
+  });
+
+  test('o botao de finalizar abre o checkout mesmo com a loja fechada', () => {
+    const { api, renderCheckoutStep } = montar(FECHADA);
+    api.openCheckout();
+    expect(renderCheckoutStep).toHaveBeenCalled();
+  });
+
+  test('pedido concluido repete a frase, com o "quando" que o servidor devolveu', () => {
+    const { api, els } = montar(FECHADA, { selectedDelivery: 'delivery' });
+    api.setOrder({ order_number: 7, loja_fechada: true, abre_em: 'amanhã às 18:00' });
+    expect(api.avisoDoPedidoConcluido())
+      .toBe('A loja está fechada agora. Seu pedido será preparado e entregue a partir de amanhã às 18:00.');
+    api.aplicarLojaFechada();
+    expect(els.checkoutFechada.hidden).toBe(true); // a tela final ja traz a frase
+  });
+
+  test('loja aberta: nenhum aviso', () => {
+    const { api, els } = montar({ is_open_now: true, next_open_text: '', next_open_when: '' });
+    api.aplicarLojaFechada();
+    expect(els.cartFechada.hidden).toBe(true);
+    expect(els.checkoutFechada.hidden).toBe(true);
+    api.setOrder({ order_number: 7, loja_fechada: false, abre_em: '' });
+    expect(api.avisoDoPedidoConcluido()).toBe('');
+  });
+
+  test('sem proximo horario conhecido: "quando ela abrir"', () => {
+    const { api } = montar({ is_open_now: false, next_open_text: '', next_open_when: '' });
+    expect(api.avisoDaLojaFechada('delivery'))
+      .toBe('A loja está fechada agora. Seu pedido será preparado e entregue quando ela abrir.');
+  });
+
+  test('nao ha mais tratamento de recusa no checkout', () => {
+    expect(fonte).not.toMatch(/LOJA_FECHADA/);
   });
 });
 
