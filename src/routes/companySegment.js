@@ -2,7 +2,7 @@
 // AURA. — Frente da empresa pelo proprio cliente (07/10/2026)
 //
 // PATCH /companies/:id/segment
-// Body: { segment, extras?: ['os'] }
+// Body: { segment, extras?: ['os'], only_if_empty?: true }
 //
 // Decisao do fundador (07/10/2026): o cliente PODE trocar a propria frente
 // em Configuracoes. So dono/admin da empresa (req.companyRole, carimbado por
@@ -19,8 +19,17 @@
 //   - empresa com OUTRA vertical ativa (odonto, food...) nao entra no Studio
 //     por aqui: a troca derrubaria a vertical dela (409 VERTICAL_ACTIVE)
 //
+// only_if_empty === true (tq-35, 18/10/2026): so o check-in do app manda. Grava
+// SO se companies.segment estiver vazio (NULL ou ''); a linha fica travada
+// (FOR UPDATE) na mesma transacao da checagem e da gravacao, entao uma frente
+// que chegou entre a leitura do app e este PATCH nunca e sobrescrita. Se ja
+// havia frente: 200 { applied: false, segment: <a que estava> } e NADA mais
+// mexe (nem segment_source, nem flags/vertical, nem audit_log). Sem o campo
+// (cartao "Sua frente" das Configuracoes, Gestao Aura) a troca segue de
+// proposito, como sempre.
+//
 // Resposta (mesmo formato de PATCH /admin/clients/:cid/segment):
-//   { segment, segment_source, vertical_active, flags: {...} }
+//   { segment, segment_source, vertical_active, flags: {...}, applied: true }
 //
 // Sem migration: companies.segment/segment_source ja existem (366) e
 // audit_log e a tabela da migration 023.
@@ -62,6 +71,9 @@ router.patch('/segment', asyncHandler(async (req, res) => {
     extras = [...new Set(body.extras)];
   }
 
+  // So o `true` literal liga a garantia; qualquer outra coisa age como ausente.
+  const onlyIfEmpty = body.only_if_empty === true;
+
   const client = await pool.connect();
   let state;
   let previous = null;
@@ -76,6 +88,11 @@ router.patch('/segment', asyncHandler(async (req, res) => {
       return res.status(404).json({ error: 'Empresa não encontrada' });
     }
     previous = rows[0].segment || null;
+    if (onlyIfEmpty && previous) {
+      // Ja ha frente (chegou depois da leitura do app): nao mexe em nada.
+      await client.query('ROLLBACK');
+      return res.json({ applied: false, segment: previous });
+    }
     const vertical = rows[0].vertical_active || null;
     if (segment === 'studio' && vertical && vertical !== 'studio') {
       await client.query('ROLLBACK');
@@ -119,7 +136,7 @@ router.patch('/segment', asyncHandler(async (req, res) => {
     console.warn('[companies/segment] audit log falhou:', err.message);
   }
 
-  res.json(state);
+  res.json({ ...state, applied: true });
 }));
 
 module.exports = router;
