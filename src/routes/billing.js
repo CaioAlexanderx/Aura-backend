@@ -445,7 +445,7 @@ router.post('/tokenize', requireAuth, requireRole('client', 'admin'), async (req
       creditCardHolderInfo: {
         name: holder_name,
         email: user.email,
-        cpfCnpj: (holder_cpf || company.cnpj || '').replace(/\D/g, ''),
+        cpfCnpj: (holder_cpf || company.cnpj || company.cpf || '').replace(/\D/g, ''),
         postalCode: holder_postal_code || company.address_zip || undefined,
         addressNumber: holder_address_number || undefined,
         address: holder_address || undefined,
@@ -785,7 +785,7 @@ router.post('/subscribe', requireAuth, requireRole('client', 'admin'), async (re
 
     const cardHolderInfo = credit_card_holder_name ? {
       name: credit_card_holder_name,
-      cpfCnpj: (credit_card_holder_cpf || company.cnpj || '').replace(/\D/g, ''),
+      cpfCnpj: (credit_card_holder_cpf || company.cnpj || company.cpf || '').replace(/\D/g, ''),
       email: user.email,
       phone: user.phone || undefined,
       postalCode: credit_card_holder_postal_code || company.address_zip || undefined,

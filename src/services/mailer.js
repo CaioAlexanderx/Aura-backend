@@ -467,6 +467,7 @@ async function sendSelfServeSignupNotification(info) {
       ${row('E-mail', info.email)}
       ${row('Telefone', info.phone)}
       ${row('CNPJ', info.cnpj)}
+      ${row('CPF (sem CNPJ)', info.cpf)}
       ${row('Plano', info.plan)}
       ${row('Trial até', info.trialEndsAt)}
     </table>`;
@@ -474,7 +475,7 @@ async function sendSelfServeSignupNotification(info) {
     to,
     subject: `Nova conta self-service: ${info.companyName || info.email}`,
     html: emailLayout(content),
-    text: `Nova conta self-service\nNome: ${info.name || '-'}\nEmpresa: ${info.companyName || '-'}\nE-mail: ${info.email || '-'}\nTelefone: ${info.phone || '-'}\nCNPJ: ${info.cnpj || '-'}\nPlano: ${info.plan || '-'}\nTrial ate: ${info.trialEndsAt || '-'}`,
+    text: `Nova conta self-service\nNome: ${info.name || '-'}\nEmpresa: ${info.companyName || '-'}\nE-mail: ${info.email || '-'}\nTelefone: ${info.phone || '-'}\nCNPJ: ${info.cnpj || '-'}${info.cpf ? '\nCPF (sem CNPJ): ' + info.cpf : ''}\nPlano: ${info.plan || '-'}\nTrial ate: ${info.trialEndsAt || '-'}`,
   });
 }
 
