@@ -248,7 +248,7 @@ describe('duplicata por nome + unidade + marca', () => {
   });
 
   test('contra o banco: mesma chave vira duplicata com o id; marca diferente entra', async () => {
-    mockSql([[/SELECT id, name, unit, brand FROM products/i, { rows: [
+    mockSql([[/SELECT id, name, unit, brand, sku FROM products/i, { rows: [
       { id: 'p9', name: 'Cimento CP II', unit: 'SC', brand: 'Votoran' },
       { id: 'p8', name: 'Areia', unit: null, brand: null }, // unidade antiga vazia = 'un'
     ] }]]);
@@ -268,7 +268,7 @@ describe('duplicata por nome + unidade + marca', () => {
     ]);
     expect(res.body.a_importar).toBe(2);
     // lookup e da empresa; sem filtro de is_active (DELETE e fisico)
-    const [sql, params] = chamadas(/SELECT id, name, unit, brand FROM products/i)[0];
+    const [sql, params] = chamadas(/SELECT id, name, unit, brand, sku FROM products/i)[0];
     expect(params).toEqual([cid]);
     expect(sql).not.toMatch(/is_active/);
   });
@@ -302,6 +302,76 @@ describe('duplicata por nome + unidade + marca', () => {
     expect(res.body.duplicates_skipped).toBe(1);
     expect(res.body.duplicatas).toEqual([expect.objectContaining({ index: 2, origem: 'lote', duplicata_de: 0 })]);
     expect(res.body.unidades_desconhecidas).toEqual({ total: 0, valores: [] });
+  });
+});
+
+// ────────────────────────────────────────────────────────────
+// 20/10/2026 (loja de roupas): nome generico ("Blusa" x23) com o codigo
+// do fornecedor no SKU. SKU preenchido e diferente dos dois lados = pecas
+// diferentes, entram as duas. Um lado sem SKU continua duplicata (pular e
+// o erro barato no import: deixar entrar dobraria o catalogo numa
+// reimportacao com a coluna SKU nova).
+describe('duplicata no import com SKU', () => {
+  const peca = (nome, sku, preco, tam) => ({ NOME: nome, 'VALOR DIN': preco, SKU: sku, TAMANHO: tam || '' });
+
+  test('lote: "Blusa" com SKUs diferentes entram todas; mesmo SKU (outro tamanho) vira duplicata', async () => {
+    mockSql([]);
+    const res = await request(app).post(url).set(auth).send({
+      dry_run: true,
+      rows: [
+        peca('Blusa', 'B1010', '89,90', 'P'),
+        peca('Blusa', 'C2020', '119,90', 'M'),
+        peca('blusa', ' c2020 ', '119,90', 'G'),
+        peca('Blusa', '55871', '149,90', 'U'),
+      ],
+    });
+    expect(res.status).toBe(200);
+    expect(res.body.a_importar).toBe(3);
+    expect(res.body.duplicatas).toEqual([
+      expect.objectContaining({ index: 2, origem: 'lote', criterio: 'nome_unidade_marca', duplicata_de: 1 }),
+    ]);
+  });
+
+  test('lote: um com SKU e outro sem continua duplicata (como antes)', async () => {
+    mockSql([]);
+    const res = await request(app).post(url).set(auth).send({
+      dry_run: true,
+      rows: [peca('Colar', 'K77', '59,90'), peca('Colar', '', '59,90')],
+    });
+    expect(res.body.a_importar).toBe(1);
+    expect(res.body.duplicatas).toEqual([expect.objectContaining({ index: 1, origem: 'lote', duplicata_de: 0 })]);
+  });
+
+  test('banco: SKU diferente entra; mesmo SKU vira duplicata com o id', async () => {
+    mockSql([[/SELECT id, name, unit, brand, sku FROM products/i, { rows: [
+      { id: 'p1', name: 'Blusa', unit: 'un', brand: null, sku: '41402' },
+    ] }]]);
+    const res = await request(app).post(url).set(auth).send({
+      dry_run: true,
+      rows: [
+        peca('Blusa', 'B8449', '139,90', 'P'),
+        peca('Blusa', '41402', '129,90', 'M'),
+      ],
+    });
+    expect(res.status).toBe(200);
+    expect(res.body.a_importar).toBe(1);
+    expect(res.body.duplicatas).toEqual([
+      expect.objectContaining({ index: 1, origem: 'banco', criterio: 'nome_unidade_marca', produto_id: 'p1' }),
+    ]);
+  });
+
+  test('banco: linha sem SKU contra produto com SKU continua duplicata', async () => {
+    mockSql([[/SELECT id, name, unit, brand, sku FROM products/i, { rows: [
+      { id: 'p1', name: 'Blusa', unit: 'un', brand: null, sku: '41402' },
+    ] }]]);
+    const res = await request(app).post(url).set(auth).send({
+      dry_run: true,
+      rows: [peca('Blusa', '', '99,90')],
+    });
+    expect(res.body.a_importar).toBe(0);
+    expect(res.body.duplicatas).toEqual([
+      expect.objectContaining({ index: 0, origem: 'banco', criterio: 'nome_unidade_marca', produto_id: 'p1' }),
+    ]);
   });
 });
 
