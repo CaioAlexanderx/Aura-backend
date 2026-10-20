@@ -97,6 +97,9 @@ async function listarClients360({ companyId = null } = {}) {
        u.email AS owner_email, u.full_name AS owner_name,
        COALESCE(NULLIF(u.phone, ''), c.phone) AS owner_phone, u.is_staff AS owner_is_staff,
        c.is_sandbox, c.access_code_used,
+       -- 20/10/2026: documento da conta. Sem CNPJ, o CPF do cadastro
+       -- (migration 400); to_jsonb devolve null se a coluna nao existir.
+       c.cnpj, to_jsonb(c)->>'cpf' AS cpf,
        (c.asaas_subscription_id IS NOT NULL) AS has_subscription,
        h.score AS health_score, h.risk_level, h.activity_score, h.usage_score, h.payment_score, h.adoption_score,
        (SELECT COUNT(*) FROM transactions WHERE company_id=c.id) AS tx_count,

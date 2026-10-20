@@ -11,8 +11,9 @@
 // Agora o documento vem, nesta ordem:
 //   1. cpf_cnpj digitado no checkout (explicito — sobrescreve o do Asaas)
 //   2. company.cnpj (se valido)
-//   3. CPF do titular do cartao (so PREENCHE o que falta, nunca sobrescreve)
-// Sem nenhum dos tres: 400 com stage='cpf_cnpj' — a tela abre o campo.
+//   3. company.cpf — conta sem CNPJ, cadastrada com CPF (20/10/2026)
+//   4. CPF do titular do cartao (so PREENCHE o que falta, nunca sobrescreve)
+// Sem nenhum deles: 400 com stage='cpf_cnpj' — a tela abre o campo.
 //
 // Cliente que JA existe no Asaas sem documento (criado pelo fluxo antigo) e
 // corrigido aqui: GET no cliente, e PUT com o documento se estiver vazio.
@@ -29,18 +30,9 @@ function onlyDigits(v) {
   return String(v == null ? '' : v).replace(/\D/g, '');
 }
 
-function validateCPF(cpf) {
-  const c = onlyDigits(cpf);
-  if (c.length !== 11) return false;
-  if (/^(\d)\1+$/.test(c)) return false;
-  const calc = (len) => {
-    let s = 0;
-    for (let i = 0; i < len; i++) s += parseInt(c[i], 10) * (len + 1 - i);
-    const r = (s * 10) % 11;
-    return r === 10 ? 0 : r;
-  };
-  return parseInt(c[9], 10) === calc(9) && parseInt(c[10], 10) === calc(10);
-}
+// 20/10/2026: a validacao do CPF mora em services/documentoEmpresa (o cadastro
+// com CPF usa a mesma). Reexportada abaixo para quem ja importava daqui.
+const { validateCPF } = require('./documentoEmpresa');
 
 function isValidTaxId(v) {
   const d = onlyDigits(v);
@@ -66,15 +58,22 @@ function isTaxIdAsaasError(err) {
 }
 
 // A empresa ja tem documento valido para cobrar sem perguntar nada?
+// 20/10/2026: a conta sem CNPJ cadastrada com CPF ja tem documento.
 function companyHasTaxId(company) {
-  return isValidTaxId(company && company.cnpj);
+  return isValidTaxId(company && company.cnpj) || isValidTaxId(company && company.cpf);
+}
+
+// Documento da empresa para o Asaas: CNPJ valido e, sem ele, o CPF do
+// cadastro (conta sem CNPJ). '' quando nao ha nenhum dos dois.
+function companyTaxId(company) {
+  return [company && company.cnpj, company && company.cpf].map(onlyDigits).find(isValidTaxId) || '';
 }
 
 async function ensureAsaasCustomer(company, user, opts) {
   const typed = onlyDigits(opts && opts.taxId);
   if (typed && !isValidTaxId(typed)) throw taxIdError(TAX_ID_INVALID_MSG);
 
-  const fallback = [company.cnpj, opts && opts.fallbackTaxId].map(onlyDigits).find(isValidTaxId) || '';
+  const fallback = [companyTaxId(company), opts && opts.fallbackTaxId].map(onlyDigits).find(isValidTaxId) || '';
   const doc = typed || fallback;
 
   if (!company.asaas_customer_id) {
@@ -109,6 +108,7 @@ async function ensureAsaasCustomer(company, user, opts) {
 module.exports = {
   ensureAsaasCustomer,
   companyHasTaxId,
+  companyTaxId,
   isValidTaxId,
   validateCPF,
   isTaxIdAsaasError,

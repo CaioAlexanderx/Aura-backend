@@ -5,6 +5,8 @@
 // ============================================================
 
 const router = require('express').Router({ mergeParams: true });
+// 20/10/2026: conta sem CNPJ (cadastro com CPF) — mensagem unica de "precisa de CNPJ".
+const { cnpjRequiredBody } = require('../services/documentoEmpresa');
 const db     = require('../config/database');
 const fiscal = require('../services/nuvemfiscal');
 const { requireAuth, requireRole } = require('../middleware/auth');
@@ -55,7 +57,7 @@ router.post('/certificate', requireAuth, requireRole('client', 'analyst', 'admin
   }
   try {
     const company = await getCompanyNfe(cid);
-    if (!company.cnpj) return res.status(400).json({ error: 'Empresa sem CNPJ cadastrado' });
+    if (!company.cnpj) return res.status(400).json(cnpjRequiredBody());
     await fiscal.uploadCertificate(company.cnpj, certificate, password);
     await db.query('UPDATE companies SET certificate_uploaded = true, updated_at = NOW() WHERE id = $1', [cid]);
     res.json({ message: 'Certificado A1 enviado com sucesso' });
@@ -77,7 +79,7 @@ router.post('/emit/nfse', requireAuth, requireRole('client', 'analyst', 'admin')
 
   try {
     const company = await getCompanyNfe(cid);
-    if (!company.cnpj)               return res.status(400).json({ error: 'Empresa sem CNPJ cadastrado' });
+    if (!company.cnpj)               return res.status(400).json(cnpjRequiredBody());
     if (!company.inscricao_municipal) return res.status(400).json({ error: 'Inscricao municipal nao cadastrada. Atualize em Configuracoes.' });
 
     await db.query(
@@ -135,7 +137,7 @@ router.post('/emit/nfce', requireAuth, requireRole('client', 'analyst', 'admin')
 
   try {
     const company = await getCompanyNfe(cid);
-    if (!company.cnpj) return res.status(400).json({ error: 'Empresa sem CNPJ cadastrado' });
+    if (!company.cnpj) return res.status(400).json(cnpjRequiredBody());
 
     await db.query(
       `INSERT INTO nfe_documents

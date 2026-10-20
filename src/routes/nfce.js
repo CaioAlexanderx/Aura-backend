@@ -40,6 +40,8 @@ const engineBreaker                = require('../services/sefazSp/engineBreaker'
 const rejectionCatalog             = require('../services/sefazSp/rejectionCatalog');
 const taxEngine                    = require('../services/sefazSp/taxEngine');
 const { buildDanfeNfceHtml }       = require('../utils/buildDanfeNfceHtml');
+// 20/10/2026: conta sem CNPJ (cadastro com CPF) — mensagem unica de "precisa de CNPJ".
+const { cnpjRequiredBody }         = require('../services/documentoEmpresa');
 // 06/08/2026 — Nuvem Fiscal não existe mais: precisamos validar, na hora de
 // SALVAR a config (não só na hora de emitir), se a UF da empresa já tem
 // suporte na engine própria — hoje SP e AP (SVRS). Ver services/sefazSp/endpoints.js.
@@ -410,6 +412,13 @@ router.post('/emit', requireAuth, requireRole('client','analyst','admin'), async
 
     const { rows: configs } = await db.query('SELECT * FROM nfce_config WHERE company_id=$1', [req.params.id]);
     if (!configs.length || !configs[0].is_active) {
+      // 20/10/2026: conta sem CNPJ (cadastro com CPF) nunca vai configurar a
+      // nota — diz o motivo real em vez de mandar para a configuracao. So
+      // consulta o banco neste caminho de erro; a venda com nota segue igual.
+      const { rows: semConfig } = await db.query('SELECT cnpj FROM companies WHERE id=$1', [req.params.id]);
+      if (semConfig.length && !semConfig[0].cnpj) {
+        return res.status(400).json(cnpjRequiredBody({ instrucao: INSTRUCOES_NOTA.dica }));
+      }
       return res.status(400).json({ error: 'Emissao de nota fiscal nao configurada. Acesse Configuracoes > Nota Fiscal.', instrucao: INSTRUCOES_NOTA.dica });
     }
     const config = configs[0];
@@ -424,7 +433,7 @@ router.post('/emit', requireAuth, requireRole('client','analyst','admin'), async
     );
     if (!companies.length) return res.status(404).json({ error: 'Empresa nao encontrada' });
     const company = companies[0];
-    if (!company.cnpj) return res.status(400).json({ error: 'CNPJ da empresa nao cadastrado.' });
+    if (!company.cnpj) return res.status(400).json(cnpjRequiredBody());
     if (!company.ibge_code) return res.status(400).json({ error: 'Codigo IBGE da empresa nao cadastrado (campo cMun obrigatorio). Atualize em Configuracoes > Empresa.' });
     if (!company.inscricao_estadual && config.inscricao_estadual) company.inscricao_estadual = config.inscricao_estadual;
     if (!company.inscricao_estadual) return res.status(400).json({ error: 'Inscricao Estadual da empresa nao cadastrada.' });

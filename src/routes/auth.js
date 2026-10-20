@@ -106,6 +106,7 @@ const trialRegra = require('../services/trialRegra');
 const { applySegment, isValidSegment, normalizeCnae, ALLOWED_EXTRAS } = require('../services/segment');
 const signupOrigem = require('../services/signupOrigem');
 const { lookupCNPJ } = require('../services/cnpj');
+const documentoEmpresa = require('../services/documentoEmpresa');
 
 let redis = null;
 try { redis = require('../config/redis').default || require('../config/redis'); } catch (_) {}
@@ -302,13 +303,21 @@ function shapeCompany(company, fallbackMemberRole) {
 
 // POST /api/v1/auth/register
 router.post('/register', async (req, res) => {
-  const { name, email, password, company_name, phone, cnpj, access_code, terms_accepted, terms_version, self_serve, vertical, federation_id, tax_regime } = req.body;
+  const { name, email, password, company_name, phone, cnpj, cpf, access_code, terms_accepted, terms_version, self_serve, vertical, federation_id, tax_regime } = req.body;
   const isSelfServe = (self_serve === true || self_serve === 'true');
+  // 20/10/2026: conta sem CNPJ ("Nao tenho CNPJ" no cadastro). O CPF so vale
+  // quando NAO veio cnpj — com cnpj no corpo o fluxo e o de sempre e o cpf e
+  // ignorado. Gravado em companies.cpf (migration 400), nunca em cnpj/tax_id.
+  const cleanCpf = (!cnpj && cpf) ? documentoEmpresa.onlyDigits(cpf) : null;
   // 12/10/2026: o regime que o cadastro detectou pela Receita vem no corpo e
   // é gravado na empresa nova. Antes ninguém gravava e TODO cadastro ficava
   // com o default da coluna (simples_nacional) — 148 de 149 empresas.
   const REGIMES = ['mei', 'simples_nacional', 'lucro_presumido', 'lucro_real'];
-  const regimeDoCadastro = REGIMES.includes(tax_regime) ? tax_regime : null;
+  // 20/10/2026: conta com CPF nao tem regime (nao ha Receita para consultar).
+  // Nada de inventar: o tax_regime do corpo e ignorado e a coluna (NOT NULL)
+  // fica no default; o app trata o regime como "a confirmar" enquanto nao
+  // houver CNPJ (GET /companies/:id/profile -> regime_a_confirmar).
+  const regimeDoCadastro = (!cleanCpf && REGIMES.includes(tax_regime)) ? tax_regime : null;
   const isComecarCode = typeof access_code === 'string' && access_code.toUpperCase().trim() === 'COMECAR';
 
   if (!name || !email || !password) return res.status(400).json({ error: 'Campos obrigatorios: name, email, password' });
@@ -316,6 +325,14 @@ router.post('/register', async (req, res) => {
   if (!terms_accepted) return res.status(400).json({ error: 'O aceite dos Termos de Uso e obrigatorio para criar uma conta' });
   if (password.length < 8) return res.status(400).json({ error: 'Senha deve ter pelo menos 8 caracteres' });
   if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return res.status(400).json({ error: 'E-mail invalido' });
+  if (cleanCpf !== null) {
+    if (!documentoEmpresa.validateCPF(cleanCpf)) {
+      return res.status(400).json({ error: 'CPF invalido. Confira os numeros.', code: 'CPF_INVALID' });
+    }
+    if (!company_name || !String(company_name).trim()) {
+      return res.status(400).json({ error: 'Informe o nome da sua loja', code: 'COMPANY_NAME_REQUIRED' });
+    }
+  }
 
   // ── F11: ramo declarado no cadastro (opcional) ─────────────
   // Sem `vertical` no body nada abaixo roda e o fluxo segue identico ao
@@ -359,6 +376,28 @@ router.post('/register', async (req, res) => {
     await client.query('BEGIN');
     const { rows: existing } = await client.query('SELECT id FROM users WHERE email = $1', [email.toLowerCase().trim()]);
     if (existing.length > 0) { await client.query('ROLLBACK'); return res.status(409).json({ error: 'E-mail ja cadastrado' }); }
+
+    // 20/10/2026: CPF ja usado por outra conta — mesmo padrao do CNPJ ja
+    // cadastrado (409 + code). Diferente do CNPJ, o CPF nunca "entra como
+    // vendedor" numa empresa existente: o CPF e da pessoa, nao da loja.
+    if (cleanCpf) {
+      let cpfEmUso = [];
+      try {
+        ({ rows: cpfEmUso } = await client.query('SELECT id FROM companies WHERE cpf = $1 LIMIT 1', [cleanCpf]));
+      } catch (e) {
+        if (e.code !== '42703') throw e;
+        // Coluna da migration 400 ausente: sem onde gravar o CPF.
+        await client.query('ROLLBACK');
+        return res.status(503).json({ error: 'Cadastro com CPF indisponivel no momento. Tente de novo em alguns minutos.', code: 'CPF_SIGNUP_UNAVAILABLE' });
+      }
+      if (cpfEmUso.length) {
+        await client.query('ROLLBACK');
+        return res.status(409).json({
+          error: 'Ja existe uma conta Aura com este CPF. Entre com ela ou peca acesso ao responsavel.',
+          code: 'CPF_ALREADY_REGISTERED',
+        });
+      }
+    }
 
     // F11: a federacao escolhida precisa existir e estar ativa. `vertical` e
     // o campo CANONICO de identidade (ver src/config/karateRoles.js). Nao
@@ -478,6 +517,25 @@ router.post('/register', async (req, res) => {
       );
       company = newCompany;
 
+      // 20/10/2026: conta sem CNPJ — o CPF vai em companies.cpf, na mesma
+      // transacao. UPDATE separado para o INSERT acima (o de quem tem CNPJ)
+      // ficar identico ao de sempre.
+      if (cleanCpf) {
+        try {
+          await client.query('UPDATE companies SET cpf = $2 WHERE id = $1', [company.id, cleanCpf]);
+        } catch (e) {
+          if (e.code === '23505') {
+            await client.query('ROLLBACK');
+            return res.status(409).json({
+              error: 'Ja existe uma conta Aura com este CPF. Entre com ela ou peca acesso ao responsavel.',
+              code: 'CPF_ALREADY_REGISTERED',
+            });
+          }
+          throw e;
+        }
+        company = { ...company, cpf: cleanCpf };
+      }
+
       // 15/10/2026 (t2-09): primeiro toque do site, na mesma transacao.
       if (signupOrigin) await signupOrigem.gravarOrigem(client, company.id, signupOrigin);
 
@@ -538,6 +596,7 @@ router.post('/register', async (req, res) => {
         email: user.email,
         phone: phone || null,
         cnpj: cnpj || null,
+        cpf: cleanCpf || null,
         plan: company.plan,
         trialDays,
         trialEndsAt: company.trial_ends_at,

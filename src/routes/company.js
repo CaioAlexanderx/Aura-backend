@@ -14,8 +14,9 @@ router.get('/profile', async (req, res) => {
               vigilancia_alvara_expires_at, vigilancia_alvara_number,
               vigilancia_alvara_reminder_enabled,
               cro_state, cro_pj_number, cro_rt_number, cro_rt_user_id,
-              cnes_number, uses_controlled_meds, dental_compliance_enabled
-       FROM companies WHERE id = $1`,
+              cnes_number, uses_controlled_meds, dental_compliance_enabled,
+              to_jsonb(c)->>'cpf' AS cpf
+       FROM companies c WHERE id = $1`,
       [req.params.id]
     );
     if (!rows.length) return res.status(404).json({ error: 'Empresa nao encontrada' });
@@ -26,6 +27,11 @@ router.get('/profile', async (req, res) => {
       trade_name:      c.trade_name  || '',
       legal_name:      c.legal_name  || '',
       cnpj:            c.cnpj         || '',
+      // 20/10/2026: conta sem CNPJ, cadastrada com CPF (migration 400; o
+      // to_jsonb acima devolve null se a coluna ainda nao existir). Sem CNPJ
+      // nao ha regime vindo da Receita: o app mostra "a confirmar".
+      cpf:             c.cpf          || '',
+      regime_a_confirmar: !c.cnpj,
       phone:           c.phone        || '',
       email:           c.email        || '',
       address:         c.address      || '',
@@ -138,6 +144,11 @@ router.put('/profile', async (req, res) => {
       updated:    true,
     });
   } catch (err) {
+    // 20/10/2026: CNPJ informado depois (conta que nasceu com CPF) que ja
+    // pertence a outra conta: antes caia no 500 generico.
+    if (err.code === '23505' && /cnpj/i.test(String(err.constraint || err.detail || ''))) {
+      return res.status(409).json({ error: 'Ja existe uma conta Aura com este CNPJ. Fale com o suporte da Aura.', code: 'CNPJ_ALREADY_REGISTERED' });
+    }
     console.error('[company] PUT /profile error:', err.message);
     res.status(500).json({ error: 'Erro ao atualizar perfil' });
   }
