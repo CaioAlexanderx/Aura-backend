@@ -202,6 +202,8 @@ const {
   resolverUnidadeImport,
   normalizarUnidadeImport,
   chaveProdutoImport,
+  chaveSku,
+  mesmaPecaNoImport,
 } = require('../services/productDedupKey');
 
 // Mesmo tratamento de products.js (sanitizeBrand): trim, null se vazio,
@@ -476,6 +478,10 @@ router.post('/products/import', requireAuth, async (req, res) => {
   // e nome + unidade + marca (sem acento, espacos colapsados); o codigo de
   // barras continua deduplicando sozinho. Roda tambem no dry_run, para o
   // front mostrar o que NAO vai entrar antes de confirmar.
+  // 20/10/2026: SKU preenchido e DIFERENTE dos dois lados = pecas
+  // diferentes (loja de roupa: "Blusa" x23, cada uma com o codigo do
+  // fornecedor), entram as duas. Se um lado nao tem SKU, segue duplicata
+  // como antes -- ver mesmaPecaNoImport (services/productDedupKey.js).
   const duplicatas = [];
   const descrever = (p, index, origem, extra) => ({
     index, origem, ...extra,
@@ -484,22 +490,25 @@ router.post('/products/import', requireAuth, async (req, res) => {
 
   // Fase 1 — dentro do proprio lote (primeira linha vence).
   const primeiraPorBarcode = new Map();
-  const primeiraPorChave   = new Map();
+  const primeiraPorChave   = new Map(); // chave -> [{ sku, index }]
   const candidatos = [];
   valid.forEach((p, k) => {
     const index = linhaDe[k];
     const chave = chaveProdutoImport(p.name, p.unit, p.brand);
+    const sku = chaveSku(p.sku);
     if (p.barcode && primeiraPorBarcode.has(p.barcode)) {
       duplicatas.push(descrever(p, index, 'lote', { criterio: 'codigo_de_barras', duplicata_de: primeiraPorBarcode.get(p.barcode) }));
       return;
     }
-    if (primeiraPorChave.has(chave)) {
-      duplicatas.push(descrever(p, index, 'lote', { criterio: 'nome_unidade_marca', duplicata_de: primeiraPorChave.get(chave) }));
+    const mesma = mesmaPecaNoImport(primeiraPorChave.get(chave), sku);
+    if (mesma) {
+      duplicatas.push(descrever(p, index, 'lote', { criterio: 'nome_unidade_marca', duplicata_de: mesma.index }));
       return;
     }
     if (p.barcode) primeiraPorBarcode.set(p.barcode, index);
-    primeiraPorChave.set(chave, index);
-    candidatos.push({ p, index, chave });
+    if (!primeiraPorChave.has(chave)) primeiraPorChave.set(chave, []);
+    primeiraPorChave.get(chave).push({ sku, index });
+    candidatos.push({ p, index, chave, sku });
   });
 
   // Fase 2 — contra o banco. Nome sem acento/espacos nao da pra casar com
@@ -510,7 +519,7 @@ router.post('/products/import', requireAuth, async (req, res) => {
   // mesclado) nao pode voltar ativo numa reimportacao.
   const barcodeList = candidatos.filter(c => c.p.barcode).map(c => c.p.barcode);
   const existentesPorBarcode = new Map();
-  const existentesPorChave   = new Map();
+  const existentesPorChave   = new Map(); // chave -> [{ sku, id }]
 
   try {
     const [barRes, nomeRes] = await Promise.all([
@@ -518,13 +527,14 @@ router.post('/products/import', requireAuth, async (req, res) => {
         ? db.query(`SELECT id, barcode FROM products WHERE company_id=$1 AND barcode = ANY($2::text[])`, [companyId, barcodeList])
         : { rows: [] },
       candidatos.length > 0
-        ? db.query(`SELECT id, name, unit, brand FROM products WHERE company_id=$1`, [companyId])
+        ? db.query(`SELECT id, name, unit, brand, sku FROM products WHERE company_id=$1`, [companyId])
         : { rows: [] },
     ]);
     for (const r of barRes.rows) existentesPorBarcode.set(r.barcode, r.id || null);
     for (const r of nomeRes.rows) {
       const k = chaveProdutoImport(r.name, r.unit, r.brand);
-      if (!existentesPorChave.has(k)) existentesPorChave.set(k, r.id || null);
+      if (!existentesPorChave.has(k)) existentesPorChave.set(k, []);
+      existentesPorChave.get(k).push({ sku: chaveSku(r.sku), id: r.id || null });
     }
   } catch (err) {
     console.error('[import-products] lookup error:', err.message);
@@ -532,13 +542,14 @@ router.post('/products/import', requireAuth, async (req, res) => {
   }
 
   const toInsert = [];
-  for (const { p, index, chave } of candidatos) {
+  for (const { p, index, chave, sku } of candidatos) {
     if (p.barcode && existentesPorBarcode.has(p.barcode)) {
       duplicatas.push(descrever(p, index, 'banco', { criterio: 'codigo_de_barras', produto_id: existentesPorBarcode.get(p.barcode) }));
       continue;
     }
-    if (existentesPorChave.has(chave)) {
-      duplicatas.push(descrever(p, index, 'banco', { criterio: 'nome_unidade_marca', produto_id: existentesPorChave.get(chave) }));
+    const existente = mesmaPecaNoImport(existentesPorChave.get(chave), sku);
+    if (existente) {
+      duplicatas.push(descrever(p, index, 'banco', { criterio: 'nome_unidade_marca', produto_id: existente.id }));
       continue;
     }
     toInsert.push(p);

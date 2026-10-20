@@ -8,7 +8,8 @@ const db     = require('../config/database');
 // 23/09/2026 (QA producao): /duplicate-groups passou a usar a MESMA chave
 // de dedup do import por planilha -- nome + unidade + marca, normalizados
 // (services/productDedupKey.js). Ver comentario da rota abaixo.
-const { chaveProdutoImport } = require('../services/productDedupKey');
+// 20/10/2026: + SKU na chave (chaveDuplicataProduto) -- ver a rota.
+const { chaveDuplicataProduto } = require('../services/productDedupKey');
 
 // Normaliza nome pra comparacao: trim + lowercase + colapsar espacos.
 // Usada so em /check-duplicate (Fase A -- aviso no cadastro, propositalmente
@@ -75,6 +76,17 @@ router.get('/check-duplicate', async (req, res) => {
 // chave nome+unidade+marca que o import por planilha ja usa (PR #739) --
 // e so entram no is_active=true (produto filho de variante ja unificada
 // nao reaparece como duplicata fantasma).
+//
+// FIX (20/10/2026, loja de roupas medida): planilha com nome generico
+// ("Blusa" x23, "Colar" x8), cada linha com o SKU do fornecedor e preco
+// proprio, dava 14 grupos de "duplicata" -- eram pecas diferentes. Agora
+// a chave inclui o SKU (chaveDuplicataProduto): com SKU, so agrupa SKU
+// igual (o mesmo modelo em tamanhos diferentes, ex. 41402 P e M); sem
+// SKU nos dois, a regra de antes; um com SKU e outro sem nao agrupa
+// (SKU preenchido = peca do fornecedor; unificar apaga o secundario, entao
+// na duvida nao sugerir). normalized_name passa a ser a chave inteira:
+// o front usa como key da lista e dois grupos "Blusa" de SKUs diferentes
+// precisam de chaves diferentes.
 // ============================================================
 router.get('/duplicate-groups', async (req, res) => {
   const cid = req.params.id;
@@ -87,11 +99,11 @@ router.get('/duplicate-groups', async (req, res) => {
       [cid]
     );
 
-    // Agrupa em JS (nao SQL): chaveProdutoImport tira acento e normaliza a
-    // unidade pela tabela de grafias do deposito (mesma logica do import).
+    // Agrupa em JS (nao SQL): a chave tira acento e normaliza a unidade
+    // pela tabela de grafias do deposito (mesma logica do import).
     const byKey = new Map();
     for (const p of products) {
-      const key = chaveProdutoImport(p.name, p.unit, p.brand);
+      const key = chaveDuplicataProduto(p.name, p.unit, p.brand, p.sku);
       if (!byKey.has(key)) byKey.set(key, []);
       byKey.get(key).push(p);
     }
@@ -104,6 +116,7 @@ router.get('/duplicate-groups', async (req, res) => {
         normalized_name: key,
         unit: list[0].unit || null,
         brand: list[0].brand || null,
+        sku: list[0].sku ? String(list[0].sku).trim() : null,
         count: list.length,
         products: list.map(p => ({
           id: p.id, name: p.name, sku: p.sku || '', barcode: p.barcode || '',

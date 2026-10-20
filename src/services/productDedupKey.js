@@ -82,10 +82,51 @@ function chaveProdutoImport(name, unit, brand) {
   return [chaveTexto(name), chaveTexto(normalizarUnidadeImport(unit)), chaveTexto(brand)].join('|');
 }
 
+// ─── SKU (20/10/2026, loja de roupas) ───────────────────────
+// Planilha de loja de roupa vem com nome generico ("Blusa" x23, "Colar"
+// x8) e o codigo do fornecedor no SKU: cada linha e uma PECA diferente,
+// com preco proprio. So nome+unidade+marca jogava todas no mesmo grupo
+// de "duplicatas" (14 grupos falsos numa loja medida em 20/10). O mesmo
+// modelo em tamanhos diferentes repete o SKU (41402 P e M) -- esse sim
+// e candidato a unificar em variante.
+//
+// SKU comparado com trim e sem caixa ("b8449 " == "B8449"). Vazio = ''.
+function chaveSku(sku) {
+  return String(sku === null || sku === undefined ? '' : sku).trim().toLowerCase();
+}
+
+// Chave do banner "N grupos de produtos duplicados" (GET
+// /duplicate-groups): nome + unidade + marca + SKU.
+//   - os dois com SKU: so agrupa se o SKU for o MESMO;
+//   - os dois sem SKU: regra de antes (so nome+unidade+marca);
+//   - um com SKU e outro sem: NAO agrupa. SKU preenchido e sinal de peca
+//     cadastrada com o codigo do fornecedor; o sem SKU pode ser outra
+//     peca de mesmo nome generico. O banner empurra a unificar em
+//     VARIANTE, que apaga o produto secundario -- na duvida, nao sugerir.
+function chaveDuplicataProduto(name, unit, brand, sku) {
+  return chaveProdutoImport(name, unit, brand) + '|' + chaveSku(sku);
+}
+
+// Import por planilha: dentre os ja vistos com a mesma chave
+// nome+unidade+marca (`lista` = [{ sku, ... }], sku ja passado por
+// chaveSku), devolve o que conta como a MESMA peca, ou undefined.
+// SKU diferente dos dois lados = pecas diferentes, entram as duas (como
+// no banner). Se um dos lados nao tem SKU, continua duplicata como antes:
+// aqui o erro caro e o contrario do banner -- deixar entrar dobra o
+// catalogo numa reimportacao (ex.: 1a planilha sem a coluna SKU, 2a com
+// ela), e a linha pulada volta listada em `duplicatas` no dry_run.
+function mesmaPecaNoImport(lista, sku) {
+  if (!lista) return undefined;
+  return lista.find((e) => !sku || !e.sku || e.sku === sku);
+}
+
 module.exports = {
   chaveTexto,
   UNIDADES_IMPORT,
   resolverUnidadeImport,
   normalizarUnidadeImport,
   chaveProdutoImport,
+  chaveSku,
+  chaveDuplicataProduto,
+  mesmaPecaNoImport,
 };
