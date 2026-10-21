@@ -25,6 +25,8 @@ const { scriptsDoHead, metatagsDeSeo } = require('../services/rastreadores');
 const { linkDeFontes } = require('./storefrontTypography');
 const buildHtmlBody = require('./storefrontHtml');
 const buildScript   = require('./storefrontScript');
+// tq-61: o numero do wa.me com o 55 — uma regra so (services/whatsappDaLoja.js).
+const { numeroDoWhatsapp } = require('../services/whatsappDaLoja');
 
 // Lido a cada pagina, e nao uma vez no load do modulo: trocar a variavel
 // no ambiente passa a valer no proximo boot sem depender da ordem em que
@@ -46,7 +48,8 @@ function buildStorefrontPage(data, slug) {
   const logoUrl  = site.logo_url  ? escHtml(site.logo_url)  : '';
   const coverUrl = site.cover_url ? escHtml(site.cover_url) : '';
   const announcementBar = site.announcement_bar ? escHtml(site.announcement_bar) : '';
-  const whatsNum = (data.contact?.whatsapp || '').replace(/\D/g, '');
+  // O painel grava "(12) 98136-5134"; o wa.me precisa de 5512981365134.
+  const whatsNum = numeroDoWhatsapp(data.contact?.whatsapp);
   const addrText = escHtml(data.contact?.address || '');
 
   // Fase 5: open state. Quando o builder nao computou (config sem
@@ -158,6 +161,10 @@ function buildStorefrontPage(data, slug) {
     addrText, horarioTexto: site.horario_resumo || '', cnpjTexto: site.cnpj_formatado || '',
     announcementBar: announcementFinal, banners, serviceCards,
     isOpenNow, nextOpenText, whatsNum,
+    // Titulo e texto do bloco do WhatsApp escritos pela lojista
+    // (migration 401). Fora do storeData de proposito: o <script> das
+    // lojas que nao escreveram nada nao muda.
+    whatsBloco: data.whats_bloco || null,
     // Formas de pagamento vem do que a lojista LIGOU, nao de lista fixa.
     pagamentos: {
       pix:  data.settings && data.settings.has_pix === true,

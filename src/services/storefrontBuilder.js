@@ -1111,6 +1111,13 @@ async function buildStorefront(config) {
     // Migration 306 — politica de troca do rodape. NULL faz o template
     // usar o texto padrao.
     politica_troca: config.politica_troca || null,
+    // Migration 401 — titulo e texto do bloco do WhatsApp escritos pela
+    // lojista. NULL = o texto de hoje ("Duvida sobre tamanho ou
+    // modelo?"). Base sem a migration devolve undefined, que vira null.
+    whats_bloco: {
+      titulo: config.whats_bloco_titulo || null,
+      texto: config.whats_bloco_texto || null,
+    },
     // Rodape institucional JA RESOLVIDO. A vitrine Studio nao remonta a
     // lista de formas nem repete o texto padrao: se repetisse, uma
     // correcao no texto valeria numa loja e nao na outra.
