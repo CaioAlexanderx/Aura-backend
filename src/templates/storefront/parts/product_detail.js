@@ -94,6 +94,30 @@ function origemAtual(){
 /** Abaixo disto a pagina avisa "Ultimas N unidades" na variante escolhida. */
 var LIMITE_DE_ULTIMAS=3;
 
+// ── A sacola no topo da pagina do produto (tq-63, 20/10/2026) ──
+//
+// O topo da peca so tinha "Voltar" e as migalhas: depois de "Adicionado a
+// sacola" nao havia como abrir a sacola sem voltar a home. Agora o mesmo
+// icone com contador do topo da loja fica a direita, e abre a mesma
+// gaveta.
+//
+// A pagina do produto e a camada da sacola tem o mesmo z-index (200) e a
+// pagina entra DEPOIS no DOM: aberta daqui, a gaveta (201) aparecia, mas
+// o fundo escuro ficava embaixo da pagina e clicar fora nao fechava.
+// Subir o fundo para 201 so neste caminho resolve sem mexer na sacola
+// aberta pela home (la nao ha nada entre 200 e 201).
+function abrirSacolaDoProduto(){
+  openCart();
+  var fundo=document.getElementById('cartOverlay');
+  if(fundo) fundo.style.zIndex='201';
+}
+/** O contador da pagina do produto segue o do topo (chamado em updateCartUI). */
+function sincronizarSacolaDoProduto(){
+  var b=document.getElementById('pdCartBadge'); if(!b) return;
+  var n=getCount();
+  b.textContent=n; b.classList.toggle('visible',n>0);
+}
+
 function fecharProduto(){
   if(!paginaProduto) return;
   if(paginaProduto.parar) paginaProduto.parar();
@@ -459,6 +483,10 @@ function showDetail(id,opts){
      '<div class="pd-topo"><div class="pd-topo-inner">'
     +'<button type="button" class="pd-voltar" id="pdVoltar"><span class="pd-voltar-seta">&#8592;</span>'+esc(origemAtual())+'</button>'
     +'<nav class="crumbs pd-crumbs" aria-label="Você está em">'+migalhasDoProduto(p)+'</nav>'
+    +'<button type="button" class="cart-btn pd-sacola" id="pdSacola" aria-label="Abrir sacola">'
+    +'<svg width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 7h14l-1 13H6L5 7z"/><path d="M9 7V5a3 3 0 016 0v2"/></svg>'
+    +'<span class="cart-badge" id="pdCartBadge">0</span>'
+    +'</button>'
     +'</div></div>'
     +'<div class="pd-corpo">'
     +'<div class="pd-col-foto" id="pdGaleria" role="group" tabindex="0" aria-label="'+esc('Fotos de '+p.name)+'">'+fotosHtml()+'</div>'
@@ -486,6 +514,7 @@ function showDetail(id,opts){
   document.body.appendChild(el);
   document.body.style.overflow='hidden';
   el.scrollTop=0;
+  sincronizarSacolaDoProduto();
 
   var empilhou=false;
   try{
@@ -633,6 +662,7 @@ function showDetail(id,opts){
   }
 
   el.querySelector('#pdVoltar').addEventListener('click',voltarDaPagina);
+  el.querySelector('#pdSacola').addEventListener('click',abrirSacolaDoProduto);
   el.querySelectorAll('.pd-crumb-cat').forEach(function(a){
     a.addEventListener('click',function(e){ e.preventDefault(); fecharProduto(); irParaCategoria(a.dataset.cat); });
   });
@@ -642,6 +672,9 @@ function showDetail(id,opts){
     var b=this;
     if(!b.dataset.rotulo) b.dataset.rotulo=b.textContent;
     addToCart(p.id, variante?variante.id:null, { semToast:true });
+    // O contador do topo DESTA pagina pulsa: e ali que a sacola abre.
+    var pb=document.getElementById('pdCartBadge');
+    if(pb){ pb.classList.add('pulse'); setTimeout(function(){ pb.classList.remove('pulse'); },300); }
     b.textContent='Adicionado à sacola';
     b.classList.add('feito');
     clearTimeout(voltarRotulo);
