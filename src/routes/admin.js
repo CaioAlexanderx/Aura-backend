@@ -316,9 +316,18 @@ router.post('/reports/trigger', adminSecretAuth, async (req, res) => {
         }
         // Enviar email (to_email sobrescreve destinatário — apenas para testes)
         const companyForSend = to_email ? { ...result.company, email: to_email } : result.company;
-        const emailResult = await sendWeeklyReport(companyForSend, result.kpis, result.html);
-        // Marcar como enviado
-        await updateDelivery(result.deliveryId, 'sent');
+        // tq-72: o 3o argumento de sendWeeklyReport e a URL do relatorio (vira
+        // o href do botao "Ver relatorio completo"). Antes ia result.html e o
+        // botao apontava para o HTML inteiro do relatorio.
+        let emailResult;
+        try {
+          emailResult = await sendWeeklyReport(companyForSend, result.kpis, result.reportUrl);
+        } catch (sendErr) {
+          await updateDelivery(result.deliveryId, 'failed', { error: sendErr.message });
+          throw sendErr;
+        }
+        // Marcar como enviado, com o id do provedor
+        await updateDelivery(result.deliveryId, 'sent', { resendId: emailResult?.id });
         results.push({
           company_id: co.id,
           name: co.name,

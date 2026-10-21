@@ -7,7 +7,7 @@
 //   buildConsolidatedReportData(companyIds, type, periodOverride?)
 //   generateReport(companyId, type, periodOverride?)
 //   generateConsolidatedReport(companyIds, primaryId, type, periodOverride?)
-//   updateDelivery(id, status, errorMsg?)
+//   updateDelivery(id, status, { resendId?, error? }) -> true/false
 // ============================================================
 
 const db = require('../config/database');
@@ -76,11 +76,69 @@ function calcEdition(startDate) {
   return week > 0 ? week : 1;
 }
 
-async function updateDelivery(id, status, errorMsg = null) {
-  await db.query(
-    `UPDATE report_deliveries SET status=$2, last_error=$3, sent_at=CASE WHEN $2='sent' THEN NOW() ELSE NULL END, attempts=attempts+1 WHERE id=$1`,
-    [id, status, errorMsg]
-  ).catch(e => console.error('[reportGenerator] updateDelivery error:', e.message));
+// Mensagem curta para report_deliveries.last_error: sem e-mail (o Resend
+// às vezes repete o endereço na mensagem de erro) e no máximo 200 chars.
+function erroCurto(msg) {
+  const s = String(msg == null ? '' : msg)
+    .replace(/[^\s<>"'(),;:]+@[^\s<>"'(),;:]+/g, '[email]')
+    .replace(/\s+/g, ' ')
+    .trim();
+  return s.length > 200 ? s.slice(0, 199) + '…' : s;
+}
+
+const STATUS_DE_ENTREGA = new Set(['pending', 'sent', 'failed']);
+
+/**
+ * Grava o resultado de um envio em report_deliveries.
+ *
+ *   updateDelivery(id, 'sent',   { resendId })   -> sent_at = NOW(), resend_id
+ *   updateDelivery(id, 'failed', { error })      -> last_error (curto, sem e-mail)
+ *
+ * attempts sobe 1 a cada chamada (cada chamada é uma tentativa de envio).
+ * Aceita a forma antiga (id, status, 'mensagem de erro').
+ *
+ * tq-72 (21/10/2026): o SQL antigo usava $2 duas vezes — em `status=$2`
+ * (coluna VARCHAR(20): o Postgres deduz character varying) e em
+ * `CASE WHEN $2='sent'` (comparação com literal: deduz text). O node-pg
+ * manda os parâmetros sem tipo, e o Postgres recusava a query inteira com
+ * 42P08 "inconsistent types deduced for parameter $2". O .catch só fazia
+ * console.error, então o envio contava como "sent" e a linha ficava
+ * 'pending'. Agora todo parâmetro tem cast explícito, e o status é o mesmo
+ * `$1::text` nas duas posições. O id ($4) aparece uma vez só e fica sem
+ * cast: o tipo vem da coluna, seja qual for.
+ *
+ * Nunca lança: devolve true/false. Falha do UPDATE vai para o log com o
+ * código do Postgres — quem chama decide o que fazer com o false.
+ */
+async function updateDelivery(id, status, info = {}) {
+  const opts = typeof info === 'string' ? { error: info } : (info || {});
+  if (!STATUS_DE_ENTREGA.has(status)) {
+    console.error(`[reportGenerator] updateDelivery: status invalido "${status}" (delivery=${id})`);
+    return false;
+  }
+  const resendId = opts.resendId != null && opts.resendId !== '' ? String(opts.resendId).slice(0, 100) : null;
+  const error = status === 'failed' ? (erroCurto(opts.error) || 'erro desconhecido') : null;
+
+  try {
+    const { rowCount } = await db.query(
+      `UPDATE report_deliveries
+          SET status     = $1::text,
+              resend_id  = COALESCE($2::text, resend_id),
+              last_error = $3::text,
+              sent_at    = CASE WHEN $1::text = 'sent' THEN NOW() ELSE NULL END,
+              attempts   = attempts + 1
+        WHERE id = $4`,
+      [status, resendId, error, id]
+    );
+    if (!rowCount) {
+      console.error(`[reportGenerator] updateDelivery: delivery=${id} nao encontrada (status=${status})`);
+      return false;
+    }
+    return true;
+  } catch (e) {
+    console.error(`[reportGenerator] updateDelivery error: code=${e.code || 'sem_codigo'} delivery=${id} status=${status}: ${e.message}`);
+    return false;
+  }
 }
 
 async function buildReportData(companyId, type, periodOverride = null) {

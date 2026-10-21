@@ -6,8 +6,55 @@
 // IMPORTANT: FROM must use a verified domain in Resend.
 // onboarding@resend.dev = sandbox (only sends to account owner).
 // getaura.com.br is verified (DKIM + SPF + MX green).
-const FROM_DEFAULT = 'Aura. <noreply@getaura.com.br>';
-const FROM = process.env.SMTP_FROM || FROM_DEFAULT;
+//
+// tq-72 (21/10/2026): remetente padrão deixa de ser noreply@ e passa a ser
+// contato@, com Reply-To em todo envio. Ordem: MAIL_FROM > SMTP_FROM >
+// padrão. Reply-To: MAIL_REPLY_TO > padrão, aplicado quando o envio não
+// passa replyTo. Um envio pode trocar o remetente (opts.from), mas só para
+// endereço @getaura.com.br — o único domínio verificado no Resend.
+const FROM_DEFAULT = 'Caio Alexander, da Aura <contato@getaura.com.br>';
+const FROM = process.env.MAIL_FROM || process.env.SMTP_FROM || FROM_DEFAULT;
+const REPLY_TO_DEFAULT = 'contato@getaura.com.br';
+const REPLY_TO = process.env.MAIL_REPLY_TO || REPLY_TO_DEFAULT;
+const DOMINIO_DO_REMETENTE = 'getaura.com.br';
+// Remetente do relatório semanal (tq-72).
+const FROM_RELATORIO = 'Aura <contato@getaura.com.br>';
+
+/**
+ * Remetente de um envio: opts.from quando é um endereço @getaura.com.br
+ * ("Nome <x@getaura.com.br>" ou "x@getaura.com.br"); senão o FROM padrão.
+ * Recusa quebra de linha (injeção de cabeçalho) e qualquer outro domínio.
+ */
+function resolverRemetente(from) {
+  if (from == null || from === '') return FROM;
+  const s = String(from).trim();
+  if (/[\r\n]/.test(s)) {
+    console.warn('[mailer] opts.from recusado (quebra de linha); usando o remetente padrao');
+    return FROM;
+  }
+  const m = s.match(/<([^<>\s]+)>\s*$/) || s.match(/^([^<>\s]+)$/);
+  const endereco = m ? m[1] : '';
+  const dominio = endereco.includes('@') ? endereco.split('@').pop().toLowerCase() : '';
+  if (dominio !== DOMINIO_DO_REMETENTE || endereco.split('@').length !== 2 || !endereco.split('@')[0]) {
+    console.warn(`[mailer] opts.from fora de @${DOMINIO_DO_REMETENTE} recusado; usando o remetente padrao`);
+    return FROM;
+  }
+  return s;
+}
+
+/** Cabeçalhos extras: só pares string -> string, sem quebra de linha. */
+function cabecalhosLimpos(headers) {
+  if (!headers || typeof headers !== 'object') return null;
+  const out = {};
+  for (const [k, v] of Object.entries(headers)) {
+    if (v == null) continue;
+    const nome = String(k);
+    const valor = String(v);
+    if (!/^[A-Za-z0-9-]+$/.test(nome) || /[\r\n]/.test(valor)) continue;
+    out[nome] = valor;
+  }
+  return Object.keys(out).length ? out : null;
+}
 const ICON_URL = 'https://cdn.jsdelivr.net/gh/CaioAlexanderx/aura-app@main/assets/Icon.png';
 // O numero do wa.me com o 55, regra unica (tq-61).
 const { numeroDoWhatsapp } = require('./whatsappDaLoja');
@@ -43,15 +90,18 @@ function emailLayout(content) {
 async function sendViaResend(opts) {
   const key = process.env.RESEND_API_KEY;
   if (!key) return null;
+  const headers = cabecalhosLimpos(opts.headers);
   const res = await fetch('https://api.resend.com/emails', {
     method: 'POST',
     headers: { 'Authorization': `Bearer ${key}`, 'Content-Type': 'application/json' },
     body: JSON.stringify({
-      from: FROM,
+      from: resolverRemetente(opts.from),
       to: Array.isArray(opts.to) ? opts.to : [opts.to],
+      reply_to: opts.replyTo || REPLY_TO,
       subject: opts.subject,
       html: opts.html,
       text: opts.text,
+      ...(headers ? { headers } : {}),
       // Imagem no corpo (cid): { filename, content: Buffer, cid, contentType }
       // vira o formato do Resend (base64 + content_id + content_type). O
       // SMTP (nodemailer) já entende { filename, content, cid, contentType }.
@@ -73,7 +123,8 @@ async function sendViaResend(opts) {
     throw new Error(`Resend API ${res.status}: ${err.message || JSON.stringify(err)}`);
   }
   const data = await res.json();
-  console.log(`[mailer] Resend OK: ${data.id} to ${opts.to}`);
+  // Sem o e-mail do destinatário no log: o id do envio basta para achar no Resend.
+  console.log(`[mailer] Resend OK: id=${data && data.id}`);
   return data;
 }
 
@@ -95,18 +146,34 @@ function getSmtpTransporter() {
 
 // Dev fallback
 async function sendViaDev(opts) {
+  const id = 'dev-' + Date.now();
   console.log('\n[DEV] Email simulado:');
-  console.log(`  To: ${opts.to}`);
+  // Sem o e-mail do destinatário no log (tq-72): o id do envio no lugar.
+  console.log(`  Id: ${id}`);
   console.log(`  Subject: ${opts.subject}`);
   console.log(`  Link/Code: ${opts.text?.match(/(https?:\/\/\S+|\d{4,6})/)?.[0] || 'N/A'}`);
-  return { id: 'dev-' + Date.now() };
+  return { id };
 }
 
-// Envio unificado
+// Envio unificado.
+// opts: { to, subject, html, text, attachments?, from?, replyTo?, headers? }
+// Devolve o resultado do provedor com `id` sempre preenchido quando o
+// provedor deu um (Resend: id; SMTP: messageId; dev: dev-<timestamp>), para
+// quem chama gravar (report_deliveries.resend_id, notification_emails...).
 async function sendMail(opts) {
   if (process.env.RESEND_API_KEY) return sendViaResend(opts);
   const smtp = getSmtpTransporter();
-  if (smtp) return smtp.sendMail({ from: FROM, ...opts });
+  if (smtp) {
+    const headers = cabecalhosLimpos(opts.headers);
+    const { headers: _ignorado, ...resto } = opts;
+    const info = await smtp.sendMail({
+      ...resto,
+      from: resolverRemetente(opts.from),
+      replyTo: opts.replyTo || REPLY_TO,
+      ...(headers ? { headers } : {}),
+    });
+    return { ...info, id: (info && (info.id || info.messageId)) || null };
+  }
   return sendViaDev(opts);
 }
 
@@ -448,6 +515,7 @@ async function sendWeeklyReport(company, kpis, reportUrl) {
   `);
 
   return sendMail({
+    from: FROM_RELATORIO,
     to: company.email,
     subject: `Relatório semanal — ${company.name}`,
     text: `Aura. — Relatorio semanal de ${company.name}. Receita: R$ ${kpis.revenue} | Vendas: ${kpis.sales} | Ticket medio: R$ ${kpis.avg_ticket} | Saude: ${kpis.health_score}/100\n\nVer relatorio completo: ${url}`,
