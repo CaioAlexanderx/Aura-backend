@@ -830,7 +830,13 @@ router.put('/', requireRole('client', 'analyst', 'admin'), async (req, res) => {
         serviceCards !== undefined ? JSON.stringify(serviceCards) : null,
         logo_url || null, cover_url || null,
         description || null, address || null, phone || null, whatsapp || null,
-        instagram || null, google_maps_url || null,
+        // instagram: o UPSERT nao grava o valor cru. Quem grava e o UPDATE
+        // das redes sociais mais abaixo, ja normalizado (services/redesSociais):
+        // um link de partilha colado (https://www.instagram.com/x?igsh=...)
+        // passava de 60 caracteres e estourava a coluna ANTES de chegar la
+        // (Felic Adega, 21/10/2026: "value too long for type character
+        // varying(60)"). NULL aqui = COALESCE mantem o que ja existe.
+        null, google_maps_url || null,
         business_hours ? JSON.stringify(business_hours) : null,
         featuredJsonParam,
         show_prices ?? null, show_stock ?? null, delivery_enabled ?? null,
@@ -949,7 +955,13 @@ router.put('/', requireRole('client', 'analyst', 'admin'), async (req, res) => {
         cid, site_name || null, tagline || null, primary_color || null,
         secondary_color || null, logo_url || null, cover_url || null,
         description || null, address || null, phone || null, whatsapp || null,
-        instagram || null, google_maps_url || null,
+        // instagram: o UPSERT nao grava o valor cru. Quem grava e o UPDATE
+        // das redes sociais mais abaixo, ja normalizado (services/redesSociais):
+        // um link de partilha colado (https://www.instagram.com/x?igsh=...)
+        // passava de 60 caracteres e estourava a coluna ANTES de chegar la
+        // (Felic Adega, 21/10/2026: "value too long for type character
+        // varying(60)"). NULL aqui = COALESCE mantem o que ja existe.
+        null, google_maps_url || null,
         business_hours ? JSON.stringify(business_hours) : null,
         featuredJsonParam,
         show_prices ?? null, show_stock ?? null, delivery_enabled ?? null,
