@@ -179,8 +179,18 @@ function renderProducts(){
   var sw=document.getElementById('sortWrap');
   if(sw) sw.hidden=(totalFiltrado<20);
 
+  // Com resultado, a linha embaixo do titulo; sem resultado, o proprio
+  // vazio oferece a loja toda (as duas juntas repetiam o mesmo link).
+  var escopo=escopoDaBusca();
+  renderEscopoDaBusca(visiveis.length?escopo:null);
+
   if(!visiveis.length){
-    grid.innerHTML='<div style="grid-column:1/-1;text-align:center;padding:60px 0;color:var(--sf-ink-3);"><div style="font-size:15px;font-weight:700;">Nenhum produto encontrado</div><div style="font-size:13px;margin-top:6px;">Tente outra palavra ou veja todas as categorias.</div></div>';
+    // Busca dentro de categoria que deu zero: a saida e a loja toda, no
+    // mesmo lugar onde a pessoa ja esta olhando (tq-62).
+    var dica=escopo
+      ?'Nada em '+esc(escopo)+'. <a href="#" onclick="return buscarNaLojaToda()" style="color:var(--sf-ink);text-decoration:underline;text-underline-offset:3px;">Buscar na loja toda</a>'
+      :'Tente outra palavra ou veja todas as categorias.';
+    grid.innerHTML='<div style="grid-column:1/-1;text-align:center;padding:60px 0;color:var(--sf-ink-3);"><div style="font-size:15px;font-weight:700;">Nenhum produto encontrado</div><div style="font-size:13px;margin-top:6px;">'+dica+'</div></div>';
     renderPaginacao();
     return;
   }
@@ -188,6 +198,45 @@ function renderProducts(){
   if(typeof renderFiltros==='function') renderFiltros();
   if(typeof atualizarModoHome==='function') atualizarModoHome();
   grid.innerHTML=visiveis.map(function(p){ return cardHtml(p); }).join('');
+}
+
+// ── Busca dentro de uma categoria (tq-62, 20/10/2026) ───
+//
+// A busca vai ao servidor com a categoria aberta (cat= e q= juntos). Quem
+// esta em Combos > Gin e digita "ballantine" recebe so o que ha em Gin —
+// 0, com 5 na loja — e nada dizia que a busca estava presa ali.
+//
+// Agora, SEMPRE que ha busca E categoria, uma linha discreta embaixo do
+// titulo diz onde se esta buscando e oferece a loja toda. Sempre, e nao
+// so no zero: "1 resultado em Gin" com 5 na loja engana do mesmo jeito.
+// No zero, quem diz e o proprio "Nenhum produto encontrado".
+// A linha so existe nesse caso — o elemento e criado e removido aqui, e
+// fora dele (busca sem categoria, categoria sem busca, home) a pagina e
+// a mesma de antes.
+
+/** Nome da categoria aberta quando ha busca nela; null nos demais casos. */
+function escopoDaBusca(){
+  if(!String(searchTerm||'').trim()) return null;
+  if(!currentCat||currentCat==='Todos') return null;
+  return (typeof nomeDoCaminho==='function'?nomeDoCaminho(currentCat):currentCat)||currentCat;
+}
+function renderEscopoDaBusca(escopo){
+  var el=document.getElementById('buscaEscopo');
+  if(!escopo){ if(el) el.remove(); return; }
+  if(!el){
+    var cab=document.querySelector('#productsAnchor .products-header');
+    if(!cab) return;
+    el=document.createElement('p');
+    el.id='buscaEscopo';
+    el.setAttribute('style','margin:-8px 0 20px;font-size:13px;color:var(--sf-ink-3);');
+    cab.insertAdjacentElement('afterend',el);
+  }
+  el.innerHTML='Buscando em '+esc(escopo)+' · <a href="#" onclick="return buscarNaLojaToda()" style="color:var(--sf-ink);text-decoration:underline;text-underline-offset:3px;">Buscar na loja toda</a>';
+}
+/** Tira a categoria e mantem o termo: a mesma busca, na loja inteira. */
+function buscarNaLojaToda(){
+  filterCat('Todos',null);
+  return false;
 }
 
 /**
