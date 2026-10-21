@@ -324,7 +324,7 @@ router.get('/clientes/:cid/ficha', ...adminOnly, asyncHandler(async (req, res) =
     // Check-in (migration 384): o que o cliente respondeu e o que a equipe anotou.
     base.opcional(pool, `-- checkin:ficha
        SELECT checkin FROM companies WHERE id = $1`, [cid]),
-    // Handshake do cadastro pelo WhatsApp (migration 401). Sem a tabela: null.
+    // Handshake do cadastro pelo WhatsApp (migration 402). Sem a tabela: null.
     signupHandshake.doCliente(pool, cid),
   ]);
 
@@ -475,7 +475,7 @@ router.post('/contatos', ...adminOnly, asyncHandler(async (req, res) => {
 // API): quem confirma é a equipe, aqui. Confirmar é idempotente: o segundo
 // pedido devolve 200 com ja_confirmado: true. A conta nunca dependeu disto.
 const PENDENTE_HANDSHAKE = {
-  error: 'Handshake do cadastro indisponível (migration 401 pendente).',
+  error: 'Handshake do cadastro indisponível (migration 402 pendente).',
   code: 'MIGRATION_PENDING',
 };
 

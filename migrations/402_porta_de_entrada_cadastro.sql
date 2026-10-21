@@ -1,5 +1,5 @@
 -- ============================================================
--- 401 — Porta de entrada 1/5 (tq-66): handshake pelo WhatsApp e lead por etapa
+-- 402 — Porta de entrada 1/5 (tq-66): handshake pelo WhatsApp e lead por etapa
 --
 -- Duas tabelas novas, nenhuma coluna nova em tabela existente:
 --   signup_handshakes  código AURA-XXXX da conta nova (confirmação manual)

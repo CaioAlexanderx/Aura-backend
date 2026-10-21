@@ -151,7 +151,7 @@ describe('POST /auth/signup-lead', () => {
     expect(r.body.code).toBe('LEAD_NOT_FOUND');
   });
 
-  test('migration 401 pendente: 503; erro do banco: 500 sem dado pessoal no log', async () => {
+  test('migration 402 pendente: 503; erro do banco: 500 sem dado pessoal no log', async () => {
     mock({ erro: Object.assign(new Error('relation "signup_leads" does not exist'), { code: '42P01' }) });
     expect((await request(app()).post('/auth/signup-lead').send(etapa1())).status).toBe(503);
 

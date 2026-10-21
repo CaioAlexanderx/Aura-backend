@@ -90,8 +90,10 @@
 // e gravada no cadastro (em segundo plano, depois do COMMIT).
 //
 // ── Porta de entrada 1/5 (21/10/2026, tq-66) ────────────────
-// WhatsApp da pessoa OBRIGATORIO em conta NOVA de varejo (cria empresa e nao
-// e dojo): `whatsapp` no corpo (ou `phone`, o campo de sempre), validado em
+// WhatsApp da pessoa obrigatorio em conta NOVA de varejo (cria empresa e nao
+// e dojo) QUANDO WHATSAPP_OBRIGATORIO_NO_CADASTRO=true (desligado por padrao;
+// liga junto com a tela nova, tq-69). Desligado, vazio ou fixo seguem como
+// sempre, sem 400; celular valido e normalizado e ganha handshake: `whatsapp` no corpo (ou `phone`, o campo de sempre), validado em
 // services/whatsappCadastro (DDD da Anatel + 9 + 8 digitos, +55 opcional,
 // fixo recusado) -> 400 com code WHATSAPP_*. Convite (sem company_name),
 // quem entra numa empresa existente pelo CNPJ e dojo seguem como antes.
@@ -99,10 +101,10 @@
 // `company_phone` (telefone da loja, o da Receita) quando vier; sem ele,
 // o mesmo telefone de antes (ninguem que le companies.phone perde dado).
 // A conta nova ganha um handshake AURA-XXXX (services/signupHandshake,
-// migration 401), devolvido em `whatsapp_handshake` com o link wa.me pronto.
+// migration 402), devolvido em `whatsapp_handshake` com o link wa.me pronto.
 // Estado 'aguardando'; confirmacao so manual pela equipe (nao ha webhook do
 // numero da Aura). O handshake nunca bloqueia a conta.
-// Desligar a obrigatoriedade: WHATSAPP_OBRIGATORIO_NO_CADASTRO=false.
+// Ligar a obrigatoriedade: WHATSAPP_OBRIGATORIO_NO_CADASTRO=true.
 // `lead_token` (POST /auth/signup-lead, services/signupLead) liga o lead das
 // etapas a conta criada e, sem `origem` no corpo, a conta herda a do lead.
 // ============================================================
@@ -530,7 +532,8 @@ router.post('/register', async (req, res) => {
       });
     }
 
-    // 21/10/2026 (tq-66): conta NOVA de varejo exige o WhatsApp da pessoa.
+    // 21/10/2026 (tq-66): conta NOVA de varejo exige o WhatsApp da pessoa
+    // (so com o interruptor ligado; desligado, grava como sempre).
     // Aqui (e nao antes) porque so agora se sabe que nao e convite nem
     // entrada numa empresa existente pelo CNPJ. ROLLBACK desfaz o usuario.
     if (!skipCompany && !company && !isDojoSignup && exigeWhatsapp && !celular.ok) {
@@ -731,7 +734,7 @@ router.post('/register', async (req, res) => {
       joined_existing: company ? !isNewCompany : false,
       no_company: skipCompany,
       // 21/10/2026 (tq-66): handshake pelo WhatsApp. null em convite, dojo,
-      // entrada em empresa existente ou migration 401 pendente. estado nasce
+      // entrada em empresa existente ou migration 402 pendente. estado nasce
       // 'aguardando' e confirmacao_automatica e sempre false: so a equipe
       // confirma (nao ha webhook do numero da Aura). Nunca bloqueia a conta.
       whatsapp_handshake: handshake ? signupHandshake.moldar(handshake) : null,

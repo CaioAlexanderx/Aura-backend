@@ -14,8 +14,10 @@
 // O número do WhatsApp da Aura vem de AURA_WHATSAPP (padrão 5511956305269,
 // confirmado pelo Caio em 21/10/2026). O link wa.me já sai pronto para o app.
 //
-// Caminho de volta sem deploy de código: WHATSAPP_OBRIGATORIO_NO_CADASTRO=false
-// volta o cadastro ao comportamento antigo (telefone opcional, sem validação).
+// Obrigatoriedade DESLIGADA por padrão (decisão de 21/10): só liga com
+// WHATSAPP_OBRIGATORIO_NO_CADASTRO=true, junto com a tela nova (tq-69).
+// Desligada, o cadastro aceita e grava o telefone como sempre (vazio ou fixo
+// não viram 400); celular válido é normalizado e ganha handshake do mesmo jeito.
 // ============================================================
 'use strict';
 
@@ -89,9 +91,10 @@ function telefoneDaLoja(bruto) {
   return d.length >= 10 && d.length <= 13 ? d : null;
 }
 
+// Só 'true' (ou 1/sim/on) liga. Variável ausente ou qualquer outro valor: desligada.
 function exigidoNoCadastro(env = process.env) {
   const v = String(env.WHATSAPP_OBRIGATORIO_NO_CADASTRO || '').trim().toLowerCase();
-  return !(v === 'false' || v === '0' || v === 'nao' || v === 'não' || v === 'off');
+  return v === 'true' || v === '1' || v === 'sim' || v === 'on';
 }
 
 function numeroDaAura(env = process.env) {

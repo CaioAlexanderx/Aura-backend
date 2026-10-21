@@ -2,7 +2,7 @@
 // AURA. — Handshake pelo WhatsApp no cadastro (porta de entrada 1/5, tq-66)
 //
 // A conta nova de varejo ganha um código AURA-XXXX (signup_handshakes,
-// migration 401). O app mostra o código e o botão "mandar no WhatsApp"
+// migration 402). O app mostra o código e o botão "mandar no WhatsApp"
 // (link wa.me pronto, services/whatsappCadastro). Quando a mensagem chega, a
 // equipe confirma.
 //
@@ -78,7 +78,7 @@ async function criarHandshake(client, { companyId, userId, whatsapp: numero }, s
       try { await client.query('ROLLBACK TO SAVEPOINT signup_handshake'); } catch (_) { /* segue com o chamador */ }
       // Código repetido: sorteia outro.
       if (err && err.code === '23505') continue;
-      // 42P01 = migration 401 ainda não rodou: cadastro sem handshake.
+      // 42P01 = migration 402 ainda não rodou: cadastro sem handshake.
       if (!(err && err.code === '42P01')) {
         console.warn('[register] handshake do WhatsApp não criado:', err && err.message);
       }

@@ -376,7 +376,7 @@ function responder(dados, escritas, sql, params = []) {
   // ── ficha (antes das consultas genéricas das mesmas tabelas) ──
   if (s.includes('-- contatos:ficha')) return dados.ficha.contatos;
   if (s.includes('-- checkin:ficha')) return dados.ficha.checkin ? [{ checkin: dados.ficha.checkin }] : [];
-  // 21/10/2026 (tq-66): handshake do cadastro pelo WhatsApp (migration 401).
+  // 21/10/2026 (tq-66): handshake do cadastro pelo WhatsApp (migration 402).
   if (s.includes('-- handshake:ficha')) return dados.ficha.handshake ? [dados.ficha.handshake] : [];
   if (s.includes("(SELECT 'venda' AS tipo")) return dados.ficha.linhaDoTempo;
   if (s.includes('ck ON true')) return dados.ficha.cliente && (!params[0] || params[0] === dados.ficha.cliente.id) ? [{ ...dados.ficha.cliente }] : [];

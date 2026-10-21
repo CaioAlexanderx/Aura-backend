@@ -84,11 +84,14 @@ describe('validarCelular', () => {
     expect(decodeURIComponent(link.split('text=')[1])).toContain('AURA-K7QP');
   });
 
-  test('obrigatoriedade desligavel por WHATSAPP_OBRIGATORIO_NO_CADASTRO', () => {
-    expect(whatsapp.exigidoNoCadastro({})).toBe(true);
-    expect(whatsapp.exigidoNoCadastro({ WHATSAPP_OBRIGATORIO_NO_CADASTRO: 'true' })).toBe(true);
+  test('obrigatoriedade DESLIGADA por padrao: so WHATSAPP_OBRIGATORIO_NO_CADASTRO=true liga', () => {
+    expect(whatsapp.exigidoNoCadastro({})).toBe(false);
+    expect(whatsapp.exigidoNoCadastro({ WHATSAPP_OBRIGATORIO_NO_CADASTRO: '' })).toBe(false);
     expect(whatsapp.exigidoNoCadastro({ WHATSAPP_OBRIGATORIO_NO_CADASTRO: 'false' })).toBe(false);
-    expect(whatsapp.exigidoNoCadastro({ WHATSAPP_OBRIGATORIO_NO_CADASTRO: '0' })).toBe(false);
+    expect(whatsapp.exigidoNoCadastro({ WHATSAPP_OBRIGATORIO_NO_CADASTRO: 'talvez' })).toBe(false);
+    expect(whatsapp.exigidoNoCadastro({ WHATSAPP_OBRIGATORIO_NO_CADASTRO: 'true' })).toBe(true);
+    expect(whatsapp.exigidoNoCadastro({ WHATSAPP_OBRIGATORIO_NO_CADASTRO: ' TRUE ' })).toBe(true);
+    expect(whatsapp.exigidoNoCadastro({ WHATSAPP_OBRIGATORIO_NO_CADASTRO: '1' })).toBe(true);
   });
 });
 
@@ -109,7 +112,7 @@ describe('codigo do handshake', () => {
 });
 
 // ── 2-4, 6, 7. POST /auth/register ───────────────────────────
-describe('POST /auth/register -- WhatsApp e handshake', () => {
+describe('POST /auth/register -- WhatsApp e handshake (interruptor LIGADO)', () => {
   let app; let db;
   beforeAll(() => {
     ({ app } = require('../src/index'));
@@ -119,13 +122,14 @@ describe('POST /auth/register -- WhatsApp e handshake', () => {
     jest.clearAllMocks();
     db.query.mockReset();
     db.query.mockResolvedValue({ rows: [] });
-    delete process.env.WHATSAPP_OBRIGATORIO_NO_CADASTRO;
+    process.env.WHATSAPP_OBRIGATORIO_NO_CADASTRO = 'true';
     delete process.env.AURA_WHATSAPP;
     jest.spyOn(console, 'log').mockImplementation(() => {});
     jest.spyOn(console, 'warn').mockImplementation(() => {});
     jest.spyOn(console, 'error').mockImplementation(() => {});
   });
   afterEach(() => jest.restoreAllMocks());
+  afterAll(() => { delete process.env.WHATSAPP_OBRIGATORIO_NO_CADASTRO; });
 
   function banco({ empresaExistente = false, handshake = 'ok', federacao = false } = {}) {
     const chamadas = [];
@@ -305,7 +309,7 @@ describe('POST /auth/register -- WhatsApp e handshake', () => {
     expect(res.body.whatsapp_handshake.estado).toBe('aguardando');
   });
 
-  test('migration 401 pendente (42P01): conta criada, whatsapp_handshake null, sem ROLLBACK geral', async () => {
+  test('migration 402 pendente (42P01): conta criada, whatsapp_handshake null, sem ROLLBACK geral', async () => {
     const b = banco({ handshake: 'sem_tabela' });
     const res = await cadastrar({ whatsapp: '11987654321' });
     expect(res.status).toBe(201);
@@ -344,6 +348,55 @@ describe('POST /auth/register -- WhatsApp e handshake', () => {
     expect(res.status).toBe(201);
     expect(b.achar('INSERT INTO companies')[0].params[5]).toBe('11222333000181');
     expect(res.body.whatsapp_handshake.estado).toBe('aguardando');
+  });
+
+  // ── Interruptor DESLIGADO (o padrao: variavel ausente) ───────
+  // O site e o app atuais seguem cadastrando como hoje: vazio ou fixo nao
+  // viram 400 e sao gravados como sempre. Celular valido ganha handshake.
+  describe('interruptor DESLIGADO (variavel ausente = padrao)', () => {
+    beforeEach(() => { delete process.env.WHATSAPP_OBRIGATORIO_NO_CADASTRO; });
+
+    test('sem telefone nenhum: 201 como hoje, sem handshake', async () => {
+      const b = banco();
+      const res = await cadastrar();
+      expect(res.status).toBe(201);
+      expect(res.body.whatsapp_handshake).toBeNull();
+      expect(b.achar('INSERT INTO users')[0].params[4]).toBeNull();
+      expect(b.achar('INSERT INTO companies')[0].params[6]).toBeNull();
+      expect(b.achar('INSERT INTO signup_handshakes')).toHaveLength(0);
+    });
+
+    test.each([
+      ['fixo', '1133334444'],
+      ['fixo com mascara', '(11) 3333-4444'],
+      ['DDD inexistente', '20987654321'],
+      ['curto', '119876'],
+    ])('telefone %s: 201, gravado como veio (users e companies), sem handshake', async (_n, numero) => {
+      const b = banco();
+      const res = await cadastrar({ phone: numero });
+      expect(res.status).toBe(201);
+      expect(b.achar('INSERT INTO users')[0].params[4]).toBe(numero);
+      expect(b.achar('INSERT INTO companies')[0].params[6]).toBe(numero);
+      expect(res.body.whatsapp_handshake).toBeNull();
+      expect(b.sqls()).not.toContain('ROLLBACK');
+    });
+
+    test('`whatsapp` fixo tambem nao vira 400', async () => {
+      const b = banco();
+      const res = await cadastrar({ whatsapp: '1133334444' });
+      expect(res.status).toBe(201);
+      expect(b.achar('INSERT INTO users')[0].params[4]).toBe('1133334444');
+    });
+
+    test('celular valido: normalizado em users.phone e handshake criado mesmo desligado', async () => {
+      const b = banco();
+      const res = await cadastrar({ phone: '(11) 98765-4321' });
+      expect(res.status).toBe(201);
+      expect(b.achar('INSERT INTO users')[0].params[4]).toBe('11987654321');
+      // companies.phone segue recebendo o `phone` como veio, igual a hoje
+      expect(b.achar('INSERT INTO companies')[0].params[6]).toBe('(11) 98765-4321');
+      expect(res.body.whatsapp_handshake).toMatchObject({ estado: 'aguardando', confirmacao_automatica: false });
+    });
   });
 });
 

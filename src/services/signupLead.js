@@ -12,7 +12,7 @@
 // liga o lead à conta criada (company_id, user_id, convertido_em) e herda a
 // origem quando o corpo do register não traz `origem`.
 //
-// Por que tabela própria (signup_leads, migration 401) e não sales_leads:
+// Por que tabela própria (signup_leads, migration 402) e não sales_leads:
 // sales_leads é o CRM de prospecção (~10 consultas, cadências, metas, score),
 // alimentado só pelo Worker do site com token (x-site-token). Esta rota é
 // PÚBLICA, chamada do navegador: gravar direto no CRM abriria a lista de

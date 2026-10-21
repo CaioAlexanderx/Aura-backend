@@ -13,7 +13,7 @@
 //   400     { error, code }  — validação (codes LEAD_* e WHATSAPP_*)
 //   404     { error, code: 'LEAD_NOT_FOUND' } — token desconhecido ou lead já convertido
 //   429     limite por IP ou por e-mail
-//   503     { code: 'MIGRATION_PENDING' } — migration 401 ainda não rodou
+//   503     { code: 'MIGRATION_PENDING' } — migration 402 ainda não rodou
 //
 // O lead NÃO cria conta nem usuário. O register liga o lead pelo lead_token.
 // Limites (memória do processo, como os outros limitadores da API):
