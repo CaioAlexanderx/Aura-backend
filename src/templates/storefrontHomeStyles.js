@@ -347,6 +347,15 @@ body.home .products-grid{grid-template-columns:repeat(4,1fr);gap:20px 16px;}
 .pd-voltar{display:inline-flex;align-items:center;gap:8px;font-family:${fontSans};font-size:13.5px;font-weight:600;color:var(--sf-ink-2);background:none;border:0;padding:8px 0;cursor:pointer;}
 .pd-voltar:hover{color:var(--sf-brand);}
 .pd-crumbs{margin:0;}
+/* Sacola no topo da peca (tq-63): o mesmo .cart-btn da loja, na borda
+   direita da barra, alinhada a coluna da pagina. Fora do fluxo de
+   proposito: "Voltar" e as migalhas ficam exatamente onde estavam. O
+   .pd-topo (sticky) e o bloco de referencia; centrar por top/bottom/margin
+   e nao por transform, que o hover do .cart-btn ja usa. */
+.pd-sacola{position:absolute;top:0;bottom:0;margin:auto 0;right:max(32px,calc((100% - 1280px)/2 + 32px));padding:0;font:inherit;}
+/* Reserva simetrica dos dois lados: o grupo continua centrado e so encolhe
+   quando as migalhas encostariam na sacola. */
+.pd-topo:has(.pd-sacola) .pd-topo-inner{max-width:min(1280px,calc(100% - 160px));}
 .pd-corpo{max-width:1280px;margin:0 auto;padding:24px 32px 8px;display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:48px;align-items:start;}
 /* Galeria: miniaturas em coluna, foto grande 3:4 no canvas */
 .pd-col-foto{display:flex;gap:14px;}
@@ -446,6 +455,9 @@ body.home .products-grid{grid-template-columns:repeat(4,1fr);gap:20px 16px;}
   .pd-crumbs{flex-wrap:nowrap;white-space:nowrap;overflow-x:auto;max-width:100%;scrollbar-width:none;}
   .pd-crumbs::-webkit-scrollbar{display:none;}
   .pd-crumbs [aria-current],.pd-crumbs .crumbs-sep:nth-last-child(2){display:none;}
+  /* Celular: a sacola na mesma borda do topo da loja (8px). */
+  .pd-topo:has(.pd-sacola) .pd-topo-inner{max-width:calc(100% - 120px);}
+  .pd-sacola{right:8px;}
   .pd-corpo{grid-template-columns:1fr;gap:24px;padding:16px 16px 8px;}
   .pd-col-foto{flex-direction:column;}
   .pd-minis{flex-direction:row;order:1;flex:none;overflow-x:auto;padding-bottom:2px;}

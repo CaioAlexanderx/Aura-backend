@@ -76,6 +76,8 @@ function updateCartUI(){
   var count=getCount(),sub=getSubtotal(),fee=getFee();
   var badge=document.getElementById('cartBadge');
   badge.textContent=count;badge.classList.toggle('visible',count>0);
+  // O contador do topo da pagina do produto, quando ela esta aberta (tq-63).
+  if(typeof sincronizarSacolaDoProduto==='function') sincronizarSacolaDoProduto();
   // A sacola sobrevive a aba (fase 6) e o resumo do checkout acompanha.
   if(typeof salvarSacola==='function') salvarSacola();
   if(typeof renderResumoDoCheckout==='function') renderResumoDoCheckout();
