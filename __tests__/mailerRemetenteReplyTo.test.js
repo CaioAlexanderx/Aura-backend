@@ -161,3 +161,64 @@ describe('dev (sem RESEND_API_KEY nem SMTP_HOST)', () => {
     expect(tudo).not.toContain('segredo@exemplo.com');
   });
 });
+
+// Revisão do Teo (21/10): quem não é a lojista nem a equipe Aura não recebe
+// e-mail com o nome do Caio nem responde para contato@.
+describe('e-mails a quem não é a lojista: remetente neutro, sem reply_to para contato@', () => {
+  const NEUTRO = 'Aura <contato@getaura.com.br>';
+
+  test('status do pedido com e-mail da loja: reply_to = loja', async () => {
+    const corpos = fetchFalso();
+    const { sendOrderStatusEmail } = carregarMailer({ RESEND_API_KEY: 'k' });
+    await sendOrderStatusEmail('cliente@exemplo.com', {
+      order_number: '0001', customer_name: 'Ana', status: 'ready', store_name: 'Loja', store_email: 'loja@exemplo.com.br',
+    });
+    expect(corpos[0].from).toBe(NEUTRO);
+    expect(corpos[0].reply_to).toBe('loja@exemplo.com.br');
+  });
+
+  test('status do pedido sem e-mail da loja (ou inválido): reply_to = noreply@', async () => {
+    const corpos = fetchFalso();
+    const { sendOrderStatusEmail } = carregarMailer({ RESEND_API_KEY: 'k', MAIL_REPLY_TO: 'caio@getaura.com.br' });
+    const base = { order_number: '0001', customer_name: 'Ana', status: 'ready', store_name: 'Loja' };
+    await sendOrderStatusEmail('cliente@exemplo.com', base);
+    await sendOrderStatusEmail('cliente@exemplo.com', { ...base, store_email: null });
+    await sendOrderStatusEmail('cliente@exemplo.com', { ...base, store_email: 'loja@x.com\r\nBcc: y@z.com' });
+    await sendOrderStatusEmail('cliente@exemplo.com', { ...base, store_email: 'sem-arroba' });
+    for (const c of corpos) {
+      expect(c.from).toBe(NEUTRO);
+      expect(c.reply_to).toBe('noreply@getaura.com.br');
+    }
+  });
+
+  test('confirmação do pedido (cliente final): mesma regra', async () => {
+    const corpos = fetchFalso();
+    const { sendOrderConfirmationEmail } = carregarMailer({ RESEND_API_KEY: 'k' });
+    const base = { order_number: '0001', customer_name: 'Ana', total: 10, delivery_type: 'pickup', store_name: 'Loja', items: [] };
+    await sendOrderConfirmationEmail('cliente@exemplo.com', { ...base, store_email: 'loja@exemplo.com.br' });
+    await sendOrderConfirmationEmail('cliente@exemplo.com', base);
+    expect(corpos.map((c) => [c.from, c.reply_to])).toEqual([
+      [NEUTRO, 'loja@exemplo.com.br'],
+      [NEUTRO, 'noreply@getaura.com.br'],
+    ]);
+  });
+
+  test('verificação do portal do Karatê: remetente neutro e reply_to noreply@', async () => {
+    const corpos = fetchFalso();
+    const { sendVerificationEmail } = carregarMailer({ RESEND_API_KEY: 'k' });
+    await sendVerificationEmail('atleta@exemplo.com', '123456', 'Atleta Teste');
+    expect(corpos[0].from).toBe(NEUTRO);
+    expect(corpos[0].reply_to).toBe('noreply@getaura.com.br');
+    expect(corpos[0].from).not.toMatch(/Caio/);
+  });
+
+  test('e-mails da lojista seguem com o padrão (Caio + reply_to contato@)', async () => {
+    const corpos = fetchFalso();
+    const { sendOwnerNewOrderEmail } = carregarMailer({ RESEND_API_KEY: 'k' });
+    await sendOwnerNewOrderEmail('lojista@exemplo.com', {
+      order_number: '0001', customer_name: 'Ana', customer_phone: '', total: 10, delivery_type: 'pickup', store_name: 'Loja', payment_method: 'pix',
+    });
+    expect(corpos[0].from).toBe('Caio Alexander, da Aura <contato@getaura.com.br>');
+    expect(corpos[0].reply_to).toBe('contato@getaura.com.br');
+  });
+});
