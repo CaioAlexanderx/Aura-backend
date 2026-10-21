@@ -240,7 +240,7 @@ describe('POST /auth/register — F11 não mexe no varejo', () => {
 
     const res = await request(app).post('/api/v1/auth/register').send({
       name: 'João', email: 'joao@loja.com', password: 'senha1234',
-      company_name: 'Loja', cnpj: '11222333000181', terms_accepted: true,
+      company_name: 'Loja', cnpj: '11222333000181', phone: '11987654321', terms_accepted: true,
     });
 
     expect(res.status).toBe(201);
@@ -258,7 +258,7 @@ describe('POST /auth/register — F11 não mexe no varejo', () => {
 
     await request(app).post('/api/v1/auth/register').send({
       name: 'João', email: 'joao@loja.com', password: 'senha1234',
-      company_name: 'Loja', terms_accepted: true,
+      company_name: 'Loja', phone: '11987654321', terms_accepted: true,
     });
 
     expect(client.calls.some((c) => /karate_federation/.test(c.text))).toBe(false);

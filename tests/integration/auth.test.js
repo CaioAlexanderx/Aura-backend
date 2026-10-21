@@ -76,7 +76,7 @@ describe('POST /api/v1/auth/register', () => {
     db.connect.mockResolvedValueOnce(mockClient);
 
     const res = await request(app).post('/api/v1/auth/register')
-      .send({ name: 'João', email: 'a@b.com', password: 'senha1234', company_name: 'Loja', terms_accepted: true });
+      .send({ name: 'João', email: 'a@b.com', password: 'senha1234', company_name: 'Loja', phone: '11987654321', terms_accepted: true });
 
     expect(res.status).toBe(201);
     expect(res.body.token).toBeDefined();

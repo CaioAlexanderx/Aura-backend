@@ -88,6 +88,23 @@
 // companies.signup_origin (migration 387) so em empresa NOVA, atras de
 // SAVEPOINT. Sem `origem` (ou invalida): nada muda. A cidade do CNPJ tambem
 // e gravada no cadastro (em segundo plano, depois do COMMIT).
+//
+// ── Porta de entrada 1/5 (21/10/2026, tq-66) ────────────────
+// WhatsApp da pessoa OBRIGATORIO em conta NOVA de varejo (cria empresa e nao
+// e dojo): `whatsapp` no corpo (ou `phone`, o campo de sempre), validado em
+// services/whatsappCadastro (DDD da Anatel + 9 + 8 digitos, +55 opcional,
+// fixo recusado) -> 400 com code WHATSAPP_*. Convite (sem company_name),
+// quem entra numa empresa existente pelo CNPJ e dojo seguem como antes.
+// Gravado normalizado (11 digitos) em users.phone. companies.phone recebe
+// `company_phone` (telefone da loja, o da Receita) quando vier; sem ele,
+// o mesmo telefone de antes (ninguem que le companies.phone perde dado).
+// A conta nova ganha um handshake AURA-XXXX (services/signupHandshake,
+// migration 401), devolvido em `whatsapp_handshake` com o link wa.me pronto.
+// Estado 'aguardando'; confirmacao so manual pela equipe (nao ha webhook do
+// numero da Aura). O handshake nunca bloqueia a conta.
+// Desligar a obrigatoriedade: WHATSAPP_OBRIGATORIO_NO_CADASTRO=false.
+// `lead_token` (POST /auth/signup-lead, services/signupLead) liga o lead das
+// etapas a conta criada e, sem `origem` no corpo, a conta herda a do lead.
 // ============================================================
 const router  = require('express').Router();
 const bcrypt  = require('bcrypt');
@@ -107,6 +124,9 @@ const { applySegment, isValidSegment, normalizeCnae, ALLOWED_EXTRAS } = require(
 const signupOrigem = require('../services/signupOrigem');
 const { lookupCNPJ } = require('../services/cnpj');
 const documentoEmpresa = require('../services/documentoEmpresa');
+const whatsappCadastro = require('../services/whatsappCadastro');
+const signupHandshake = require('../services/signupHandshake');
+const signupLead = require('../services/signupLead');
 
 let redis = null;
 try { redis = require('../config/redis').default || require('../config/redis'); } catch (_) {}
@@ -303,7 +323,7 @@ function shapeCompany(company, fallbackMemberRole) {
 
 // POST /api/v1/auth/register
 router.post('/register', async (req, res) => {
-  const { name, email, password, company_name, phone, cnpj, cpf, access_code, terms_accepted, terms_version, self_serve, vertical, federation_id, tax_regime } = req.body;
+  const { name, email, password, company_name, phone, cnpj, cpf, access_code, terms_accepted, terms_version, self_serve, vertical, federation_id, tax_regime, whatsapp, company_phone, lead_token } = req.body;
   const isSelfServe = (self_serve === true || self_serve === 'true');
   // 20/10/2026: conta sem CNPJ ("Nao tenho CNPJ" no cadastro). O CPF so vale
   // quando NAO veio cnpj — com cnpj no corpo o fluxo e o de sempre e o cpf e
@@ -357,6 +377,18 @@ router.post('/register', async (req, res) => {
   const signupSegment = parsedSegment.value;
   // Origem do cadastro (opcional, nunca bloqueia): invalida vira null.
   const signupOrigin = signupOrigem.sanitizarOrigem(req.body && req.body.origem);
+  // 21/10/2026 (tq-66): WhatsApp da pessoa. `whatsapp` e o campo novo; sem
+  // ele vale o `phone` de sempre (app e site atuais mandam o contato ali).
+  // A obrigatoriedade so e decidida mais abaixo, quando se sabe se a conta
+  // cria empresa nova de varejo.
+  const temWhatsapp = whatsapp !== undefined && whatsapp !== null && whatsapp !== '';
+  const whatsappBruto = temWhatsapp ? whatsapp : phone;
+  const celular = whatsappCadastro.validarCelular(whatsappBruto);
+  const exigeWhatsapp = whatsappCadastro.exigidoNoCadastro();
+  // users.phone: normalizado quando e celular valido; senao, como sempre foi.
+  const telefoneDaPessoa = celular.ok ? celular.numero : ((typeof whatsappBruto === 'string' && whatsappBruto.trim()) ? whatsappBruto : (phone || null));
+  // companies.phone: telefone da loja (Receita) quando vier; senao o de antes.
+  const telefoneDaEmpresa = whatsappCadastro.telefoneDaLoja(company_phone) || phone || (celular.ok ? celular.numero : null);
   const dojoFederationId = (typeof federation_id === 'string') ? federation_id.trim() : '';
   if (isDojoSignup && !company_name) {
     return res.status(400).json({
@@ -456,7 +488,7 @@ router.post('/register', async (req, res) => {
       `INSERT INTO users (full_name, email, password_hash, role, is_staff, phone, terms_accepted_at, terms_version)
        VALUES ($1, $2, $3, 'client', $4, $5, NOW(), $6)
        RETURNING id, full_name AS name, email, role, is_staff, email_verified, created_at`,
-      [name.trim(), email.toLowerCase().trim(), password_hash, isStaff, phone || null, acceptedVersion]
+      [name.trim(), email.toLowerCase().trim(), password_hash, isStaff, telefoneDaPessoa || null, acceptedVersion]
     );
 
     let company = null;
@@ -465,6 +497,8 @@ router.post('/register', async (req, res) => {
     let skipCompany = !company_name;
     let segmentState = null;
     let trialInfo = null;
+    let handshake = null;
+    let leadLigado = null;
 
     if (!skipCompany && cnpj) {
       const cleanCnpj = cnpj.replace(/\D/g, '');
@@ -496,6 +530,14 @@ router.post('/register', async (req, res) => {
       });
     }
 
+    // 21/10/2026 (tq-66): conta NOVA de varejo exige o WhatsApp da pessoa.
+    // Aqui (e nao antes) porque so agora se sabe que nao e convite nem
+    // entrada numa empresa existente pelo CNPJ. ROLLBACK desfaz o usuario.
+    if (!skipCompany && !company && !isDojoSignup && exigeWhatsapp && !celular.ok) {
+      await client.query('ROLLBACK');
+      return res.status(400).json({ error: celular.error, code: celular.code, field: 'whatsapp' });
+    }
+
     if (!skipCompany && !company) {
       isNewCompany = true;
       const trialEndsAt = trialDays > 0 ? new Date(Date.now() + trialDays * 86400000).toISOString() : null;
@@ -513,7 +555,7 @@ router.post('/register', async (req, res) => {
         `INSERT INTO companies (owner_id, legal_name, trade_name, plan, onboarding_step, trial_ends_at, access_code_used, cnpj, phone, vertical, vertical_active, federation_id, tax_regime)
          VALUES ($1, $2, $2, $3, 'cnpj', $4, $5, $6, $7, $8, $8, $9, COALESCE($10::tax_regime, 'simples_nacional'::tax_regime))
          RETURNING id, legal_name, trade_name, plan, onboarding_step, trial_ends_at, module_overrides, access_code_used, vertical_active, vertical, ai_enabled, ai_consent_at, federation_id, segment, tax_regime`,
-        [user.id, company_name.trim(), plan, trialEndsAt, access_code || null, cnpj ? cnpj.replace(/\D/g, '') : null, phone || null, newVertical, newFederationId, regimeDoCadastro]
+        [user.id, company_name.trim(), plan, trialEndsAt, access_code || null, cnpj ? cnpj.replace(/\D/g, '') : null, telefoneDaEmpresa || null, newVertical, newFederationId, regimeDoCadastro]
       );
       company = newCompany;
 
@@ -536,8 +578,22 @@ router.post('/register', async (req, res) => {
         company = { ...company, cpf: cleanCpf };
       }
 
+      // 21/10/2026 (tq-66): lead do cadastro por etapa (POST /auth/signup-lead).
+      // Liga o lead a conta e, sem `origem` no corpo, herda a origem que o
+      // lead capturou na etapa 1. Atras de SAVEPOINT: falhou, segue sem lead.
+      if (lead_token) {
+        leadLigado = await signupLead.ligarAoCadastro(client, { token: lead_token, email: user.email, companyId: company.id, userId: user.id });
+      }
+      const origemDoCadastro = signupOrigin || (leadLigado ? signupOrigem.sanitizarOrigem(leadLigado.origem) : null);
+
       // 15/10/2026 (t2-09): primeiro toque do site, na mesma transacao.
-      if (signupOrigin) await signupOrigem.gravarOrigem(client, company.id, signupOrigin);
+      if (origemDoCadastro) await signupOrigem.gravarOrigem(client, company.id, origemDoCadastro);
+
+      // 21/10/2026 (tq-66): handshake pelo WhatsApp (conta nova de varejo com
+      // celular valido). Atras de SAVEPOINT: falhou, segue sem handshake.
+      if (!isDojoSignup && celular.ok) {
+        handshake = await signupHandshake.criarHandshake(client, { companyId: company.id, userId: user.id, whatsapp: celular.numero });
+      }
 
       // 13/10/2026: self-service sem codigo (e que nao e dojo) entra no modo
       // primeira_venda. Sem as colunas da migration 379 volta null e os 7
@@ -574,6 +630,12 @@ router.post('/register', async (req, res) => {
       );
     }
 
+    // Convite ou entrada em empresa existente: o lead tambem e ligado a conta
+    // (sem origem: so empresa nova grava signup_origin).
+    if (lead_token && !isNewCompany) {
+      leadLigado = await signupLead.ligarAoCadastro(client, { token: lead_token, email: user.email, companyId: company ? company.id : null, userId: user.id });
+    }
+
     if (codeType === 'referral' && referrerId) {
       await client.query('INSERT INTO referrals (referrer_id, referred_user_id, referred_email, code, status, completed_at) VALUES ($1, $2, $3, $4, \'completed\', NOW())', [referrerId, user.id, email.toLowerCase().trim(), access_code.toUpperCase().trim()]);
     }
@@ -594,7 +656,7 @@ router.post('/register', async (req, res) => {
         name: user.name,
         companyName: company.trade_name || company.legal_name,
         email: user.email,
-        phone: phone || null,
+        phone: telefoneDaPessoa || null,
         cnpj: cnpj || null,
         cpf: cleanCpf || null,
         plan: company.plan,
@@ -668,6 +730,13 @@ router.post('/register', async (req, res) => {
       code_applied: access_code ? { type: codeType, plan: plan, discount_pct: discountPct, trial_days: trialDays } : null,
       joined_existing: company ? !isNewCompany : false,
       no_company: skipCompany,
+      // 21/10/2026 (tq-66): handshake pelo WhatsApp. null em convite, dojo,
+      // entrada em empresa existente ou migration 401 pendente. estado nasce
+      // 'aguardando' e confirmacao_automatica e sempre false: so a equipe
+      // confirma (nao ha webhook do numero da Aura). Nunca bloqueia a conta.
+      whatsapp_handshake: handshake ? signupHandshake.moldar(handshake) : null,
+      // 21/10/2026 (tq-66): true quando o lead_token do corpo foi ligado a conta.
+      lead_ligado: !!leadLigado,
     });
   } catch (err) {
     await client.query('ROLLBACK');

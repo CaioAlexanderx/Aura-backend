@@ -79,7 +79,7 @@ function clienteDoCadastro({ codigo = null, semMigration = false } = {}) {
 }
 
 const cadastrar = (extra = {}) => request(app).post('/api/v1/auth/register').send({
-  name: 'Ana', email: 'ana@loja.com', password: 'senha1234', company_name: 'Loja da Ana', terms_accepted: true, ...extra,
+  name: 'Ana', email: 'ana@loja.com', password: 'senha1234', company_name: 'Loja da Ana', phone: '11987654321', terms_accepted: true, ...extra,
 });
 
 describe('POST /auth/register', () => {
@@ -113,7 +113,8 @@ describe('POST /auth/register', () => {
 
     expect(res.status).toBe(201);
     expect(estado.sqls.some((s) => s.includes('trial_mode'))).toBe(false);
-    expect(estado.sqls.some((s) => s.startsWith('SAVEPOINT'))).toBe(false);
+    // o SAVEPOINT do handshake do WhatsApp (tq-66) nao conta: aqui so o do modo do trial.
+    expect(estado.sqls.some((s) => s.startsWith('SAVEPOINT') && !s.includes('signup_handshake'))).toBe(false);
     expect(diasAte(estado.empresa.trial_ends_at)).toBeCloseTo(7, 2);
     expect(res.body.company.trial).toMatchObject({ mode: 'fixo', teto_em: null, aguardando_primeira_venda: false });
   });

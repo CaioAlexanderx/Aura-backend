@@ -14,6 +14,9 @@
 // GET  /admin/painel/layout                 — blocos visíveis e ordem do usuário
 // PUT  /admin/painel/layout                 — body: { blocos: [{ id, visivel }] }
 // POST /admin/painel/recalcular             — roda o passo diário agora
+// GET  /admin/painel/handshakes?estado=      — handshakes do cadastro (tq-66)
+// POST /admin/painel/handshakes/:codigo/confirmar — confirma o AURA-XXXX à mão
+// (o "Registrar contato" também confirma, com confirma_whatsapp: true)
 // (conferência com a Asaas: routes/adminPainelAsaas.js, em /admin/painel/asaas)
 //
 // Exemplos reais de cada resposta: tests/fixtures/painel/*.json.
@@ -33,6 +36,7 @@ const { calcularAlertas, alertasDeContatos } = require('../services/painelAlerta
 const { detalheDaConversa } = require('../services/contatosWhatsapp');
 const { listarClients360 } = require('../services/clients360');
 const contatos = require('../services/registrarContato');
+const signupHandshake = require('../services/signupHandshake');
 const canaryStatus = require('../services/canaryStatus');
 const errosPorMinuto = require('../services/errosPorMinuto');
 
@@ -243,7 +247,7 @@ router.get('/clientes/:cid/ficha', ...adminOnly, asyncHandler(async (req, res) =
   if (!cliente) throw new AppError('Empresa não encontrada', 404);
 
   const semanas = base.ultimasSemanas(hoje, 12);
-  const [logins, asaas, linhaDoTempo, vendasSemana, alertas, modulos, contatosDaLoja, checkinRows] = await Promise.all([
+  const [logins, asaas, linhaDoTempo, vendasSemana, alertas, modulos, contatosDaLoja, checkinRows, handshake] = await Promise.all([
     base.consultar(
       pool,
       `SELECT COUNT(*) FILTER (WHERE action = 'login') AS logins,
@@ -320,6 +324,8 @@ router.get('/clientes/:cid/ficha', ...adminOnly, asyncHandler(async (req, res) =
     // Check-in (migration 384): o que o cliente respondeu e o que a equipe anotou.
     base.opcional(pool, `-- checkin:ficha
        SELECT checkin FROM companies WHERE id = $1`, [cid]),
+    // Handshake do cadastro pelo WhatsApp (migration 401). Sem a tabela: null.
+    signupHandshake.doCliente(pool, cid),
   ]);
 
   const l = logins[0] || {};
@@ -400,6 +406,8 @@ router.get('/clientes/:cid/ficha', ...adminOnly, asyncHandler(async (req, res) =
     // passo sem varrer a linha do tempo, que é cortada em 15 eventos.
     contatos: contatosFormatados.slice(0, 10),
     checkin: (checkinRows[0] && checkinRows[0].checkin) || null,
+    // 21/10/2026 (tq-66): AURA-XXXX do cadastro e se a equipe já confirmou.
+    whatsapp_handshake: signupHandshake.moldar(handshake),
     linha_do_tempo: linhaDoTempoCompleta,
   });
 }));
@@ -422,6 +430,16 @@ const PENDENTE_CONTATO = {
 router.post('/contatos', ...adminOnly, asyncHandler(async (req, res) => {
   const { erro, valor } = contatos.normalizar(req.body);
   if (erro) return res.status(400).json({ error: erro, code: 'CONTATO_INVALID' });
+  // 21/10/2026 (tq-66): a mensagem com o AURA-XXXX chegou no WhatsApp da
+  // Aura -> o mesmo "Registrar contato" confirma o handshake da empresa.
+  const cw = req.body && req.body.confirma_whatsapp;
+  if (cw !== undefined && cw !== null && typeof cw !== 'boolean') {
+    return res.status(400).json({ error: 'confirma_whatsapp deve ser true ou false.', code: 'CONTATO_INVALID' });
+  }
+  const confirmaWhatsapp = cw === true;
+  if (confirmaWhatsapp && !valor.alvo.company_id) {
+    return res.status(400).json({ error: 'confirma_whatsapp só vale para empresa (company_id).', code: 'CONTATO_INVALID' });
+  }
 
   let criado;
   try {
@@ -438,7 +456,68 @@ router.post('/contatos', ...adminOnly, asyncHandler(async (req, res) => {
     if (contatos.migrationPendente(err)) return res.status(503).json(PENDENTE_CONTATO);
     throw err;
   }
+  if (confirmaWhatsapp) {
+    // O contato já entrou; o handshake é um extra que nunca derruba o registro.
+    let handshake = null;
+    try {
+      const r = await signupHandshake.confirmarHandshake(pool, { companyId: valor.alvo.company_id, confirmadoPor: req.user.id, via: 'staff' });
+      handshake = r ? { ...signupHandshake.moldar(r.handshake), ja_confirmado: r.ja_confirmado } : null;
+    } catch (err) {
+      if (!(err && (err.code === '42P01' || err.code === '42703'))) throw err;
+    }
+    return res.status(201).json({ ...criado, whatsapp_handshake: handshake });
+  }
   res.status(201).json(criado);
+}));
+
+// ── Handshake do cadastro pelo WhatsApp (21/10/2026, tq-66) ─────
+// Hoje NÃO há webhook de mensagem recebida (o número da Aura não está na
+// API): quem confirma é a equipe, aqui. Confirmar é idempotente: o segundo
+// pedido devolve 200 com ja_confirmado: true. A conta nunca dependeu disto.
+const PENDENTE_HANDSHAKE = {
+  error: 'Handshake do cadastro indisponível (migration 401 pendente).',
+  code: 'MIGRATION_PENDING',
+};
+
+// GET /admin/painel/handshakes?estado=aguardando|confirmado (padrão aguardando)
+router.get('/handshakes', ...adminOnly, asyncHandler(async (req, res) => {
+  const estado = req.query.estado === undefined ? 'aguardando' : req.query.estado;
+  if (estado !== 'aguardando' && estado !== 'confirmado') {
+    return res.status(400).json({ error: 'estado deve ser aguardando ou confirmado.', code: 'HANDSHAKE_INVALID' });
+  }
+  const rows = await base.opcional(
+    pool,
+    `-- handshake:lista
+     SELECT h.codigo, h.whatsapp, h.estado, h.confirmado_em, h.confirmado_via, h.criado_em,
+            h.company_id, COALESCE(c.trade_name, c.legal_name) AS empresa, u.full_name AS pessoa
+       FROM signup_handshakes h
+       JOIN companies c ON c.id = h.company_id
+       LEFT JOIN users u ON u.id = h.user_id
+      WHERE h.estado = $1
+      ORDER BY h.criado_em DESC
+      LIMIT 100`,
+    [estado]
+  );
+  res.json({
+    estado,
+    total: rows.length,
+    handshakes: rows.map((r) => ({ ...signupHandshake.moldar(r), company_id: r.company_id, empresa: r.empresa || null, pessoa: r.pessoa || null })),
+  });
+}));
+
+// POST /admin/painel/handshakes/:codigo/confirmar
+router.post('/handshakes/:codigo/confirmar', ...adminOnly, asyncHandler(async (req, res) => {
+  const codigo = signupHandshake.normalizarCodigo(req.params.codigo);
+  if (!codigo) return res.status(400).json({ error: 'Código inválido. Formato: AURA-XXXX.', code: 'HANDSHAKE_INVALID' });
+  let r;
+  try {
+    r = await signupHandshake.confirmarHandshake(pool, { codigo, confirmadoPor: req.user.id, via: 'staff' });
+  } catch (err) {
+    if (err && (err.code === '42P01' || err.code === '42703')) return res.status(503).json(PENDENTE_HANDSHAKE);
+    throw err;
+  }
+  if (!r) throw new AppError('Código não encontrado', 404);
+  res.status(200).json({ ...signupHandshake.moldar(r.handshake), company_id: r.handshake.company_id, ja_confirmado: r.ja_confirmado });
 }));
 
 // ── GET /admin/painel/contatos?desde=YYYY-MM-DD ─────────────────

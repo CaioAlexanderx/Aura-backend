@@ -12,6 +12,8 @@ const verificationRouter      = require('./verification');
 const { userRouter: productLinksUserRouter } = require('./productLinks');
 
 router.use('/auth', require('./auth'));
+// 21/10/2026 (tq-66): lead do cadastro por etapa. Publica, com limite por IP e por e-mail.
+router.use('/auth', require('./signupLead'));
 router.use('/auth', require('./passwordReset'));
 router.use('/auth', accessCodesRouter);
 router.use('/auth', verificationRouter);
