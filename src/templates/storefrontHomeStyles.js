@@ -493,6 +493,7 @@ body.home .products-grid{grid-template-columns:repeat(4,1fr);gap:20px 16px;}
 .checkout-voltar-loja:hover{color:var(--sf-ink);}
 .checkout-topo-logo{height:42px;display:flex;align-items:center;}
 .checkout-topo-logo img{height:42px;max-width:140px;object-fit:contain;mix-blend-mode:multiply;}
+body.sf-dark .checkout-topo-logo img{mix-blend-mode:normal;}
 .checkout-topo-logo .serif{font-size:22px;}
 .checkout-seguro{display:inline-flex;align-items:center;gap:8px;font-size:12.5px;font-weight:600;color:var(--sf-ink-2);}
 .checkout-seguro svg{color:var(--sf-pix);}
