@@ -58,6 +58,8 @@ const {
 // Loja comum que recebe um endereco da vitrine Studio volta para a home
 // pelo mesmo host por onde chegou (BE-1).
 const { caminhoDaHomeDaLoja } = require('../middleware/customDomain');
+// Fotos pelo r2.getaura.com.br em vez do r2.dev (tq-65) — ver o servico.
+const { fotosPeloDominioProprio, fotosPeloDominioProprioNoJson } = require('../services/fotosPeloDominioProprio');
 const { paginaDoCatalogo, facetasDoCatalogo, faixaDePreco } = require('../services/catalogoPaginado');
 const { normalizarTamanho } = require('../services/tamanhosDaLoja');
 const { generatePix }     = require('../services/pixService');
@@ -251,7 +253,7 @@ router.get('/:slug/catalogo', async (req, res) => {
       }).catch(() => null);
     }
 
-    res.json({
+    res.json(fotosPeloDominioProprioNoJson({
       products: pagina.produtos.map(p => montarProdutoPublico(p, {
         variantsByProduct, categoryById, primaryLinkByProduct,
         mostrarPrecos: cfg.show_prices !== false,
@@ -262,7 +264,7 @@ router.get('/:slug/catalogo', async (req, res) => {
       // null quando a consulta falhou — o cliente mantem as opcoes que ja
       // tinha em vez de esvaziar a lateral.
       facetas,
-    });
+    }));
   } catch (err) {
     console.error('[storefront] catalogo error:', err.message);
     res.status(500).json({ error: 'Erro ao buscar o catalogo' });
@@ -391,7 +393,7 @@ async function servirPaginaDaLoja(req, res, produtoId, { somenteStudio = false, 
     res.setHeader('Content-Security-Policy', STOREFRONT_CSP);
     res.removeHeader('X-Frame-Options');
     res.setHeader('Content-Type', 'text/html; charset=utf-8');
-    const html = buildStorefrontPage(data, slug);
+    const html = fotosPeloDominioProprio(buildStorefrontPage(data, slug));
     if (ehHome) { lembrarPagina(slug, html); res.setHeader('X-Aura-Cache', 'miss'); }
     res.send(html);
   } catch (err) {
@@ -467,7 +469,7 @@ router.get('/:slug/produto/:id/fotos', async (req, res) => {
     // Cinco minutos de cache: a galeria muda quando a lojista sobe foto,
     // e ate la e o mesmo JSON para todo mundo que abre a peca.
     res.setHeader('Cache-Control', 'public, max-age=300');
-    res.json(galeria);
+    res.json(fotosPeloDominioProprioNoJson(galeria));
   } catch (err) {
     console.error('[storefront] fotos da peca:', err.message);
     res.json(vazia);
