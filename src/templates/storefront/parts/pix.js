@@ -41,7 +41,7 @@ function startPolling(){
 function showConfirmation(order){
   clearInterval(pollInterval);clearInterval(timerInterval);
   closeCheckout();cart={};updateCartUI();renderProducts();
-  var wnum=(CONTACT.whatsapp||'').replace(/\\D/g,'');
+  var wnum=numeroDoWhatsapp(CONTACT.whatsapp);
   var wBtn=wnum?'<a class="whats-btn" href="https://wa.me/'+wnum+'" target="_blank">💬 Acompanhar no WhatsApp</a>':'';
   var ov=document.createElement('div');
   ov.className='checkout-overlay open';

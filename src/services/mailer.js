@@ -9,6 +9,8 @@
 const FROM_DEFAULT = 'Aura. <noreply@getaura.com.br>';
 const FROM = process.env.SMTP_FROM || FROM_DEFAULT;
 const ICON_URL = 'https://cdn.jsdelivr.net/gh/CaioAlexanderx/aura-app@main/assets/Icon.png';
+// O numero do wa.me com o 55, regra unica (tq-61).
+const { numeroDoWhatsapp } = require('./whatsappDaLoja');
 
 function emailLayout(content) {
   return `<!DOCTYPE html>
@@ -330,9 +332,11 @@ async function sendOwnerNewOrderEmail(to, opts) {
   const paymentLabel  = payment_method === 'pix' ? 'Pix' :
                         payment_method === 'card' ? 'Cart&atilde;o' : 'Na entrega';
 
-  const phone = customer_phone ? customer_phone.replace(/\D/g, '') : null;
+  // tq-61: a regra unica do wa.me (services/whatsappDaLoja.js). Antes o
+  // 55 entrava sempre, e quem digitava "+55 ..." no checkout virava 5555.
+  const phone = numeroDoWhatsapp(customer_phone);
   const whatsappLink = phone
-    ? `<a href="https://wa.me/55${phone}" style="color:#7c3aed;text-decoration:none;">Chamar no WhatsApp</a>`
+    ? `<a href="https://wa.me/${phone}" style="color:#7c3aed;text-decoration:none;">Chamar no WhatsApp</a>`
     : '';
 
   const html = emailLayout(`

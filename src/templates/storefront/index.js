@@ -42,6 +42,10 @@ const { FONTE: fonteDasFaixas } = require('../../services/faixasDePreco');
 // Mesma estrategia: a regra mora no servico, e testada la, e vai
 // serializada — o navegador e o teste rodam o MESMO codigo.
 const { FONTE: fonteDasFotos } = require('../../services/fotosDaVitrine');
+// O numero do wa.me com o 55 (tq-61). Mesma estrategia: a regra mora no
+// servico, testada la, e vai serializada — pix.js e product_detail.js
+// chamam numeroDoWhatsapp() em vez de so tirar o que nao e digito.
+const { FONTE: fonteDoWhatsapp } = require('../../services/whatsappDaLoja');
 
 function buildScript(storeData, escapedSlug, apiBase) {
   return prelude(storeData, escapedSlug, apiBase)
@@ -52,6 +56,7 @@ function buildScript(storeData, escapedSlug, apiBase) {
        + fonteDasCores
        + fonteDasFaixas
        + fonteDasFotos
+       + fonteDoWhatsapp
        + card
        + products
        + categorias

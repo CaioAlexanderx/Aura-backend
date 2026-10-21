@@ -30,6 +30,8 @@ const { validatePixKey } = require('../services/staticPixService');
 const { geocodeCep, normalizeCep } = require('../services/cepGeocoding');
 const { POLITICA_PADRAO } = require('../templates/storefrontHtml');
 const { normalizarHandle } = require('../services/redesSociais');
+// Titulo e texto do bloco do WhatsApp da home (migration 401).
+const { sanearTextoDoBloco, LIMITES_DO_BLOCO } = require('../services/whatsappDaLoja');
 const {
   CAMPOS: CAMPOS_DE_VITRINE, condicaoDeFalta,
   exigeFotoNoUniverso, sanitizarItens,
@@ -584,6 +586,8 @@ router.put('/', requireRole('client', 'analyst', 'admin'), async (req, res) => {
     card_enabled,
     card_max_installments,
     politica_troca,
+    // Migration 401 — bloco do WhatsApp da home
+    whats_bloco_titulo, whats_bloco_texto,
     require_product_image,
     pix_discount_pct,
     always_open,
@@ -1197,6 +1201,33 @@ router.put('/', requireRole('client', 'analyst', 'admin'), async (req, res) => {
       } catch (e) {
         if (e.code === '42703') {
           console.error('[canal-politica] coluna politica_troca inexistente — skip:', e.message);
+        } else {
+          throw e;
+        }
+      }
+    }
+
+    // Migration 401 — titulo e texto do bloco do WhatsApp da home
+    // (21/10/2026: "Duvida sobre tamanho ou modelo?" nao serve para uma
+    // adega). UPDATE por coluna e 42703 tolerado, como os campos acima.
+    // Sem HTML, espacos colapsados, limite de tamanho; vazio LIMPA e a
+    // loja volta ao texto padrao. Os nomes de coluna sao fixos, nunca do
+    // corpo.
+    for (const [coluna, valor, limite] of [
+      ['whats_bloco_titulo', whats_bloco_titulo, LIMITES_DO_BLOCO.titulo],
+      ['whats_bloco_texto', whats_bloco_texto, LIMITES_DO_BLOCO.texto],
+    ]) {
+      if (valor === undefined) continue;
+      try {
+        const { rows: updated } = await db.query(
+          `UPDATE digital_channel_config SET ${coluna} = $1, updated_at = NOW()
+            WHERE company_id = $2 RETURNING *`,
+          [sanearTextoDoBloco(valor, limite), cid]
+        );
+        if (updated.length) savedConfig = updated[0];
+      } catch (e) {
+        if (e.code === '42703') {
+          console.error(`[canal-whats-bloco] coluna ${coluna} inexistente — skip:`, e.message);
         } else {
           throw e;
         }
