@@ -23,13 +23,18 @@
 //   siteName, tagline, logoInTopbar, logoNoRodape, contactBar,
 //   addrText, horarioTexto, cnpjTexto, announcementBar, banners[],
 //   serviceCards[], isOpenNow, nextOpenText, pagamentos, politicaTroca,
-//   whatsNum,
+//   whatsNum, whatsBloco,
 // }) → string HTML
+//
+// whatsNum ja chega com o 55 (services/whatsappDaLoja.js, tq-61).
+// whatsBloco = { titulo, texto } da lojista (migration 401); null nos
+// dois = o bloco de hoje, byte a byte.
 //
 // O texto da politica e as formas de pagamento moram em
 // services/rodapeInstitucional.js — a vitrine Studio desenha o MESMO
 // rodape, e calcular em dois lugares e como as duas lojas divergem.
 const { POLITICA_PADRAO, montarRodape } = require('../services/rodapeInstitucional');
+const { BLOCO_PADRAO, politicaComLinkDoWhatsapp } = require('../services/whatsappDaLoja');
 
 // Logo oficial do WhatsApp (glyph 24x24, fill currentColor). Nao usar o
 // balao generico: e a logo que a cliente reconhece de relance.
@@ -49,7 +54,7 @@ function buildHtmlBody({
   siteName, tagline, logoInTopbar, logoNoRodape, contactBar,
   addrText, horarioTexto, cnpjTexto, announcementBar, banners, serviceCards,
   isOpenNow, nextOpenText,
-  pagamentos, politicaTroca, whatsNum, redes,
+  pagamentos, politicaTroca, whatsNum, redes, whatsBloco,
 }) {
   banners = Array.isArray(banners) ? banners : [];
   serviceCards = Array.isArray(serviceCards) ? serviceCards : [];
@@ -65,6 +70,14 @@ function buildHtmlBody({
   }, politicaTroca);
   const formas = rodape.formas;
   const politica = rodape.politica;
+  // "fale com a loja pelo WhatsApp" sem link (21/10/2026, Felic). Quando
+  // a lojista ESCREVEU a politica dela e a loja tem WhatsApp, a palavra
+  // vira link. O texto padrao fica como esta: as lojas que nao escreveram
+  // a delas nao mudam (mesma regra do bloco do WhatsApp abaixo).
+  const politicaDela = politicaTroca != null && String(politicaTroca).trim() !== '';
+  const politicaHtml = (politicaDela && whatsNum)
+    ? politicaComLinkDoWhatsapp(politica, whatsNum)
+    : escHtml(politica);
 
   // ── Redes sociais ─────────────────────────────────────
   // A lojista cadastra o @; quem normaliza e valida e
@@ -86,7 +99,7 @@ function buildHtmlBody({
         </div>` : ''}
         ${politica ? `<div class="footer-inst-bloco">
           <div class="sf-label">Trocas e devoluções</div>
-          <div class="footer-inst-txt">${escHtml(politica)}</div>
+          <div class="footer-inst-txt">${politicaHtml}</div>
         </div>` : ''}
       </div>`;
 
@@ -208,7 +221,26 @@ ${serviceCards.map((c) => `  <div class="service-card">
   // Bloco do WhatsApp: em vez da contact-bar, um cartao no wash da marca
   // com o botao verde e a logo oficial. Chega pronto de storefrontPage
   // (contactBar) quando ha numero; vazio quando nao ha.
-  const whatsBlock = whatsNum ? `
+  //
+  // Titulo e texto da lojista (migration 401, 21/10/2026): "Duvida sobre
+  // tamanho ou modelo?" nao serve para uma adega. Com um dos dois
+  // escrito, o cartao INTEIRO vira o link (o botao vira <span> dentro
+  // dele — <a> dentro de <a> nao vale). O estilo do link vai inline para
+  // o <style> das outras lojas nao mudar. Sem nada escrito, o bloco de
+  // hoje, byte a byte.
+  const tituloDela = whatsBloco && whatsBloco.titulo ? String(whatsBloco.titulo) : '';
+  const textoDele = whatsBloco && whatsBloco.texto ? String(whatsBloco.texto) : '';
+  const blocoDela = !!(tituloDela || textoDele);
+  const whatsBlock = (whatsNum && blocoDela) ? `
+<section class="whats-block">
+  <a class="whats-block-inner" href="https://wa.me/${whatsNum}" target="_blank" rel="noopener" style="color:inherit;text-decoration:none;">
+    <div>
+      <div class="whats-block-tit serif">${escHtml(tituloDela || BLOCO_PADRAO.titulo)}</div>
+      <div class="whats-block-txt">${escHtml(textoDele || BLOCO_PADRAO.texto)}</div>
+    </div>
+    <span class="whatsapp-cta">${WHATSAPP_GLYPH}Chamar no WhatsApp</span>
+  </a>
+</section>` : whatsNum ? `
 <section class="whats-block">
   <div class="whats-block-inner">
     <div>
