@@ -6,7 +6,8 @@
 //   - sanitizarOrigem: entrada pública, então tudo é whitelist + tamanho.
 //     Chave desconhecida some, string acima do limite é cortada, valor que
 //     não é texto some, landing_page perde query e #, referrer vira só o
-//     host, first_seen_at tem de ser uma data válida. Sem nenhuma chave
+//     host, first_seen_at tem de ser uma data válida, ref (21/10, tq-66) é o
+//     código de indicação do link, só [A-Z0-9-]. Sem nenhuma chave
 //     válida devolve null (nada é gravado e o cadastro segue como sempre);
 //   - gravarOrigem: UPDATE na empresa NOVA, na transação do cadastro, atrás
 //     de SAVEPOINT (coluna ausente = deploy antes da migration 387; o
@@ -30,6 +31,7 @@ const LIMITES = {
   utm_term: 100,
   landing_page: 300,
   referrer: 200,
+  ref: 44,
 };
 const CHAVES_UTM = ['utm_source', 'utm_medium', 'utm_campaign', 'utm_content', 'utm_term'];
 // utm_source e utm_medium agrupam melhor em minúsculas ("Google" = "google").
@@ -69,6 +71,18 @@ function host(valor) {
   return h.slice(0, LIMITES.referrer);
 }
 
+// Código de indicação do link (getaura.com.br/r/<código> -> ?ref=). Só
+// letras, números e hífen, em maiúsculas (REF-ANA123). Fica na origem mesmo
+// quando o código não foi aplicado (vencido, esgotado): é atribuição de
+// marketing. O código APLICADO continua em companies.access_code_used.
+function codigoRef(valor) {
+  const t = texto(valor, 200);
+  if (!t) return null;
+  const c = t.toUpperCase();
+  if (c.length > LIMITES.ref || !/^[A-Z0-9][A-Z0-9-]{2,}$/.test(c)) return null;
+  return c;
+}
+
 function dataIso(valor) {
   if (typeof valor !== 'string' || valor.length > 40) return null;
   const d = new Date(valor);
@@ -93,6 +107,8 @@ function sanitizarOrigem(bruto) {
   if (ref) out.referrer = ref;
   const visto = dataIso(bruto.first_seen_at);
   if (visto) out.first_seen_at = visto;
+  const indicacao = codigoRef(bruto.ref);
+  if (indicacao) out.ref = indicacao;
   return Object.keys(out).length ? out : null;
 }
 

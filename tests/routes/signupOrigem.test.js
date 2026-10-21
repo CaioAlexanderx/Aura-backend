@@ -66,7 +66,7 @@ function clienteDoCadastro({ semMigration = false, empresaExistente = false } = 
 }
 
 const cadastrar = (extra = {}) => request(app).post('/api/v1/auth/register').send({
-  name: 'Ana', email: 'ana@loja.com', password: 'senha1234', company_name: 'Loja da Ana', terms_accepted: true, ...extra,
+  name: 'Ana', email: 'ana@loja.com', password: 'senha1234', company_name: 'Loja da Ana', phone: '11987654321', terms_accepted: true, ...extra,
 });
 const gravouOrigem = (chamadas) => chamadas.find((c) => c.sql.startsWith('UPDATE companies SET signup_origin'));
 

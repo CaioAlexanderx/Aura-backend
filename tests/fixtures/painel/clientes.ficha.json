@@ -208,6 +208,7 @@
     "fiado": "sim",
     "quem_decide": "dono"
   },
+  "whatsapp_handshake": null,
   "linha_do_tempo": [
     {
       "tipo": "contato",
