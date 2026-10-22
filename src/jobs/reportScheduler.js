@@ -54,7 +54,7 @@ async function getEligibleOwnerGroups() {
 async function triggerWeeklyReports() {
   console.log('[reportScheduler] iniciando relatorios semanais (allowlist + group-by-owner)...');
   const start = Date.now();
-  let sent = 0, skipped = 0, errors = 0;
+  let sent = 0, skipped = 0, errors = 0, deliveryErrors = 0;
 
   try {
     const {
@@ -90,10 +90,21 @@ async function triggerWeeklyReports() {
           email: result.company.recipient_email || g.recipient,
           name:  result.company.name || label,
         };
-        await sendWeeklyReport(sendCompany, result.kpis, result.reportUrl);
-        await updateDelivery(result.deliveryId, 'sent');
+        // tq-72: o envio devolve o id do provedor (Resend, SMTP ou dev), que
+        // vai para report_deliveries.resend_id. Se o envio lança, a linha
+        // vira 'failed' antes de o erro seguir para o catch abaixo.
+        let envio;
+        try {
+          envio = await sendWeeklyReport(sendCompany, result.kpis, result.reportUrl);
+        } catch (sendErr) {
+          if (!(await updateDelivery(result.deliveryId, 'failed', { error: sendErr.message }))) deliveryErrors++;
+          throw sendErr;
+        }
+        const envioId = (envio && envio.id) || null;
+        if (!(await updateDelivery(result.deliveryId, 'sent', { resendId: envioId }))) deliveryErrors++;
         sent++;
-        console.log(`[reportScheduler] sent ${consolidated ? '[CONS]' : '[SINGLE]'} -> ${sendCompany.email}: ${label}`);
+        // Sem o e-mail do destinatario no log: empresa, entrega e id do envio.
+        console.log(`[reportScheduler] sent ${consolidated ? '[CONS]' : '[SINGLE]'} company=${g.primary.id} delivery=${result.deliveryId} id=${envioId || '-'}: ${label}`);
       } catch (err) {
         errors++;
         console.error(`[reportScheduler] error em ${label}:`, err.message);
@@ -103,7 +114,7 @@ async function triggerWeeklyReports() {
     console.error('[reportScheduler] fatal:', err.message);
   }
 
-  console.log(`[reportScheduler] semanal concluido em ${Date.now()-start}ms — sent=${sent} skipped=${skipped} errors=${errors}`);
+  console.log(`[reportScheduler] semanal concluido em ${Date.now()-start}ms — sent=${sent} skipped=${skipped} errors=${errors} delivery_update_errors=${deliveryErrors}`);
 }
 
 let _lastWeeklyDate = null;

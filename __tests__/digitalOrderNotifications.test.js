@@ -166,3 +166,38 @@ describe('notifyPaymentConfirmed — enriquecimento do pedido', () => {
     expect(sendOrderStatusEmail.mock.calls[0][1].status).toBe('confirmed');
   });
 });
+
+// tq-72 (21/10/2026): o e-mail ao cliente final leva o e-mail da loja
+// (companies.email) para o mailer usar como Reply-To; sem e-mail, null
+// (o mailer cai em noreply@, nunca em contato@).
+describe('e-mail ao cliente final — e-mail da loja para o Reply-To', () => {
+  function comEmailDaLoja(email) {
+    mockDb();
+    const base = db.query.getMockImplementation();
+    db.query.mockImplementation((sql, params) => {
+      if (/SELECT email FROM companies/i.test(sql)) {
+        return Promise.resolve({ rows: email === undefined ? [] : [{ email }] });
+      }
+      return base(sql, params);
+    });
+  }
+
+  it('pagamento confirmado: passa store_email da loja', async () => {
+    comEmailDaLoja('loja@davicalcados.com.br');
+    await notify.notifyPaymentConfirmed({ order: { ...PARTIAL_ORDER } });
+    expect(sendOrderStatusEmail.mock.calls[0][1].store_email).toBe('loja@davicalcados.com.br');
+  });
+
+  it('mudança de status: passa store_email da loja', async () => {
+    comEmailDaLoja('loja@davicalcados.com.br');
+    await notify.notifyStatusChange({ ...DB_ROW, status: 'ready' });
+    expect(sendOrderStatusEmail).toHaveBeenCalledTimes(1);
+    expect(sendOrderStatusEmail.mock.calls[0][1].store_email).toBe('loja@davicalcados.com.br');
+  });
+
+  it('loja sem e-mail: store_email null', async () => {
+    comEmailDaLoja(null);
+    await notify.notifyStatusChange({ ...DB_ROW, status: 'ready' });
+    expect(sendOrderStatusEmail.mock.calls[0][1].store_email).toBeNull();
+  });
+});

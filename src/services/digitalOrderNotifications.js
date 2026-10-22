@@ -222,6 +222,22 @@ async function getStoreName(company_id) {
   }
 }
 
+// E-mail da própria loja (companies.email), para o Reply-To dos e-mails
+// ao cliente final (tq-72): a resposta do cliente vai para a loja, não para
+// a Aura. Sem e-mail (2/3 dos cadastros novos não têm), o mailer usa
+// noreply@. Best-effort: falha vira null, nunca e-mail que não sai.
+async function getStoreEmail(company_id) {
+  try {
+    const { rows } = await db.query(
+      `SELECT email FROM companies WHERE id = $1`, [company_id]
+    );
+    const email = rows[0] && rows[0].email ? String(rows[0].email).trim() : '';
+    return email || null;
+  } catch (_) {
+    return null;
+  }
+}
+
 // ---- Eventos públicos ----
 
 /**
@@ -297,11 +313,13 @@ async function notifyPaymentConfirmed({ order: input }) {
   // 3. E-mail ao cliente — no Studio, com o link do pedido (Fase 2).
   if (order.customer_email) {
     const link = await linkDoPedidoDaVitrine(order);
+    const store_email = await getStoreEmail(company_id);
     await sendOrderStatusEmail(order.customer_email, {
       order_number:  order.order_number,
       customer_name: order.customer_name,
       status:        'confirmed',
       store_name,
+      store_email,
       ...(link ? { link } : {}),
     }).catch(err => console.error('[notify] customer confirmed email error:', err.message));
   }
@@ -321,11 +339,13 @@ async function notifyStatusChange(order) {
   }
 
   const store_name = await getStoreName(order.company_id);
+  const store_email = await getStoreEmail(order.company_id);
   await sendOrderStatusEmail(order.customer_email, {
     order_number:  order.order_number,
     customer_name: order.customer_name,
     status:        order.status,
     store_name,
+    store_email,
   }).catch(err => console.error('[notify] status email error:', err.message));
 }
 
