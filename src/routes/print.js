@@ -15,6 +15,9 @@
 //   Mesmo tratamento do back#391 (DANFE) — pendência declarada lá.
 // 10/10/2026: carnê ganha "O que foi comprado" por carnê, pagas separadas
 //   das a pagar, e o formato A4 com a marca da loja (?format=a4).
+// 22/10/2026: cupom não fiscal do Caixa mostra a logo da loja (companies.logo_url)
+//   no canto superior esquerdo quando cadastrada. Sem logo o HTML é idêntico
+//   ao de antes (travado por __tests__/cupom.logoDaLoja.test.js).
 // ============================================================
 const express = require('express');
 const router  = express.Router({ mergeParams: true });
@@ -55,6 +58,21 @@ function saleLabel(sale) {
     return String(sale.sale_number);
   }
   return String(sale && sale.id ? sale.id : '').slice(-8).toUpperCase();
+}
+
+// 22/10/2026: logo no cabecalho do cupom. So aceita https:// -- http:,
+// javascript:, data: e caminho relativo contam como "sem logo" e o cupom sai
+// exatamente como sempre saiu. O valor volta SEM escape; quem monta o atributo
+// passa por esc().
+function receiptLogoUrl(raw) {
+  if (typeof raw !== 'string') return null;
+  const u = raw.trim();
+  if (!u || u.length > 2048 || /[\s\u0000-\u001f]/.test(u)) return null;
+  try {
+    return new URL(u).protocol === 'https:' ? u : null;
+  } catch (e) {
+    return null;
+  }
 }
 
 function receiptHTML({ company, sale, items, payments, installments = [], options = {} }) {
@@ -122,6 +140,42 @@ function receiptHTML({ company, sale, items, payments, installments = [], option
 
   const w = width80 ? '72mm' : '100%';
 
+  // Logo da loja (so https). Caixa fixa: 18mm na bobina de 80mm (72mm uteis),
+  // 30mm no A4. Tamanho fixo evita o layout pular quando a imagem carrega.
+  // O filtro e pra termica: sem ele o colorido sai borrado/manchado.
+  const logoUrl = receiptLogoUrl(company.logo_url);
+  const logoBox = width80 ? '18mm' : '30mm';
+  const logoCss = logoUrl
+    ? `
+    .head-logo { display:flex; align-items:center; gap:2mm; }
+    .head-logo-img { flex:none; width:${logoBox}; height:${logoBox}; }
+    .head-logo-img img { display:block; width:${logoBox}; height:${logoBox}; object-fit:contain; filter:grayscale(1) contrast(1.2); }
+    .head-logo-txt { flex:1 1 auto; min-width:0; text-align:left; word-break:break-word; }`
+    : '';
+
+  const cnpjLine   = company.cnpj ? `<div>CNPJ: ${company.cnpj}</div>` : '';
+  const phoneLine  = company.phone ? `<div>Tel: ${company.phone}</div>` : '';
+  const streetLine = company.address_street ? `<div>${company.address_street}${company.address_number ? ', '+company.address_number : ''}</div>` : '';
+  const cityLine   = company.address_city ? `<div>${company.address_city}${company.address_state ? ' - '+company.address_state : ''}</div>` : '';
+  const headerHTML = logoUrl
+    ? `<div class="head-logo">
+    <div class="head-logo-img"><img src="${esc(logoUrl)}" alt=""></div>
+    <div class="head-logo-txt">
+      <div class="company-name">${company.trade_name || company.legal_name}</div>
+      ${cnpjLine}
+      ${phoneLine}
+      ${streetLine}
+      ${cityLine}
+    </div>
+  </div>`
+    : `<div class="center">
+    <div class="company-name">${company.trade_name || company.legal_name}</div>
+    ${cnpjLine}
+    ${phoneLine}
+    ${streetLine}
+    ${cityLine}
+  </div>`;
+
   return `<!DOCTYPE html>
 <html lang="pt-BR">
 <head>
@@ -144,18 +198,12 @@ function receiptHTML({ company, sale, items, payments, installments = [], option
     .total-row td { font-weight:bold; font-size:13px; border-top:1px solid #000; padding-top:4px; }
     .discount-row td { color:#555; }
     .footer { font-size:9px; text-align:center; margin-top:6px; }
-    .sale-id { font-size:9px; color:#666; }
+    .sale-id { font-size:9px; color:#666; }${logoCss}
     @media print { body { -webkit-print-color-adjust:exact; } button { display:none; } }
   </style>
 </head>
 <body>
-  <div class="center">
-    <div class="company-name">${company.trade_name || company.legal_name}</div>
-    ${company.cnpj ? `<div>CNPJ: ${company.cnpj}</div>` : ''}
-    ${company.phone ? `<div>Tel: ${company.phone}</div>` : ''}
-    ${company.address_street ? `<div>${company.address_street}${company.address_number ? ', '+company.address_number : ''}</div>` : ''}
-    ${company.address_city ? `<div>${company.address_city}${company.address_state ? ' - '+company.address_state : ''}</div>` : ''}
-  </div>
+  ${headerHTML}
   <div class="divider"></div>
   <div class="center bold">CUPOM NAO FISCAL</div>
   <div class="divider"></div>
@@ -188,7 +236,7 @@ function receiptHTML({ company, sale, items, payments, installments = [], option
   ${sale.notes ? `<div style="font-size:10px">Obs: ${sale.notes}</div><div class="divider"></div>` : ''}
   <div class="footer">Obrigado pela preferencia!<br>${company.trade_name || company.legal_name}<br><small>Powered by Aura. - getaura.com.br</small></div>
   <br><button onclick="window.print()" style="width:100%;padding:8px;margin-top:8px;cursor:pointer">Imprimir</button>
-  ${autoprint ? autoPrintScript() : ''}
+  ${autoprint ? (logoUrl ? autoPrintScript({ bailMs: 2000 }) : autoPrintScript()) : ''}
 </body>
 </html>`;
 }
@@ -204,7 +252,7 @@ function _payLabel(method) {
 
 async function _loadSaleData(saleId, companyId) {
   const { rows: companyRows } = await db.query(
-    `SELECT legal_name, trade_name, cnpj, phone,
+    `SELECT legal_name, trade_name, cnpj, phone, logo_url,
             address_street, address_number, address_city, address_state
      FROM companies WHERE id=$1`, [companyId]
   );
