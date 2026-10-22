@@ -1,0 +1,2 @@
+# Fixtures do cupom sem logo: comparadas byte a byte, nao podem sofrer conversao de fim de linha.
+__tests__/fixtures/cupomSemLogo/* -text

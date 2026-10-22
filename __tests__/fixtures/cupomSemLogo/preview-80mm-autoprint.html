@@ -1,0 +1,78 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8">
+  <title>Cupom - MH Alimentos</title>
+  <style>
+    @page { margin: 4mm 5mm; size: 80mm auto; }
+    * { margin:0; padding:0; box-sizing:border-box; }
+    /* 14/09/2026: Courier New tem traco de 1 ponto na cabeca termica de 203dpi
+       e as letras saem falhadas (a pagina de teste do Windows, em fonte mais
+       grossa, sai legivel na mesma impressora). Consolas segura o traco. */
+    body { font-family:Consolas,'Lucida Console',Menlo,'Courier New',monospace; font-size:11px; width:72mm; color:#000; }
+    .center { text-align:center; }
+    .bold { font-weight:bold; }
+    .divider { border-top:1px dashed #000; margin:4px 0; }
+    .company-name { font-size:14px; font-weight:bold; }
+    table { width:100%; border-collapse:collapse; }
+    th { font-size:10px; border-bottom:1px solid #000; padding:2px 0; }
+    td { padding:2px 0; vertical-align:top; font-size:11px; }
+    .total-row td { font-weight:bold; font-size:13px; border-top:1px solid #000; padding-top:4px; }
+    .discount-row td { color:#555; }
+    .footer { font-size:9px; text-align:center; margin-top:6px; }
+    .sale-id { font-size:9px; color:#666; }
+    @media print { body { -webkit-print-color-adjust:exact; } button { display:none; } }
+  </style>
+</head>
+<body>
+  <div class="center">
+    <div class="company-name">MH Alimentos</div>
+    <div>CNPJ: 12.345.678/0001-90</div>
+    <div>Tel: (91) 90000-0000</div>
+    <div>Rua das Palmeiras, 120</div>
+    <div>Belém - PA</div>
+  </div>
+  <div class="divider"></div>
+  <div class="center bold">CUPOM NAO FISCAL</div>
+  <div class="divider"></div>
+  <div>Data: 20/10/2026, 12:30:00</div>
+  <div class="sale-id">Venda: #1042</div>
+  <div>Vendedor: Ana</div>
+  <div>Cliente: Carlos</div>
+  <div class="divider"></div>
+  <table>
+    <thead><tr>
+      <th style="text-align:left">Produto</th>
+      <th style="text-align:center">Qtd</th>
+      <th style="text-align:right">Unit.</th>
+      <th style="text-align:right">Total</th>
+    </tr></thead>
+    <tbody><tr>
+      <td>Feijão 1kg</td>
+      <td style="text-align:center">2</td>
+      <td style="text-align:right">R$7.50</td>
+      <td style="text-align:right">R$15.00</td>
+    </tr><tr>
+      <td>Camiseta <small>(M-AZUL)</small></td>
+      <td style="text-align:center">1</td>
+      <td style="text-align:right">R$169.50</td>
+      <td style="text-align:right"><s style="color:#999">R$169.50</s><br>R$159.50</td>
+    </tr></tbody>
+  </table>
+  <div class="divider"></div>
+  <table>
+    <tr><td>Subtotal</td><td style="text-align:right">R$184.50</td></tr>
+    <tr class="discount-row"><td>Desconto</td><td style="text-align:right">-R$10.00</td></tr>
+    <tr class="total-row"><td>TOTAL</td><td style="text-align:right">R$174.50</td></tr>
+    <tr><td>Dinheiro</td><td style="text-align:right">R$174.50</td></tr>
+    <tr><td>Troco</td><td style="text-align:right">R$25.50</td></tr>
+  </table>
+  
+  
+  <div class="divider"></div>
+  <div style="font-size:10px">Obs: Entregar na portaria</div><div class="divider"></div>
+  <div class="footer">Obrigado pela preferencia!<br>MH Alimentos<br><small>Powered by Aura. - getaura.com.br</small></div>
+  <br><button onclick="window.print()" style="width:100%;padding:8px;margin-top:8px;cursor:pointer">Imprimir</button>
+  <script>(function(){var fired=false;function go(){if(fired)return;fired=true;try{window.focus();}catch(e){}try{window.print();}catch(e){}}function ready(){var imgs=[].slice.call(document.images||[]);var pend=imgs.filter(function(i){return !i.complete;});if(!pend.length){setTimeout(go,250);return;}var n=0,t=setTimeout(go,3000);pend.forEach(function(i){function fin(){if(++n>=pend.length){clearTimeout(t);setTimeout(go,250);}}i.addEventListener("load",fin);i.addEventListener("error",fin);});}setTimeout(ready,50);})();</script>
+</body>
+</html>
