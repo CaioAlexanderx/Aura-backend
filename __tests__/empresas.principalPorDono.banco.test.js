@@ -158,15 +158,23 @@ describe('migration 404 — principal para quem não tem', () => {
 describe('cadastro — INSERT com is_primary no schema de verdade', () => {
   test('3. a empresa do cadastro nasce principal', async () => {
     await client.query('SAVEPOINT cad404');
-    const dono = await novoDono('cadastro');
-    const src = fs.readFileSync(path.join(__dirname, '..', 'src', 'routes', 'auth.js'), 'utf8');
-    const m = src.match(/`(INSERT INTO companies \(owner_id, legal_name, trade_name, plan, onboarding_step[^`]*?)`/);
-    expect(m).not.toBeNull();
-    const { rows: [c] } = await client.query(m[1], [
-      dono, 'Loja Fixture 404', 'negocio', null, null, null, null, null, null, null,
-    ]);
-    expect(c.is_primary).toBe(true);
-    await client.query('ROLLBACK TO SAVEPOINT cad404');
+    try {
+      const dono = await novoDono('cadastro');
+      const src = fs.readFileSync(path.join(__dirname, '..', 'src', 'routes', 'auth.js'), 'utf8');
+      const m = src.match(/`(INSERT INTO companies \(owner_id, legal_name, trade_name, plan, onboarding_step[^`]*?)`/);
+      expect(m).not.toBeNull();
+      // Colunas e VALUES exatamente como o cadastro grava; o RETURNING vira
+      // só id + is_primary (o schema do CI não tem todas as colunas que o
+      // RETURNING do cadastro lê, como module_overrides).
+      const insert = m[1].replace(/RETURNING[\s\S]*$/, 'RETURNING id, is_primary');
+      expect(insert).toMatch(/tax_regime, is_primary\)/);
+      const { rows: [c] } = await client.query(insert, [
+        dono, 'Loja Fixture 404', 'negocio', null, null, null, null, null, null, null,
+      ]);
+      expect(c.is_primary).toBe(true);
+    } finally {
+      await client.query('ROLLBACK TO SAVEPOINT cad404');
+    }
   });
 });
 
