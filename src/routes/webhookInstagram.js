@@ -6,10 +6,14 @@
 // AURINHA (312): além de persistir a DM (comportamento original do P11
 // S3), o inbound agora (1) faz upsert da conversa em hub_conversations,
 // (2) liga a mensagem à conversa e (3) dispara o agente Aurinha async.
-// Segurança: valida X-Hub-Signature-256 quando IG_APP_SECRET estiver
-// setado (mesmo padrão do webhook WhatsApp). Sem o secret, mantém o
-// comportamento legado (processa sem validar) COM warning — trocar para
-// estrito assim que IG_APP_SECRET entrar no Railway.
+// Segurança (INC-2026-10-21-03, tq-101):
+//   - GET de verificação: IG_VERIFY_TOKEN obrigatório, sem fallback fixo
+//     (o antigo estava escrito no código de um repositório público).
+//     Sem a env, responde 403.
+//   - POST: X-Hub-Signature-256 obrigatório (HMAC-SHA256 do IG_APP_SECRET
+//     sobre os bytes crus). Sem IG_APP_SECRET, recusa com 401 e loga o
+//     motivo — antes processava o evento sem validar.
+//   As envs são lidas a cada requisição (não no load do módulo).
 // ============================================================
 
 const express = require('express');
@@ -17,18 +21,26 @@ const router  = express.Router();
 const db      = require('../config/database');
 const { validateWebhookSignature } = require('../utils/webhook');
 
-const VERIFY_TOKEN = process.env.IG_VERIFY_TOKEN || 'aura_instagram_verify_2026';
-const APP_SECRET   = process.env.IG_APP_SECRET || null;
+const verifyToken = () => process.env.IG_VERIFY_TOKEN || null;
+const appSecret   = () => process.env.IG_APP_SECRET || null;
 
 // GET /webhooks/instagram — Meta webhook verification
 router.get('/', (req, res) => {
   const mode      = req.query['hub.mode'];
   const token     = req.query['hub.verify_token'];
   const challenge = req.query['hub.challenge'];
+  const VERIFY_TOKEN = verifyToken();
 
   console.log('[IG-WEBHOOK] Verification attempt:', {
-    mode, token_match: token === VERIFY_TOKEN, challenge,
+    mode,
+    token_match: !!VERIFY_TOKEN && token === VERIFY_TOKEN,
+    verify_token_configured: !!VERIFY_TOKEN,
   });
+
+  if (!VERIFY_TOKEN) {
+    console.error('[IG-WEBHOOK] Verification RECUSADA: IG_VERIFY_TOKEN não configurado no ambiente.');
+    return res.sendStatus(403);
+  }
 
   if (mode === 'subscribe' && token === VERIFY_TOKEN) {
     console.log('[IG-WEBHOOK] Verified OK — challenge:', challenge);
@@ -46,22 +58,25 @@ router.get('/ping', (_req, res) => {
   res.json({
     status: 'ok',
     verify_token_set: !!process.env.IG_VERIFY_TOKEN,
-    app_secret_set:   !!APP_SECRET,
+    app_secret_set:   !!appSecret(),
     timestamp: new Date().toISOString(),
   });
 });
 
 // POST /webhooks/instagram — Receive events
 router.post('/', async (req, res) => {
-  // Valida assinatura quando o secret existir (HMAC-SHA256 dos bytes crus).
-  if (APP_SECRET) {
-    const sig = req.headers['x-hub-signature-256'];
-    const raw = req.rawBody || Buffer.from(JSON.stringify(req.body || {}), 'utf8');
-    if (!sig || !validateWebhookSignature(raw, sig, APP_SECRET, 'sha256=')) {
-      return res.sendStatus(401);
-    }
-  } else {
-    console.warn('[IG-WEBHOOK] IG_APP_SECRET ausente — processando SEM validação de assinatura (modo legado).');
+  // Assinatura obrigatória (HMAC-SHA256 dos bytes crus). Sem secret não há
+  // como validar: recusa em vez de processar às cegas.
+  const APP_SECRET = appSecret();
+  if (!APP_SECRET) {
+    console.error('[IG-WEBHOOK] Evento RECUSADO (401): IG_APP_SECRET não configurado — impossível validar X-Hub-Signature-256.');
+    return res.sendStatus(401);
+  }
+  const sig = req.headers['x-hub-signature-256'];
+  const raw = req.rawBody || Buffer.from(JSON.stringify(req.body || {}), 'utf8');
+  if (!sig || !validateWebhookSignature(raw, sig, APP_SECRET, 'sha256=')) {
+    console.warn('[IG-WEBHOOK] Evento RECUSADO (401): assinatura ausente ou inválida.');
+    return res.sendStatus(401);
   }
 
   // Responde 200 imediatamente para evitar retries da Meta

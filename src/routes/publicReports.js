@@ -6,7 +6,9 @@
 //   -> 200 single ou consolidado (multi-CNPJ via claim 'cids')
 //   -> 401 invalid | 410 expired | 404 not found
 //
-// GET /api/v1/reports/admin/test-weekly?token=...&q=...  [TEMPORARIO]
+// GET /api/v1/reports/admin/test-weekly?q=...  [TEMPORARIO, SO EQUIPE AURA]
+//   Exige JWT de usuario is_staff (Authorization: Bearer). Nao aceita mais
+//   token em query string nem header fixo (INC-2026-10-21-03, tq-101).
 //   Agrupa resultados por owner_id; cada grupo gera 1 link consolidado.
 // ============================================================
 
@@ -14,6 +16,7 @@ const express = require('express');
 const router  = express.Router();
 
 const db = require('../config/database');
+const { requireAuth } = require('../middleware/auth');
 const { verifyWeeklyReportToken, signWeeklyReportToken } = require('../utils/reportToken');
 const { buildReportData, buildConsolidatedReportData }   = require('../services/reportGenerator');
 const { resolvePeriodForReport }                         = require('../services/reportDataQueries');
@@ -88,18 +91,19 @@ router.get('/weekly/:token', async (req, res) => {
 });
 
 // ─── Admin smoke-test endpoint (TEMPORARIO) ──────────────────
-
-const _TEST_TOKEN_FALLBACK = 'aura-admin-2026-relatorios';
-function _getExpectedTestToken() {
-  return process.env.ADMIN_REPORTS_TEST_TOKEN || _TEST_TOKEN_FALLBACK;
+// INC-2026-10-21-03 (tq-101): a rota aceitava um token fixo escrito no codigo
+// (repositorio publico) e devolvia nome, plano e e-mail de empresas. Agora so
+// JWT de conta interna da Aura (is_staff), mesmo staff-gate de
+// routes/adminAuraNotas.js. Sem token compartilhado, sem fallback.
+function requireStaff(req, res, next) {
+  if (!req.user) return res.status(401).json({ error: 'Não autenticado' });
+  if (req.user.is_staff !== true) {
+    return res.status(403).json({ error: 'Acesso restrito à equipe Aura' });
+  }
+  next();
 }
 
-router.get('/admin/test-weekly', async (req, res) => {
-  const provided = req.query.token || req.headers['x-admin-token'];
-  if (!provided || provided !== _getExpectedTestToken()) {
-    return res.status(401).json({ error: 'Token invalido' });
-  }
-
+router.get('/admin/test-weekly', requireAuth, requireStaff, async (req, res) => {
   const q = String(req.query.q || 'finesse').toLowerCase();
   if (q.length < 2) {
     return res.status(400).json({ error: 'q deve ter pelo menos 2 caracteres' });

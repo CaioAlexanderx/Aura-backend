@@ -12,11 +12,12 @@ const waOutbox = require('../services/waOutbox');
 const customerConsent = require('../services/customerConsent');
 const hubWhatsapp = require('../services/hubWhatsapp');
 
-// Sem fallback hardcoded (era 'aura_whatsapp_verify_2026' — token previsível).
-// O verify token PRECISA vir do ambiente; sem ele, a verificação da Meta falha.
-const VERIFY_TOKEN = process.env.WA_VERIFY_TOKEN || null;
-// App Secret da Meta — usado para validar X-Hub-Signature-256 no POST.
-const APP_SECRET = process.env.WA_APP_SECRET || null;
+// Sem fallback hardcoded: o verify token PRECISA vir do ambiente; sem ele, a
+// verificação da Meta falha (403).
+// App Secret da Meta — usado para validar X-Hub-Signature-256 no POST; sem ele
+// o POST é recusado (401). Lidos a cada requisição (INC-2026-10-21-03, tq-101).
+const verifyToken = () => process.env.WA_VERIFY_TOKEN || null;
+const appSecret   = () => process.env.WA_APP_SECRET || null;
 
 // GET /webhooks/whatsapp — Meta webhook verification
 // Meta envia: ?hub.mode=subscribe&hub.verify_token=TOKEN&hub.challenge=XXXX
@@ -25,6 +26,7 @@ router.get('/', (req, res) => {
   const mode      = req.query['hub.mode'];
   const token     = req.query['hub.verify_token'];
   const challenge = req.query['hub.challenge'];
+  const VERIFY_TOKEN = verifyToken();
 
   // Log de diagnóstico SEM vazar os valores dos tokens (só o resultado).
   console.log('[WA-WEBHOOK] Verification attempt:', {
@@ -62,18 +64,20 @@ router.post('/', async (req, res) => {
   // A7 — valida a assinatura X-Hub-Signature-256 (HMAC-SHA256 do App Secret
   // sobre os BYTES crus do corpo). Sem isso, qualquer um que descubra a URL
   // injeta status/mensagens falsos em wa_messages. Constant-time no helper.
-  if (APP_SECRET) {
-    const sig = req.headers['x-hub-signature-256'];
-    const raw = req.rawBody || Buffer.from(JSON.stringify(req.body || {}), 'utf8');
-    if (!sig || !validateWebhookSignature(raw, sig, APP_SECRET, 'sha256=')) {
-      // 401 sem efeito: não é uma requisição legítima da Meta.
-      return res.sendStatus(401);
-    }
-  } else {
-    // Segredo não configurado (integração ainda dormente): não dá pra validar.
-    // Responde 200 pra Meta não re-tentar e NÃO processa às cegas.
-    console.warn('[WA-WEBHOOK] WA_APP_SECRET ausente — evento ignorado (sem validação de assinatura).');
-    return res.sendStatus(200);
+  // tq-101: sem segredo não dá pra validar → recusa 401 e loga o motivo
+  // (antes respondia 200 e descartava em silêncio; agora a falha de
+  // configuração aparece no log e no painel de webhooks da Meta).
+  const APP_SECRET = appSecret();
+  if (!APP_SECRET) {
+    console.error('[WA-WEBHOOK] Evento RECUSADO (401): WA_APP_SECRET não configurado — impossível validar X-Hub-Signature-256.');
+    return res.sendStatus(401);
+  }
+  const sig = req.headers['x-hub-signature-256'];
+  const raw = req.rawBody || Buffer.from(JSON.stringify(req.body || {}), 'utf8');
+  if (!sig || !validateWebhookSignature(raw, sig, APP_SECRET, 'sha256=')) {
+    // 401 sem efeito: não é uma requisição legítima da Meta.
+    console.warn('[WA-WEBHOOK] Evento RECUSADO (401): assinatura ausente ou inválida.');
+    return res.sendStatus(401);
   }
 
   // Assinatura ok → 200 rápido e processa async.
