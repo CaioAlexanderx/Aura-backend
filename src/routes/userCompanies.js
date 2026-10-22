@@ -28,6 +28,7 @@
 const router = require('express').Router();
 const { requireAuth } = require('../middleware/auth');
 const db = require('../config/database');
+const { logAuditAction, contextoDaRequisicao } = require('../middleware/auditLog');
 const {
   calculateMulticnpjValue,
   safeSyncSubscriptionValue,
@@ -655,15 +656,28 @@ router.post('/:companyId/transfer-primary', async (req, res) => {
 // (M2-04)
 //
 // Comportamento:
+//  - NÃO permite remover a ÚLTIMA empresa ativa do dono (409 LAST_COMPANY)
 //  - NÃO permite remover primary (precisa transfer-primary antes)
 //  - Soft-delete via is_active=false (preserva histórico fiscal)
 //  - Sincroniza Asaas pra reduzir mensalidade
-//  - Audit log com ação remove_company
+//  - Audit log com ação remove_company (audit_log, company_id = empresa
+//    removida; multicnpj_audit continua gravando como antes)
+//
+// 22/10/2026 (INC-2026-10-22-01, tq-103): uma lojista em teste removeu a
+// própria e única empresa. A regra só recusava is_primary, e o cadastro não
+// marcava a primeira empresa como principal (57 de 64 donos sem principal).
+// Com is_active = false, resolveDefaultContext (auth.js) não achava empresa
+// nenhuma e a conta abria vazia. Agora a última empresa ativa é recusada
+// antes de qualquer outra regra, e o UPDATE repete a contagem para não
+// desativar a última numa corrida entre duas remoções.
 //
 // Não permite remover se a empresa tem dados críticos pendentes
 // (ex: NF-es não autorizadas, vendas em aberto). Aqui validamos
 // apenas o caso "tem vendas" — outros gates podem ser adicionados.
 // ──────────────────────────────────────────────────────────
+const LAST_COMPANY_MESSAGE =
+  'Esta é a sua única empresa. Para mudar nome, endereço ou contato, edite em Configurações. Para trocar o CNPJ, fale com o suporte da Aura.';
+
 router.delete('/:companyId', async (req, res) => {
   const userId = req.user.id;
   const companyId = req.params.companyId;
@@ -691,6 +705,21 @@ router.delete('/:companyId', async (req, res) => {
 
     const company = rows[0];
 
+    // 1b. Nunca remover a última empresa ativa do dono: a conta abriria vazia.
+    const { rows: ativas } = await db.query(
+      `SELECT COUNT(*)::int AS total
+         FROM companies
+        WHERE owner_id = $1 AND is_active = true`,
+      [userId]
+    );
+    if (!(Number(ativas[0]?.total) > 1)) {
+      return res.status(409).json({
+        error: 'LAST_COMPANY',
+        code: 'LAST_COMPANY',
+        message: LAST_COMPANY_MESSAGE,
+      });
+    }
+
     if (company.is_primary) {
       return res.status(403).json({
         error: 'CANNOT_REMOVE_PRIMARY',
@@ -713,14 +742,25 @@ router.delete('/:companyId', async (req, res) => {
       });
     }
 
-    // 3. Soft-delete + capturar billing_owner pra sincronizar depois
-    await db.query(
+    // 3. Soft-delete + capturar billing_owner pra sincronizar depois.
+    // A subconsulta repete a regra da última empresa no próprio UPDATE.
+    const { rows: desativada } = await db.query(
       `UPDATE companies
          SET is_active = false,
              updated_at = NOW()
-       WHERE id = $1`,
-      [companyId]
+       WHERE id = $1
+         AND (SELECT COUNT(*) FROM companies
+               WHERE owner_id = $2 AND is_active = true) > 1
+       RETURNING id`,
+      [companyId, userId]
     );
+    if (!desativada.length) {
+      return res.status(409).json({
+        error: 'LAST_COMPANY',
+        code: 'LAST_COMPANY',
+        message: LAST_COMPANY_MESSAGE,
+      });
+    }
 
     // 4. Audit
     try {
@@ -740,6 +780,19 @@ router.delete('/:companyId', async (req, res) => {
     } catch (auditErr) {
       console.error('[userCompanies] DELETE audit failed:', auditErr.message);
     }
+    // audit_log: onde a equipe procura (action='remove_company'). Antes a
+    // remoção só ia para multicnpj_audit, por isso o caso real não apareceu.
+    await logAuditAction(
+      userId,
+      companyId,
+      'remove_company',
+      'Empresa removida: ' + (company.trade_name || company.legal_name || companyId),
+      {
+        removed_company_name: company.trade_name || company.legal_name,
+        billing_owner_company_id: company.billing_owner_company_id || null,
+      },
+      contextoDaRequisicao(req)
+    );
 
     // 5. Sincronizar Asaas (reduz mensalidade)
     const syncResult = await safeSyncSubscriptionValue(company.billing_owner_company_id);
