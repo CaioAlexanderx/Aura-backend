@@ -676,7 +676,7 @@ router.post('/:companyId/transfer-primary', async (req, res) => {
 // apenas o caso "tem vendas" — outros gates podem ser adicionados.
 // ──────────────────────────────────────────────────────────
 const LAST_COMPANY_MESSAGE =
-  'Esta é a sua única empresa. Para trocar o CNPJ ou os dados, edite em Configurações → Dados da empresa.';
+  'Esta é a sua única empresa. Para mudar nome, endereço ou contato, edite em Configurações. Para trocar o CNPJ, fale com o suporte da Aura.';
 
 router.delete('/:companyId', async (req, res) => {
   const userId = req.user.id;

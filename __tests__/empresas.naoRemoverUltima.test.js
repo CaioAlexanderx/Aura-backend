@@ -44,7 +44,7 @@ const SEGUNDA = '44444444-4444-4444-8444-444444444444';
 const auth = { Authorization: `Bearer ${jwt.sign({ id: OWNER, role: 'client' }, SECRET, { expiresIn: '1h' })}` };
 
 const MENSAGEM =
-  'Esta é a sua única empresa. Para trocar o CNPJ ou os dados, edite em Configurações → Dados da empresa.';
+  'Esta é a sua única empresa. Para mudar nome, endereço ou contato, edite em Configurações. Para trocar o CNPJ, fale com o suporte da Aura.';
 
 let db;
 let routeApp;
