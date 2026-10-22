@@ -16,7 +16,12 @@ jest.mock('../../src/services/dentalWs', () => ({ setupDentalWebSocket: jest.fn(
 
 const request = require('supertest');
 const jwt = require('jsonwebtoken');
-const JWT_SECRET = process.env.JWT_SECRET || 'aura-test-secret-2026';
+const crypto = require('crypto');
+// Segredo neutro gerado aqui (tq-101): nada de literal de JWT_SECRET no
+// repositório público. Definido ANTES de require('../../src/index') (no
+// beforeAll), então o requireAuth verifica com este mesmo valor.
+process.env.JWT_SECRET = crypto.randomBytes(32).toString('hex');
+const JWT_SECRET = process.env.JWT_SECRET;
 const token = jwt.sign({ id: 'u1', role: 'client', plan: 'negocio' }, JWT_SECRET, { expiresIn: '1h' });
 const auth = { Authorization: `Bearer ${token}` };
 

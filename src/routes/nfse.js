@@ -37,23 +37,65 @@ const requireWrite = requireRole('client', 'analyst', 'admin');
 // Helpers de cifragem das credentials
 // ─────────────────────────────────────────────────────────
 //
-// Estrategia AES-256-GCM com chave em env AURA_ENCRYPTION_KEY (32 bytes).
-// Em prod a chave fica em Railway env var. Em dev, fallback pra string fixa
-// pra nao quebrar mas deve ser trocada antes de prod.
+// Estrategia AES-256-GCM com chave em env AURA_ENCRYPTION_KEY (32 bytes,
+// 64 chars hex). Em prod a chave fica em Railway env var.
+//
+// INC-2026-10-21-03 (tq-101): havia uma chave fixa de desenvolvimento no
+// codigo (repositorio publico) usada quando a env faltava — qualquer um
+// decifraria as credenciais do provedor. Agora:
+//   - com AURA_ENCRYPTION_KEY valida: usa ela;
+//   - NODE_ENV=test sem a env: chave aleatoria por processo (nunca literal);
+//   - qualquer outro caso (producao inclusive): cifrar/decifrar lanca
+//     NfseEncryptionKeyError -> 500 controlado + console.error. Nunca chave fixa.
 //
 // Formato: base64(iv || authTag || ciphertext)
 // IV 12 bytes (96 bits) — padrao GCM
 // AuthTag 16 bytes (128 bits)
 // ─────────────────────────────────────────────────────────
 
-const ENCRYPTION_KEY_HEX = process.env.AURA_ENCRYPTION_KEY ||
-  '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef'; // dev fallback
-const KEY = Buffer.from(ENCRYPTION_KEY_HEX, 'hex');
+class NfseEncryptionKeyError extends Error {
+  constructor(message) {
+    super(message);
+    this.name = 'NfseEncryptionKeyError';
+    this.code = 'NFSE_ENCRYPTION_KEY_MISSING';
+  }
+}
+
+let _testOnlyKey = null;
+
+// Lida a cada uso (nao no load do modulo): a env pode entrar sem redeploy do
+// codigo e os testes conseguem exercitar os dois lados.
+function getEncryptionKey() {
+  const hex = process.env.AURA_ENCRYPTION_KEY;
+  if (hex) {
+    if (!/^[0-9a-fA-F]{64}$/.test(hex)) {
+      // Mensagem sem ecoar o valor recebido.
+      throw new NfseEncryptionKeyError('AURA_ENCRYPTION_KEY invalida (esperado: 64 chars hex).');
+    }
+    return Buffer.from(hex, 'hex');
+  }
+  if (process.env.NODE_ENV === 'test') {
+    if (!_testOnlyKey) _testOnlyKey = crypto.randomBytes(32);
+    return _testOnlyKey;
+  }
+  throw new NfseEncryptionKeyError(
+    'AURA_ENCRYPTION_KEY ausente: credenciais de NFS-e nao podem ser cifradas nem decifradas.'
+  );
+}
+
+function sendKeyError(res, where, err) {
+  console.error(`[nfse ${where}] ${err.code}: ${err.message}`);
+  return res.status(500).json({
+    error: 'NFS-e indisponivel: chave de criptografia nao configurada no servidor.',
+    code: err.code,
+  });
+}
 
 function encrypt(plaintext) {
   if (!plaintext) return null;
+  const key = getEncryptionKey();
   const iv = crypto.randomBytes(12);
-  const cipher = crypto.createCipheriv('aes-256-gcm', KEY, iv);
+  const cipher = crypto.createCipheriv('aes-256-gcm', key, iv);
   const ciphertext = Buffer.concat([cipher.update(String(plaintext), 'utf8'), cipher.final()]);
   const authTag = cipher.getAuthTag();
   return Buffer.concat([iv, authTag, ciphertext]).toString('base64');
@@ -61,12 +103,15 @@ function encrypt(plaintext) {
 
 function decrypt(encoded) {
   if (!encoded) return null;
+  // Fora do try: chave ausente/invalida NAO vira "api key nao configurada";
+  // sobe como NfseEncryptionKeyError para a rota responder 500 controlado.
+  const key = getEncryptionKey();
   try {
     const buf = Buffer.from(encoded, 'base64');
     const iv = buf.subarray(0, 12);
     const authTag = buf.subarray(12, 28);
     const ciphertext = buf.subarray(28);
-    const decipher = crypto.createDecipheriv('aes-256-gcm', KEY, iv);
+    const decipher = crypto.createDecipheriv('aes-256-gcm', key, iv);
     decipher.setAuthTag(authTag);
     return Buffer.concat([decipher.update(ciphertext), decipher.final()]).toString('utf8');
   } catch (err) {
@@ -143,13 +188,14 @@ router.put('/config', requireAuth, requireWrite, async (req, res) => {
     if (body[k] !== undefined) data[k] = body[k];
   }
 
-  // api_key e secret sao tratados separadamente — cifrados antes de salvar
-  if (body.api_key) data.api_key_encrypted = encrypt(body.api_key);
-  if (body.api_secret) data.api_secret = body.api_secret; // alguns providers nao cifram secret
-  if (body.certificate_url) data.certificate_url = body.certificate_url;
-  if (body.certificate_pwd) data.certificate_pwd = encrypt(body.certificate_pwd);
-
   try {
+    // api_key e secret sao tratados separadamente — cifrados antes de salvar
+    // (dentro do try: sem chave, encrypt lanca e a rota responde 500 controlado)
+    if (body.api_key) data.api_key_encrypted = encrypt(body.api_key);
+    if (body.api_secret) data.api_secret = body.api_secret; // alguns providers nao cifram secret
+    if (body.certificate_url) data.certificate_url = body.certificate_url;
+    if (body.certificate_pwd) data.certificate_pwd = encrypt(body.certificate_pwd);
+
     // Upsert
     const existing = await getNfseConfig(req.params.id);
 
@@ -181,6 +227,7 @@ router.put('/config', requireAuth, requireWrite, async (req, res) => {
       return res.status(201).json({ ok: true, config_id: rows[0].id });
     }
   } catch (err) {
+    if (err instanceof NfseEncryptionKeyError) return sendKeyError(res, 'put config', err);
     console.error('[nfse put config]', err.message);
     res.status(500).json({ error: 'Erro ao salvar config' });
   }
@@ -393,6 +440,7 @@ router.post('/', requireAuth, requireWrite, async (req, res) => {
       return res.status(status).json({ error: err.message, code: err.code });
     }
 
+    if (err instanceof NfseEncryptionKeyError) return sendKeyError(res, 'emit', err);
     console.error('[nfse emit] unexpected:', err.message);
     res.status(500).json({ error: 'Erro ao emitir NFS-e' });
   } finally {
@@ -523,6 +571,7 @@ router.post('/:nid/cancel', requireAuth, requireWrite, async (req, res) => {
 
     res.json({ ok: true });
   } catch (err) {
+    if (err instanceof NfseEncryptionKeyError) return sendKeyError(res, 'cancel', err);
     if (err instanceof NfseProviderError) {
       return res.status(502).json({ error: err.message, code: err.code });
     }
@@ -591,6 +640,7 @@ router.post('/:nid/refresh', requireAuth, requireWrite, async (req, res) => {
 
     res.json({ status: result.status, nfse_number: result.nfse_number });
   } catch (err) {
+    if (err instanceof NfseEncryptionKeyError) return sendKeyError(res, 'refresh', err);
     if (err instanceof NfseProviderError) {
       return res.status(502).json({ error: err.message, code: err.code });
     }
@@ -619,3 +669,5 @@ router.get('/:nid/xml', requireAuth, async (req, res) => {
 });
 
 module.exports = router;
+// Exposto para teste (tq-101): sem chave em producao, cifrar/decifrar recusa.
+module.exports._crypto = { encrypt, decrypt, getEncryptionKey, NfseEncryptionKeyError };
