@@ -91,7 +91,8 @@
 // ATENCAO: quando operando sem segredo, o log fica MUITO barulhento de
 // proposito (WARN por requisicao) — ninguem deve poder dizer que "nao viu".
 //
-// Handles two flows:
+// Handles these flows:
+//   0. event PIX_AUTOMATIC_*                        → Pix Automatico (services/pixAutomaticoWebhook)
 //   1. externalReference = 'digital-order-<uuid>'  → pedido Canal Digital
 //   2. tudo mais                                    → billing de empresa (plano)
 //
@@ -111,6 +112,9 @@ const lojaEvents = require('../services/lojaEvents');
 const { asaas } = require('../services/asaasClient');
 const marketingQuota = require('../services/marketing/marketingQuota');
 const { proximoVencimento } = require('../services/asaasAssinaturas');
+const pixAutomatico = require('../services/pixAutomatico');
+const pixAutomaticoWebhook = require('../services/pixAutomaticoWebhook');
+const appNotifications = require('../services/appNotifications');
 
 const ASAAS_WEBHOOK_TOKEN = process.env.ASAAS_WEBHOOK_SECRET;
 
@@ -332,6 +336,23 @@ router.post('/', async function(req, res) {
 
   var event       = req.body.event;
   var bodyPayment = req.body.payment;
+
+  // ── 0. Pix Automático (tq-105, 24/10/2026) ─────────────────
+  // Eventos PIX_AUTOMATIC_* nao trazem `payment` (trazem authorization,
+  // paymentInstruction ou eligibility) e cairiam no guard abaixo. Sem o
+  // segredo, a autorizacao e relida na Asaas antes de qualquer gravacao.
+  if (typeof event === 'string' && event.indexOf('PIX_AUTOMATIC_') === 0) {
+    try {
+      var pixRes = await pixAutomaticoWebhook.processarEventoPixAutomatico({
+        body: req.body, hasSecret: hasSecret, db: db, notifications: appNotifications, cliente: pixAutomatico,
+      });
+      return res.status(200).json(pixRes);
+    } catch (err) {
+      console.error('[WEBHOOK] Error processing Pix Automatico:', err.message);
+      return res.status(200).json({ received: true, error: true });
+    }
+  }
+
   if (!event || !bodyPayment) return res.status(200).json({ received: true });
 
   var payment       = bodyPayment;
