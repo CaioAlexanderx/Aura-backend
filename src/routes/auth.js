@@ -129,6 +129,7 @@ const documentoEmpresa = require('../services/documentoEmpresa');
 const whatsappCadastro = require('../services/whatsappCadastro');
 const signupHandshake = require('../services/signupHandshake');
 const signupLead = require('../services/signupLead');
+const { datasDoAtraso } = require('../services/cobrancaAssinatura');
 
 let redis = null;
 try { redis = require('../config/redis').default || require('../config/redis'); } catch (_) {}
@@ -222,6 +223,19 @@ async function storeRefreshToken(userId, refreshToken, req) {
       try { await db.query('INSERT INTO refresh_tokens (user_id, token_hash, expires_at, ip_address, user_agent) VALUES ($1, $2, $3, $4, $5)', base); } catch (_) {}
     }
   }
+}
+
+// 24/10/2026 (tq-86): datas do atraso no MESMO objeto em que esta
+// billing_status — contrato com o app (muro de assinatura):
+//   billing_overdue_since    AAAA-MM-DD, vencimento da cobranca OVERDUE mais
+//                            antiga; null fora de atraso
+//   billing_pause_screens_on overdue_since + 7 (DIAS_ATE_PAUSA_TELAS)
+//   billing_pause_caixa_on   overdue_since + 14 (DIAS_ATE_PAUSA_CAIXA)
+// So consulta o banco quando billing_status = 'overdue'; nunca lanca.
+async function withBillingDates(shaped, companyId, billingStatus) {
+  if (!shaped) return shaped;
+  const datas = await datasDoAtraso({ db, companyId, billingStatus });
+  return { ...shaped, ...datas };
 }
 
 // 15/06/2026: anexa extra_seats_granted ao objeto company ja moldado.
@@ -850,7 +864,11 @@ router.post('/login', async (req, res) => {
     // 15/06/2026: anexa extra_seats_granted ao company (fallback do gate de Equipe).
     const companyOut = ctx.consolidated
       ? null
-      : await withExtraSeats(shapeCompany(ctx.primary, ctx.primary?.member_role), ctx.primary ? ctx.primary.id : null);
+      : await withBillingDates(
+        await withExtraSeats(shapeCompany(ctx.primary, ctx.primary?.member_role), ctx.primary ? ctx.primary.id : null),
+        ctx.primary ? ctx.primary.id : null,
+        ctx.primary ? ctx.primary.billing_status : null
+      );
 
     res.json({
       token: accessToken, refresh_token: refreshToken, token_expires_in: '1h',
@@ -1026,6 +1044,9 @@ router.post('/me', requireAuth, async (req, res) => {
         // { mode, ends_at, started_by_sale_at, dias_restantes, teto_em, ... }
         trial: trialRegra.montarTrial({ ...company, ...trialCols }),
       };
+      // tq-86: por ultimo (e so em atraso), para nao mudar a ordem das
+      // consultas acima.
+      companyOut = await withBillingDates(companyOut, company.id, company.billing_status);
     }
 
     res.json({

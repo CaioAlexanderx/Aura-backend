@@ -8,6 +8,7 @@
 // com o dueDate da cobrança que acabou de ser PAGA (webhookAsaas.js) — a data
 // ficava sempre um ciclo para trás. O próximo vencimento de verdade é:
 //
+//   0. com cobrança VENCIDA em aberto, o dueDate da mais antiga (tq-86);
 //   1. o menor dueDate entre as cobranças PENDENTES da assinatura; ou,
 //   2. sem pendente, o nextDueDate da assinatura.
 //
@@ -38,7 +39,7 @@ const MESES_DO_CICLO = {
 const assinaturaAtiva = (sub) => !!sub && !sub.deleted && (!sub.status || sub.status === 'ACTIVE');
 
 // Próximo vencimento de uma assinatura. Devolve
-//   { data, origem: 'cobranca_pendente' | 'assinatura', assinatura }
+//   { data, origem: 'cobranca_vencida' | 'cobranca_pendente' | 'assinatura', assinatura }
 // ou null quando a Asaas não respondeu / a assinatura não tem próxima data.
 // Nunca lança: quem chama trata null como "não sei — não gravar nada".
 async function proximoVencimento(asaas, subscriptionId) {
@@ -66,6 +67,27 @@ async function proximoVencimento(asaas, subscriptionId) {
     // Sem a lista de cobranças ainda vale o nextDueDate da assinatura.
     console.warn('[asaas] cobranças da assinatura ' + subscriptionId + ' não puderam ser lidas: ' + err.message);
   }
+
+  // tq-86 (24/10/2026): com cobrança VENCIDA em aberto, o próximo vencimento
+  // é o dela (a mais antiga) — nunca a pendente seguinte. Foi o que a
+  // correção de vencimentos fez com a MHT em 21/10 (20/10 vencida -> 20/11).
+  // Se a lista de vencidas não vier, não dá para afirmar a data: null
+  // ("não sei — não gravar"), e quem chama mantém a data atual.
+  let vencida = null;
+  try {
+    const lista = await asaas(
+      'GET',
+      '/subscriptions/' + encodeURIComponent(subscriptionId) + '/payments?status=OVERDUE&limit=100'
+    );
+    for (const p of (lista && Array.isArray(lista.data)) ? lista.data : []) {
+      if (!p || p.deleted || p.status !== 'OVERDUE' || !ehData(p.dueDate)) continue;
+      if (!vencida || p.dueDate < vencida) vencida = p.dueDate;
+    }
+  } catch (err) {
+    console.warn('[asaas] cobranças vencidas da assinatura ' + subscriptionId + ' não puderam ser lidas: ' + err.message);
+    return null;
+  }
+  if (vencida) return { data: vencida, origem: 'cobranca_vencida', assinatura };
 
   const proxima = ehData(assinatura.nextDueDate) ? assinatura.nextDueDate : null;
   if (pendente && (!proxima || pendente <= proxima)) {

@@ -211,15 +211,23 @@ async function loadOrderForNotify(order) {
   }
 }
 
-async function getStoreName(company_id) {
+// Nome, WhatsApp e logo da vitrine (digital_channel_config). WhatsApp e logo
+// vão no e-mail ao cliente final (tq-75, variante "loja": a marca e o
+// WhatsApp são os da loja, nunca os da Aura). Uma consulta só.
+async function getStoreInfo(company_id) {
   try {
     const { rows } = await db.query(
-      `SELECT site_name FROM digital_channel_config WHERE company_id = $1`, [company_id]
+      `SELECT site_name, whatsapp, logo_url FROM digital_channel_config WHERE company_id = $1`, [company_id]
     );
-    return rows[0]?.site_name || 'Aura Loja';
+    const r = rows[0] || {};
+    return { name: r.site_name || 'Aura Loja', whatsapp: r.whatsapp || null, logo_url: r.logo_url || null };
   } catch (_) {
-    return 'Aura Loja';
+    return { name: 'Aura Loja', whatsapp: null, logo_url: null };
   }
+}
+
+async function getStoreName(company_id) {
+  return (await getStoreInfo(company_id)).name;
 }
 
 // E-mail da própria loja (companies.email), para o Reply-To dos e-mails
@@ -263,7 +271,8 @@ async function notifyPaymentConfirmed({ order: input }) {
     return;
   }
 
-  const store_name = await getStoreName(company_id);
+  const store = await getStoreInfo(company_id);
+  const store_name = store.name;
 
   // 'courier' (migration 288) precisa de rótulo próprio: sem ele o pedido
   // que um motoboy de app vai buscar chega como "🏪 Retirada", e o lojista
@@ -320,6 +329,8 @@ async function notifyPaymentConfirmed({ order: input }) {
       status:        'confirmed',
       store_name,
       store_email,
+      store_whatsapp: store.whatsapp,
+      store_logo_url: store.logo_url,
       ...(link ? { link } : {}),
     }).catch(err => console.error('[notify] customer confirmed email error:', err.message));
   }
@@ -338,14 +349,16 @@ async function notifyStatusChange(order) {
     return;
   }
 
-  const store_name = await getStoreName(order.company_id);
+  const store = await getStoreInfo(order.company_id);
   const store_email = await getStoreEmail(order.company_id);
   await sendOrderStatusEmail(order.customer_email, {
     order_number:  order.order_number,
     customer_name: order.customer_name,
     status:        order.status,
-    store_name,
+    store_name:    store.name,
     store_email,
+    store_whatsapp: store.whatsapp,
+    store_logo_url: store.logo_url,
   }).catch(err => console.error('[notify] status email error:', err.message));
 }
 

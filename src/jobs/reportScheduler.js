@@ -87,6 +87,9 @@ async function triggerWeeklyReports() {
 
         const sendCompany = {
           ...result.company,
+          // tq-74: o id da primária assina o link de descadastro (no
+          // consolidado, desliga o grupo inteiro do dono).
+          id:    g.primary.id,
           email: result.company.recipient_email || g.recipient,
           name:  result.company.name || label,
         };
@@ -95,7 +98,7 @@ async function triggerWeeklyReports() {
         // vira 'failed' antes de o erro seguir para o catch abaixo.
         let envio;
         try {
-          envio = await sendWeeklyReport(sendCompany, result.kpis, result.reportUrl);
+          envio = await sendWeeklyReport(sendCompany, result.kpis, result.reportUrl, { grupo: consolidated });
         } catch (sendErr) {
           if (!(await updateDelivery(result.deliveryId, 'failed', { error: sendErr.message }))) deliveryErrors++;
           throw sendErr;

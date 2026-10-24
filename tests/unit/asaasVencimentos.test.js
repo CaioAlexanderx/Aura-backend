@@ -126,3 +126,23 @@ describe('corrigirVencimentos', () => {
     expect(db.escritas).toHaveLength(0);
   });
 });
+
+// tq-86 (24/10/2026): o caso da MHT em 21/10 — cobrança de 20/10 vencida e
+// em aberto, a de 20/11 pendente. A correção levou a data para 20/11; agora
+// fica na vencida mais antiga.
+describe('corrigirVencimentos com cobrança vencida em aberto', () => {
+  test('não avança além da OVERDUE mais antiga', async () => {
+    const empresa = { company_id: id(6), nome: 'Loja em Atraso', status: 'overdue', asaas_subscription_id: 'sub_6', atual: '2026-10-20' };
+    const db = {
+      query: jest.fn(async (sql) => (sql.trim().startsWith('SELECT') ? { rows: [empresa] } : { rows: [], rowCount: 1 })),
+    };
+    const asaasAtraso = jest.fn(async (metodo, caminho) => {
+      if (caminho.includes('status=OVERDUE')) return { data: [{ status: 'OVERDUE', dueDate: '2026-10-20' }] };
+      if (caminho.includes('status=PENDING')) return { data: [{ status: 'PENDING', dueDate: '2026-11-20' }] };
+      return { id: 'sub_6', status: 'ACTIVE', nextDueDate: '2026-12-20' };
+    });
+    const r = await corrigirVencimentos({ db, asaas: asaasAtraso, aplicar: true });
+    expect(r.linhas[0]).toMatchObject({ antes: '2026-10-20', depois: '2026-10-20', origem: 'cobranca_vencida', situacao: 'igual' });
+    expect(db.query).toHaveBeenCalledTimes(1); // nada gravado
+  });
+});

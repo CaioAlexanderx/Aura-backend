@@ -115,6 +115,7 @@ const { proximoVencimento } = require('../services/asaasAssinaturas');
 const pixAutomatico = require('../services/pixAutomatico');
 const pixAutomaticoWebhook = require('../services/pixAutomaticoWebhook');
 const appNotifications = require('../services/appNotifications');
+const cobrancaAssinatura = require('../services/cobrancaAssinatura');
 
 const ASAAS_WEBHOOK_TOKEN = process.env.ASAAS_WEBHOOK_SECRET;
 
@@ -218,9 +219,15 @@ var PAYMENT_STATUS_MAP = {
 // Eventos registrados (auditoria) mas que NAO alteram o billing da empresa.
 // 14/10/2026: PAYMENT_CREATED entra aqui — cobranca criada e o "a receber"
 // da Financeiro, nao diz nada sobre o status da assinatura.
+// 24/10/2026 (tq-84): PAYMENT_CREDIT_CARD_CAPTURE_REFUSED (cartão recusado)
+// também — registra e manda o e-mail 2.8, sem mexer no billing_status (a
+// cobrança segue em aberto; o atraso, se vier, chega por PAYMENT_OVERDUE).
+// Só no modo com segredo: sem ele o evento do body não é confiável e a
+// recusa não aparece no status relido da Asaas, então é ignorado.
 var STATUS_NEUTRAL_EVENTS = {
   PAYMENT_DELETED: true,
   PAYMENT_CREATED: true,
+  PAYMENT_CREDIT_CARD_CAPTURE_REFUSED: true,
 };
 
 // Eventos neutros que so valem com loja: sem empresa, nao sao gravados
@@ -228,7 +235,39 @@ var STATUS_NEUTRAL_EVENTS = {
 // dinheiro que entrou).
 var NEUTRAL_ONLY_WITH_COMPANY = {
   PAYMENT_CREATED: true,
+  PAYMENT_CREDIT_CARD_CAPTURE_REFUSED: true,
 };
+
+// Vencimento (AAAA-MM-DD) da cobrança OVERDUE mais antiga da empresa no
+// espelho, fora a cobrança informada. null sem linha ou sem a tabela.
+async function vencidaMaisAntigaEmAberto(companyId, paymentId) {
+  try {
+    var r = await db.query(
+      `SELECT to_char(MIN(due_date), 'YYYY-MM-DD') AS venc
+         FROM assinatura_cobrancas
+        WHERE company_id = $1 AND status = 'OVERDUE' AND asaas_payment_id <> $2`,
+      [companyId, String(paymentId || '')]
+    );
+    var v = r && r.rows && r.rows[0] && r.rows[0].venc;
+    return (typeof v === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(v)) ? v : null;
+  } catch (err) {
+    return null;
+  }
+}
+
+// Espelho das cobranças e e-mails da assinatura (services/cobrancaAssinatura,
+// 24/10/2026: recibo, estorno, contestação, cartão recusado). Depois do
+// efeito em companies e do log; nunca derruba nem muda a resposta.
+async function aposEventoDaAssinatura(event, payment, statusSource, company, nextDue) {
+  try {
+    await cobrancaAssinatura.aoEventoDaAssinatura({
+      db: db, asaas: asaas, event: event, payment: payment,
+      fromAsaasApi: statusSource === 'asaas-api', company: company, nextDue: nextDue || null,
+    });
+  } catch (err) {
+    console.error('[WEBHOOK] e-mail/espelho da cobranca falhou (seguindo): ' + err.message);
+  }
+}
 
 // Reenvio do mesmo evento para o mesmo pagamento nao repete o efeito. So
 // estes: um pagamento recebe cada um deles uma unica vez. OVERDUE/DELETED
@@ -454,6 +493,7 @@ router.post('/', async function(req, res) {
     // sobre a saude da assinatura do cliente.
     if (isNeutral) {
       await logWebhookEvent(company.id, event, payment);
+      await aposEventoDaAssinatura(event, payment, statusSource, company, null);
       console.log('[WEBHOOK] Company ' + company.id + ' — evento neutro ' + event +
                   ' registrado; billing_status preservado em ' + prevStatus);
       return res.status(200).json({
@@ -478,6 +518,7 @@ router.post('/', async function(req, res) {
     }
     if (isPaid && dataPagamento && ultimoPagamento && dataPagamento < ultimoPagamento) {
       await logWebhookEvent(company.id, event, payment);
+      await aposEventoDaAssinatura(event, payment, statusSource, company, null);
       console.log('[WEBHOOK] Company ' + company.id + ' — pagamento antigo ' + payment.id + ' (' + dataPagamento +
         ' < ' + ultimoPagamento + ') registrado; billing_status preservado em ' + prevStatus);
       return res.status(200).json({
@@ -496,6 +537,13 @@ router.post('/', async function(req, res) {
     if (isPaid) {
       var proximo = await proximoVencimento(asaas, company.asaas_subscription_id || payment.subscription);
       nextDue = proximo ? proximo.data : null;
+      // tq-86 (24/10/2026): next_billing_date nunca passa da cobrança VENCIDA
+      // mais antiga que continua em aberto (outra que não esta). Pagar a
+      // cobrança nova com a antiga ainda vencida não empurra o vencimento
+      // (o caso da MHT em 21/10). Fonte: o espelho assinatura_cobrancas
+      // (408); sem a tabela, fica o que a Asaas respondeu.
+      var vencidaMaisAntiga = await vencidaMaisAntigaEmAberto(company.id, payment.id);
+      if (vencidaMaisAntiga && (!nextDue || vencidaMaisAntiga < nextDue)) nextDue = vencidaMaisAntiga;
     }
 
     // last_payment_date so avanca em pagamento efetivo; nos demais eventos
@@ -557,6 +605,7 @@ router.post('/', async function(req, res) {
     }
 
     await logWebhookEvent(company.id, event, payment);
+    await aposEventoDaAssinatura(event, payment, statusSource, company, nextDue);
 
     console.log('[WEBHOOK] Company ' + company.id + ' billing: ' + prevStatus + ' -> ' + newStatus);
     res.status(200).json({
