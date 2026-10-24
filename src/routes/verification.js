@@ -28,6 +28,7 @@ const db     = require('../config/database');
 const { requireAuth } = require('../middleware/auth');
 const { sendVerificationLinkEmail } = require('../services/mailer');
 const { validateRuntimeEnv } = require('../config/env');
+const relacionamento = require('../services/relacionamento');
 
 const env = validateRuntimeEnv();
 const API_URL = env.API_URL;
@@ -126,6 +127,18 @@ async function issueVerification(userId, email, fullName) {
   }
 }
 
+// tq-80 (24/10/2026): boas-vindas (4.1) só quando o e-mail acabou de ser
+// confirmado (o UPDATE devolveu a linha: era false e virou true). Sem
+// await: o e-mail nunca atrasa nem derruba a confirmação. Quem recebe
+// (dono, fora conta interna/sandbox/Karatê, uma vez por usuário) decide
+// services/relacionamento.aoConfirmarEmail.
+function aoConfirmar(resultado, userId) {
+  if (!resultado || !Array.isArray(resultado.rows) || !resultado.rows.length) return;
+  Promise.resolve()
+    .then(() => relacionamento.aoConfirmarEmail(userId))
+    .catch((err) => console.error('[verify] boas-vindas falhou (seguindo): ' + (err && err.message)));
+}
+
 // -- POST /auth/send-verification --
 router.post('/send-verification', requireAuth, async (req, res) => {
   try {
@@ -212,8 +225,11 @@ router.post('/verify-email', requireAuth, async (req, res) => {
       });
     }
     await db.query('UPDATE verification_codes SET verified_at=NOW() WHERE id=$1', [vc.id]);
-    await db.query('UPDATE users SET email_verified=true WHERE id=$1', [req.user.id]);
+    const confirmou = await db.query(
+      'UPDATE users SET email_verified=true WHERE id=$1 AND email_verified IS NOT TRUE RETURNING id', [req.user.id]
+    );
     console.log(`[verify] Email confirmed via OTP for user ${req.user.id}`);
+    aoConfirmar(confirmou, req.user.id);
     res.json({ valid: true, email_verified: true });
   } catch (err) {
     console.error('[verify-email] error:', err.message);
@@ -243,9 +259,12 @@ router.get('/confirm-email/:token', async (req, res) => {
     }
 
     await db.query('UPDATE verification_codes SET verified_at=NOW() WHERE id=$1', [vc.id]);
-    await db.query('UPDATE users SET email_verified=true WHERE id=$1', [vc.user_id]);
+    const confirmou = await db.query(
+      'UPDATE users SET email_verified=true WHERE id=$1 AND email_verified IS NOT TRUE RETURNING id', [vc.user_id]
+    );
 
     console.log(`[verify] Email confirmed for user ${vc.user_id} (${vc.full_name})`);
+    aoConfirmar(confirmou, vc.user_id);
     res.redirect(`${APP_URL}/?email_verified=true`);
   } catch (err) {
     console.error('[confirm-email] error:', err.message);

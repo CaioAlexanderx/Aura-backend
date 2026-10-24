@@ -16,7 +16,10 @@
 //   caia no checkout e perdia os gates de plano (Encanto Presentes: 15/06 e
 //   11/07). Agora:
 //     - PAYMENT_DELETED e NEUTRO: loga em webhook_logs, nao toca em companies.
-//       Cancelamento real vem de SUBSCRIPTION_DELETED/INACTIVATED.
+//       (Correcao de 24/10/2026: este comentario dizia que o cancelamento
+//       real vinha de SUBSCRIPTION_DELETED/INACTIVATED. Nunca veio: ate o
+//       tq-73 nenhum SUBSCRIPTION_* era tratado. Hoje eles sao registrados,
+//       mas TAMBEM nao mudam billing_status — ver o bloco de 24/10 abaixo.)
 //     - last_payment_date so e escrito em pagamento efetivo (CONFIRMED/RECEIVED).
 //     - next_billing_date nunca e sobrescrito por NULL (COALESCE).
 //
@@ -88,11 +91,27 @@
 //     vinculado a uma loja (orfao vinculado depois pode ser reprocessado).
 //   PAYMENT_OVERDUE e PAYMENT_DELETED seguem exatamente como antes.
 //
+// 24/10/2026 (tq-73) — eventos de ASSINATURA (SUBSCRIPTION_CREATED,
+//   _UPDATED, _INACTIVATED, _DELETED; os de split so sao registrados):
+//   - gravados em webhook_logs (com a empresa; reenvio do mesmo evento nao
+//     grava de novo) e espelhados em assinaturas_asaas (migration 410), via
+//     services/assinaturasAsaas;
+//   - NAO mudam billing_status, NAO mexem em asaas_subscription_id e NAO
+//     bloqueiam nada. A propria Aura apaga e troca assinaturas (troca de
+//     plano em /billing/subscribe, migracao para o Pix Automatico): um
+//     SUBSCRIPTION_DELETED nao pode derrubar cliente que pagou. Quem cancela
+//     de verdade pelo app passa por POST /billing/cancel, que ja grava
+//     'cancelled' la mesmo;
+//   - sem segredo, a assinatura e relida na Asaas antes de gravar;
+//   - o e-mail de assinatura cancelada (tq-79) nao sai daqui: sai do job de
+//     relacionamento, 2 h depois, com as conferencias do servico.
+//
 // ATENCAO: quando operando sem segredo, o log fica MUITO barulhento de
 // proposito (WARN por requisicao) — ninguem deve poder dizer que "nao viu".
 //
 // Handles these flows:
 //   0. event PIX_AUTOMATIC_*                        → Pix Automatico (services/pixAutomaticoWebhook)
+//   0b. event SUBSCRIPTION_*                        → registro e espelho (services/assinaturasAsaas)
 //   1. externalReference = 'digital-order-<uuid>'  → pedido Canal Digital
 //   2. tudo mais                                    → billing de empresa (plano)
 //
@@ -116,6 +135,7 @@ const pixAutomatico = require('../services/pixAutomatico');
 const pixAutomaticoWebhook = require('../services/pixAutomaticoWebhook');
 const appNotifications = require('../services/appNotifications');
 const cobrancaAssinatura = require('../services/cobrancaAssinatura');
+const assinaturasAsaas = require('../services/assinaturasAsaas');
 
 const ASAAS_WEBHOOK_TOKEN = process.env.ASAAS_WEBHOOK_SECRET;
 
@@ -388,6 +408,22 @@ router.post('/', async function(req, res) {
       return res.status(200).json(pixRes);
     } catch (err) {
       console.error('[WEBHOOK] Error processing Pix Automatico:', err.message);
+      return res.status(200).json({ received: true, error: true });
+    }
+  }
+
+  // ── 0b. Assinatura (tq-73, 24/10/2026) ─────────────────────
+  // SUBSCRIPTION_* traz `subscription`, nao `payment`: antes caia no guard
+  // abaixo e saia 200 sem gravar nada. So registra e espelha; nunca muda
+  // billing_status (ver comentario do topo).
+  if (typeof event === 'string' && event.indexOf('SUBSCRIPTION_') === 0) {
+    try {
+      var subRes = await assinaturasAsaas.processarEventoDeAssinatura({
+        body: req.body, hasSecret: hasSecret, db: db, asaas: asaas,
+      });
+      return res.status(200).json(subRes);
+    } catch (err) {
+      console.error('[WEBHOOK] Error processing subscription event:', err.message);
       return res.status(200).json({ received: true, error: true });
     }
   }

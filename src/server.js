@@ -212,6 +212,13 @@ function startServer() {
     const { initReguaDeCobrancaJob } = require('./jobs/reguaDeCobrancaJob');
     initReguaDeCobrancaJob();
 
+    // E-mails de relacionamento (407/410; tq-79, 81, 82): ciclo do teste
+    // (4.2, 4.3, 4.4) às 10h BRT, "faz uns dias que você não aparece" e o
+    // aviso de assinatura cancelada (estes dois atrás de flags desligadas).
+    // Kill switch EMAILS_TESTE_ENABLED=false (ou EMAILS_CICLO_ENABLED=false).
+    const { initRelacionamentoJob } = require('./jobs/relacionamentoJob');
+    initRelacionamentoJob();
+
     // Indicação (14/10/2026): 1x por dia após 06h30 BRT cria o banner
     // "Indique um lojista" (ativo) para toda empresa de varejo em teste,
     // um por empresa (dedupe_key). Kill switch

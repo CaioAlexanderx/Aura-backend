@@ -92,3 +92,18 @@ jest.mock('../src/services/cnpj', () => ({
   ...jest.requireActual('../src/services/cnpj'),
   lookupCNPJ: jest.fn(async () => { throw new Error('rede desligada nos testes'); }),
 }));
+
+// 24/10/2026 (tq-73, tq-79, tq-80): a marca "quem pediu o encerramento"
+// (antes do DELETE da assinatura em /billing/subscribe, /billing/cancel e na
+// troca do Pix Automático) e a boas-vindas na confirmação do e-mail fazem
+// uma query a mais em db.query — mesmo problema acima. No-op aqui; os
+// testes delas usam jest.unmock('../src/services/assinaturasAsaas') e
+// jest.unmock('../src/services/relacionamento').
+jest.mock('../src/services/assinaturasAsaas', () => ({
+  ...jest.requireActual('../src/services/assinaturasAsaas'),
+  marcarEncerramentoPedido: jest.fn(async () => false),
+}));
+jest.mock('../src/services/relacionamento', () => ({
+  ...jest.requireActual('../src/services/relacionamento'),
+  aoConfirmarEmail: jest.fn(async () => 'mock'),
+}));

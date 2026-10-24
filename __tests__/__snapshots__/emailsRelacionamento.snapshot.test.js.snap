@@ -1,0 +1,311 @@
+// Jest Snapshot v1, https://goo.gl/fbAQLP
+
+exports[`2.6 nova data combinada valor exato da cobrança e o Pix novo 1`] = `
+"<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="color-scheme" content="light dark">
+<meta name="supported-color-schemes" content="light dark">
+<title>Combinado: nova data para a mensalidade da Aura</title>
+<style>
+  :root { color-scheme: light dark; supported-color-schemes: light dark; }
+  @media (prefers-color-scheme: dark) {
+    .a-bg { background: #0c0a16 !important; }
+    .a-card { background: #15122a !important; border-color: #2b2650 !important; }
+    .a-ink { color: #ece9ff !important; }
+    .a-ink2 { color: #b3add8 !important; }
+    .a-line { border-color: #2b2650 !important; }
+    .a-soft { background: #1d1938 !important; border-color: #2b2650 !important; }
+    .a-btn { background: #a78bfa !important; color: #14102b !important; }
+    .a-wa { color: #6ee7b7 !important; border-color: #6ee7b7 !important; }
+    .a-link { color: #a78bfa !important; }
+    .a-sig { filter: invert(1) brightness(1.6); }
+  }
+</style>
+</head>
+<body class="a-bg" style="margin:0;padding:0;background:#f4f1fb;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;">
+<div style="display:none;max-height:0;overflow:hidden;opacity:0;mso-hide:all;">Vence em 27/10, mesmo valor</div><table role="presentation" width="100%" cellpadding="0" cellspacing="0" class="a-bg" style="background:#f4f1fb;">
+  <tr><td align="center" style="padding:24px 12px;">
+    <table role="presentation" width="560" cellpadding="0" cellspacing="0" class="a-card" style="max-width:560px;width:100%;background:#ffffff;border:1px solid #e4def5;border-radius:14px;">
+      <tr><td class="a-line" style="padding:14px 22px;border-bottom:1px solid #e4def5;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;"><img src="https://app.getaura.com.br/email/aura-logo-v1.png" width="28" height="28" alt="Aura" style="display:inline-block;width:28px;height:28px;vertical-align:middle;border:0;margin-right:9px;"><span class="a-ink" style="font-weight:700;font-size:16px;letter-spacing:-.2px;color:#1b1736;vertical-align:middle;">Aura.</span></td></tr>
+      <tr><td style="padding:22px;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;">
+<p class="a-ink" style="margin:0 0 14px;color:#1b1736;font-size:15px;line-height:1.6;">Oi, Maria! Combinado.</p>
+<p class="a-ink" style="margin:0 0 14px;color:#1b1736;font-size:15px;line-height:1.6;">Movi o vencimento da mensalidade da Modas da Maria para 27/10. O valor continua R$ 119,00, sem custo a mais. O Pix novo está aqui embaixo.</p>
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" class="a-soft" style="background:#f1ecfd;border:1px solid #e4def5;border-radius:12px;margin:0 0 16px;"><tr><td style="padding:14px;"><table role="presentation" width="100%" cellpadding="0" cellspacing="0"><tr><td width="104" valign="top" style="padding:0 14px 0 0;"><img src="https://api.exemplo.test/api/v1/emails/pix-qr/T.png" width="92" height="92" alt="QR Code do Pix" style="display:block;width:92px;height:92px;background:#ffffff;border:1px solid #e4def5;border-radius:8px;padding:4px;"></td><td valign="top"><p class="a-ink2" style="margin:0 0 6px;color:#51497f;font-size:11px;letter-spacing:.07em;text-transform:uppercase;font-weight:700;">Pix copia e cola</p><p class="a-ink2" style="margin:0;color:#51497f;font-family:ui-monospace,Menlo,Consolas,monospace;font-size:11px;line-height:1.5;word-break:break-all;">00020126PIXNOVO</p></td></tr></table></td></tr></table>
+<p class="a-ink" style="margin:0 0 14px;color:#1b1736;font-size:15px;line-height:1.6;">Só aviso que esse ajuste de data eu consigo fazer uma vez a cada seis meses, então vale ficar de olho no dia.</p>
+<div style="margin:6px 0 4px;"><a class="a-btn" href="https://www.asaas.com/i/abc" style="display:inline-block;background:#6d28d9;color:#ffffff;font-weight:700;font-size:14px;text-decoration:none;padding:11px 18px;border-radius:10px;margin:0 10px 10px 0;">Abrir a fatura</a><a class="a-wa" href="https://wa.me/5511956305269?text=Oi%2C%20Caio!%20Recebi%20seu%20e-mail%20sobre%20a%20mensalidade%20da%20Modas%20da%20Maria%20na%20Aura." style="display:inline-block;background:transparent;color:#0f766e;border:1.5px solid #0f766e;font-weight:700;font-size:14px;text-decoration:none;padding:9.5px 16px;border-radius:10px;margin:0 10px 10px 0;">Falar comigo no WhatsApp</a></div><table role="presentation" cellpadding="0" cellspacing="0" style="margin:4px 0 0;"><tr><td><p class="a-ink" style="margin:0;color:#1b1736;font-size:15px;">Um abraço,</p><img class="a-sig" src="https://app.getaura.com.br/email/assinatura-caio-alexander-v1.png" width="170" alt="Caio Alexander" style="display:block;width:170px;height:auto;margin:2px 0 0 -2px;border:0;"><p class="a-ink" style="margin:0;color:#1b1736;font-size:14px;">Caio Alexander, fundador da Aura</p></td></tr></table>
+      </td></tr>
+      <tr><td class="a-line a-ink2" style="padding:12px 22px;border-top:1px solid #e4def5;color:#51497f;font-size:11.5px;line-height:1.6;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;">Aura. Tecnologia para negócios · <a class="a-link" href="https://getaura.com.br" style="color:#6d28d9;text-decoration:none;">getaura.com.br</a></td></tr>
+    </table>
+  </td></tr>
+</table>
+</body>
+</html>"
+`;
+
+exports[`4.1 boas-vindas varejo, teste esperando a primeira venda 1`] = `
+"<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="color-scheme" content="light dark">
+<meta name="supported-color-schemes" content="light dark">
+<title>Oi, Maria, bem-vindo à Aura</title>
+<style>
+  :root { color-scheme: light dark; supported-color-schemes: light dark; }
+  @media (prefers-color-scheme: dark) {
+    .a-bg { background: #0c0a16 !important; }
+    .a-card { background: #15122a !important; border-color: #2b2650 !important; }
+    .a-ink { color: #ece9ff !important; }
+    .a-ink2 { color: #b3add8 !important; }
+    .a-line { border-color: #2b2650 !important; }
+    .a-soft { background: #1d1938 !important; border-color: #2b2650 !important; }
+    .a-btn { background: #a78bfa !important; color: #14102b !important; }
+    .a-wa { color: #6ee7b7 !important; border-color: #6ee7b7 !important; }
+    .a-link { color: #a78bfa !important; }
+    .a-sig { filter: invert(1) brightness(1.6); }
+  }
+</style>
+</head>
+<body class="a-bg" style="margin:0;padding:0;background:#f4f1fb;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;">
+<div style="display:none;max-height:0;overflow:hidden;opacity:0;mso-hide:all;">Sou o Caio. Se precisar de ajuda, é só responder</div><table role="presentation" width="100%" cellpadding="0" cellspacing="0" class="a-bg" style="background:#f4f1fb;">
+  <tr><td align="center" style="padding:24px 12px;">
+    <table role="presentation" width="560" cellpadding="0" cellspacing="0" class="a-card" style="max-width:560px;width:100%;background:#ffffff;border:1px solid #e4def5;border-radius:14px;">
+      <tr><td class="a-line" style="padding:14px 22px;border-bottom:1px solid #e4def5;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;"><img src="https://app.getaura.com.br/email/aura-logo-v1.png" width="28" height="28" alt="Aura" style="display:inline-block;width:28px;height:28px;vertical-align:middle;border:0;margin-right:9px;"><span class="a-ink" style="font-weight:700;font-size:16px;letter-spacing:-.2px;color:#1b1736;vertical-align:middle;">Aura.</span></td></tr>
+      <tr><td style="padding:22px;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;">
+<p class="a-ink" style="margin:0 0 14px;color:#1b1736;font-size:15px;line-height:1.6;">Oi, Maria, tudo bem?</p>
+<p class="a-ink" style="margin:0 0 14px;color:#1b1736;font-size:15px;line-height:1.6;">Sou o Caio, da Aura. Vi que você criou a conta da Modas da Maria e quis te dar as boas-vindas pessoalmente.</p>
+<p class="a-ink" style="margin:0 0 14px;color:#1b1736;font-size:15px;line-height:1.6;">A Aura reúne caixa, estoque, clientes e fiado num lugar só. O seu teste grátis começa a contar na primeira venda e, a partir dela, dura 7 dias. Se a primeira venda demorar, ele termina no máximo em 08/11.</p>
+<p class="a-ink" style="margin:0 0 14px;color:#1b1736;font-size:15px;line-height:1.6;">Se quiser ajuda para trazer seus produtos ou seus clientes, ou se ficar qualquer dúvida no caminho, é só responder este e-mail. Eu leio todos.</p>
+<div style="margin:6px 0 4px;"><a class="a-btn" href="https://app.getaura.com.br/?empresa=emp-1" style="display:inline-block;background:#6d28d9;color:#ffffff;font-weight:700;font-size:14px;text-decoration:none;padding:11px 18px;border-radius:10px;margin:0 10px 10px 0;">Abrir minha conta</a><a class="a-wa" href="https://wa.me/5511956305269?text=Oi%2C%20Caio!%20Acabei%20de%20criar%20a%20conta%20da%20Modas%20da%20Maria%20na%20Aura." style="display:inline-block;background:transparent;color:#0f766e;border:1.5px solid #0f766e;font-weight:700;font-size:14px;text-decoration:none;padding:9.5px 16px;border-radius:10px;margin:0 10px 10px 0;">Falar comigo no WhatsApp</a></div><table role="presentation" cellpadding="0" cellspacing="0" style="margin:4px 0 0;"><tr><td><p class="a-ink" style="margin:0;color:#1b1736;font-size:15px;">Um abraço,</p><img class="a-sig" src="https://app.getaura.com.br/email/assinatura-caio-alexander-v1.png" width="170" alt="Caio Alexander" style="display:block;width:170px;height:auto;margin:2px 0 0 -2px;border:0;"><p class="a-ink" style="margin:0;color:#1b1736;font-size:14px;">Caio Alexander, fundador da Aura</p></td></tr></table>
+      </td></tr>
+      <tr><td class="a-line a-ink2" style="padding:12px 22px;border-top:1px solid #e4def5;color:#51497f;font-size:11.5px;line-height:1.6;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;">Você recebe este e-mail porque criou a conta da Modas da Maria na Aura. <a class="a-link" href="https://app.getaura.com.br/configuracoes?foco=emails&amp;empresa=emp-1" style="color:#6d28d9;">Ajustar meus e-mails</a> · <a class="a-link" href="https://api.exemplo.test/api/v1/emails/descadastro/TOKEN" style="color:#6d28d9;">Parar de receber</a> · Aura. Tecnologia para negócios</td></tr>
+    </table>
+  </td></tr>
+</table>
+</body>
+</html>"
+`;
+
+exports[`4.2 a 4.4 4.2 com produtos cadastrados 1`] = `
+"<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="color-scheme" content="light dark">
+<meta name="supported-color-schemes" content="light dark">
+<title>Já fez a primeira venda na Aura?</title>
+<style>
+  :root { color-scheme: light dark; supported-color-schemes: light dark; }
+  @media (prefers-color-scheme: dark) {
+    .a-bg { background: #0c0a16 !important; }
+    .a-card { background: #15122a !important; border-color: #2b2650 !important; }
+    .a-ink { color: #ece9ff !important; }
+    .a-ink2 { color: #b3add8 !important; }
+    .a-line { border-color: #2b2650 !important; }
+    .a-soft { background: #1d1938 !important; border-color: #2b2650 !important; }
+    .a-btn { background: #a78bfa !important; color: #14102b !important; }
+    .a-wa { color: #6ee7b7 !important; border-color: #6ee7b7 !important; }
+    .a-link { color: #a78bfa !important; }
+    .a-sig { filter: invert(1) brightness(1.6); }
+  }
+</style>
+</head>
+<body class="a-bg" style="margin:0;padding:0;background:#f4f1fb;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;">
+<div style="display:none;max-height:0;overflow:hidden;opacity:0;mso-hide:all;">Se travou em algo, eu ajudo</div><table role="presentation" width="100%" cellpadding="0" cellspacing="0" class="a-bg" style="background:#f4f1fb;">
+  <tr><td align="center" style="padding:24px 12px;">
+    <table role="presentation" width="560" cellpadding="0" cellspacing="0" class="a-card" style="max-width:560px;width:100%;background:#ffffff;border:1px solid #e4def5;border-radius:14px;">
+      <tr><td class="a-line" style="padding:14px 22px;border-bottom:1px solid #e4def5;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;"><img src="https://app.getaura.com.br/email/aura-logo-v1.png" width="28" height="28" alt="Aura" style="display:inline-block;width:28px;height:28px;vertical-align:middle;border:0;margin-right:9px;"><span class="a-ink" style="font-weight:700;font-size:16px;letter-spacing:-.2px;color:#1b1736;vertical-align:middle;">Aura.</span></td></tr>
+      <tr><td style="padding:22px;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;">
+<p class="a-ink" style="margin:0 0 14px;color:#1b1736;font-size:15px;line-height:1.6;">Oi, Maria, tudo bem?</p>
+<p class="a-ink" style="margin:0 0 14px;color:#1b1736;font-size:15px;line-height:1.6;">Passando para saber como está indo a Modas da Maria na Aura. Vi que você já cadastrou 12 produtos, mas a primeira venda ainda não saiu. É comum travar em um detalhe, como cadastrar um produto, achar o Caixa ou imprimir uma etiqueta.</p>
+<p class="a-ink" style="margin:0 0 14px;color:#1b1736;font-size:15px;line-height:1.6;">Me conta onde está empacando, pode ser respondendo este e-mail mesmo, que eu te ajudo.</p>
+<div style="margin:6px 0 4px;"><a class="a-btn" href="https://app.getaura.com.br/pdv?empresa=emp-1" style="display:inline-block;background:#6d28d9;color:#ffffff;font-weight:700;font-size:14px;text-decoration:none;padding:11px 18px;border-radius:10px;margin:0 10px 10px 0;">Fazer minha primeira venda</a><a class="a-wa" href="https://wa.me/5511956305269?text=Oi%2C%20Caio!%20Recebi%20seu%20e-mail%20sobre%20a%20primeira%20venda%20da%20Modas%20da%20Maria%20na%20Aura." style="display:inline-block;background:transparent;color:#0f766e;border:1.5px solid #0f766e;font-weight:700;font-size:14px;text-decoration:none;padding:9.5px 16px;border-radius:10px;margin:0 10px 10px 0;">Falar comigo no WhatsApp</a></div><table role="presentation" cellpadding="0" cellspacing="0" style="margin:4px 0 0;"><tr><td><p class="a-ink" style="margin:0;color:#1b1736;font-size:15px;">Um abraço,</p><img class="a-sig" src="https://app.getaura.com.br/email/assinatura-caio-alexander-v1.png" width="170" alt="Caio Alexander" style="display:block;width:170px;height:auto;margin:2px 0 0 -2px;border:0;"><p class="a-ink" style="margin:0;color:#1b1736;font-size:14px;">Caio Alexander, fundador da Aura</p></td></tr></table>
+      </td></tr>
+      <tr><td class="a-line a-ink2" style="padding:12px 22px;border-top:1px solid #e4def5;color:#51497f;font-size:11.5px;line-height:1.6;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;">Você recebe este e-mail porque está testando a Aura com a Modas da Maria. <a class="a-link" href="https://app.getaura.com.br/configuracoes?foco=emails&amp;empresa=emp-1" style="color:#6d28d9;">Ajustar meus e-mails</a> · <a class="a-link" href="https://api.exemplo.test/api/v1/emails/descadastro/TOKEN" style="color:#6d28d9;">Parar de receber</a> · Aura. Tecnologia para negócios</td></tr>
+    </table>
+  </td></tr>
+</table>
+</body>
+</html>"
+`;
+
+exports[`4.2 a 4.4 4.3 dois dias antes (dia da semana) e na recuperação (amanhã) 1`] = `
+"<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="color-scheme" content="light dark">
+<meta name="supported-color-schemes" content="light dark">
+<title>Seu teste da Aura termina quinta-feira, dia 29/10</title>
+<style>
+  :root { color-scheme: light dark; supported-color-schemes: light dark; }
+  @media (prefers-color-scheme: dark) {
+    .a-bg { background: #0c0a16 !important; }
+    .a-card { background: #15122a !important; border-color: #2b2650 !important; }
+    .a-ink { color: #ece9ff !important; }
+    .a-ink2 { color: #b3add8 !important; }
+    .a-line { border-color: #2b2650 !important; }
+    .a-soft { background: #1d1938 !important; border-color: #2b2650 !important; }
+    .a-btn { background: #a78bfa !important; color: #14102b !important; }
+    .a-wa { color: #6ee7b7 !important; border-color: #6ee7b7 !important; }
+    .a-link { color: #a78bfa !important; }
+    .a-sig { filter: invert(1) brightness(1.6); }
+  }
+</style>
+</head>
+<body class="a-bg" style="margin:0;padding:0;background:#f4f1fb;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;">
+<div style="display:none;max-height:0;overflow:hidden;opacity:0;mso-hide:all;">O Caixa continua funcionando</div><table role="presentation" width="100%" cellpadding="0" cellspacing="0" class="a-bg" style="background:#f4f1fb;">
+  <tr><td align="center" style="padding:24px 12px;">
+    <table role="presentation" width="560" cellpadding="0" cellspacing="0" class="a-card" style="max-width:560px;width:100%;background:#ffffff;border:1px solid #e4def5;border-radius:14px;">
+      <tr><td class="a-line" style="padding:14px 22px;border-bottom:1px solid #e4def5;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;"><img src="https://app.getaura.com.br/email/aura-logo-v1.png" width="28" height="28" alt="Aura" style="display:inline-block;width:28px;height:28px;vertical-align:middle;border:0;margin-right:9px;"><span class="a-ink" style="font-weight:700;font-size:16px;letter-spacing:-.2px;color:#1b1736;vertical-align:middle;">Aura.</span></td></tr>
+      <tr><td style="padding:22px;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;">
+<p class="a-ink" style="margin:0 0 14px;color:#1b1736;font-size:15px;line-height:1.6;">Oi, Maria, tudo bem?</p>
+<p class="a-ink" style="margin:0 0 14px;color:#1b1736;font-size:15px;line-height:1.6;">O teste da Modas da Maria termina quinta-feira, dia 29/10. Depois disso o Caixa continua funcionando normalmente, e as outras telas ficam travadas até você escolher um plano.</p>
+<p class="a-ink" style="margin:0 0 14px;color:#1b1736;font-size:15px;line-height:1.6;">Se quiser seguir, é só escolher o plano aqui. E se ficou alguma dúvida ou faltou testar alguma coisa, responde este e-mail que eu te ajudo.</p>
+<div style="margin:6px 0 4px;"><a class="a-btn" href="https://app.getaura.com.br/checkout?empresa=emp-1" style="display:inline-block;background:#6d28d9;color:#ffffff;font-weight:700;font-size:14px;text-decoration:none;padding:11px 18px;border-radius:10px;margin:0 10px 10px 0;">Escolher meu plano</a><a class="a-wa" href="https://wa.me/5511956305269?text=Oi%2C%20Caio!%20Recebi%20seu%20e-mail%20sobre%20o%20fim%20do%20teste%20da%20Modas%20da%20Maria%20na%20Aura." style="display:inline-block;background:transparent;color:#0f766e;border:1.5px solid #0f766e;font-weight:700;font-size:14px;text-decoration:none;padding:9.5px 16px;border-radius:10px;margin:0 10px 10px 0;">Falar comigo no WhatsApp</a></div><table role="presentation" cellpadding="0" cellspacing="0" style="margin:4px 0 0;"><tr><td><p class="a-ink" style="margin:0;color:#1b1736;font-size:15px;">Um abraço,</p><img class="a-sig" src="https://app.getaura.com.br/email/assinatura-caio-alexander-v1.png" width="170" alt="Caio Alexander" style="display:block;width:170px;height:auto;margin:2px 0 0 -2px;border:0;"><p class="a-ink" style="margin:0;color:#1b1736;font-size:14px;">Caio Alexander, fundador da Aura</p></td></tr></table>
+      </td></tr>
+      <tr><td class="a-line a-ink2" style="padding:12px 22px;border-top:1px solid #e4def5;color:#51497f;font-size:11.5px;line-height:1.6;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;">Você recebe este e-mail porque está testando a Aura com a Modas da Maria. <a class="a-link" href="https://app.getaura.com.br/configuracoes?foco=emails&amp;empresa=emp-1" style="color:#6d28d9;">Ajustar meus e-mails</a> · <a class="a-link" href="https://api.exemplo.test/api/v1/emails/descadastro/TOKEN" style="color:#6d28d9;">Parar de receber</a> · Aura. Tecnologia para negócios</td></tr>
+    </table>
+  </td></tr>
+</table>
+</body>
+</html>"
+`;
+
+exports[`4.2 a 4.4 4.4 com a contagem real 1`] = `
+"<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="color-scheme" content="light dark">
+<meta name="supported-color-schemes" content="light dark">
+<title>Seu teste da Aura terminou</title>
+<style>
+  :root { color-scheme: light dark; supported-color-schemes: light dark; }
+  @media (prefers-color-scheme: dark) {
+    .a-bg { background: #0c0a16 !important; }
+    .a-card { background: #15122a !important; border-color: #2b2650 !important; }
+    .a-ink { color: #ece9ff !important; }
+    .a-ink2 { color: #b3add8 !important; }
+    .a-line { border-color: #2b2650 !important; }
+    .a-soft { background: #1d1938 !important; border-color: #2b2650 !important; }
+    .a-btn { background: #a78bfa !important; color: #14102b !important; }
+    .a-wa { color: #6ee7b7 !important; border-color: #6ee7b7 !important; }
+    .a-link { color: #a78bfa !important; }
+    .a-sig { filter: invert(1) brightness(1.6); }
+  }
+</style>
+</head>
+<body class="a-bg" style="margin:0;padding:0;background:#f4f1fb;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;">
+<div style="display:none;max-height:0;overflow:hidden;opacity:0;mso-hide:all;">O Caixa segue liberado</div><table role="presentation" width="100%" cellpadding="0" cellspacing="0" class="a-bg" style="background:#f4f1fb;">
+  <tr><td align="center" style="padding:24px 12px;">
+    <table role="presentation" width="560" cellpadding="0" cellspacing="0" class="a-card" style="max-width:560px;width:100%;background:#ffffff;border:1px solid #e4def5;border-radius:14px;">
+      <tr><td class="a-line" style="padding:14px 22px;border-bottom:1px solid #e4def5;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;"><img src="https://app.getaura.com.br/email/aura-logo-v1.png" width="28" height="28" alt="Aura" style="display:inline-block;width:28px;height:28px;vertical-align:middle;border:0;margin-right:9px;"><span class="a-ink" style="font-weight:700;font-size:16px;letter-spacing:-.2px;color:#1b1736;vertical-align:middle;">Aura.</span></td></tr>
+      <tr><td style="padding:22px;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;">
+<p class="a-ink" style="margin:0 0 14px;color:#1b1736;font-size:15px;line-height:1.6;">Oi, Maria.</p>
+<p class="a-ink" style="margin:0 0 14px;color:#1b1736;font-size:15px;line-height:1.6;">O teste da Modas da Maria terminou. O Caixa segue liberado para você vender, e o que você cadastrou continua guardado: 320 produtos e 41 clientes. As outras telas voltam assim que você escolher o plano.</p>
+<p class="a-ink" style="margin:0 0 14px;color:#1b1736;font-size:15px;line-height:1.6;">Se algo ficou faltando, ou se a Aura não era o que você esperava, me conta. Eu quero entender.</p>
+<div style="margin:6px 0 4px;"><a class="a-btn" href="https://app.getaura.com.br/checkout?empresa=emp-1" style="display:inline-block;background:#6d28d9;color:#ffffff;font-weight:700;font-size:14px;text-decoration:none;padding:11px 18px;border-radius:10px;margin:0 10px 10px 0;">Escolher meu plano</a><a class="a-wa" href="https://wa.me/5511956305269?text=Oi%2C%20Caio!%20Recebi%20seu%20e-mail%20sobre%20o%20fim%20do%20teste%20da%20Modas%20da%20Maria%20na%20Aura." style="display:inline-block;background:transparent;color:#0f766e;border:1.5px solid #0f766e;font-weight:700;font-size:14px;text-decoration:none;padding:9.5px 16px;border-radius:10px;margin:0 10px 10px 0;">Falar comigo no WhatsApp</a></div><table role="presentation" cellpadding="0" cellspacing="0" style="margin:4px 0 0;"><tr><td><p class="a-ink" style="margin:0;color:#1b1736;font-size:15px;">Um abraço,</p><img class="a-sig" src="https://app.getaura.com.br/email/assinatura-caio-alexander-v1.png" width="170" alt="Caio Alexander" style="display:block;width:170px;height:auto;margin:2px 0 0 -2px;border:0;"><p class="a-ink" style="margin:0;color:#1b1736;font-size:14px;">Caio Alexander, fundador da Aura</p></td></tr></table>
+      </td></tr>
+      <tr><td class="a-line a-ink2" style="padding:12px 22px;border-top:1px solid #e4def5;color:#51497f;font-size:11.5px;line-height:1.6;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;">Você recebe este e-mail porque testou a Aura com a Modas da Maria. <a class="a-link" href="https://app.getaura.com.br/configuracoes?foco=emails&amp;empresa=emp-1" style="color:#6d28d9;">Ajustar meus e-mails</a> · <a class="a-link" href="https://api.exemplo.test/api/v1/emails/descadastro/TOKEN" style="color:#6d28d9;">Parar de receber</a> · Aura. Tecnologia para negócios</td></tr>
+    </table>
+  </td></tr>
+</table>
+</body>
+</html>"
+`;
+
+exports[`textos novos (a aprovar pelo Caio) assinatura cancelada: dados guardados e, no varejo fora do atraso, o Caixa 1`] = `
+"<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="color-scheme" content="light dark">
+<meta name="supported-color-schemes" content="light dark">
+<title>A assinatura da Aura foi cancelada</title>
+<style>
+  :root { color-scheme: light dark; supported-color-schemes: light dark; }
+  @media (prefers-color-scheme: dark) {
+    .a-bg { background: #0c0a16 !important; }
+    .a-card { background: #15122a !important; border-color: #2b2650 !important; }
+    .a-ink { color: #ece9ff !important; }
+    .a-ink2 { color: #b3add8 !important; }
+    .a-line { border-color: #2b2650 !important; }
+    .a-soft { background: #1d1938 !important; border-color: #2b2650 !important; }
+    .a-btn { background: #a78bfa !important; color: #14102b !important; }
+    .a-wa { color: #6ee7b7 !important; border-color: #6ee7b7 !important; }
+    .a-link { color: #a78bfa !important; }
+    .a-sig { filter: invert(1) brightness(1.6); }
+  }
+</style>
+</head>
+<body class="a-bg" style="margin:0;padding:0;background:#f4f1fb;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;">
+<div style="display:none;max-height:0;overflow:hidden;opacity:0;mso-hide:all;">Seus dados continuam guardados</div><table role="presentation" width="100%" cellpadding="0" cellspacing="0" class="a-bg" style="background:#f4f1fb;">
+  <tr><td align="center" style="padding:24px 12px;">
+    <table role="presentation" width="560" cellpadding="0" cellspacing="0" class="a-card" style="max-width:560px;width:100%;background:#ffffff;border:1px solid #e4def5;border-radius:14px;">
+      <tr><td class="a-line" style="padding:14px 22px;border-bottom:1px solid #e4def5;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;"><img src="https://app.getaura.com.br/email/aura-logo-v1.png" width="28" height="28" alt="Aura" style="display:inline-block;width:28px;height:28px;vertical-align:middle;border:0;margin-right:9px;"><span class="a-ink" style="font-weight:700;font-size:16px;letter-spacing:-.2px;color:#1b1736;vertical-align:middle;">Aura.</span></td></tr>
+      <tr><td style="padding:22px;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;">
+<p class="a-ink" style="margin:0 0 14px;color:#1b1736;font-size:15px;line-height:1.6;">Oi, Maria.</p>
+<p class="a-ink" style="margin:0 0 14px;color:#1b1736;font-size:15px;line-height:1.6;">A assinatura da Modas da Maria na Aura foi cancelada. Seus dados continuam guardados, e o Caixa segue funcionando para você vender.</p>
+<p class="a-ink" style="margin:0 0 14px;color:#1b1736;font-size:15px;line-height:1.6;">Se foi um engano, ou se quiser me contar o que pesou na decisão, é só responder este e-mail. Eu leio todos e quero entender.</p>
+<div style="margin:6px 0 4px;"><a class="a-wa" href="https://wa.me/5511956305269?text=Oi%2C%20Caio!%20Recebi%20o%20e-mail%20sobre%20o%20cancelamento%20da%20assinatura%20da%20Modas%20da%20Maria%20na%20Aura." style="display:inline-block;background:transparent;color:#0f766e;border:1.5px solid #0f766e;font-weight:700;font-size:14px;text-decoration:none;padding:9.5px 16px;border-radius:10px;margin:0 10px 10px 0;">Falar comigo no WhatsApp</a></div><table role="presentation" cellpadding="0" cellspacing="0" style="margin:4px 0 0;"><tr><td><p class="a-ink" style="margin:0;color:#1b1736;font-size:15px;">Um abraço,</p><img class="a-sig" src="https://app.getaura.com.br/email/assinatura-caio-alexander-v1.png" width="170" alt="Caio Alexander" style="display:block;width:170px;height:auto;margin:2px 0 0 -2px;border:0;"><p class="a-ink" style="margin:0;color:#1b1736;font-size:14px;">Caio Alexander, fundador da Aura</p></td></tr></table>
+      </td></tr>
+      <tr><td class="a-line a-ink2" style="padding:12px 22px;border-top:1px solid #e4def5;color:#51497f;font-size:11.5px;line-height:1.6;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;">Aura. Tecnologia para negócios · <a class="a-link" href="https://getaura.com.br" style="color:#6d28d9;text-decoration:none;">getaura.com.br</a></td></tr>
+    </table>
+  </td></tr>
+</table>
+</body>
+</html>"
+`;
+
+exports[`textos novos (a aprovar pelo Caio) faz uns dias que você não aparece: carta curta, pergunta aberta, sem lista de funções 1`] = `
+"<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="color-scheme" content="light dark">
+<meta name="supported-color-schemes" content="light dark">
+<title>Faz uns dias que você não aparece</title>
+<style>
+  :root { color-scheme: light dark; supported-color-schemes: light dark; }
+  @media (prefers-color-scheme: dark) {
+    .a-bg { background: #0c0a16 !important; }
+    .a-card { background: #15122a !important; border-color: #2b2650 !important; }
+    .a-ink { color: #ece9ff !important; }
+    .a-ink2 { color: #b3add8 !important; }
+    .a-line { border-color: #2b2650 !important; }
+    .a-soft { background: #1d1938 !important; border-color: #2b2650 !important; }
+    .a-btn { background: #a78bfa !important; color: #14102b !important; }
+    .a-wa { color: #6ee7b7 !important; border-color: #6ee7b7 !important; }
+    .a-link { color: #a78bfa !important; }
+    .a-sig { filter: invert(1) brightness(1.6); }
+  }
+</style>
+</head>
+<body class="a-bg" style="margin:0;padding:0;background:#f4f1fb;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;">
+<div style="display:none;max-height:0;overflow:hidden;opacity:0;mso-hide:all;">Só passando para saber se está tudo bem</div><table role="presentation" width="100%" cellpadding="0" cellspacing="0" class="a-bg" style="background:#f4f1fb;">
+  <tr><td align="center" style="padding:24px 12px;">
+    <table role="presentation" width="560" cellpadding="0" cellspacing="0" class="a-card" style="max-width:560px;width:100%;background:#ffffff;border:1px solid #e4def5;border-radius:14px;">
+      <tr><td class="a-line" style="padding:14px 22px;border-bottom:1px solid #e4def5;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;"><img src="https://app.getaura.com.br/email/aura-logo-v1.png" width="28" height="28" alt="Aura" style="display:inline-block;width:28px;height:28px;vertical-align:middle;border:0;margin-right:9px;"><span class="a-ink" style="font-weight:700;font-size:16px;letter-spacing:-.2px;color:#1b1736;vertical-align:middle;">Aura.</span></td></tr>
+      <tr><td style="padding:22px;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;">
+<p class="a-ink" style="margin:0 0 14px;color:#1b1736;font-size:15px;line-height:1.6;">Oi, Maria, tudo bem?</p>
+<p class="a-ink" style="margin:0 0 14px;color:#1b1736;font-size:15px;line-height:1.6;">Faz uns dias que você não aparece na Aura e quis passar só para saber como andam as coisas na Modas da Maria.</p>
+<p class="a-ink" style="margin:0 0 14px;color:#1b1736;font-size:15px;line-height:1.6;">Ficou alguma coisa que não funcionou do jeito que você precisava? Pode responder este e-mail mesmo, que chega direto para mim.</p>
+<div style="margin:6px 0 4px;"><a class="a-wa" href="https://wa.me/5511956305269?text=Oi%2C%20Caio!%20Recebi%20seu%20e-mail%20sobre%20a%20Modas%20da%20Maria%20na%20Aura." style="display:inline-block;background:transparent;color:#0f766e;border:1.5px solid #0f766e;font-weight:700;font-size:14px;text-decoration:none;padding:9.5px 16px;border-radius:10px;margin:0 10px 10px 0;">Falar comigo no WhatsApp</a></div><table role="presentation" cellpadding="0" cellspacing="0" style="margin:4px 0 0;"><tr><td><p class="a-ink" style="margin:0;color:#1b1736;font-size:15px;">Um abraço,</p><img class="a-sig" src="https://app.getaura.com.br/email/assinatura-caio-alexander-v1.png" width="170" alt="Caio Alexander" style="display:block;width:170px;height:auto;margin:2px 0 0 -2px;border:0;"><p class="a-ink" style="margin:0;color:#1b1736;font-size:14px;">Caio Alexander, fundador da Aura</p></td></tr></table>
+      </td></tr>
+      <tr><td class="a-line a-ink2" style="padding:12px 22px;border-top:1px solid #e4def5;color:#51497f;font-size:11.5px;line-height:1.6;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;">Você recebe este e-mail porque usa a Aura com a Modas da Maria. <a class="a-link" href="https://app.getaura.com.br/configuracoes?foco=emails&amp;empresa=emp-1" style="color:#6d28d9;">Ajustar meus e-mails</a> · <a class="a-link" href="https://api.exemplo.test/api/v1/emails/descadastro/TOKEN" style="color:#6d28d9;">Parar de receber</a> · Aura. Tecnologia para negócios</td></tr>
+    </table>
+  </td></tr>
+</table>
+</body>
+</html>"
+`;
