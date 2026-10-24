@@ -139,6 +139,9 @@ router.use('/storefront', require('./studioStorefrontVisual'));
 router.use('/storefront', require('./studioStorefront'));
 router.use('/storefront', require('./storefront'));
 router.use('/reports', require('./publicReports'));
+// E-mails (24/10/2026, público): descadastro do relatório semanal (tq-74,
+// RFC 8058) e QR do Pix dos e-mails de cobrança (tq-77). Token assinado.
+router.use('/emails', require('./emailPublico'));
 
 router.use('/reviews',           publicReviewsRouter);
 router.use('/dental',            require('./dentalSign'));

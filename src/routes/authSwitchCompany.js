@@ -15,6 +15,7 @@ const db = require('../config/database');
 const { requireAuth } = require('../middleware/auth');
 const { validateRuntimeEnv } = require('../config/env');
 const { logAuditAction } = require('../middleware/auditLog');
+const { datasDoAtraso } = require('../services/cobrancaAssinatura');
 
 const env = validateRuntimeEnv();
 const JWT_SECRET = env.JWT_SECRET;
@@ -249,6 +250,10 @@ router.post('/switch-company', requireAuth, async (req, res) => {
     const trialActive =
       company.trial_ends_at && new Date(company.trial_ends_at) > new Date();
 
+    // tq-86 (24/10/2026): datas do atraso, no mesmo objeto do billing_status
+    // (contrato com o app). So consulta em 'overdue'; nunca lanca.
+    const atraso = await datasDoAtraso({ db, companyId: company.id, billingStatus: company.billing_status });
+
     return res.json({
       token: accessToken,
       token_expires_in: ACCESS_TTL,
@@ -264,6 +269,9 @@ router.post('/switch-company', requireAuth, async (req, res) => {
         is_primary: company.is_primary,
         module_overrides: company.module_overrides || {},
         billing_status: company.billing_status,
+        billing_overdue_since: atraso.billing_overdue_since,
+        billing_pause_screens_on: atraso.billing_pause_screens_on,
+        billing_pause_caixa_on: atraso.billing_pause_caixa_on,
         trial_active: !!trialActive,
         trial_ends_at: company.trial_ends_at,
         ai_enabled: !!company.ai_enabled,

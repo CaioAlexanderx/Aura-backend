@@ -191,16 +191,10 @@ describe('e-mails a quem não é a lojista: remetente neutro, sem reply_to para 
     }
   });
 
-  test('confirmação do pedido (cliente final): mesma regra', async () => {
-    const corpos = fetchFalso();
-    const { sendOrderConfirmationEmail } = carregarMailer({ RESEND_API_KEY: 'k' });
-    const base = { order_number: '0001', customer_name: 'Ana', total: 10, delivery_type: 'pickup', store_name: 'Loja', items: [] };
-    await sendOrderConfirmationEmail('cliente@exemplo.com', { ...base, store_email: 'loja@exemplo.com.br' });
-    await sendOrderConfirmationEmail('cliente@exemplo.com', base);
-    expect(corpos.map((c) => [c.from, c.reply_to])).toEqual([
-      [NEUTRO, 'loja@exemplo.com.br'],
-      [NEUTRO, 'noreply@getaura.com.br'],
-    ]);
+  // tq-75 (24/10/2026): sendOrderConfirmationEmail saiu (não tinha chamador).
+  test('confirmação do pedido (cliente final) não existe mais', () => {
+    const mailer = carregarMailer({ RESEND_API_KEY: 'k' });
+    expect(mailer).not.toHaveProperty('sendOrderConfirmationEmail');
   });
 
   test('verificação do portal do Karatê: remetente neutro e reply_to noreply@', async () => {

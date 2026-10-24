@@ -197,8 +197,10 @@ describe('sendOrderStatusEmail com link', () => {
       link: { url: 'https://x.com/"><script>', rotulo: '<b>oi</b>' },
     });
     const m = enviado();
+    // tq-75: o modelo único recusa URL com aspas ou <> (o botão não sai) e
+    // escapa tudo o que vem de fora.
     expect(m.html).not.toContain('"><script>');
-    expect(m.html).toContain('&quot;>&lt;script>');
-    expect(m.html).toContain('&lt;b>oi&lt;/b>');
+    expect(m.html).not.toContain('<script>');
+    expect(m.html).not.toContain('<b>oi</b>');
   });
 });

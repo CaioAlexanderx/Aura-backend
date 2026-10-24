@@ -64,6 +64,11 @@ function startServer() {
     console.log('   Release: ' + (env.GIT_SHA || 'local'));
     console.log('   Health:  http://localhost:' + env.PORT + '/health\n');
 
+    // E-mails (407, tq-74): todo sendMail grava uma linha em email_log.
+    // Nunca derruba o envio nem o boot.
+    try { require('./services/emailLog').ligarRegistroNoMailer(); }
+    catch (e) { console.error('[emailLog] registro nao ligado:', e.message); }
+
     // Iniciar scheduler de relatórios
     const { initReportScheduler } = require('./jobs/reportScheduler');
     initReportScheduler();
@@ -199,6 +204,13 @@ function startServer() {
     // vencer sem pagamento. A cada 30 min, 8h–20h BRT.
     const { initLembreteDeFaturaJob } = require('./jobs/lembreteDeFaturaJob');
     initLembreteDeFaturaJob();
+
+    // Régua de cobrança da assinatura (407/408; tq-77, 78, 84, 93):
+    // lembrete 2 dias antes e no dia, atraso de 1/3/7/11/14 dias e aviso
+    // interno no dia 3 — diário às 9h BRT, tick de 10 min. Kill switch
+    // EMAILS_COBRANCA_ENABLED=false (ou EMAILS_CICLO_ENABLED=false).
+    const { initReguaDeCobrancaJob } = require('./jobs/reguaDeCobrancaJob');
+    initReguaDeCobrancaJob();
 
     // Indicação (14/10/2026): 1x por dia após 06h30 BRT cria o banner
     // "Indique um lojista" (ativo) para toda empresa de varejo em teste,

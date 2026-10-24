@@ -83,8 +83,12 @@ describe('listarAssinaturasAtivas', () => {
 });
 
 describe('proximoVencimento', () => {
+  // A lista de cobranças responde pelo status pedido (PENDING ou OVERDUE),
+  // como a Asaas.
   const asaasDe = (assinatura, cobrancas) => jest.fn(async (m, caminho) => {
-    const r = caminho.includes('/payments') ? cobrancas : assinatura;
+    let r = caminho.includes('/payments') ? cobrancas : assinatura;
+    const st = /status=(\w+)/.exec(caminho);
+    if (st && r && Array.isArray(r.data)) r = { data: r.data.filter((p) => p.status === st[1]) };
     if (r instanceof Error) throw r;
     return r;
   });
@@ -94,18 +98,28 @@ describe('proximoVencimento', () => {
     expect(r).toMatchObject({ data: '2026-11-05', origem: 'assinatura' });
   });
 
-  test('com pendente mais próxima, vale a pendente (vencida e paga não contam)', async () => {
+  test('com pendente mais próxima, vale a pendente (paga não conta)', async () => {
     const r = await proximoVencimento(asaasDe({ id: 'sub_1', nextDueDate: '2026-12-05' }, { data: [
-      { status: 'OVERDUE', dueDate: '2026-09-05' },
       { status: 'RECEIVED', dueDate: '2026-10-05' },
       { status: 'PENDING', dueDate: '2026-11-05' },
     ] }), 'sub_1');
     expect(r).toMatchObject({ data: '2026-11-05', origem: 'cobranca_pendente' });
   });
 
-  test('lista de cobranças fora do ar: ainda vale o nextDueDate', async () => {
+  // tq-86 (24/10/2026): com cobrança vencida em aberto, o próximo vencimento
+  // é o da vencida mais antiga — nunca a pendente seguinte (caso MHT, 21/10).
+  test('com cobrança vencida em aberto, vale a vencida mais antiga', async () => {
+    const r = await proximoVencimento(asaasDe({ id: 'sub_1', nextDueDate: '2026-12-20' }, { data: [
+      { status: 'OVERDUE', dueDate: '2026-10-20' },
+      { status: 'OVERDUE', dueDate: '2026-09-20' },
+      { status: 'PENDING', dueDate: '2026-11-20' },
+    ] }), 'sub_1');
+    expect(r).toMatchObject({ data: '2026-09-20', origem: 'cobranca_vencida' });
+  });
+
+  test('lista de cobranças fora do ar: null (não dá para afirmar que não há vencida)', async () => {
     const r = await proximoVencimento(asaasDe({ id: 'sub_1', nextDueDate: '2026-11-05' }, new Error('timeout')), 'sub_1');
-    expect(r.data).toBe('2026-11-05');
+    expect(r).toBeNull();
   });
 
   test('assinatura fora do ar, sem id ou sem data: null, nunca lança', async () => {
