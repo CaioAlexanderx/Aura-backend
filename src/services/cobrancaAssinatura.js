@@ -417,7 +417,56 @@ async function aoEventoDaAssinatura({ db, asaas, enviar, event, payment, fromAsa
   }
 }
 
+// ── 2.6 Combinar nova data (tq-82a) ─────────────────────────────
+/**
+ * E-mail 2.6, para chamar DEPOIS que o vencimento da cobrança já foi movido
+ * na Asaas. Hoje (24/10/2026) não existe ação na Gestão Aura que mova o
+ * vencimento na Asaas (as rotas de staff só leem a Asaas ou corrigem
+ * companies.next_billing_date a partir dela), então nada chama esta função:
+ * ela fica pronta para a ação que vier, sem rota nova que escreva na Asaas.
+ *
+ * Regra 10 (valor exato): relê a cobrança (GET /payments/:id) e escreve o
+ * value + interestValue dela, o mesmo que o Pix do e-mail cobra. Não envia
+ * quando:
+ *   - a leitura falha (nenhum número de outra fonte);
+ *   - a cobrança não está em aberto ou o vencimento lido não é a nova data;
+ *   - há multa/juros (o texto diz "sem custo a mais") ou desconto ainda
+ *     válido (o Pix pode cobrar menos): valor sem número não serve aqui.
+ * Idempotente: nova-data:<pay>:<nova data>.
+ *
+ * @returns {Promise<{status: string, motivo?: string}>}
+ */
+async function enviarNovaDataCombinada({ db, asaas, enviar, companyId, paymentId, novaData, now = Date.now(), env = process.env }) {
+  if (!emailsDeCobrancaLigados(env)) return { status: 'desligado' };
+  if (!companyId || !paymentId || !DATA_RE.test(String(novaData || ''))) return { status: 'invalido' };
+  let payment;
+  try {
+    payment = await asaas('GET', '/payments/' + encodeURIComponent(paymentId));
+  } catch (err) {
+    return { status: 'nao_enviado', motivo: 'cobranca_indisponivel' };
+  }
+  if (!payment || payment.id !== paymentId) return { status: 'nao_enviado', motivo: 'cobranca_indisponivel' };
+  if (!['PENDING', 'AWAITING_RISK_ANALYSIS'].includes(payment.status)) return { status: 'nao_enviado', motivo: 'nao_esta_em_aberto' };
+  if (String(payment.dueDate || '').slice(0, 10) !== novaData) return { status: 'nao_enviado', motivo: 'vencimento_nao_mudou' };
+  const hoje = hojeBrt(now);
+  const v = conteudos.valorParaEmail(payment, { situacao: 'aberta', hoje });
+  if (!v || v.comJuros) return { status: 'nao_enviado', motivo: v ? 'com_multa_ou_juros' : 'valor_indisponivel' };
+
+  const destino = await destinatarioDaEmpresa(db, companyId);
+  if (!destino || !destino.email) return { status: 'fora' };
+  const pix = await pixDaCobranca(asaas, paymentId);
+  const conteudo = conteudos.novaDataCombinada({
+    nome: destino.nome, loja: destino.loja, valor: v.valor, novaData, pix, linkFatura: linkDaFatura(payment, null),
+  });
+  const r = await enviarCobranca({
+    db, enviar, tipo: 'cobranca_nova_data', chave: `nova-data:${paymentId}:${novaData}`, destino, conteudo,
+    metadata: { asaas_payment_id: paymentId, nova_data: novaData },
+  });
+  return { status: r.status };
+}
+
 module.exports = {
+  enviarNovaDataCombinada,
   DIAS_ATE_PAUSA_TELAS,
   DIAS_ATE_PAUSA_CAIXA,
   DIAS_MAX_RECIBO,

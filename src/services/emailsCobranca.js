@@ -425,7 +425,36 @@ function cartaoRecusadoDeNovo(d) {
   });
 }
 
+// ── 2.6 Combinar nova data (confirmação depois que a pessoa pede) ─
+// Regra aprovada em 13/10: um novo vencimento, até 7 dias, sem desconto,
+// uma vez por conta a cada 6 meses. Sai DEPOIS que o vencimento já foi
+// movido na Asaas, com o valor e o Pix da cobrança relida (quem envia é
+// cobrancaAssinatura.enviarNovaDataCombinada, que só manda com o valor
+// lido e sem multa nem juros: "sem custo a mais" tem que ser verdade).
+function novaDataCombinada(d) {
+  const valor = valorSimples(d);
+  const pix = temPix(d);
+  const nova = L.dataCurta(d.novaData);
+  return carta({
+    assunto: 'Combinado: nova data para a mensalidade da Aura',
+    previa: `Vence em ${nova}, mesmo valor`,
+    blocos: [
+      `Oi, ${d.nome}! Combinado.`,
+      `Movi o vencimento da mensalidade da ${d.loja} para ${nova}. ` +
+        (valor ? `O valor continua ${valor}, sem custo a mais. ` : 'O valor continua o mesmo, sem custo a mais. ') +
+        (pix ? 'O Pix novo está aqui embaixo.' : 'O link da fatura nova está aqui embaixo.'),
+      { pix: true },
+      'Só aviso que esse ajuste de data eu consigo fazer uma vez a cada seis meses, então vale ficar de olho no dia.',
+    ],
+    pix: d.pix,
+    botao: { rotulo: 'Abrir a fatura', url: d.linkFatura },
+    whatsapp: msgWhats(d),
+  });
+}
+
 module.exports = {
+  carta,
+  novaDataCombinada,
   formaDePagamento,
   valorParaEmail,
   valorTexto,

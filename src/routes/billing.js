@@ -113,6 +113,7 @@ const {
   recordRedemption,
 } = require('../services/checkoutCoupon');
 const subscriptionDiscount = require('../services/subscriptionDiscount');
+const { marcarEncerramentoPedido } = require('../services/assinaturasAsaas');
 // 21/09/2026: o Asaas nao cobra cliente sem CPF/CNPJ e a maioria das empresas
 // nao tem CNPJ cadastrado. O documento agora vem do checkout (cpf_cnpj).
 const {
@@ -763,6 +764,10 @@ router.post('/subscribe', requireAuth, requireRole('client', 'admin'), async (re
       // e tocado: assinar o anual depois dos 3 meses e o caminho normal.
       const lost = await subscriptionDiscount.loseDiscount(db, company.id, 'plan_change');
       if (lost) console.log('[BILLING] Desconto em andamento perdido na troca de assinatura — company=' + company.id);
+      // tq-73 (24/10/2026): marca ANTES do DELETE que a troca e da Aura — o
+      // SUBSCRIPTION_DELETED que a Asaas manda depois nao vira e-mail de
+      // "assinatura cancelada" (services/assinaturasAsaas).
+      await marcarEncerramentoPedido(db, company.asaas_subscription_id, { companyId: company.id, motivo: 'troca_de_plano' });
       try { await asaas('DELETE', '/subscriptions/' + company.asaas_subscription_id); } catch {}
     }
 
@@ -1191,6 +1196,9 @@ router.post('/cancel', requireAuth, requireRole('client', 'admin'), async (req, 
     if (!rows.length || !rows[0].asaas_subscription_id) {
       return res.status(400).json({ error: 'Nenhuma assinatura ativa' });
     }
+    // tq-79 (24/10/2026): cancelamento pedido pelo cliente no app. Marcado
+    // antes do DELETE porque a coluna da empresa e zerada logo abaixo.
+    await marcarEncerramentoPedido(db, rows[0].asaas_subscription_id, { companyId: req.params.id, motivo: 'cliente_no_app' });
     await asaas('DELETE', '/subscriptions/' + rows[0].asaas_subscription_id);
     await db.query(
       'UPDATE companies SET billing_status=\'cancelled\', asaas_subscription_id=NULL, updated_at=NOW() WHERE id=$1',

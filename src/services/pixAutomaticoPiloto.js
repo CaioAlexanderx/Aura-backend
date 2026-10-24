@@ -341,6 +341,9 @@ async function trocarAssinatura({ db, cliente, companyId, userId }) {
     } catch (err) {
       throw erroDaAsaas(err, 'listar as cobranças pendentes da assinatura antiga');
     }
+    // tq-73 (24/10/2026): a troca é da Aura — o SUBSCRIPTION_DELETED da
+    // antiga não vira e-mail de "assinatura cancelada".
+    await require('./assinaturasAsaas').marcarEncerramentoPedido(db, antiga, { companyId: empresa.id, motivo: 'pix_automatico' });
     try {
       await cliente.cancelarAssinatura(antiga);
     } catch (err) {
