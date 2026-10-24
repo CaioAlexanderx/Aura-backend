@@ -8,6 +8,7 @@ const express = require('express');
 const router  = express.Router({ mergeParams: true });
 const pool    = require('../config/database');
 const { requireAuth, requireRole } = require('../middleware/auth');
+const { excluirVarianteComHistorico } = require('../services/excluirProduto');
 
 async function checkProductOwnership(company_id, product_id) {
   const { rows } = await pool.query(
@@ -443,13 +444,25 @@ router.delete('/:vid', requireAuth, requireRole('client', 'analyst', 'admin'), a
     if (!await checkProductOwnership(company_id, product_id)) {
       return res.status(404).json({ error: 'Produto nao encontrado' });
     }
-    const { rows } = await pool.query(
-      'DELETE FROM product_variants WHERE id = $1 AND product_id = $2 RETURNING id',
-      [variant_id, product_id]
-    );
+    let rows;
+    try {
+      ({ rows } = await pool.query(
+        'DELETE FROM product_variants WHERE id = $1 AND product_id = $2 RETURNING id',
+        [variant_id, product_id]
+      ));
+    } catch (err) {
+      // 24/10/2026: variante ja vendida (sale_items.variant_id sem acao) dava
+      // 500 aqui. Exclusao confirmada nunca e negada: anula as referencias de
+      // historico e apaga; se ainda assim nao der, arquiva (is_active=false).
+      if (err.code !== '23503') throw err;
+      const r = await excluirVarianteComHistorico(pool, { vid: variant_id, pid: product_id });
+      if (!r.found) return res.status(404).json({ error: 'Variante nao encontrada' });
+      return res.json({ message: 'Variante removida', deleted: true, ...(r.archived ? { archived: true } : {}) });
+    }
     if (rows.length === 0) return res.status(404).json({ error: 'Variante nao encontrada' });
     res.json({ message: 'Variante removida' });
   } catch (err) {
+    console.error('variant DELETE error:', err.message, err.code);
     res.status(500).json({ error: 'Erro ao remover variante' });
   }
 });

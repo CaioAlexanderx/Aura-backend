@@ -93,6 +93,8 @@ async function execTool(companyId, channelConfig, name, input, ctx = {}) {
       `-- aurinha:buscar-produtos
        SELECT id, name, price, stock_qty FROM products
         WHERE company_id = $1 AND name ILIKE $2
+          -- 24/10/2026: produto excluido e arquivado (is_active=false) nao e oferecido.
+          AND is_active IS NOT FALSE
         ORDER BY stock_qty DESC, name ASC LIMIT 8`,
       [companyId, termo]
     );
@@ -110,7 +112,7 @@ async function execTool(companyId, channelConfig, name, input, ctx = {}) {
   if (name === 'detalhe_produto') {
     const { rows } = await db.query(
       `SELECT id, name, price, stock_qty FROM products
-        WHERE company_id = $1 AND id = $2 LIMIT 1`,
+        WHERE company_id = $1 AND id = $2 AND is_active IS NOT FALSE LIMIT 1`,
       [companyId, input.produto_id]
     );
     if (!rows.length) return { erro: 'produto não encontrado' };
@@ -119,7 +121,7 @@ async function execTool(companyId, channelConfig, name, input, ctx = {}) {
     try {
       const { rows: vars } = await db.query(
         `SELECT sku_suffix, price_override, stock_qty FROM product_variants
-          WHERE product_id = $1 ORDER BY sku_suffix ASC LIMIT 40`,
+          WHERE product_id = $1 AND is_active IS NOT FALSE ORDER BY sku_suffix ASC LIMIT 40`,
         [p.id]
       );
       variacoes = vars.map(v => ({

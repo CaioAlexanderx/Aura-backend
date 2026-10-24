@@ -29,6 +29,9 @@
 //   mas explodia em 42P01 quando o deployment nao tinha a migration de
 //   barbershop (caso Eryca/Finesse — varejo puro). safeNullProductRef
 //   ignora 42P01 e segue o resto da cadeia.
+// FIX (24/10/2026): a cadeia de retry virou services/excluirProduto.js —
+//   anula tambem as referencias as VARIANTES (sale_items.variant_id segurava
+//   a variante vendida e devolvia 409) e, se ainda assim nao der, arquiva.
 // FEAT (19/05/2026): suporte a variantes no GET. variants_stock_total
 //   agrega SUM(product_variants.stock_qty) e variant_barcodes lista
 //   ARRAY_AGG dos barcodes das variants ativas. Search WHERE estendido
@@ -52,6 +55,8 @@ const db = require('../config/database');
 const { avancarSemEsperar } = require('../services/onboardingProgress');
 // t3-05 (18/10/2026): NCM fora da tabela da Receita so AVISA (ncm_aviso), nunca bloqueia.
 const { avisoDeNcm } = require('../services/ncmTable');
+// 24/10/2026: exclusao confirmada nunca e negada (anula historico ou arquiva).
+const { excluirProdutoComHistorico } = require('../services/excluirProduto');
 
 // ─── Fase 1 fornecedores (16/09/2026) ────────────────────────
 //
@@ -199,36 +204,6 @@ function listVisibilityWhere(cidParam) {
       )
     )
   ))`;
-}
-
-// ─── safeNullProductRef ──────────────────────────────────
-//
-// 12/05/2026: helper pro retry de DELETE quando ha FK violation
-// (23503). Cada deployment so tem as tabelas das migrations que
-// rodaram nele — barber_stock_movements so existe se a vertical
-// barbershop foi aplicada. Tentar UPDATE em tabela inexistente
-// explode 42P01 e quebra a cadeia inteira do retry.
-//
-// `tableName` E HARDCODED neste arquivo (whitelist de tabelas
-// internas conhecidas), nunca vem de user input — SEM risco
-// de SQL injection.
-async function safeNullProductRef(tableName, productId) {
-  try {
-    await db.query(
-      `UPDATE ${tableName} SET product_id = NULL WHERE product_id = $1`,
-      [productId]
-    );
-  } catch (err) {
-    // 42P01 = undefined_table. Acontece quando a migration que cria
-    // essa tabela nao rodou nesse deployment (ex: barbershop em
-    // cliente de varejo puro). Ignora e segue a cadeia.
-    if (err.code === '42P01') {
-      console.log('[products] safeNull: tabela', tableName, 'nao existe nesse deployment, pulando');
-      return;
-    }
-    // Outras falhas (permissao, sintaxe, deadlock) sobem.
-    throw err;
-  }
 }
 
 // ─── GET / ──────────────────────────────────
@@ -855,6 +830,13 @@ router.patch('/:pid', async (req, res) => {
 });
 
 // ─── DELETE /:pid ───────────────────────────────
+//
+// 24/10/2026: exclusao confirmada nunca e negada (regra do Caio). O DELETE
+// simples continua sendo a primeira tentativa (produto sem historico sai
+// como sempre, numa consulta so). Se uma FK segurar (23503), o
+// excluirProdutoComHistorico anula as referencias de historico ao produto e
+// as variantes dele numa transacao e apaga; se ainda assim nao der, arquiva
+// (is_active = false) e responde sucesso com archived: true. Nunca 409.
 router.delete('/:pid', async (req, res) => {
   const { id: cid, pid } = req.params;
   try {
@@ -867,22 +849,12 @@ router.delete('/:pid', async (req, res) => {
   } catch (err) {
     if (err.code === '23503') {
       try {
-        // 12/05/2026: safeNullProductRef ignora 42P01 pra deployments que
-        // nao tem todas as tabelas (ex: Finesse sem barbershop). Sem isso,
-        // a primeira tabela ausente quebrava a cadeia inteira e o produto
-        // nao deletava mesmo com sale_items/stock_movements ja nulificados.
-        await safeNullProductRef('sale_items', pid);
-        await safeNullProductRef('barber_stock_movements', pid);
-        await safeNullProductRef('stock_movements', pid);
-        const retry = await db.query(
-          `DELETE FROM products WHERE ${visibilityWhere('$1', '$2')} RETURNING id, name`,
-          [pid, cid]
-        );
-        if (retry && retry.rows.length) return res.json({ deleted: true, id: pid, name: retry.rows[0].name });
-        return res.status(404).json({ error: 'Produto nao encontrado' });
+        const r = await excluirProdutoComHistorico(db, { pid, cid, whereVisivel: visibilityWhere('$1', '$2') });
+        if (!r.found) return res.status(404).json({ error: 'Produto nao encontrado' });
+        return res.json({ deleted: true, id: pid, name: r.name, ...(r.archived ? { archived: true } : {}) });
       } catch (retryErr) {
-        console.error('[products] delete retry error:', retryErr.message, retryErr.code);
-        return res.status(409).json({ error: 'Este produto esta vinculado a outros registros e nao pode ser excluido. Tente desativa-lo.', code: 'FK_VIOLATION' });
+        console.error('[products] delete com historico falhou:', retryErr.message, retryErr.code);
+        return res.status(500).json({ error: 'Erro ao excluir produto' });
       }
     }
     console.error('[products] delete error:', err.message, err.code);

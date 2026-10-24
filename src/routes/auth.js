@@ -237,7 +237,7 @@ async function resolveDefaultContext(userId, dbConn) {
   const conn = dbConn || db;
   const { rows } = await conn.query(
     `SELECT DISTINCT ON (c.id)
-            c.id, c.legal_name, c.plan, c.onboarding_step,
+            c.id, c.legal_name, c.trade_name, c.plan, c.onboarding_step,
             c.trial_ends_at, c.module_overrides, c.billing_status,
             c.access_code_used, c.vertical_active, c.vertical, c.ai_enabled, c.ai_consent_at,
             c.federation_id, c.segment,
@@ -299,6 +299,11 @@ function shapeCompany(company, fallbackMemberRole) {
   return {
     id: company.id,
     name: company.legal_name || company.name || company.trade_name,
+    // 24/10/2026: nome fantasia e razao social separados. `name` continua o
+    // mesmo de sempre (razao social primeiro); a etiqueta do app usa
+    // trade_name para o nome da loja no topo. null quando vazio.
+    trade_name: company.trade_name || null,
+    legal_name: company.legal_name || null,
     plan: company.plan,
     onboarding_step: company.onboarding_step,
     module_overrides: company.module_overrides || {},
@@ -941,7 +946,7 @@ router.post('/me', requireAuth, async (req, res) => {
     );
     const companyP = buscaEmpresa
       ? db.query(
-        `SELECT c.id, c.legal_name, c.plan, c.onboarding_step,
+        `SELECT c.id, c.legal_name, c.trade_name, c.plan, c.onboarding_step,
                 c.trial_ends_at, c.module_overrides, c.billing_status,
                 c.access_code_used, c.vertical_active, c.vertical, c.ai_enabled, c.ai_consent_at,
                 c.federation_id, c.segment,

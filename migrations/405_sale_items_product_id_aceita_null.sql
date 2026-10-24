@@ -1,0 +1,23 @@
+-- ============================================================
+-- 405 — sale_items.product_id aceita NULL (24/10/2026)
+--
+-- A 001 criou sale_items.product_id NOT NULL, mas o codigo ja trata a
+-- coluna como opcional ha muito tempo:
+--   - o Caixa (pdv.js) grava item livre sem produto (product_id null —
+--     Otica "Montagem", "Armacao do cliente", item avulso);
+--   - a exclusao de produto anula sale_items.product_id para o produto
+--     vendido sair sem apagar a venda (o nome e o preco ficam em
+--     product_name_snapshot / unit_price / total_price).
+-- Como a venda de item livre funciona em producao, o banco de producao deve
+-- ja aceitar NULL nessa coluna (nao conferido daqui: nada foi rodado contra
+-- producao); o schema montado pelas migrations (o Postgres do CI) nao
+-- aceita. Esta migration alinha os dois.
+--
+-- Idempotente: DROP NOT NULL em coluna que ja aceita NULL nao faz nada.
+-- Nao reescreve a tabela (so muda o catalogo).
+--
+-- Para desfazer (so se nenhuma linha tiver product_id nulo):
+--   ALTER TABLE sale_items ALTER COLUMN product_id SET NOT NULL;
+-- ============================================================
+
+ALTER TABLE sale_items ALTER COLUMN product_id DROP NOT NULL;
