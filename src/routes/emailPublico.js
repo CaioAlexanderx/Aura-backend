@@ -12,6 +12,12 @@
 //
 // tq-77 — QR do Pix nos e-mails de cobrança:
 //   GET  /pix-qr/:token.png   desenha o QR do copia e cola que vai no token
+//
+// tq-87/tq-88 — preferências por tipo (company_email_prefs):
+//   o descadastro desliga o tipo do token (relatorio, ajuda, acompanhamento,
+//   novidades, pedido_loja), inclusive pelo one-click;
+//   GET  /confirmar/:token    confirma um endereço extra de aviso (link do
+//                             e-mail de confirmação, 7 dias)
 // ============================================================
 'use strict';
 
@@ -20,7 +26,8 @@ const QRCode = require('qrcode');
 const router = express.Router();
 
 const db = require('../config/database');
-const { lerTokenDescadastro, lerTokenQr } = require('../services/emailLinks');
+const { lerTokenDescadastro, lerTokenQr, linkAjustarEmails } = require('../services/emailLinks');
+const { confirmarPeloToken } = require('../services/emailEnderecos');
 const { TIPOS, desligarTipoDeEmail } = require('../services/emailPreferencias');
 const { contextoDaRequisicao } = require('../middleware/auditLog');
 
@@ -83,7 +90,7 @@ router.get('/descadastro/:token', async (req, res) => {
   res.set('Cache-Control', 'no-store');
   res.type('html').send(pagina('Parar de receber',
     `<h1>Parar de receber ${esc(TIPOS[t.tipo].rotulo)}?</h1>` +
-    `<p>${loja ? `A ${esc(loja)} deixa` : 'A empresa deixa'} de receber ${esc(TIPOS[t.tipo].rotulo)} por e-mail. Dá para ligar de novo quando quiser, falando com a gente.</p>` +
+    `<p>${loja ? `A ${esc(loja)} deixa` : 'A empresa deixa'} de receber ${esc(TIPOS[t.tipo].rotulo)} por e-mail. Dá para ligar de novo quando quiser, em Configurações > E-mails.</p>` +
     `<form method="post" action=""><button type="submit">Parar de receber</button></form>`));
 });
 
@@ -110,7 +117,33 @@ router.post('/descadastro/:token', async (req, res) => {
   res.set('Cache-Control', 'no-store');
   if (oneClick) return res.status(200).type('text').send('OK');
   res.type('html').send(pagina('Pronto',
-    `<h1>Pronto</h1><p>Você não vai mais receber ${esc(TIPOS[t.tipo].rotulo)} por e-mail.</p>`));
+    `<h1>Pronto</h1><p>Você não vai mais receber ${esc(TIPOS[t.tipo].rotulo)} por e-mail.</p>` +
+    `<p><a href="${esc(linkAjustarEmails(t.companyId))}">Ajustar meus e-mails</a></p>`));
+});
+
+// Confirmação de endereço extra (tq-87). GET de propósito (o link do
+// e-mail): confirmar é idempotente e só faz o endereço passar a receber os
+// avisos que a loja marcou.
+router.get('/confirmar/:token', async (req, res) => {
+  res.set('Cache-Control', 'no-store');
+  let r;
+  try {
+    r = await confirmarPeloToken(db, req.params.token);
+  } catch (err) {
+    console.error('[emailPublico] confirmação falhou: ' + err.message);
+    return res.status(500).type('html').send(pagina('Não deu certo',
+      '<h1>Não consegui confirmar agora</h1><p>Tente abrir o link de novo em alguns minutos.</p>'));
+  }
+  if (!r.ok) {
+    if (r.motivo === 'expirado') {
+      return res.status(410).type('html').send(pagina('Link vencido',
+        '<h1>Este link venceu</h1><p>Peça para a loja adicionar este e-mail de novo em Configurações > E-mails: chega um link novo.</p>'));
+    }
+    return invalido(res);
+  }
+  const loja = await nomeDaEmpresa(r.companyId);
+  res.type('html').send(pagina('E-mail confirmado',
+    `<h1>E-mail confirmado</h1><p><strong>${esc(r.email)}</strong> passa a receber os avisos ${loja ? `da ${esc(loja)}` : 'da loja'} que a Aura envia.</p>`));
 });
 
 router.get('/pix-qr/:token', async (req, res) => {

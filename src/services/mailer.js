@@ -73,7 +73,7 @@ const ICON_URL = 'https://cdn.jsdelivr.net/gh/CaioAlexanderx/aura-app@main/asset
 const { numeroDoWhatsapp } = require('./whatsappDaLoja');
 // Modelo único (tq-75) e links assinados de descadastro (tq-74).
 const L = require('./emailLayout');
-const { linkDescadastro, cabecalhosDescadastro } = require('./emailLinks');
+const { linkDescadastro, cabecalhosDescadastro, linkAjustarEmails } = require('./emailLinks');
 
 // LEGADO (escuro). Os e-mails à lojista e ao cliente saíram daqui para o
 // modelo único (services/emailLayout.js, tq-75). Ficam neste layout só os
@@ -431,10 +431,10 @@ async function sendOrderStatusEmail(to, { order_number, customer_name, status, s
 
 // -- Template: novo pedido confirmado (lojista) --
 // Enviado ao lojista após pagamento confirmado (Pix, Cartão ou Na Entrega).
-// Vai hoje a TODOS os company_members com e-mail (getOwnerEmails), sem
-// filtro de papel: mudar isso é decisão de produto (tq-88), não do layout.
+// Destinatários: services/digitalOrderNotifications (tq-88) segue a
+// preferência pedido_loja da empresa (padrão: todos os company_members).
 async function sendOwnerNewOrderEmail(to, opts) {
-  const { order_number, customer_name, customer_phone, total, delivery_type, store_name, payment_method, aguardando_pagamento } = opts;
+  const { order_number, customer_name, customer_phone, total, delivery_type, store_name, payment_method, aguardando_pagamento, company_id } = opts;
   // Pix manual (10/09/2026): o pedido chega ANTES do dinheiro, e quem
   // confere e a lojista. Mesmo resumo, outro titulo e outra instrucao.
   const aguardando = aguardando_pagamento === true;
@@ -490,6 +490,8 @@ async function sendOwnerNewOrderEmail(to, opts) {
       : `Novo pedido #${order_number} confirmado em ${store_name}. Cliente: ${customer_name}. Total: ${fmtR(total)}. Pagamento: ${paymentLabel}. Acesse o app Aura para gerenciar.`,
     html,
     tipo: 'pedido_novo_lojista',
+    // tq-87: com a empresa, o envio aparece em "Últimos e-mails".
+    companyId: company_id || null,
   });
 }
 
@@ -498,6 +500,10 @@ async function sendOwnerNewOrderEmail(to, opts) {
 // List-Unsubscribe-Post (RFC 8058) — só quando `company.id` vem (é dele o
 // token). `opts.grupo`: relatório consolidado do dono (multi-CNPJ); o
 // descadastro desliga o grupo inteiro, que recebia este mesmo e-mail.
+// tq-88: `opts.destinatarios` (endereços confirmados das preferências; sem
+// ela, company.email), `opts.config` (dia e hora do rodapé), link "Ajustar
+// meus e-mails" e `opts.registrado` (o scheduler já reservou a linha no
+// email_log; o mailer não grava outra).
 async function sendWeeklyReport(company, kpis, reportUrl, opts = {}) {
   function fmtR(v) {
     const n = Math.round(v * 100) / 100;
@@ -526,9 +532,13 @@ async function sendWeeklyReport(company, kpis, reportUrl, opts = {}) {
     `</table>`,
   ].join('\n');
 
-  const rodape = 'Você recebe este resumo toda segunda, às 8h. O link do relatório expira em 30 dias.' +
-    (descadastro ? ` <a class="a-link" href="${L.esc(descadastro)}" style="color:${L.COR.violeta};">Parar de receber</a>` : '') +
+  const ajustar = company && company.id ? linkAjustarEmails(company.id) : null;
+  const { quandoDoRelatorio } = require('./emailPreferencias');
+  const rodape = `Você recebe este resumo ${quandoDoRelatorio(opts.config)}. O link do relatório expira em 30 dias.` +
+    (ajustar ? ` <a class="a-link" href="${L.esc(ajustar)}" style="color:${L.COR.violeta};">Ajustar meus e-mails</a>` : '') +
+    (descadastro ? ` · <a class="a-link" href="${L.esc(descadastro)}" style="color:${L.COR.violeta};">Parar de receber</a>` : '') +
     ' · Aura. Tecnologia para negócios';
+  const destino = Array.isArray(opts.destinatarios) && opts.destinatarios.length ? opts.destinatarios : company.email;
 
   const html = L.montarEmail({
     variante: 'aura-transacional',
@@ -543,14 +553,16 @@ async function sendWeeklyReport(company, kpis, reportUrl, opts = {}) {
 
   return sendMail({
     from: FROM_NEUTRO,
-    to: company.email,
+    to: destino,
     subject: `Relatório semanal — ${company.name}`,
     text: `Aura. — Relatorio semanal de ${company.name}. Receita: R$ ${kpis.revenue} | Vendas: ${kpis.sales} | Ticket medio: R$ ${kpis.avg_ticket} | Saude: ${kpis.health_score}/100\n\nVer relatorio completo: ${url}`
+      + (ajustar ? `\n\nAjustar meus e-mails: ${ajustar}` : '')
       + (descadastro ? `\n\nParar de receber: ${descadastro}` : ''),
     html,
     headers: cabecalhosDescadastro(descadastro),
     tipo: 'relatorio_semanal',
     companyId: (company && company.id) || null,
+    ...(opts.registrado ? { _registrado: true } : {}),
   });
 }
 

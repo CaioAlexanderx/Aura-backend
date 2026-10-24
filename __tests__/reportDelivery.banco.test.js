@@ -56,8 +56,9 @@ beforeAll(async () => {
     [userId, `fixture-${userId}@example.test`]
   );
   await client.query(
-    `INSERT INTO companies (id, owner_id, legal_name, email, weekly_report_enabled)
-     VALUES ($1, $2, 'Fixture tq-72', 'dona-tq72@example.test', true)`,
+    // tq-88: o scheduler só manda para teste vigente ou assinatura ativa.
+    `INSERT INTO companies (id, owner_id, legal_name, email, weekly_report_enabled, billing_status)
+     VALUES ($1, $2, 'Fixture tq-72', 'dona-tq72@example.test', true, 'active')`,
     [companyId, userId]
   );
 });
@@ -166,7 +167,8 @@ describe('reportScheduler + mailer em modo dev', () => {
     jest.spyOn(console, 'log').mockImplementation((...a) => logs.push(a.join(' ')));
     jest.spyOn(console, 'error').mockImplementation((...a) => logs.push(a.join(' ')));
 
-    await require('../src/jobs/reportScheduler').triggerWeeklyReports();
+    await client.query('DELETE FROM email_log WHERE company_id = $1', [companyId]);
+    await require('../src/jobs/reportScheduler').triggerWeeklyReports({ forcar: true });
 
     const r = await linha(id);
     expect(r.status).toBe('sent');
@@ -174,6 +176,19 @@ describe('reportScheduler + mailer em modo dev', () => {
     expect(r.attempts).toBe(1);
     expect(r.sent_at).toBeInstanceOf(Date);
     expect(logs.join('\n')).toContain('delivery_update_errors=0');
+    // tq-88: a reserva no email_log virou 'sent' com o mesmo id do envio.
+    const { rows: el } = await client.query(
+      'SELECT status, resend_id, tipo, chave_idempotencia FROM email_log WHERE company_id = $1', [companyId]);
+    expect(el).toHaveLength(1);
+    expect(el[0]).toMatchObject({ status: 'sent', resend_id: r.resend_id, tipo: 'relatorio_semanal' });
+    expect(el[0].chave_idempotencia.startsWith(`relatorio:${companyId}:`)).toBe(true);
+
+    // Segunda volta no mesmo período: nada sai de novo.
+    const antes = logs.length;
+    await require('../src/jobs/reportScheduler').triggerWeeklyReports({ forcar: true });
+    expect(logs.slice(antes).join('\n')).not.toContain('sent [');
+    const { rows: el2 } = await client.query('SELECT 1 FROM email_log WHERE company_id = $1', [companyId]);
+    expect(el2).toHaveLength(1);
     expect(logs.join('\n')).not.toContain('dona-tq72@example.test');
   });
 
@@ -185,7 +200,10 @@ describe('reportScheduler + mailer em modo dev', () => {
     const mailer = require('../src/services/mailer');
     jest.spyOn(mailer, 'sendWeeklyReport').mockRejectedValue(new Error('Resend API 500: indisponivel'));
 
-    await require('../src/jobs/reportScheduler').triggerWeeklyReports();
+    await client.query('DELETE FROM email_log WHERE company_id = $1', [companyId]);
+    await require('../src/jobs/reportScheduler').triggerWeeklyReports({ forcar: true });
+    const { rows: el } = await client.query('SELECT status, erro FROM email_log WHERE company_id = $1', [companyId]);
+    expect(el[0]).toMatchObject({ status: 'failed', erro: 'Resend API 500: indisponivel' });
 
     const r = await linha(id);
     expect(r.status).toBe('failed');

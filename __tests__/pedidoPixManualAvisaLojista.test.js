@@ -76,6 +76,48 @@ describe('notifyManualPixOrder', () => {
   });
 });
 
+// tq-88: o e-mail de pedido novo segue a preferência pedido_loja da empresa.
+describe('preferência pedido_loja (tq-88)', () => {
+  function mockPrefs(linha) {
+    const base = db.query.getMockImplementation();
+    db.query.mockImplementation((sql, params) => {
+      if (/FROM company_email_prefs/i.test(sql)) return Promise.resolve({ rows: linha ? [{ company_id: 'c-manual', ...linha }] : [] });
+      if (/FROM companies c\s+LEFT JOIN users u/i.test(sql)) {
+        return Promise.resolve({ rows: [{ id: 'c-manual', owner_id: 'u1', loja: 'Finesse', plan: 'negocio', owner_email: 'Dona@Finesse.test' }] });
+      }
+      if (/FROM company_email_addresses/i.test(sql)) {
+        return Promise.resolve({ rows: [
+          { id: 'e1', email: 'financeiro@finesse.test', confirmado_em: new Date() },
+          { id: 'e2', email: 'socio@finesse.test', confirmado_em: null },
+        ] });
+      }
+      return base(sql, params);
+    });
+  }
+
+  test('sem escolha: a equipe toda, como sempre (e o e-mail leva a empresa para o registro)', async () => {
+    mockDb();
+    mockPrefs(null);
+    await notify.notifyManualPixOrder({ order: { ...PEDIDO } });
+    expect(sendOwnerNewOrderEmail.mock.calls.map((c) => c[0])).toEqual(['lojista@exemplo.com']);
+    expect(sendOwnerNewOrderEmail.mock.calls[0][1].company_id).toBe('c-manual');
+  });
+
+  test('"só os e-mails da tela": os confirmados (sem confirmar não recebe)', async () => {
+    mockDb();
+    mockPrefs({ tipo: 'pedido_loja', ligado: true, config: { pedido_destino: 'enderecos' } });
+    await notify.notifyManualPixOrder({ order: { ...PEDIDO } });
+    expect(sendOwnerNewOrderEmail.mock.calls.map((c) => c[0])).toEqual(['dona@finesse.test', 'financeiro@finesse.test']);
+  });
+
+  test('desligado: ninguém recebe', async () => {
+    mockDb();
+    mockPrefs({ tipo: 'pedido_loja', ligado: false, config: {} });
+    await notify.notifyManualPixOrder({ order: { ...PEDIDO } });
+    expect(sendOwnerNewOrderEmail).not.toHaveBeenCalled();
+  });
+});
+
 describe('quem chama', () => {
   test('a loja comum avisa so no Pix manual', () => {
     const src = fonte('src/routes/storefront.js');

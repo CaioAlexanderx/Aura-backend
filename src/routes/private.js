@@ -33,6 +33,10 @@ router.use('/caixa', require('./caixa'));
 // 13/10/2026 — Placar do dia no WhatsApp do dono (migration 377): GET/PUT da
 // preferencia. Gate de dono/admin dentro do router.
 router.use('/placar-do-dia', require('./placarDoDia'));
+// 24/10/2026 (tq-87/88/90) — Configurações > E-mails: preferências por tipo,
+// endereços de aviso, últimos e-mails e "me enviar um agora". Só o dono
+// (gate dentro do router). Migration 409.
+router.use('/emails', require('./companyEmails'));
 // 31/08/2026 — Ordem de Servico (migration 313). Gate por pdv_settings.os_enabled
 // dentro do proprio router, so na escrita.
 router.use('/service-orders', require('./serviceOrders'));

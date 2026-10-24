@@ -133,6 +133,8 @@ describe('updateDelivery', () => {
 });
 
 // ── reportScheduler + mailer em modo dev ─────────────────────────────────
+// tq-88: o scheduler lê as preferências (company_email_prefs), reserva a
+// chave no email_log antes de gerar e grava report_deliveries como antes.
 
 describe('reportScheduler com o mailer em modo dev', () => {
   const ENV = { ...process.env };
@@ -140,21 +142,36 @@ describe('reportScheduler com o mailer em modo dev', () => {
   let logs;
   let logSpy;
   let erroSpy;
+  let emailLog;
 
-  // report_deliveries em memória: o UPDATE do updateDelivery é aplicado
-  // aqui com os mesmos parâmetros que iriam ao Postgres.
-  function bancoFalso() {
+  const EMPRESA = {
+    id: 'co-1', owner_id: 'own-1', is_primary: true, created_at: new Date(),
+    name: 'Loja Fixture', plan: 'negocio', owner_email: 'dona@exemplo.com.br',
+    pref_ligado: null, pref_config: null, interna: false,
+  };
+
+  // report_deliveries e email_log em memória: os UPDATEs são aplicados aqui
+  // com os mesmos parâmetros que iriam ao Postgres.
+  function bancoFalso({ falharUpdate = false } = {}) {
     db.query.mockImplementation(async (sql, params) => {
-      if (/FROM companies/.test(sql) && /weekly_report_enabled = true/.test(sql)) {
-        return {
-          rows: [{
-            id: 'co-1', owner_id: 'own-1', is_primary: true, created_at: new Date(),
-            name: 'Loja Fixture', email: 'dona@exemplo.com.br', plan: 'negocio',
-            recipient_email: 'dona@exemplo.com.br', has_override: false,
-          }],
-        };
+      const s = String(sql).replace(/\s+/g, ' ');
+      if (/FROM companies c/.test(s) && /company_email_prefs p/.test(s)) return { rows: [EMPRESA] };
+      if (/SELECT company_id FROM report_deliveries/.test(s)) return { rows: [] };
+      if (/SELECT company_id FROM email_log/.test(s)) return { rows: [] };
+      if (/SELECT 1 FROM report_deliveries/.test(s)) return { rows: [] };
+      if (/FROM company_email_addresses/.test(s)) return { rows: [] };
+      if (/^\s*INSERT INTO email_log/.test(s)) {
+        emailLog.push({ id: 'log-1', status: 'reserved', params });
+        return { rows: [{ id: 'log-1' }] };
       }
-      if (/^\s*UPDATE report_deliveries/.test(sql)) {
+      if (/^\s*UPDATE email_log SET status = 'sent'/.test(s)) { emailLog[0].status = 'sent'; emailLog[0].resend_id = params[1]; return { rows: [] }; }
+      if (/^\s*UPDATE email_log SET status = 'failed'/.test(s)) { emailLog[0].status = 'failed'; emailLog[0].erro = params[1]; return { rows: [] }; }
+      if (/^\s*UPDATE report_deliveries/.test(s)) {
+        if (falharUpdate) {
+          const e = new Error('connection terminated');
+          e.code = '57P01';
+          throw e;
+        }
         expect(parametrosRepetidosSemCastIgual(sql)).toEqual([]);
         const [status, resendId, error, id] = params;
         const linha = linhas.get(id);
@@ -166,7 +183,7 @@ describe('reportScheduler com o mailer em modo dev', () => {
         linha.attempts += 1;
         return { rowCount: 1, rows: [] };
       }
-      throw new Error('SQL inesperado no teste: ' + sql.slice(0, 80));
+      throw new Error('SQL inesperado no teste: ' + s.slice(0, 100));
     });
   }
 
@@ -174,6 +191,7 @@ describe('reportScheduler com o mailer em modo dev', () => {
     delete process.env.RESEND_API_KEY;
     delete process.env.SMTP_HOST;
     db.query.mockReset();
+    emailLog = [];
     linhas = new Map([[101, { id: 101, status: 'pending', resend_id: null, attempts: 0, last_error: null, sent_at: null }]]);
     bancoFalso();
     reportGenerator.generateReport.mockResolvedValue({
@@ -197,7 +215,7 @@ describe('reportScheduler com o mailer em modo dev', () => {
 
   test("envio ok: a linha vira 'sent' com o id do envio (dev-...)", async () => {
     const { triggerWeeklyReports } = require('../src/jobs/reportScheduler');
-    await triggerWeeklyReports();
+    await triggerWeeklyReports({ forcar: true });
 
     const linha = linhas.get(101);
     expect(linha.status).toBe('sent');
@@ -205,6 +223,12 @@ describe('reportScheduler com o mailer em modo dev', () => {
     expect(linha.sent_at).toBeInstanceOf(Date);
     expect(linha.attempts).toBe(1);
     expect(linha.last_error).toBeNull();
+    // A reserva do email_log veio ANTES de gerar e virou 'sent' com o mesmo id.
+    expect(emailLog[0].status).toBe('sent');
+    expect(emailLog[0].resend_id).toBe(linha.resend_id);
+    expect(emailLog[0].params[0]).toMatch(/^relatorio:co-1:\d{4}-\d{2}-\d{2}$/);
+    // O gerador recebeu os destinatários das preferências (o dono).
+    expect(reportGenerator.generateReport).toHaveBeenCalledWith('co-1', 'weekly', null, { destinatarios: ['dona@exemplo.com.br'] });
 
     const tudo = logs.join('\n');
     expect(tudo).toContain('sent=1 skipped=0 errors=0 delivery_update_errors=0');
@@ -219,7 +243,7 @@ describe('reportScheduler com o mailer em modo dev', () => {
       new Error('Resend API 500: falha ao entregar para dona@exemplo.com.br')
     );
     const { triggerWeeklyReports } = require('../src/jobs/reportScheduler');
-    await triggerWeeklyReports();
+    await triggerWeeklyReports({ forcar: true });
 
     const linha = linhas.get(101);
     expect(linha.status).toBe('failed');
@@ -227,20 +251,14 @@ describe('reportScheduler com o mailer em modo dev', () => {
     expect(linha.resend_id).toBeNull();
     expect(linha.sent_at).toBeNull();
     expect(linha.last_error).toBe('Resend API 500: falha ao entregar para [email]');
+    expect(emailLog[0].status).toBe('failed');
     expect(logs.join('\n')).toContain('sent=0 skipped=0 errors=1 delivery_update_errors=0');
   });
 
   test('UPDATE falhando aparece no resumo (delivery_update_errors)', async () => {
-    db.query.mockImplementation(async (sql) => {
-      if (/weekly_report_enabled = true/.test(sql)) {
-        return { rows: [{ id: 'co-1', owner_id: 'own-1', is_primary: true, name: 'Loja Fixture', recipient_email: 'dona@exemplo.com.br' }] };
-      }
-      const e = new Error('connection terminated');
-      e.code = '57P01';
-      throw e;
-    });
+    bancoFalso({ falharUpdate: true });
     const { triggerWeeklyReports } = require('../src/jobs/reportScheduler');
-    await triggerWeeklyReports();
+    await triggerWeeklyReports({ forcar: true });
 
     const tudo = logs.join('\n');
     expect(tudo).toContain('code=57P01');
