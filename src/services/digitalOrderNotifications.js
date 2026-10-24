@@ -123,6 +123,27 @@ async function getOwnerEmails(company_id) {
   }
 }
 
+/**
+ * Quem recebe o e-mail de pedido novo (tq-88), pela preferência pedido_loja
+ * da empresa (services/emailPreferencias), lida na hora:
+ *   - desligado: ninguém;
+ *   - pedido_destino 'enderecos' ("só os e-mails da tela"): os endereços
+ *     confirmados marcados;
+ *   - 'equipe' ou sem escolha: todos os company_members, como sempre foi.
+ * Falha ao ler a preferência: o comportamento de sempre (a equipe toda).
+ */
+async function destinatariosDoPedido(company_id) {
+  try {
+    const { destinoDoPedido } = require('./emailPreferencias');
+    const d = await destinoDoPedido(db, company_id);
+    if (!d.ligado) return [];
+    if (d.destino === 'enderecos') return d.emails || [];
+  } catch (err) {
+    console.error('[notify] preferencia de pedido indisponivel:', err.message);
+  }
+  return getOwnerEmails(company_id);
+}
+
 async function sendExpoPush(tokens, title, body, data) {
   if (!tokens || !tokens.length) return;
   try {
@@ -306,7 +327,7 @@ async function notifyPaymentConfirmed({ order: input }) {
   );
 
   // 2. E-mail ao lojista
-  const ownerEmails = await getOwnerEmails(company_id);
+  const ownerEmails = await destinatariosDoPedido(company_id);
   await Promise.all(ownerEmails.map(email =>
     sendOwnerNewOrderEmail(email, {
       order_number:    order.order_number,
@@ -316,6 +337,7 @@ async function notifyPaymentConfirmed({ order: input }) {
       delivery_type:   order.delivery_type,
       store_name,
       payment_method:  order.payment_method,
+      company_id,
     }).catch(err => console.error('[notify] owner email error:', err.message))
   ));
 
@@ -392,7 +414,7 @@ async function notifyManualPixOrder({ order: input }) {
   }
 
   const store_name = await getStoreName(order.company_id);
-  const ownerEmails = await getOwnerEmails(order.company_id);
+  const ownerEmails = await destinatariosDoPedido(order.company_id);
   await Promise.all(ownerEmails.map(email =>
     sendOwnerNewOrderEmail(email, {
       order_number:         order.order_number,
@@ -402,6 +424,7 @@ async function notifyManualPixOrder({ order: input }) {
       delivery_type:        order.delivery_type,
       store_name,
       payment_method:       order.payment_method,
+      company_id:           order.company_id,
       aguardando_pagamento: true,
     }).catch(err => console.error('[notify] manual pix owner email error:', err.message))
   ));

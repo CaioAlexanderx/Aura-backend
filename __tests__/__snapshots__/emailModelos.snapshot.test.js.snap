@@ -784,6 +784,51 @@ Um abraço,
 Caio Alexander, fundador da Aura"
 `;
 
+exports[`e-mails que já saíam, no modelo único confirmação de endereço extra (tq-87, aura-transacional, sem letra) 1`] = `
+"<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="color-scheme" content="light dark">
+<meta name="supported-color-schemes" content="light dark">
+<title>Confirme este e-mail para receber os avisos da Finesse</title>
+<style>
+  :root { color-scheme: light dark; supported-color-schemes: light dark; }
+  @media (prefers-color-scheme: dark) {
+    .a-bg { background: #0c0a16 !important; }
+    .a-card { background: #15122a !important; border-color: #2b2650 !important; }
+    .a-ink { color: #ece9ff !important; }
+    .a-ink2 { color: #b3add8 !important; }
+    .a-line { border-color: #2b2650 !important; }
+    .a-soft { background: #1d1938 !important; border-color: #2b2650 !important; }
+    .a-btn { background: #a78bfa !important; color: #14102b !important; }
+    .a-wa { color: #6ee7b7 !important; border-color: #6ee7b7 !important; }
+    .a-link { color: #a78bfa !important; }
+    .a-sig { filter: invert(1) brightness(1.6); }
+  }
+</style>
+</head>
+<body class="a-bg" style="margin:0;padding:0;background:#f4f1fb;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;">
+<div style="display:none;max-height:0;overflow:hidden;opacity:0;mso-hide:all;">Um clique para confirmar</div><table role="presentation" width="100%" cellpadding="0" cellspacing="0" class="a-bg" style="background:#f4f1fb;">
+  <tr><td align="center" style="padding:24px 12px;">
+    <table role="presentation" width="560" cellpadding="0" cellspacing="0" class="a-card" style="max-width:560px;width:100%;background:#ffffff;border:1px solid #e4def5;border-radius:14px;">
+      <tr><td class="a-line" style="padding:14px 22px;border-bottom:1px solid #e4def5;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;"><img src="https://app.getaura.com.br/email/aura-logo-v1.png" width="28" height="28" alt="Aura" style="display:inline-block;width:28px;height:28px;vertical-align:middle;border:0;margin-right:9px;"><span class="a-ink" style="font-weight:700;font-size:16px;letter-spacing:-.2px;color:#1b1736;vertical-align:middle;">Aura.</span></td></tr>
+      <tr><td style="padding:22px;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;">
+<p class="a-ink" style="margin:0 0 14px;color:#1b1736;font-size:15px;line-height:1.6;">Olá!</p>
+<p class="a-ink" style="margin:0 0 14px;color:#1b1736;font-size:15px;line-height:1.6;">Pediram para <strong>financeiro@exemplo.com</strong> receber os avisos da <strong>Finesse</strong> na Aura, como o relatório da semana.</p>
+<p class="a-ink" style="margin:0 0 14px;color:#1b1736;font-size:15px;line-height:1.6;">Para começar a receber, confirme no botão abaixo. O link vale por 7 dias.</p>
+<p class="a-ink2" style="margin:0 0 12px;color:#51497f;font-size:12.5px;line-height:1.55;">Se você não conhece esta loja, é só ignorar este e-mail: nada chega para você sem a confirmação.</p>
+<div style="margin:6px 0 4px;"><a class="a-btn" href="https://api.exemplo.test/api/v1/emails/confirmar/tok" style="display:inline-block;background:#6d28d9;color:#ffffff;font-weight:700;font-size:14px;text-decoration:none;padding:11px 18px;border-radius:10px;margin:0 10px 10px 0;">Confirmar este e-mail</a></div><p class="a-ink" style="margin:8px 0 0;color:#1b1736;font-size:14px;">Aura</p>
+      </td></tr>
+      <tr><td class="a-line a-ink2" style="padding:12px 22px;border-top:1px solid #e4def5;color:#51497f;font-size:11.5px;line-height:1.6;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;">Aura. Tecnologia para negócios · <a class="a-link" href="https://getaura.com.br" style="color:#6d28d9;text-decoration:none;">getaura.com.br</a></td></tr>
+    </table>
+  </td></tr>
+</table>
+</body>
+</html>"
+`;
+
 exports[`e-mails que já saíam, no modelo único convite de equipe (nomes escapados) 1`] = `
 "<!DOCTYPE html>
 <html lang="pt-BR">
@@ -1005,7 +1050,7 @@ exports[`e-mails que já saíam, no modelo único relatório semanal: link de de
 <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin:0 0 16px;"><tr><td class="a-line" style="padding:10px 0;border-bottom:1px solid #e4def5;"><span class="a-ink2" style="font-size:11px;color:#51497f;letter-spacing:.07em;text-transform:uppercase;font-weight:700;">Receita</span><p class="a-ink" style="margin:4px 0 0;font-size:20px;font-weight:700;color:#1b1736;">R$&nbsp;4.820</p></td></tr><tr><td class="a-line" style="padding:10px 0;border-bottom:1px solid #e4def5;"><span class="a-ink2" style="font-size:11px;color:#51497f;letter-spacing:.07em;text-transform:uppercase;font-weight:700;">Vendas</span><p class="a-ink" style="margin:4px 0 0;font-size:20px;font-weight:700;color:#1b1736;">31</p></td></tr><tr><td class="a-line" style="padding:10px 0;border-bottom:1px solid #e4def5;"><span class="a-ink2" style="font-size:11px;color:#51497f;letter-spacing:.07em;text-transform:uppercase;font-weight:700;">Ticket médio</span><p class="a-ink" style="margin:4px 0 0;font-size:20px;font-weight:700;color:#1b1736;">R$&nbsp;155,48</p></td></tr><tr><td class="a-line" style="padding:10px 0;border-bottom:1px solid #e4def5;"><span class="a-ink2" style="font-size:11px;color:#51497f;letter-spacing:.07em;text-transform:uppercase;font-weight:700;">Saúde do negócio</span><p class="" style="margin:4px 0 0;font-size:20px;font-weight:700;color:#15803d;">72<span style="font-size:13px;color:#51497f;">/100</span></p></td></tr></table>
 <div style="margin:6px 0 4px;"><a class="a-btn" href="https://app.getaura.com.br/relatorios/semanal/tok" style="display:inline-block;background:#6d28d9;color:#ffffff;font-weight:700;font-size:14px;text-decoration:none;padding:11px 18px;border-radius:10px;margin:0 10px 10px 0;">Ver relatório completo</a><a class="a-wa" href="https://wa.me/5511956305269?text=Oi%2C%20Caio!%20Recebi%20o%20relat%C3%B3rio%20semanal%20da%20Finesse." style="display:inline-block;background:transparent;color:#0f766e;border:1.5px solid #0f766e;font-weight:700;font-size:14px;text-decoration:none;padding:9.5px 16px;border-radius:10px;margin:0 10px 10px 0;">Falar comigo no WhatsApp</a></div>
       </td></tr>
-      <tr><td class="a-line a-ink2" style="padding:12px 22px;border-top:1px solid #e4def5;color:#51497f;font-size:11.5px;line-height:1.6;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;">Você recebe este resumo toda segunda, às 8h. O link do relatório expira em 30 dias. <a class="a-link" href="https://api.exemplo.test/api/v1/emails/descadastro/eyJrIjoiZCIsImMiOiIxMTExMTExMS0xMTExLTQxMTEtODExMS0xMTExMTExMTExMTEiLCJ0IjoicmVsYXRvcmlvIiwiZyI6MH0.RwSq1auBp5iMJNvNipIzie0O4mt6QjQKZ-ueRL4qqfg" style="color:#6d28d9;">Parar de receber</a> · Aura. Tecnologia para negócios</td></tr>
+      <tr><td class="a-line a-ink2" style="padding:12px 22px;border-top:1px solid #e4def5;color:#51497f;font-size:11.5px;line-height:1.6;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;">Você recebe este resumo toda segunda, às 8h. O link do relatório expira em 30 dias. <a class="a-link" href="https://app.getaura.com.br/configuracoes?foco=emails&amp;empresa=11111111-1111-4111-8111-111111111111" style="color:#6d28d9;">Ajustar meus e-mails</a> · <a class="a-link" href="https://api.exemplo.test/api/v1/emails/descadastro/eyJrIjoiZCIsImMiOiIxMTExMTExMS0xMTExLTQxMTEtODExMS0xMTExMTExMTExMTEiLCJ0IjoicmVsYXRvcmlvIiwiZyI6MH0.RwSq1auBp5iMJNvNipIzie0O4mt6QjQKZ-ueRL4qqfg" style="color:#6d28d9;">Parar de receber</a> · Aura. Tecnologia para negócios</td></tr>
     </table>
   </td></tr>
 </table>

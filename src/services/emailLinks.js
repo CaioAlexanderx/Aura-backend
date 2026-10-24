@@ -89,6 +89,45 @@ function cabecalhosDescadastro(link) {
   };
 }
 
+// ── Confirmação de endereço extra (tq-87) ─────────────────────
+// O token diz a linha (company_email_addresses.id), a empresa e o e-mail,
+// e vale 7 dias. Apagar a linha invalida o link; e-mail trocado também.
+
+const VALIDADE_CONFIRMACAO_MS = 7 * 24 * 3600 * 1000;
+
+function tokenConfirmacao({ enderecoId, companyId, email }, env = process.env, agora = Date.now()) {
+  if (!enderecoId || !companyId || !email) return null;
+  return assinar({
+    k: 'c', a: String(enderecoId), c: String(companyId),
+    e: String(email).toLowerCase(), x: agora + VALIDADE_CONFIRMACAO_MS,
+  }, env);
+}
+
+function lerTokenConfirmacao(token, env = process.env, agora = Date.now()) {
+  const d = ler(token, env);
+  if (!d || d.k !== 'c' || !d.a || !d.c || !d.e || typeof d.x !== 'number') return null;
+  if (d.x < agora) return { expirado: true, enderecoId: d.a, companyId: d.c, email: d.e };
+  return { expirado: false, enderecoId: d.a, companyId: d.c, email: d.e };
+}
+
+function linkConfirmacao(dados, env = process.env, agora = Date.now()) {
+  const t = tokenConfirmacao(dados, env, agora);
+  return t ? `${apiUrl(env)}/emails/confirmar/${t}` : null;
+}
+
+// ── "Ajustar meus e-mails" (tq-88) ─────────────────────────────
+// Abre Configurações > E-mails da empresa certa: o app lê ?foco= (rola até a
+// seção) e ?empresa= (troca de empresa em conta multi-CNPJ).
+
+function appUrl(env = process.env) {
+  return String(env.APP_URL || 'https://app.getaura.com.br').replace(/\/+$/, '');
+}
+
+function linkAjustarEmails(companyId, env = process.env) {
+  const base = `${appUrl(env)}/configuracoes?foco=emails`;
+  return companyId ? `${base}&empresa=${encodeURIComponent(String(companyId))}` : base;
+}
+
 // ── QR do Pix ──────────────────────────────────────────────────
 
 const PIX_MAX = 600;
@@ -114,6 +153,11 @@ module.exports = {
   lerTokenDescadastro,
   linkDescadastro,
   cabecalhosDescadastro,
+  tokenConfirmacao,
+  lerTokenConfirmacao,
+  linkConfirmacao,
+  appUrl,
+  linkAjustarEmails,
   linkQrDoPix,
   lerTokenQr,
 };

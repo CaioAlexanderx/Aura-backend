@@ -5,8 +5,9 @@
 // EXPORTACOES:
 //   buildReportData(companyId, type, periodOverride?)
 //   buildConsolidatedReportData(companyIds, type, periodOverride?)
-//   generateReport(companyId, type, periodOverride?)
-//   generateConsolidatedReport(companyIds, primaryId, type, periodOverride?)
+//   generateReport(companyId, type, periodOverride?, opts?)
+//   generateConsolidatedReport(companyIds, primaryId, type, periodOverride?, opts?)
+//     opts: { destinatarios?, semEntrega? } (tq-88)
 //   updateDelivery(id, status, { resendId?, error? }) -> true/false
 // ============================================================
 
@@ -481,32 +482,54 @@ async function buildConsolidatedReportData(companyIds, type, periodOverride = nu
   };
 }
 
-async function generateReport(companyId, type, periodOverride = null) {
-  const period = periodOverride || resolvePeriodForReport(type);
-
-  const { rows: existing } = await db.query(
-    `SELECT id FROM report_deliveries WHERE company_id=$1 AND report_type=$2 AND period_start=$3 AND status='sent' LIMIT 1`,
-    [companyId, type, period.startDate]
-  );
-  if (existing.length > 0) {
-    console.log(`[reportGenerator] ja enviado: company=${companyId} type=${type} period=${period.startDate}`);
-    return { skipped: true, reason: 'already_sent' };
-  }
-
+// opts (tq-88, 24/10/2026):
+//   destinatarios  lista de e-mails já resolvida pelas preferências
+//                  (services/emailPreferencias): pula a checagem de
+//                  report_email_override/email, que deixou de ser a fonte
+//   semEntrega     "Me enviar um agora": não olha nem grava
+//                  report_deliveries (não pode consumir o envio agendado
+//                  da semana) e não grava o snapshot de saúde
+/**
+ * Primeiro destinatário do relatório: o da lista já resolvida pelas
+ * preferências (tq-88) ou, sem lista (rotas de admin), o de sempre:
+ * COALESCE(report_email_override, email) da empresa ativa. null = sem e-mail.
+ */
+async function destinatarioDoRelatorio(companyId, destinatarios) {
+  if (destinatarios) return destinatarios[0] || null;
   const { rows: [coCheck] } = await db.query(
     `SELECT COALESCE(report_email_override, email) AS recipient FROM companies WHERE id = $1 AND is_active = true`,
     [companyId]
   );
-  if (!coCheck || !coCheck.recipient) {
-    return { skipped: true, reason: 'no_email' };
+  return (coCheck && coCheck.recipient) || null;
+}
+
+async function generateReport(companyId, type, periodOverride = null, opts = {}) {
+  const period = periodOverride || resolvePeriodForReport(type);
+  const destinatarios = Array.isArray(opts.destinatarios) ? opts.destinatarios.filter(Boolean) : null;
+
+  if (!opts.semEntrega) {
+    const { rows: existing } = await db.query(
+      `SELECT id FROM report_deliveries WHERE company_id=$1 AND report_type=$2 AND period_start=$3 AND status='sent' LIMIT 1`,
+      [companyId, type, period.startDate]
+    );
+    if (existing.length > 0) {
+      console.log(`[reportGenerator] ja enviado: company=${companyId} type=${type} period=${period.startDate}`);
+      return { skipped: true, reason: 'already_sent' };
+    }
   }
 
-  const { rows: [delivery] } = await db.query(
-    `INSERT INTO report_deliveries (company_id, report_type, period_start, status)
-     VALUES ($1, $2, $3, 'pending') RETURNING id`,
-    [companyId, type, period.startDate]
-  );
-  const deliveryId = delivery.id;
+  const recipient = await destinatarioDoRelatorio(companyId, destinatarios);
+  if (!recipient) return { skipped: true, reason: 'no_email' };
+
+  let deliveryId = null;
+  if (!opts.semEntrega) {
+    const { rows: [delivery] } = await db.query(
+      `INSERT INTO report_deliveries (company_id, report_type, period_start, status)
+       VALUES ($1, $2, $3, 'pending') RETURNING id`,
+      [companyId, type, period.startDate]
+    );
+    deliveryId = delivery.id;
+  }
 
   const data = await buildReportData(companyId, type, period);
 
@@ -540,15 +563,17 @@ async function generateReport(companyId, type, periodOverride = null) {
     reportUrl,
   });
 
-  const snapshotPeriod = period.startDate.slice(0, 8) + '01';
-  await saveHealthSnapshot(companyId, data.health.score, data.health.label, snapshotPeriod, {}).catch(e => {
-    console.warn('[reportGenerator] saveHealthSnapshot falhou:', e.message);
-  });
+  if (!opts.semEntrega) {
+    const snapshotPeriod = period.startDate.slice(0, 8) + '01';
+    await saveHealthSnapshot(companyId, data.health.score, data.health.label, snapshotPeriod, {}).catch(e => {
+      console.warn('[reportGenerator] saveHealthSnapshot falhou:', e.message);
+    });
+  }
 
   return {
     skipped:    false,
     deliveryId,
-    company:    { ...data.company, recipient_email: coCheck.recipient },
+    company:    { ...data.company, recipient_email: recipient },
     period,
     kpis:       data.kpis,
     html,
@@ -556,40 +581,41 @@ async function generateReport(companyId, type, periodOverride = null) {
   };
 }
 
-async function generateConsolidatedReport(companyIds, primaryId, type, periodOverride = null) {
+async function generateConsolidatedReport(companyIds, primaryId, type, periodOverride = null, opts = {}) {
   if (!Array.isArray(companyIds) || companyIds.length === 0) {
     throw new Error('generateConsolidatedReport: companyIds vazio');
   }
   if (companyIds.length === 1) {
-    return generateReport(companyIds[0], type, periodOverride);
+    return generateReport(companyIds[0], type, periodOverride, opts);
   }
 
   const period = periodOverride || resolvePeriodForReport(type);
   const sub = primaryId || companyIds[0];
+  const destinatarios = Array.isArray(opts.destinatarios) ? opts.destinatarios.filter(Boolean) : null;
 
-  const { rows: existing } = await db.query(
-    `SELECT id FROM report_deliveries WHERE company_id=$1 AND report_type=$2 AND period_start=$3 AND status='sent' LIMIT 1`,
-    [sub, type, period.startDate]
-  );
-  if (existing.length > 0) {
-    console.log(`[reportGenerator] (consolidado) ja enviado: primary=${sub} period=${period.startDate}`);
-    return { skipped: true, reason: 'already_sent' };
+  if (!opts.semEntrega) {
+    const { rows: existing } = await db.query(
+      `SELECT id FROM report_deliveries WHERE company_id=$1 AND report_type=$2 AND period_start=$3 AND status='sent' LIMIT 1`,
+      [sub, type, period.startDate]
+    );
+    if (existing.length > 0) {
+      console.log(`[reportGenerator] (consolidado) ja enviado: primary=${sub} period=${period.startDate}`);
+      return { skipped: true, reason: 'already_sent' };
+    }
   }
 
-  const { rows: [coCheck] } = await db.query(
-    `SELECT COALESCE(report_email_override, email) AS recipient FROM companies WHERE id = $1 AND is_active = true`,
-    [sub]
-  );
-  if (!coCheck || !coCheck.recipient) {
-    return { skipped: true, reason: 'no_email' };
-  }
+  const recipient = await destinatarioDoRelatorio(sub, destinatarios);
+  if (!recipient) return { skipped: true, reason: 'no_email' };
 
-  const { rows: [delivery] } = await db.query(
-    `INSERT INTO report_deliveries (company_id, report_type, period_start, status)
-     VALUES ($1, $2, $3, 'pending') RETURNING id`,
-    [sub, type, period.startDate]
-  );
-  const deliveryId = delivery.id;
+  let deliveryId = null;
+  if (!opts.semEntrega) {
+    const { rows: [delivery] } = await db.query(
+      `INSERT INTO report_deliveries (company_id, report_type, period_start, status)
+       VALUES ($1, $2, $3, 'pending') RETURNING id`,
+      [sub, type, period.startDate]
+    );
+    deliveryId = delivery.id;
+  }
 
   const data = await buildConsolidatedReportData(companyIds, type, period);
 
@@ -624,15 +650,17 @@ async function generateConsolidatedReport(companyIds, primaryId, type, periodOve
     reportUrl,
   });
 
-  const snapshotPeriod = period.startDate.slice(0, 8) + '01';
-  await saveHealthSnapshot(sub, data.health.score, data.health.label, snapshotPeriod, {}).catch(e => {
-    console.warn('[reportGenerator] saveHealthSnapshot (consolidado) falhou:', e.message);
-  });
+  if (!opts.semEntrega) {
+    const snapshotPeriod = period.startDate.slice(0, 8) + '01';
+    await saveHealthSnapshot(sub, data.health.score, data.health.label, snapshotPeriod, {}).catch(e => {
+      console.warn('[reportGenerator] saveHealthSnapshot (consolidado) falhou:', e.message);
+    });
+  }
 
   return {
     skipped:    false,
     deliveryId,
-    company:    { ...data.company, recipient_email: coCheck.recipient },
+    company:    { ...data.company, recipient_email: recipient },
     period,
     kpis:       data.kpis,
     html,

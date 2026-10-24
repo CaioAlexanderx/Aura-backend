@@ -148,6 +148,38 @@ describe('e-mails que já saíam, no modelo único', () => {
     const link = c.headers['List-Unsubscribe'].slice(1, -1);
     expect(c.html).toContain(`href="${link}"`);
     expect(c.text).toContain(`Parar de receber: ${link}`);
+    // tq-88: "Ajustar meus e-mails" abre Configurações > E-mails da empresa.
+    const ajustar = 'https://app.getaura.com.br/configuracoes?foco=emails&amp;empresa=11111111-1111-4111-8111-111111111111';
+    expect(c.html).toContain(`href="${ajustar}"`);
+    expect(c.html).toContain('Ajustar meus e-mails</a>');
+    expect(c.html).toContain('Você recebe este resumo toda segunda, às 8h.');
+    expect(c.html).toMatchSnapshot();
+  });
+
+  test('relatório semanal (tq-88): dia e hora escolhidos, vários destinatários, sem registro duplo', async () => {
+    const { mailer, corpos } = carregar();
+    const registros = [];
+    mailer.definirRegistroDeEnvio((i) => registros.push(i));
+    await mailer.sendWeeklyReport(
+      { id: '11111111-1111-4111-8111-111111111111', name: 'Finesse', email: 'dona@exemplo.com' },
+      { revenue: 4820, sales: 31, avg_ticket: 155.48, health_score: 72 },
+      'https://app.getaura.com.br/relatorios/semanal/tok',
+      { destinatarios: ['dona@exemplo.com', 'financeiro@exemplo.com'], config: { dia: 0, hora: 18 }, registrado: true }
+    );
+    expect(corpos[0].to).toEqual(['dona@exemplo.com', 'financeiro@exemplo.com']);
+    expect(corpos[0].html).toContain('Você recebe este resumo todo domingo, às 18h.');
+    expect(registros).toHaveLength(0); // o scheduler já reservou a linha no email_log
+  });
+
+  test('confirmação de endereço extra (tq-87, aura-transacional, sem letra)', async () => {
+    carregar();
+    const { montarConfirmacao } = require('../src/services/emailEnderecos');
+    const c = montarConfirmacao({ loja: 'Finesse', email: 'financeiro@exemplo.com', link: 'https://api.exemplo.test/api/v1/emails/confirmar/tok' });
+    regrasComuns(c.html);
+    expect(c.assunto).toBe('Confirme este e-mail para receber os avisos da Finesse');
+    expect(c.html).toContain('href="https://api.exemplo.test/api/v1/emails/confirmar/tok"');
+    expect(c.html).not.toContain(LETRA);
+    expect(c.text).toContain('https://api.exemplo.test/api/v1/emails/confirmar/tok');
     expect(c.html).toMatchSnapshot();
   });
 });
