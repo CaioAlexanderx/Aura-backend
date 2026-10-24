@@ -5,6 +5,13 @@
 // GET /api/v1/reports/weekly/:token
 //   -> 200 single ou consolidado (multi-CNPJ via claim 'cids')
 //   -> 401 invalid | 410 expired | 404 not found
+//   tq-85: o JSON ganha `blocos` (relatório longo: os blocos ligados nas
+//   preferências da primária que o plano tem, lidos na hora). Campo novo; os
+//   de sempre não mudaram.
+//
+// GET /api/v1/reports/weekly/:token/pagina   (tq-85)
+//   -> 200 text/html: a página completa, modo claro, com todos os blocos
+//      ligados (templates/weeklyReport). Mesmos erros, em HTML curto.
 //
 // GET /api/v1/reports/admin/test-weekly?q=...  [TEMPORARIO, SO EQUIPE AURA]
 //   Exige JWT de usuario is_staff (Authorization: Bearer). Nao aceita mais
@@ -20,6 +27,55 @@ const { requireAuth } = require('../middleware/auth');
 const { verifyWeeklyReportToken, signWeeklyReportToken } = require('../utils/reportToken');
 const { buildReportData, buildConsolidatedReportData }   = require('../services/reportGenerator');
 const { resolvePeriodForReport }                         = require('../services/reportDataQueries');
+const { semInternos }                                    = require('../services/relatorioBlocos');
+const { buildWeeklyReportHtml }                          = require('../templates/weeklyReport');
+
+/** Dados do relatório do token (com os blocos da primária, lidos agora). */
+function dadosDoToken(v) {
+  const period = { startDate: v.period_start, endDate: v.period_end };
+  return v.consolidated
+    ? buildConsolidatedReportData(v.company_ids, 'weekly', period, { decisorId: v.company_id })
+    : buildReportData(v.company_id, 'weekly', period);
+}
+
+// GET /weekly/:token/pagina — página completa (tq-85). Antes da rota do
+// JSON por clareza; os caminhos não colidem.
+router.get('/weekly/:token/pagina', async (req, res) => {
+  res.setHeader('Content-Type', 'text/html; charset=utf-8');
+  res.setHeader('X-Robots-Tag', 'noindex, nofollow');
+  res.setHeader('Cache-Control', 'private, no-store');
+  // A página só tem estilo inline e o logo da Aura (app.getaura.com.br/email).
+  // O CSP geral do helmet não libera esse host de imagem; e o app pode mostrar
+  // a página num iframe (frame-ancestors), em vez do X-Frame-Options SAMEORIGIN.
+  const app = String(process.env.APP_URL || 'https://app.getaura.com.br').replace(/\/+$/, '');
+  res.setHeader('Content-Security-Policy',
+    `default-src 'none'; style-src 'unsafe-inline'; img-src https://app.getaura.com.br ${app} data:; ` +
+    `frame-ancestors 'self' https://app.getaura.com.br ${app}; base-uri 'none'; form-action 'none'`);
+  res.removeHeader('X-Frame-Options');
+  const v = verifyWeeklyReportToken(req.params.token);
+  if (!v.valid) {
+    return res.status(v.error === 'expired' ? 410 : 401)
+      .send(v.error === 'expired'
+        ? '<!DOCTYPE html><meta charset="utf-8"><p>Este link do relatório expirou (vale 30 dias).</p>'
+        : '<!DOCTYPE html><meta charset="utf-8"><p>Link do relatório inválido.</p>');
+  }
+  try {
+    const data = await dadosDoToken(v);
+    return res.send(buildWeeklyReportHtml({
+      company:   { name: data.company.name, logo_url: data.company.logo_url },
+      companyId: v.company_id,
+      periodo:   { inicio: v.period_start, fim: v.period_end },
+      relatorio: semInternos(data.relatorio),
+      breakdown: data.breakdown || null,
+    }));
+  } catch (err) {
+    console.error('[publicReports/pagina] erro:', err.message);
+    if (err.message && err.message.includes('Empresa nao encontrada')) {
+      return res.status(404).send('<!DOCTYPE html><meta charset="utf-8"><p>Empresa não encontrada.</p>');
+    }
+    return res.status(500).send('<!DOCTYPE html><meta charset="utf-8"><p>Não deu para montar o relatório agora. Tente de novo em alguns minutos.</p>');
+  }
+});
 
 router.get('/weekly/:token', async (req, res) => {
   const { token } = req.params;
@@ -38,9 +94,7 @@ router.get('/weekly/:token', async (req, res) => {
   try {
     const period = { startDate: v.period_start, endDate: v.period_end };
 
-    const data = v.consolidated
-      ? await buildConsolidatedReportData(v.company_ids, 'weekly', period)
-      : await buildReportData(v.company_id, 'weekly', period);
+    const data = await dadosDoToken(v);
 
     const plan = data.company.plan || 'essencial';
     const showHeatmap          = plan !== 'essencial';
@@ -74,6 +128,7 @@ router.get('/weekly/:token', async (req, res) => {
       dormant:        showDormantCustomers ? data.dormantCustomers : null,
       stale_products: data.staleProducts,
       breakdown:      data.breakdown || null,
+      blocos:         semInternos(data.relatorio) || null,
       gating: {
         plan,
         show_heatmap: showHeatmap,

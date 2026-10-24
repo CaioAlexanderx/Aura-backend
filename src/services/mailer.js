@@ -504,62 +504,105 @@ async function sendOwnerNewOrderEmail(to, opts) {
 // ela, company.email), `opts.config` (dia e hora do rodapé), link "Ajustar
 // meus e-mails" e `opts.registrado` (o scheduler já reservou a linha no
 // email_log; o mailer não grava outra).
-async function sendWeeklyReport(company, kpis, reportUrl, opts = {}) {
-  function fmtR(v) {
-    const n = Math.round(v * 100) / 100;
-    const [int, dec] = n.toFixed(2).split('.');
-    return 'R$&nbsp;' + int.replace(/\B(?=(\d{3})+(?!\d))/g, '.') + (dec === '00' ? '' : ',' + dec);
-  }
+// tq-85 (24/10/2026): `opts.relatorio` (blocos de services/relatorioBlocos)
+// e `opts.versao`. Versão 'completa' (padrão): o resumo de cada bloco ligado
+// (mock "Sua semana · versão 1" da Nina) e o botão "Ver relatório completo".
+// Versão 'resumo', ou sem blocos: o e-mail curto de sempre. Nos dois, a
+// "saúde do negócio" saiu: o número era fixo (71 no reportGenerator), não
+// calculado, e o relatório não mostra número inventado.
 
+/**
+ * Monta o e-mail do relatório (sem enviar). Usado pelo envio e pela rota
+ * "Ver um exemplo" (GET /companies/:id/emails/relatorio/exemplo).
+ * @returns {{ assunto, previa, html, text, descadastro, ajustar }}
+ */
+function montarEmailDoRelatorio(company, kpis, reportUrl, opts = {}) {
   const url = reportUrl || 'https://app.getaura.com.br';
   const descadastro = company && company.id
     ? linkDescadastro(company.id, 'relatorio', { grupo: !!opts.grupo })
     : null;
-
-  const corSaude = kpis.health_score >= 70 ? '#15803d' : kpis.health_score >= 40 ? '#b7791f' : '#c0392b';
-  const kpi = (rot, val, cor) =>
-    `<tr><td class="a-line" style="padding:10px 0;border-bottom:1px solid ${L.COR.linha};">` +
-    `<span class="a-ink2" style="font-size:11px;color:${L.COR.tinta2};letter-spacing:.07em;text-transform:uppercase;font-weight:700;">${rot}</span>` +
-    `<p class="${cor ? '' : 'a-ink'}" style="margin:4px 0 0;font-size:20px;font-weight:700;color:${cor || L.COR.tinta};">${val}</p></td></tr>`;
-  const corpo = [
-    L.p('Seu relatório semanal chegou!', 'font-weight:700;'),
-    L.pHtml(`Aqui está o resumo de desempenho de <strong>${L.esc(company.name)}</strong> nesta semana.`),
-    `<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin:0 0 16px;">` +
-      kpi('Receita', fmtR(kpis.revenue)) +
-      kpi('Vendas', L.esc(kpis.sales)) +
-      kpi('Ticket médio', fmtR(kpis.avg_ticket)) +
-      kpi('Saúde do negócio', `${L.esc(kpis.health_score)}<span style="font-size:13px;color:${L.COR.tinta2};">/100</span>`, corSaude) +
-    `</table>`,
-  ].join('\n');
-
   const ajustar = company && company.id ? linkAjustarEmails(company.id) : null;
   const { quandoDoRelatorio } = require('./emailPreferencias');
+  const B = require('../templates/relatorioSemanalBlocos');
+
+  const nome = company.name;
+  const completa = opts.versao !== 'resumo' && opts.relatorio && B.blocosVisiveis(opts.relatorio).length > 0;
+
+  let corpo;
+  let assunto;
+  let previa;
+  let textoDoResumo;
+  if (completa) {
+    const periodo = opts.periodo || {};
+    const v = opts.relatorio.vendas;
+    assunto = `Sua semana na ${nome}`;
+    if (v && v.vendas > 0) {
+      assunto += `: ${L.brl(v.receita)}`;
+      const pctRedondo = v.variacaoPct != null ? Math.round(Math.abs(v.variacaoPct)) : 0;
+      if (pctRedondo > 0) assunto += ` (${v.variacaoPct > 0 ? '+' : '-'}${pctRedondo}%)`;
+    }
+    previa = B.previaDosBlocos(opts.relatorio);
+    corpo = [
+      `<h1 class="a-ink" style="margin:0 0 4px;font-size:24px;line-height:1.2;font-weight:700;color:${L.COR.tinta};">Sua semana na ${L.esc(nome)}</h1>`,
+      periodo.inicio
+        ? `<p class="a-ink2" style="margin:0 0 16px;color:${L.COR.tinta2};font-size:13.5px;">De ${L.esc(L.dataCurta(periodo.inicio))} a ${L.esc(L.dataCurta(periodo.fim))}.</p>`
+        : '',
+      B.renderBlocos(opts.relatorio, { modo: 'email', companyId: company.id }),
+    ].join('\n');
+    textoDoResumo = `Aura. — Sua semana na ${nome}.` +
+      (v ? ` Faturamento: ${L.brl(v.receita)} | Vendas: ${v.vendas} | Ticket medio: ${L.brl(v.ticket)}` : '');
+  } else {
+    const kpi = (rot, val) =>
+      `<tr><td class="a-line" style="padding:10px 0;border-bottom:1px solid ${L.COR.linha};">` +
+      `<span class="a-ink2" style="font-size:11px;color:${L.COR.tinta2};letter-spacing:.07em;text-transform:uppercase;font-weight:700;">${rot}</span>` +
+      `<p class="a-ink" style="margin:4px 0 0;font-size:20px;font-weight:700;color:${L.COR.tinta};">${val}</p></td></tr>`;
+    assunto = `Relatório semanal — ${nome}`;
+    previa = 'Receita, vendas e ticket médio da semana';
+    corpo = [
+      L.p('Seu relatório semanal chegou!', 'font-weight:700;'),
+      L.pHtml(`Aqui está o resumo de desempenho de <strong>${L.esc(nome)}</strong> nesta semana.`),
+      `<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin:0 0 16px;">` +
+        kpi('Receita', L.esc(L.brl(kpis.revenue))) +
+        kpi('Vendas', L.esc(kpis.sales)) +
+        kpi('Ticket médio', L.esc(L.brl(kpis.avg_ticket))) +
+      `</table>`,
+    ].join('\n');
+    textoDoResumo = `Aura. — Relatorio semanal de ${nome}. Receita: ${L.brl(kpis.revenue)} | Vendas: ${kpis.sales} | Ticket medio: ${L.brl(kpis.avg_ticket)}`;
+  }
+
   const rodape = `Você recebe este resumo ${quandoDoRelatorio(opts.config)}. O link do relatório expira em 30 dias.` +
     (ajustar ? ` <a class="a-link" href="${L.esc(ajustar)}" style="color:${L.COR.violeta};">Ajustar meus e-mails</a>` : '') +
     (descadastro ? ` · <a class="a-link" href="${L.esc(descadastro)}" style="color:${L.COR.violeta};">Parar de receber</a>` : '') +
     ' · Aura. Tecnologia para negócios';
-  const destino = Array.isArray(opts.destinatarios) && opts.destinatarios.length ? opts.destinatarios : company.email;
 
   const html = L.montarEmail({
     variante: 'aura-transacional',
-    assunto: `Relatório semanal — ${company.name}`,
-    previa: 'Receita, vendas, ticket médio e a saúde do negócio na semana',
+    assunto,
+    previa,
     corpo,
     botao: { rotulo: 'Ver relatório completo', url },
-    whatsapp: { mensagem: `Oi, Caio! Recebi o relatório semanal da ${company.name}.` },
+    whatsapp: { mensagem: `Oi, Caio! Recebi o relatório semanal da ${nome}.` },
     assinatura: false,
     rodape,
   });
 
+  const text = `${textoDoResumo}\n\nVer relatorio completo: ${url}`
+    + (ajustar ? `\n\nAjustar meus e-mails: ${ajustar}` : '')
+    + (descadastro ? `\n\nParar de receber: ${descadastro}` : '');
+
+  return { assunto, previa, html, text, descadastro, ajustar };
+}
+
+async function sendWeeklyReport(company, kpis, reportUrl, opts = {}) {
+  const m = montarEmailDoRelatorio(company, kpis, reportUrl, opts);
+  const destino = Array.isArray(opts.destinatarios) && opts.destinatarios.length ? opts.destinatarios : company.email;
   return sendMail({
     from: FROM_NEUTRO,
     to: destino,
-    subject: `Relatório semanal — ${company.name}`,
-    text: `Aura. — Relatorio semanal de ${company.name}. Receita: R$ ${kpis.revenue} | Vendas: ${kpis.sales} | Ticket medio: R$ ${kpis.avg_ticket} | Saude: ${kpis.health_score}/100\n\nVer relatorio completo: ${url}`
-      + (ajustar ? `\n\nAjustar meus e-mails: ${ajustar}` : '')
-      + (descadastro ? `\n\nParar de receber: ${descadastro}` : ''),
-    html,
-    headers: cabecalhosDescadastro(descadastro),
+    subject: m.assunto,
+    text: m.text,
+    html: m.html,
+    headers: cabecalhosDescadastro(m.descadastro),
     tipo: 'relatorio_semanal',
     companyId: (company && company.id) || null,
     ...(opts.registrado ? { _registrado: true } : {}),
@@ -653,5 +696,6 @@ module.exports = {
   sendOrderStatusEmail,
   sendOwnerNewOrderEmail,
   sendWeeklyReport,
+  montarEmailDoRelatorio,
   sendSelfServeSignupNotification,
 };
