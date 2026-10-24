@@ -113,8 +113,9 @@ describe('montarLembrete', () => {
   const l = montarLembrete({ payment: payment(), pixCode: PIX, qrBase64: QR, extraNote: null });
 
   test('título, corpo e CTA com os dados da cobrança', () => {
-    expect(l.title).toBe('Sua fatura Aura vence em 18/10');
-    expect(l.resumo).toBe('Aura Negocio — R$ 169,00, vencimento 18/10/2026. Pague via Pix pelo QR Code ou pelo código copia e cola.');
+    expect(l.title).toBe('Sua mensalidade da Aura vence domingo, 18/10.');
+    expect(l.resumo).toBe('O Pix está aqui embaixo, é só escanear ou copiar.');
+    expect(l.ctaLabel).toBe('Abrir a fatura');
     expect(l.body).toBe(l.resumo + '\n\nPIX copia e cola: ' + PIX);
     expect(l.ctaUrl).toBe('https://www.asaas.com/i/siwzm4ng6oqzr88j');
   });
@@ -128,6 +129,29 @@ describe('montarLembrete', () => {
     expect(l.htmlContent).toContain('fatura nº 900100200');
   });
 
+  test('o cliente não vê Asaas no destaque, e a peça é clara (modo claro dos e-mails novos)', () => {
+    const visivel = [l.title, l.resumo, l.ctaLabel].join(' ');
+    expect(visivel).not.toMatch(/asaas/i);
+    expect(l.htmlContent).toContain('background: #f4f1fb');
+    expect(l.htmlContent).not.toContain('#150a33');
+    expect(l.htmlContent).not.toContain('radial-gradient');
+    // Só o rodapé discreto cita quem emite a cobrança.
+    expect(l.htmlContent).toContain('<p class="brand">Cobrança emitida por AURA LTDA via Asaas</p>');
+    // O copia e cola traz o domínio do Pix da Asaas; fora dele, só o rodapé.
+    expect(l.htmlContent.split(PIX).join('').match(/Asaas/g)).toHaveLength(1);
+    expect(l.htmlContent).toContain('Sua mensalidade da Aura vence domingo, 18/10.</h1>');
+  });
+
+  test('o valor é o da cobrança lida na Asaas, não o preço do plano nem o netValue', () => {
+    const d = montarLembrete({
+      payment: payment({ value: 119, netValue: 112.35, description: 'Aura Negocio — cupom X: R$ 50,00 de desconto' }),
+      pixCode: PIX, qrBase64: QR,
+    });
+    expect(d.htmlContent).toContain('R$&nbsp;119,00');
+    expect(d.htmlContent).not.toContain('112,35');
+    expect(d.htmlContent).not.toContain('169,00');
+  });
+
   test('fica no ar até 2 dias depois do vencimento', () => {
     expect(l.expiresAt).toBe('2026-10-20T23:59:59-03:00');
   });
@@ -137,7 +161,8 @@ describe('montarLembrete', () => {
       payment: payment({ description: 'Aura Negocio — cupom VOULU119: R$ 50,00 de desconto nas 3 primeiras mensalidades', value: 119 }),
       pixCode: PIX, qrBase64: QR, extraNote: 'Um pagamento só cobre as duas empresas do grupo.',
     });
-    expect(d.resumo).toBe('Aura Negocio — R$ 119,00, vencimento 18/10/2026. Pague via Pix pelo QR Code ou pelo código copia e cola. Um pagamento só cobre as duas empresas do grupo.');
+    expect(d.resumo).toBe('O Pix está aqui embaixo, é só escanear ou copiar. Um pagamento só cobre as duas empresas do grupo.');
+    expect(d.htmlContent).toContain('R$&nbsp;119,00');
     expect(nomeDoPlano('')).toBe('Assinatura Aura');
   });
 
@@ -163,7 +188,8 @@ describe('publicar o banner no dia marcado', () => {
     expect(notifications.notifyCompany).toHaveBeenCalledTimes(1);
     const [companyId, p] = notifications.notifyCompany.mock.calls[0];
     expect(companyId).toBe(FPKT);
-    expect(p.title).toBe('Sua fatura Aura vence em 18/10');
+    expect(p.title).toBe('Sua mensalidade da Aura vence domingo, 18/10.');
+    expect(p.ctaLabel).toBe('Abrir a fatura');
     expect(p.htmlContent).toContain(QR);
     expect(p.body).toContain(PIX);
     expect(p.dedupeKey).toBe('fatura-aura:pay_siwzm4ng6oqzr88j:' + FPKT);
@@ -217,7 +243,7 @@ describe('publicar o banner no dia marcado', () => {
   test('vencimento prorrogado no Asaas corrige a agenda', async () => {
     const { db, notifications } = await run({ asaasOpts: { pay: payment({ dueDate: '2026-10-25' }) } });
     expect(db.writes.find((w) => w.sql.includes('SET due_date = $2')).params).toEqual(['r1', '2026-10-25']);
-    expect(notifications.notifyCompany.mock.calls[0][1].title).toBe('Sua fatura Aura vence em 25/10');
+    expect(notifications.notifyCompany.mock.calls[0][1].title).toBe('Sua mensalidade da Aura vence domingo, 25/10.');
   });
 });
 
@@ -226,7 +252,8 @@ describe('e-mail', () => {
     const { db, emailer, summary } = await run();
     const arg = emailer.sendNotificationEmails.mock.calls[0][0];
     expect(arg.recipients).toEqual(['fpkt@example.com']);
-    expect(arg.subject).toBe('Sua fatura Aura vence em 18/10');
+    expect(arg.subject).toBe('Sua mensalidade da Aura vence domingo, 18/10.');
+    expect(arg.notification.cta_label).toBe('Abrir a fatura');
     expect(arg.pix).toEqual({ code: PIX, amount: 169, dueDate: '2026-10-18' });
     // No e-mail o código tem bloco próprio: o texto vai sem ele.
     expect(arg.notification.body).not.toContain(PIX);

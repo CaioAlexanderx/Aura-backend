@@ -4,6 +4,7 @@
 var router = require('express').Router({ mergeParams: true });
 var db = require('../config/database');
 var { requireAuth } = require('../middleware/auth');
+var { avisarChamado } = require('../services/avisoDeChamado');
 
 // GET /support/tickets — list own tickets
 router.get('/tickets', requireAuth, async function(req, res) {
@@ -34,11 +35,17 @@ router.post('/tickets', requireAuth, async function(req, res) {
       'INSERT INTO support_tickets (company_id, user_id, subject, category, priority, metadata) VALUES ($1,$2,$3,$4,$5,$6) RETURNING *',
       [cid, uid, subject, category || 'suporte', priority || 'normal', JSON.stringify(metadata || {})]);
     var ticket = rows[0];
-    await db.query(
-      'INSERT INTO support_messages (ticket_id, sender_id, sender_role, message) VALUES ($1,$2,$3,$4)',
+    var { rows: msgs } = await db.query(
+      'INSERT INTO support_messages (ticket_id, sender_id, sender_role, message) VALUES ($1,$2,$3,$4) RETURNING id',
       [ticket.id, uid, 'client', message]);
     res.status(201).json({ ticket });
-  } catch (err) { console.error('support create error:', err); res.status(500).json({ error: 'Erro' }); }
+    // Avisa a equipe (e-mail interno + sino da Aura) DEPOIS de responder:
+    // nunca atrasa nem derruba a criacao do chamado (avisarChamado nao lanca).
+    await avisarChamado({ ticket: ticket, mensagem: message, mensagemId: msgs && msgs[0] && msgs[0].id, userId: uid, novo: true });
+  } catch (err) {
+    console.error('support create error:', err);
+    if (!res.headersSent) res.status(500).json({ error: 'Erro' });
+  }
 });
 
 // GET /support/tickets/:tid — get ticket with messages
@@ -62,14 +69,18 @@ router.post('/tickets/:tid/messages', requireAuth, async function(req, res) {
   var { message } = req.body;
   if (!message) return res.status(400).json({ error: 'message obrigatoria' });
   try {
-    var { rows: tickets } = await db.query('SELECT id, status FROM support_tickets WHERE id=$1 AND company_id=$2', [tid, cid]);
+    var { rows: tickets } = await db.query('SELECT id, company_id, subject, category, priority, status FROM support_tickets WHERE id=$1 AND company_id=$2', [tid, cid]);
     if (!tickets.length) return res.status(404).json({ error: 'Ticket nao encontrado' });
     var { rows } = await db.query(
       'INSERT INTO support_messages (ticket_id, sender_id, sender_role, message) VALUES ($1,$2,$3,$4) RETURNING *',
       [tid, uid, 'client', message]);
     await db.query('UPDATE support_tickets SET updated_at=NOW(), status=CASE WHEN status=\'respondido\' THEN \'aberto\' ELSE status END WHERE id=$1', [tid]);
     res.status(201).json({ message: rows[0] });
-  } catch (err) { res.status(500).json({ error: 'Erro' }); }
+    // Cada mensagem nova do cliente avisa a equipe (chave por chamado + mensagem).
+    await avisarChamado({ ticket: tickets[0], mensagem: message, mensagemId: rows[0] && rows[0].id, userId: uid, novo: false });
+  } catch (err) {
+    if (!res.headersSent) res.status(500).json({ error: 'Erro' });
+  }
 });
 
 module.exports = router;
