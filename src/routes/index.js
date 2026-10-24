@@ -87,6 +87,8 @@ router.use('/admin/painel/ofx', require('./adminPainelOfx'));
 router.use('/admin/painel/ruptura', require('./adminPainelRuptura'));
 // Lançamento mensal de custos (card f5-06, 18/10/2026)
 router.use('/admin/painel/custos', require('./adminPainelCustos'));
+// Piloto do Pix Automático da Asaas (tq-105, 24/10/2026): antes do prefixo.
+router.use('/admin/painel/pix-automatico', require('./adminPainelPixAutomatico'));
 router.use('/admin/painel', require('./adminPainel'));
 
 router.use('/webhooks/asaas',     require('./webhookAsaas'));

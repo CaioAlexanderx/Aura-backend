@@ -9,6 +9,14 @@
 // que aceita uma apiKey POR CHAMADA (pra falar com a SUBCONTA do dojô, não
 // só com a conta-mãe) e resolve a base sandbox via env ASAAS_ENV. O legado
 // asaas()/ASAAS_URL segue INTOCADO (compat com billing.js/seatSubscription).
+//
+// 24/10/2026 (Pix Automático, tq-104/105): asaasRequest ganhou duas coisas,
+// as duas sem efeito para quem já chamava:
+//   - chave de sandbox separada: com ASAAS_ENV=sandbox e ASAAS_SANDBOX_API_KEY
+//     definida, ela é usada quando a chamada não traz apiKey própria. Sem a
+//     variável, nada muda (segue ASAAS_API_KEY).
+//   - 5º argumento opcional { timeoutMs }: aborta a chamada depois do prazo
+//     (err.asaasTimeout = true). Sem ele, sem prazo, como antes.
 // ============================================================
 
 const ASAAS_URL = process.env.ASAAS_URL || 'https://api.asaas.com/v3';
@@ -41,8 +49,20 @@ function resolveAsaasBaseUrl() {
 // Variante genérica: apiKey por chamada (subconta do dojô no BaaS) com
 // fallback pra ASAAS_API_KEY (conta-mãe). Erros carregam asaasStatus/
 // asaasBody pra diagnóstico. NUNCA loga a apiKey.
-async function asaasRequest(method, path, body, apiKey) {
-  const key = apiKey || process.env.ASAAS_API_KEY || ASAAS_KEY;
+function isSandbox() {
+  return String(process.env.ASAAS_ENV || '').trim().toLowerCase() === 'sandbox';
+}
+
+// Chave da conta-mãe para a base atual. Em sandbox, ASAAS_SANDBOX_API_KEY
+// (quando existe) vence: assim a chave de produção nunca vai para o sandbox
+// e a de sandbox nunca vai para produção.
+function resolveAsaasApiKey() {
+  if (isSandbox() && process.env.ASAAS_SANDBOX_API_KEY) return process.env.ASAAS_SANDBOX_API_KEY;
+  return process.env.ASAAS_API_KEY || ASAAS_KEY;
+}
+
+async function asaasRequest(method, path, body, apiKey, reqOpts) {
+  const key = apiKey || resolveAsaasApiKey();
   if (!key) throw new Error('ASAAS_API_KEY nao configurada');
   const base = resolveAsaasBaseUrl();
   const opts = {
@@ -50,7 +70,26 @@ async function asaasRequest(method, path, body, apiKey) {
     headers: { 'Content-Type': 'application/json', 'access_token': key },
   };
   if (body) opts.body = JSON.stringify(body);
-  const resp = await fetch(base + path, opts);
+  const timeoutMs = reqOpts && Number(reqOpts.timeoutMs) > 0 ? Number(reqOpts.timeoutMs) : 0;
+  let timer = null;
+  if (timeoutMs) {
+    const ctrl = new AbortController();
+    opts.signal = ctrl.signal;
+    timer = setTimeout(() => ctrl.abort(), timeoutMs);
+  }
+  let resp;
+  try {
+    resp = await fetch(base + path, opts);
+  } catch (e) {
+    if (timer) clearTimeout(timer);
+    if (e && e.name === 'AbortError') {
+      const err = new Error('Asaas nao respondeu em ' + timeoutMs + 'ms');
+      err.asaasTimeout = true;
+      throw err;
+    }
+    throw e;
+  }
+  if (timer) clearTimeout(timer);
   let data = {};
   try { data = await resp.json(); } catch (_) { data = {}; }
   if (!resp.ok) {
@@ -63,4 +102,4 @@ async function asaasRequest(method, path, body, apiKey) {
   return data;
 }
 
-module.exports = { asaas, asaasRequest, resolveAsaasBaseUrl, ASAAS_URL };
+module.exports = { asaas, asaasRequest, resolveAsaasBaseUrl, resolveAsaasApiKey, ASAAS_URL };
