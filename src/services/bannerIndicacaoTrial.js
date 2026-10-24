@@ -1,9 +1,15 @@
 // ============================================================
 // AURA. — Banner "Indique um lojista" durante o teste (14/10/2026)
 //
-// Pedido do Caio: toda empresa de varejo que está testando a Aura (inclusive
-// o cadastro novo, sem nenhuma venda) recebe, no sininho, o convite para
-// indicar um lojista e ganhar o mês grátis. Um banner por empresa.
+// Pedido do Caio: toda empresa de varejo que está testando a Aura recebe, no
+// sininho, o convite para indicar um lojista e ganhar o mês grátis. Um banner
+// por empresa.
+//
+// 24/10/2026 (item 15, aprovado pelo Caio): o convite só sai depois da
+// primeira venda. A empresa precisa ter pelo menos 1 venda NÃO cancelada
+// (sales.status <> 'cancelled', o mesmo critério do resto do backend); sem
+// venda, ou só com venda cancelada, não recebe. Texto novo, curto; quem já
+// recebeu o banner antigo não recebe outro (mesma dedupe_key).
 //
 // A regra mora numa função pura (avaliarEmpresa) que recebe os fatos de uma
 // empresa; a consulta (buscarFatos) só junta esses fatos. Assim cada critério
@@ -33,12 +39,13 @@ const SHELL_VAREJO = 'negocio';
 
 const BANNER = Object.freeze({
   type: 'banner',
-  title: 'Indique um lojista e ganhe seu mês grátis',
-  body: 'Gere seu código em Configurações. Quando o lojista que você indicar pagar a primeira mensalidade, '
-    + 'seu mês grátis fica reservado por 60 dias a partir desse pagamento: assine a Aura nesse prazo e a '
-    + 'sua segunda mensalidade sai por nossa conta.',
+  title: 'Conhece outro lojista que ia gostar da Aura?',
+  body: 'Indique e ganhe um mês grátis quando ele assinar.',
   ctaLabel: 'Gerar meu código',
-  ctaRoute: '/configuracoes',
+  // Configurações já focada no cartão "Indique e ganhe". O app só reescreve a
+  // rota pelo título antigo ("Indique um lojista"), que o título novo não tem:
+  // por isso o foco vai explícito na rota.
+  ctaRoute: '/configuracoes?foco=indicacao',
 });
 
 const DIA_MS = 24 * 3600 * 1000;
@@ -69,7 +76,7 @@ const ehInterna = (email) => /@getaura\.com\.br\s*$/i.test(String(email || '').t
  *
  * fatos: { company_id, shell, company_email, owner_email, is_sandbox,
  *          paga_por_outra, trial_ends_at, tem_assinatura, billing_status,
- *          email_verificado, ja_tem_banner }
+ *          email_verificado, tem_venda, ja_tem_banner }
  */
 function avaliarEmpresa(fatos, { agora = new Date(), canaryId = null } = {}) {
   const f = fatos || {};
@@ -92,6 +99,9 @@ function avaliarEmpresa(fatos, { agora = new Date(), canaryId = null } = {}) {
 
   // Dono com e-mail verificado.
   if (f.email_verificado !== true) return nao('email_nao_verificado');
+
+  // Pelo menos 1 venda não cancelada (item 15, 24/10/2026).
+  if (f.tem_venda !== true) return nao('sem_venda');
 
   // Um banner por empresa (inclui os criados à mão com a mesma chave).
   if (f.ja_tem_banner === true) return nao('ja_tem_banner');
@@ -118,6 +128,10 @@ async function buscarFatos(db, agora = new Date()) {
             c.trial_ends_at,
             c.billing_status,
             (c.asaas_subscription_id IS NOT NULL) AS tem_assinatura,
+            EXISTS (SELECT 1 FROM sales s
+                     WHERE s.company_id = c.id
+                       AND COALESCE(s.status, 'completed') <> 'cancelled'
+            ) AS tem_venda,
             EXISTS (SELECT 1 FROM app_notifications b
                      WHERE b.dedupe_key = $2::text || c.id::text
             ) AS ja_tem_banner

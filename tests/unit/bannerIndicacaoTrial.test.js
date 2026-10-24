@@ -2,8 +2,9 @@
 // services/bannerIndicacaoTrial + jobs/bannerIndicacaoTrialJob
 // (banner "Indique um lojista" para empresas em teste, 14/10/2026).
 //
-// Regra (decisão do Caio, 14/10): TODO trial vigente de varejo recebe,
-// inclusive cadastro novo sem venda e teste perto do fim.
+// Regra (decisão do Caio, 14/10, ajustada em 24/10 no item 15): todo trial
+// vigente de varejo recebe, inclusive teste perto do fim, mas só depois de
+// pelo menos 1 venda NÃO cancelada.
 //
 // O que estes testes travam:
 //   1. A regra: o caso verdadeiro, cada critério que ficou falhando sozinho
@@ -36,6 +37,7 @@ const fatos = (extra = {}) => ({
   company_email: 'loja@gmail.com',
   owner_email: 'dona@gmail.com',
   email_verificado: true,
+  tem_venda: true,
   is_sandbox: false,
   paga_por_outra: false,
   trial_ends_at: new Date(AGORA.getTime() + 8 * DIA).toISOString(),
@@ -57,13 +59,20 @@ describe('avaliarEmpresa', () => {
     expect(avalia({ shell: undefined }).elegivel).toBe(true);
   });
 
-  describe('critérios removidos não barram mais', () => {
-    it('cadastro novo, sem nenhuma venda, entra', () => {
-      // fatos sem tem_venda (a regra nem olha mais para venda)
-      expect(avalia({ tem_venda: false }).elegivel).toBe(true);
-      expect(avalia({ tem_venda: undefined }).elegivel).toBe(true);
+  describe('venda (item 15, 24/10/2026)', () => {
+    it('cadastro novo, sem nenhuma venda (ou só com venda cancelada), não recebe', () => {
+      // "só cancelada" chega aqui como tem_venda=false: a consulta já exclui as canceladas.
+      expect(avalia({ tem_venda: false })).toEqual({ elegivel: false, motivo: 'sem_venda' });
+      expect(avalia({ tem_venda: undefined }).motivo).toBe('sem_venda');
+      expect(avalia({ tem_venda: null }).motivo).toBe('sem_venda');
     });
 
+    it('com pelo menos 1 venda válida recebe', () => {
+      expect(avalia({ tem_venda: true }).elegivel).toBe(true);
+    });
+  });
+
+  describe('critérios removidos não barram mais', () => {
     it('teste com menos de 3 dias restantes entra, desde que vigente', () => {
       const amanha = new Date(AGORA.getTime() + DIA).toISOString();
       const umMinuto = new Date(AGORA.getTime() + 60000).toISOString();
@@ -145,17 +154,13 @@ describe('montarBanner', () => {
     const b = montarBanner(CID, { agora: AGORA });
     expect(b).toMatchObject({
       type: 'banner',
-      title: 'Indique um lojista e ganhe seu mês grátis',
+      title: 'Conhece outro lojista que ia gostar da Aura?',
       ctaLabel: 'Gerar meu código',
-      ctaRoute: '/configuracoes',
+      ctaRoute: '/configuracoes?foco=indicacao',
       targetCompanyId: CID,
       dedupeKey: 'indicacao-trial:' + CID,
     });
-    expect(b.body).toBe(
-      'Gere seu código em Configurações. Quando o lojista que você indicar pagar a primeira mensalidade, '
-      + 'seu mês grátis fica reservado por 60 dias a partir desse pagamento: assine a Aura nesse prazo e a '
-      + 'sua segunda mensalidade sai por nossa conta.'
-    );
+    expect(b.body).toBe('Indique e ganhe um mês grátis quando ele assinar.');
     expect(new Date(b.expiresAt).getTime() - AGORA.getTime()).toBe(7 * DIA);
   });
 
@@ -221,7 +226,7 @@ describe('tickBannerIndicacaoTrial', () => {
 
     expect(notifications.criados).toHaveLength(2);
     expect(notifications.criados[0]).toMatchObject({
-      targetCompanyId: CID, dedupeKey: dedupeKeyDe(CID), isActive: true, ctaRoute: '/configuracoes',
+      targetCompanyId: CID, dedupeKey: dedupeKeyDe(CID), isActive: true, ctaRoute: '/configuracoes?foco=indicacao',
     });
     expect(r).toMatchObject({ ligado: true, publicar: true, candidatas: 2, criadas: 2, falhas: 0 });
   });
@@ -233,18 +238,19 @@ describe('tickBannerIndicacaoTrial', () => {
     expect(notifications.criados[0].isActive).toBe(false);
   });
 
-  it('só cria para quem passa na regra (cadastro novo entra, sem e-mail verificado não)', async () => {
+  it('só cria para quem passa na regra (com venda entra; sem e-mail verificado, sem venda ou de outro shell não)', async () => {
     const db = makeDb({
       empresas: [
         fatos({ company_id: CID }),
         fatos({ company_id: CID2, email_verificado: false }),
+        fatos({ company_id: 'c4', tem_venda: false }),
         fatos({ company_id: 'c3', shell: 'food' }),
       ],
     });
     const notifications = makeNotifications();
     const r = await rodar(db, notifications);
     expect(notifications.criados.map((p) => p.targetCompanyId)).toEqual([CID]);
-    expect(r).toMatchObject({ avaliadas: 3, candidatas: 1, criadas: 1 });
+    expect(r).toMatchObject({ avaliadas: 4, candidatas: 1, criadas: 1 });
   });
 
   it('o canário (CANARY_COMPANY_ID) fica de fora', async () => {
@@ -310,7 +316,7 @@ describe('tickBannerIndicacaoTrial', () => {
 });
 
 describe('buscarFatos (consulta)', () => {
-  it('lê teste vigente sem assinatura; sem filtro de venda, conversa ou aviso', async () => {
+  it('lê teste vigente sem assinatura e se há venda NÃO cancelada; sem filtro de conversa ou aviso', async () => {
     const db = makeDb({ empresas: [] });
     await svc.buscarFatos(db, AGORA);
     const { s, params } = db.calls[0];
@@ -319,7 +325,9 @@ describe('buscarFatos (consulta)', () => {
     expect(s).toContain("COALESCE(c.vertical_active, c.vertical, 'negocio') AS shell");
     expect(s).toContain('c.billing_owner_company_id <> c.id');
     expect(s).toContain('b.dedupe_key = $2::text || c.id::text');
-    expect(s).not.toContain('FROM sales');
+    expect(s).toContain('FROM sales s WHERE s.company_id = c.id');
+    expect(s).toContain("COALESCE(s.status, 'completed') <> 'cancelled'");
+    expect(s).toContain(') AS tem_venda');
     expect(s).not.toContain('company_admin_notes');
     expect(s).not.toContain('notify_checkout');
     expect(params).toEqual([AGORA.toISOString(), 'indicacao-trial:']);
