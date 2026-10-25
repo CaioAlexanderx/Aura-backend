@@ -9,6 +9,8 @@
 //   DELETE /enderecos/:enderecoId     remove extra
 //   GET    /ultimos                   últimos e-mails (30 dias, email_log)
 //   POST   /relatorio/enviar-agora    "Me enviar um agora" (3 por dia)
+//   GET    /relatorio/exemplo         "Ver um exemplo" (tq-85): o HTML do
+//                                      relatório da última semana fechada
 //
 // Só o dono da empresa (e a equipe Aura em modo admin). Funcionário recebe
 // 403. Multi-CNPJ: vale a empresa da rota, como as outras seções de
@@ -178,6 +180,73 @@ router.post('/relatorio/enviar-agora', asyncHandler(async (req, res) => {
   };
   const [status, error] = mapa[r.codigo] || [500, 'Erro ao enviar.'];
   res.status(status).json({ error, code: r.codigo });
+}));
+
+// GET /relatorio/exemplo (tq-85) — "Ver um exemplo" em Configurações >
+// E-mails. Devolve o HTML do relatório da última semana fechada desta
+// empresa, como sairia hoje (versão e blocos das preferências), SEM enviar
+// nada e sem gravar nada: não passa por generateReport (que insere em
+// report_deliveries e grava o snapshot de saúde) nem pelo DELETE que a
+// prévia de admin faz depois. Só leitura.
+//   ?versao=completa|resumo   força a versão (para comparar)
+//   ?formato=pagina           a página "Ver relatório completo"
+//   ?formato=json             { assunto, previa, versao, periodo, html }
+// Multi-CNPJ: vale a empresa da rota (o envio agendado de um dono com várias
+// empresas é o consolidado; o exemplo mostra a empresa escolhida no seletor).
+router.get('/relatorio/exemplo', asyncHandler(async (req, res) => {
+  const companyId = req.params.id;
+  const { buildReportData, urlDoRelatorio } = require('../services/reportGenerator');
+  const { resolvePeriodForReport } = require('../services/reportDataQueries');
+  const { signWeeklyReportToken } = require('../utils/reportToken');
+  const RB = require('../services/relatorioBlocos');
+  const { montarEmailDoRelatorio } = require('../services/mailer');
+  const { buildWeeklyReportHtml } = require('../templates/weeklyReport');
+
+  const prefs = await P.preferenciasDaEmpresa(db, companyId);
+  const config = prefs.relatorio.config;
+  const pedida = String(req.query.versao || '');
+  const versao = P.VERSOES.includes(pedida) ? pedida : RB.versaoDoRelatorio(config);
+  const formato = String(req.query.formato || 'email');
+  const period = resolvePeriodForReport('weekly');
+
+  let data;
+  try {
+    data = await buildReportData(companyId, 'weekly', period, {
+      config, semBlocos: versao === 'resumo' && formato !== 'pagina', semNarrativas: true,
+    });
+  } catch (err) {
+    if (err && /Empresa nao encontrada/.test(err.message || '')) {
+      return res.status(404).json({ error: 'Empresa não encontrada ou inativa.', code: 'EMPRESA_INATIVA' });
+    }
+    throw err;
+  }
+  const relatorio = RB.semInternos(data.relatorio);
+  const periodo = { inicio: period.startDate, fim: period.endDate };
+
+  let reportUrl;
+  try {
+    reportUrl = urlDoRelatorio(signWeeklyReportToken({ company_id: companyId, period_start: period.startDate, period_end: period.endDate }));
+  } catch (_) {
+    reportUrl = process.env.APP_URL || 'https://app.getaura.com.br';
+  }
+
+  if (formato === 'pagina') {
+    res.setHeader('Content-Type', 'text/html; charset=utf-8');
+    return res.send(buildWeeklyReportHtml({
+      company: { name: data.company.name, logo_url: data.company.logo_url },
+      companyId, periodo, relatorio,
+    }));
+  }
+
+  const email = montarEmailDoRelatorio(
+    { id: companyId, name: data.company.name, email: null },
+    data.kpis, reportUrl, { config, relatorio, versao, periodo }
+  );
+  if (formato === 'json') {
+    return res.json({ assunto: email.assunto, previa: email.previa, versao, periodo, html: email.html });
+  }
+  res.setHeader('Content-Type', 'text/html; charset=utf-8');
+  return res.send(email.html);
 }));
 
 module.exports = router;

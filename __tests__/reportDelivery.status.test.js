@@ -228,7 +228,11 @@ describe('reportScheduler com o mailer em modo dev', () => {
     expect(emailLog[0].resend_id).toBe(linha.resend_id);
     expect(emailLog[0].params[0]).toMatch(/^relatorio:co-1:\d{4}-\d{2}-\d{2}$/);
     // O gerador recebeu os destinatários das preferências (o dono).
-    expect(reportGenerator.generateReport).toHaveBeenCalledWith('co-1', 'weekly', null, { destinatarios: ['dona@exemplo.com.br'] });
+    // tq-85: e a config da primária (versão e blocos do relatório longo).
+    expect(reportGenerator.generateReport).toHaveBeenCalledWith('co-1', 'weekly', null, {
+      destinatarios: ['dona@exemplo.com.br'],
+      config: expect.objectContaining({ versao: 'completa', dia: 1, hora: 8 }),
+    });
 
     const tudo = logs.join('\n');
     expect(tudo).toContain('sent=1 skipped=0 errors=0 delivery_update_errors=0');

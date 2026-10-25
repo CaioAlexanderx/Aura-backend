@@ -92,6 +92,12 @@ async function empresasElegiveis({ env = process.env } = {}) {
   }
 }
 
+/** Periodo do relatorio gerado, no formato do e-mail (tq-85). */
+function periodoDoResultado(result) {
+  const p = result && result.period;
+  return p ? { inicio: p.startDate, fim: p.endDate } : null;
+}
+
 /** Agrupa por dono: a primaria do grupo decide dia, hora e destinatarios. */
 function agruparPorDono(rows) {
   const groups = new Map();
@@ -172,9 +178,10 @@ async function enviarGrupo(g, { now = Date.now(), env = process.env, contadores 
 
   let result;
   try {
+    // tq-85: a config da primária decide versão e blocos do grupo.
     result = consolidated
-      ? await generateConsolidatedReport(ids, g.primary.id, 'weekly', null, { destinatarios })
-      : await generateReport(g.primary.id, 'weekly', null, { destinatarios });
+      ? await generateConsolidatedReport(ids, g.primary.id, 'weekly', null, { destinatarios, config: g.config })
+      : await generateReport(g.primary.id, 'weekly', null, { destinatarios, config: g.config });
   } catch (err) {
     await marcarFalha(db, logId, 'gerar: ' + err.message).catch(() => {});
     throw err;
@@ -198,6 +205,7 @@ async function enviarGrupo(g, { now = Date.now(), env = process.env, contadores 
   try {
     envio = await sendWeeklyReport(sendCompany, result.kpis, result.reportUrl, {
       grupo: consolidated, destinatarios, config: g.config, registrado: true,
+      relatorio: result.relatorio, versao: result.versao, periodo: periodoDoResultado(result),
     });
   } catch (sendErr) {
     await marcarFalha(db, logId, sendErr.message).catch(() => {});
@@ -308,7 +316,9 @@ async function enviarRelatorioAgora({ companyId, userId, email, now = Date.now()
 
   try {
     const prefs = await P.preferenciasDaEmpresa(db, companyId);
-    const result = await generateReport(companyId, 'weekly', null, { destinatarios: [para], semEntrega: true });
+    const result = await generateReport(companyId, 'weekly', null, {
+      destinatarios: [para], semEntrega: true, config: prefs.relatorio.config,
+    });
     if (result.skipped) {
       await db.query(`DELETE FROM email_log WHERE id = $1 AND status = 'reserved'`, [logId]).catch(() => {});
       return { ok: false, codigo: 'RELATORIO_INDISPONIVEL' };
@@ -316,7 +326,10 @@ async function enviarRelatorioAgora({ companyId, userId, email, now = Date.now()
     const envio = await sendWeeklyReport(
       { ...result.company, id: companyId, email: para, name: result.company.name },
       result.kpis, result.reportUrl,
-      { destinatarios: [para], config: prefs.relatorio.config, registrado: true }
+      {
+        destinatarios: [para], config: prefs.relatorio.config, registrado: true,
+        relatorio: result.relatorio, versao: result.versao, periodo: periodoDoResultado(result),
+      }
     );
     await marcarEnviado(db, logId, (envio && envio.id) || null).catch(() => {});
     return { ok: true, para, restantes: MAX_AGORA_POR_DIA - usados };

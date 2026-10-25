@@ -280,7 +280,10 @@ describe('"me enviar um agora"', () => {
     const r4 = await request(app).post(`${base}/relatorio/enviar-agora`).set(token(dono));
     expect(r4.status).toBe(429);
     expect(r4.body.code).toBe('LIMITE_DIARIO');
-    expect(reportGenerator.generateReport).toHaveBeenCalledWith(empresa, 'weekly', null, { destinatarios: [EMAIL_DONO], semEntrega: true });
+    // tq-85: com a config do relatório da empresa (versão e blocos).
+    expect(reportGenerator.generateReport).toHaveBeenCalledWith(empresa, 'weekly', null, {
+      destinatarios: [EMAIL_DONO], semEntrega: true, config: expect.objectContaining({ versao: 'completa' }),
+    });
     const { rows } = await q(`SELECT count(*)::int AS n FROM email_log WHERE company_id = $1 AND chave_idempotencia LIKE 'relatorio-agora:%' AND status = 'sent'`, [empresa]);
     expect(rows[0].n).toBe(3);
     expect((await request(app).post(`${base}/relatorio/enviar-agora`).set(token(vendedor))).status).toBe(403);

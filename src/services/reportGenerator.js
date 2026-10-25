@@ -7,8 +7,14 @@
 //   buildConsolidatedReportData(companyIds, type, periodOverride?)
 //   generateReport(companyId, type, periodOverride?, opts?)
 //   generateConsolidatedReport(companyIds, primaryId, type, periodOverride?, opts?)
-//     opts: { destinatarios?, semEntrega? } (tq-88)
+//     opts: { destinatarios?, semEntrega? } (tq-88), { config? } (tq-85)
 //   updateDelivery(id, status, { resendId?, error? }) -> true/false
+//
+// tq-85 (24/10/2026): relatório longo. buildReportData também devolve
+// `relatorio`, os blocos da versão completa (services/relatorioBlocos): os
+// ligados nas preferências que o plano tem. O consolidado junta os blocos
+// das empresas do grupo (consolidarBlocos explica a decisão por bloco). O
+// HTML devolvido é a página completa nova (templates/weeklyReport).
 // ============================================================
 
 const db = require('../config/database');
@@ -24,6 +30,33 @@ const {
 const { generateWeeklyNarratives, selectPriorities } = require('./narrativeGenerator');
 const { buildWeeklyReportHtml } = require('../templates/weeklyReport');
 const { signWeeklyReportToken } = require('../utils/reportToken');
+const P = require('./emailPreferencias');
+const RB = require('./relatorioBlocos');
+const { apiUrl } = require('./emailLinks');
+
+/**
+ * Config do relatório que decide os blocos: a que veio (scheduler, que já
+ * leu as preferências da primária) ou a da empresa, lida agora.
+ */
+async function configDoRelatorio(companyId, config) {
+  if (config && typeof config === 'object') return config;
+  const prefs = await P.preferenciasDaEmpresa(db, companyId);
+  return (prefs && prefs.relatorio && prefs.relatorio.config) || {};
+}
+
+/**
+ * Link "Ver relatório completo". Padrão: a página do app
+ * (/relatorios/semanal/<token>). Com RELATORIO_PAGINA_NO_BACKEND=true, a
+ * página completa servida aqui (GET /reports/weekly/<token>/pagina), que já
+ * tem todos os blocos — liga sem deploy enquanto o app não mostra os blocos.
+ */
+function urlDoRelatorio(token, env = process.env) {
+  if (/^(1|true|on|sim)$/i.test(String(env.RELATORIO_PAGINA_NO_BACKEND || '').trim())) {
+    return `${apiUrl(env)}/reports/weekly/${token}/pagina`;
+  }
+  const appUrl = env.APP_URL || 'https://app.getaura.com.br';
+  return `${appUrl}/relatorios/semanal/${token}`;
+}
 
 function addDays(dateStr, n) {
   const [y, mo, d] = dateStr.split('-').map(Number);
@@ -142,7 +175,13 @@ async function updateDelivery(id, status, info = {}) {
   }
 }
 
-async function buildReportData(companyId, type, periodOverride = null) {
+// opts (tq-85):
+//   semBlocos  não calcula os blocos (versão resumo: o e-mail não usa)
+//   config     config do relatório (preferências) que decide os blocos; sem
+//              ela, lê a da própria empresa
+//   semNarrativas  não chama o Claude para as narrativas: o e-mail e a página
+//              nova não usam (só o JSON da página do app usa)
+async function buildReportData(companyId, type, periodOverride = null, opts = {}) {
   const period = periodOverride || resolvePeriodForReport(type);
 
   const { rows: [company] } = await db.query(
@@ -252,11 +291,14 @@ async function buildReportData(companyId, type, periodOverride = null) {
   };
   const priorities = selectPriorities(reportDataForPriorities);
 
-  const narratives = await generateWeeklyNarratives(reportDataForPriorities).catch(() => ({
+  const narrativasPadrao = {
     revenue:  'Monitore a evolucao diaria do faturamento para identificar padroes.',
     products: 'Priorize os produtos com maior giro para garantir disponibilidade.',
     payments: 'Diversifique os metodos de pagamento para reduzir dependencia.',
-  }));
+  };
+  const narratives = opts.semNarrativas
+    ? narrativasPadrao
+    : await generateWeeklyNarratives(reportDataForPriorities).catch(() => narrativasPadrao);
 
   let wowInsight = null;
   if (staleProducts && staleProducts.length > 0) {
@@ -271,6 +313,21 @@ async function buildReportData(companyId, type, periodOverride = null) {
       icon_type: 'user',
       text: `<b>${c.name}</b> nao aparece ha <span class="num">${c.days_dormant} dias</span>. Gastou R$${Math.round(c.total_spent || 0).toLocaleString('pt-BR')} no historico — vale uma mensagem de retorno.`,
     };
+  }
+
+  let relatorio = null;
+  if (!opts.semBlocos && type === 'weekly') {
+    const config = await configDoRelatorio(companyId, opts.config);
+    relatorio = await RB.dadosDosBlocos(companyId, {
+      blocos: RB.blocosEfetivos(config, company.plan),
+      plano: company.plan,
+      period,
+      kpis,
+      dailyRevenue,
+      prevRevenue: prev.total_revenue || 0,
+      byPayment: salesCurrent.by_payment || [],
+      dormant: dormantCustomers,
+    });
   }
 
   return {
@@ -291,20 +348,25 @@ async function buildReportData(companyId, type, periodOverride = null) {
     healthHistory,
     staleProducts,
     dormantCustomers,
+    relatorio,
   };
 }
 
-async function buildConsolidatedReportData(companyIds, type, periodOverride = null) {
+// opts (tq-85): { semBlocos?, config?, decisorId? }. Os blocos do grupo são
+// os da config da primária (decisorId, ou a primeira empresa), filtrados pelo
+// plano de cada empresa.
+async function buildConsolidatedReportData(companyIds, type, periodOverride = null, opts = {}) {
   if (!Array.isArray(companyIds) || companyIds.length === 0) {
     throw new Error('buildConsolidatedReportData: companyIds vazio');
   }
   if (companyIds.length === 1) {
-    return buildReportData(companyIds[0], type, periodOverride);
+    return buildReportData(companyIds[0], type, periodOverride, opts);
   }
 
   const period = periodOverride || resolvePeriodForReport(type);
+  const config = opts.semBlocos ? null : await configDoRelatorio(opts.decisorId || companyIds[0], opts.config);
   const perCompany = await Promise.all(
-    companyIds.map(id => buildReportData(id, type, period))
+    companyIds.map(id => buildReportData(id, type, period, { semBlocos: !!opts.semBlocos, config, semNarrativas: !!opts.semNarrativas }))
   );
 
   const primary = perCompany.find(r => r.company.is_primary) || perCompany[0];
@@ -422,11 +484,14 @@ async function buildConsolidatedReportData(companyIds, type, periodOverride = nu
     dormantCustomers,
   };
   const priorities = selectPriorities(reportDataAgg);
-  const narratives = await generateWeeklyNarratives(reportDataAgg).catch(() => ({
+  const narrativasPadraoGrupo = {
     revenue:  'Monitore a evolucao diaria do faturamento consolidado para identificar padroes.',
     products: 'Priorize os produtos com maior giro nas duas unidades.',
     payments: 'Compare a distribuicao de pagamentos entre as unidades.',
-  }));
+  };
+  const narratives = opts.semNarrativas
+    ? narrativasPadraoGrupo
+    : await generateWeeklyNarratives(reportDataAgg).catch(() => narrativasPadraoGrupo);
 
   let wowInsight = null;
   if (staleProducts && staleProducts.length > 0) {
@@ -442,6 +507,11 @@ async function buildConsolidatedReportData(companyIds, type, periodOverride = nu
       text: `<b>${c.name}</b> nao aparece ha <span class="num">${c.days_dormant} dias</span>. Gastou R$${Math.round(c.total_spent || 0).toLocaleString('pt-BR')} no historico — vale uma mensagem de retorno.`,
     };
   }
+
+  const relatorio = opts.semBlocos || type !== 'weekly' ? null : RB.consolidarBlocos(
+    perCompany.map(r => ({ companyId: r.company.id, nome: r.company.name, dados: r.relatorio })),
+    { kpis, dailyRevenue, prevRevenue: totalPrevRev }
+  );
 
   delete kpis._prev_revenue;
   delete kpis._prev_sales;
@@ -479,6 +549,7 @@ async function buildConsolidatedReportData(companyIds, type, periodOverride = nu
       sales:        r.kpis.sales,
       avg_ticket:   r.kpis.avg_ticket,
     })),
+    relatorio,
   };
 }
 
@@ -531,7 +602,11 @@ async function generateReport(companyId, type, periodOverride = null, opts = {})
     deliveryId = delivery.id;
   }
 
-  const data = await buildReportData(companyId, type, period);
+  // tq-85: a versão (completa/resumo) sai da config do relatório. Na
+  // versão resumo os blocos não são calculados (o e-mail não usa).
+  const config = await configDoRelatorio(companyId, opts.config);
+  const versao = RB.versaoDoRelatorio(config);
+  const data = await buildReportData(companyId, type, period, { config, semBlocos: versao === 'resumo', semNarrativas: true });
 
   let reportUrl = null;
   try {
@@ -540,27 +615,17 @@ async function generateReport(companyId, type, periodOverride = null, opts = {})
       period_start: period.startDate,
       period_end:   period.endDate,
     });
-    const appUrl = process.env.APP_URL || 'https://app.getaura.com.br';
-    reportUrl = `${appUrl}/relatorios/semanal/${token}`;
+    reportUrl = urlDoRelatorio(token);
   } catch (err) {
     console.warn('[reportGenerator] signWeeklyReportToken falhou:', err.message);
     reportUrl = process.env.APP_URL || 'https://app.getaura.com.br';
   }
 
   const html = buildWeeklyReportHtml({
-    company:      { name: data.company.name, logo_url: data.company.logo_url },
-    period:       { label: data.periodLabel, edition: data.edition, sent_at: data.sentAt },
-    health:       data.health,
-    kpis:         data.kpis,
-    dailyRevenue: data.dailyRevenue,
-    topProducts:  data.topProducts,
-    payments:     data.payments,
-    priorities:   data.priorities,
-    wowInsight:   data.wowInsight,
-    narratives:   data.narratives,
-    heatmapData:  data.heatmapData,
-    plan:         data.company.plan || 'essencial',
-    reportUrl,
+    company:   { name: data.company.name, logo_url: data.company.logo_url },
+    companyId,
+    periodo:   { inicio: period.startDate, fim: period.endDate },
+    relatorio: data.relatorio,
   });
 
   if (!opts.semEntrega) {
@@ -576,6 +641,8 @@ async function generateReport(companyId, type, periodOverride = null, opts = {})
     company:    { ...data.company, recipient_email: recipient },
     period,
     kpis:       data.kpis,
+    relatorio:  RB.semInternos(data.relatorio),
+    versao,
     html,
     reportUrl,
   };
@@ -617,7 +684,11 @@ async function generateConsolidatedReport(companyIds, primaryId, type, periodOve
     deliveryId = delivery.id;
   }
 
-  const data = await buildConsolidatedReportData(companyIds, type, period);
+  const config = await configDoRelatorio(sub, opts.config);
+  const versao = RB.versaoDoRelatorio(config);
+  const data = await buildConsolidatedReportData(companyIds, type, period, {
+    config, decisorId: sub, semBlocos: versao === 'resumo', semNarrativas: true,
+  });
 
   let reportUrl = null;
   try {
@@ -627,27 +698,18 @@ async function generateConsolidatedReport(companyIds, primaryId, type, periodOve
       period_start: period.startDate,
       period_end:   period.endDate,
     });
-    const appUrl = process.env.APP_URL || 'https://app.getaura.com.br';
-    reportUrl = `${appUrl}/relatorios/semanal/${token}`;
+    reportUrl = urlDoRelatorio(token);
   } catch (err) {
     console.warn('[reportGenerator] signWeeklyReportToken (consolidado) falhou:', err.message);
     reportUrl = process.env.APP_URL || 'https://app.getaura.com.br';
   }
 
   const html = buildWeeklyReportHtml({
-    company:      { name: data.company.name, logo_url: data.company.logo_url },
-    period:       { label: data.periodLabel, edition: data.edition, sent_at: data.sentAt },
-    health:       data.health,
-    kpis:         data.kpis,
-    dailyRevenue: data.dailyRevenue,
-    topProducts:  data.topProducts,
-    payments:     data.payments,
-    priorities:   data.priorities,
-    wowInsight:   data.wowInsight,
-    narratives:   data.narratives,
-    heatmapData:  data.heatmapData,
-    plan:         data.company.plan || 'essencial',
-    reportUrl,
+    company:   { name: data.company.name, logo_url: data.company.logo_url },
+    companyId: sub,
+    periodo:   { inicio: period.startDate, fim: period.endDate },
+    relatorio: data.relatorio,
+    breakdown: data.breakdown,
   });
 
   if (!opts.semEntrega) {
@@ -663,6 +725,8 @@ async function generateConsolidatedReport(companyIds, primaryId, type, periodOve
     company:    { ...data.company, recipient_email: recipient },
     period,
     kpis:       data.kpis,
+    relatorio:  RB.semInternos(data.relatorio),
+    versao,
     html,
     reportUrl,
   };
@@ -674,4 +738,6 @@ module.exports = {
   buildReportData,
   buildConsolidatedReportData,
   updateDelivery,
+  configDoRelatorio,
+  urlDoRelatorio,
 };
