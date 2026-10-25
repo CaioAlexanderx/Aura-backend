@@ -17,8 +17,9 @@
 //      avisa a empresa de alert_company_id e encerra.
 //
 // Valor, vencimento e Pix vêm do Asaas na hora de publicar, nunca da
-// tabela: o Pix de uma cobrança pode ser regerado e o valor pode mudar
-// (cupom) entre o agendamento e o aviso.
+// tabela nem do preço do plano (e nunca o netValue): o Pix de uma cobrança
+// pode ser regerado e o valor pode mudar (cupom) entre o agendamento e o
+// aviso. O valor mostrado é payment.value, o mesmo da cobrança que o Pix paga.
 //
 // Nada aqui lança por causa de uma linha: a falha é logada e a linha fica
 // para a próxima volta (o Asaas fora do ar às 8h não perde o lembrete).
@@ -71,6 +72,15 @@ function nomeDoPlano(description) {
   return s || 'Assinatura Aura';
 }
 
+// Texto aprovado pelo Caio (item 14, 24/10/2026). O cliente não vê "Asaas"
+// no destaque: só no rodapé discreto da peça.
+function tituloDoLembrete(vencimento) {
+  return `Sua mensalidade da Aura vence ${diaDaSemana(vencimento)}, ${dataBr(vencimento).slice(0, 5)}.`;
+}
+
+const TEXTO_DO_LEMBRETE = 'O Pix está aqui embaixo, é só escanear ou copiar.';
+const ROTULO_DO_BOTAO = 'Abrir a fatura';
+
 function linkDaFatura(payment) {
   return payment.invoiceUrl || 'https://www.asaas.com/i/' + String(payment.id).replace(/^pay_/, '');
 }
@@ -91,8 +101,8 @@ function montarHtml({ plano, numero, valor, vencimento, pixCode, qrBase64 }) {
   html, body { width: 1080px; height: 720px; overflow: hidden; }
   body {
     font-family: "Inter", "Segoe UI", system-ui, -apple-system, Roboto, Arial, sans-serif;
-    background: radial-gradient(120% 90% at 0% 0%, #2a1260 0%, #150a33 55%, #0d0724 100%);
-    color: #fff;
+    background: #f4f1fb;
+    color: #1b1736;
     display: flex;
     padding: 56px 56px 52px 64px;
     gap: 48px;
@@ -100,53 +110,52 @@ function montarHtml({ plano, numero, valor, vencimento, pixCode, qrBase64 }) {
   .left { flex: 1; display: flex; flex-direction: column; min-width: 0; }
   .kicker {
     display: inline-flex; align-items: center; gap: 10px; align-self: flex-start;
-    background: rgba(245, 158, 11, 0.16); border: 1px solid rgba(245, 158, 11, 0.45);
-    color: #fbbf24; font-size: 20px; font-weight: 700; letter-spacing: 0.3px;
+    background: #f1ecfd; border: 1px solid #e4def5;
+    color: #6d28d9; font-size: 20px; font-weight: 700; letter-spacing: 0.3px;
     padding: 8px 18px; border-radius: 999px;
   }
-  .kicker .dot { width: 10px; height: 10px; border-radius: 50%; background: #f59e0b; }
-  h1 { font-size: 52px; line-height: 1.08; font-weight: 800; margin-top: 26px; letter-spacing: -0.8px; }
-  .sub { font-size: 23px; color: #c4b5fd; margin-top: 12px; }
+  .kicker .dot { width: 10px; height: 10px; border-radius: 50%; background: #6d28d9; }
+  h1 { font-size: 50px; line-height: 1.1; font-weight: 800; margin-top: 26px; letter-spacing: -0.8px; color: #1b1736; }
+  .sub { font-size: 23px; color: #51497f; margin-top: 12px; }
   .facts { display: flex; gap: 18px; margin-top: 34px; }
   .fact {
-    flex: 1; background: rgba(255,255,255,0.06); border: 1px solid rgba(255,255,255,0.12);
+    flex: 1; background: #ffffff; border: 1px solid #e4def5;
     border-radius: 18px; padding: 18px 22px;
   }
-  .fact .lbl { font-size: 17px; color: #a5a1c4; font-weight: 600; text-transform: uppercase; letter-spacing: 1px; }
-  .fact .val { font-size: 40px; font-weight: 800; margin-top: 6px; letter-spacing: -0.5px; }
-  .fact .val small { display: block; font-size: 18px; font-weight: 600; color: #fbbf24; margin-top: 2px; letter-spacing: 0; }
-  .code-lbl { font-size: 17px; color: #a5a1c4; font-weight: 600; text-transform: uppercase; letter-spacing: 1px; margin-top: auto; }
+  .fact .lbl { font-size: 17px; color: #51497f; font-weight: 600; text-transform: uppercase; letter-spacing: 1px; }
+  .fact .val { font-size: 40px; font-weight: 800; margin-top: 6px; letter-spacing: -0.5px; color: #1b1736; }
+  .fact .val small { display: block; font-size: 18px; font-weight: 600; color: #6d28d9; margin-top: 2px; letter-spacing: 0; }
+  .code-lbl { font-size: 17px; color: #51497f; font-weight: 600; text-transform: uppercase; letter-spacing: 1px; margin-top: auto; }
   .code-row { display: flex; gap: 12px; margin-top: 10px; align-items: stretch; }
   .code {
     flex: 1; min-width: 0;
     font-family: ui-monospace, "Cascadia Mono", Consolas, monospace;
-    font-size: 15px; line-height: 1.45; color: #e9e5ff;
-    background: rgba(0,0,0,0.35); border: 1px dashed rgba(196,181,253,0.45);
+    font-size: 15px; line-height: 1.45; color: #1b1736;
+    background: #ffffff; border: 1px dashed #c4b5fd;
     border-radius: 14px; padding: 12px 16px;
     word-break: break-all; user-select: all; -webkit-user-select: all;
   }
   button.copy {
     flex: 0 0 auto; width: 150px; border: none; border-radius: 14px; cursor: pointer;
-    background: linear-gradient(135deg, #8b5cf6 0%, #7c3aed 100%); color: #fff;
+    background: #6d28d9; color: #fff;
     font: inherit; font-size: 21px; font-weight: 800;
   }
-  button.copy.ok { background: #10b981; }
+  button.copy.ok { background: #0f766e; }
 
   .right { width: 400px; display: flex; flex-direction: column; align-items: center; justify-content: center; }
   .qr-card {
-    background: #fff; border-radius: 28px; padding: 22px;
-    box-shadow: 0 24px 60px rgba(0,0,0,0.45);
+    background: #fff; border: 1px solid #e4def5; border-radius: 28px; padding: 22px;
   }
   .qr-card img { display: block; width: 356px; height: 356px; image-rendering: pixelated; }
-  .qr-cap { margin-top: 20px; text-align: center; font-size: 21px; color: #c4b5fd; line-height: 1.35; }
-  .qr-cap b { color: #fff; }
-  .brand { margin-top: 18px; font-size: 17px; color: #7d77a3; letter-spacing: 0.4px; }
+  .qr-cap { margin-top: 20px; text-align: center; font-size: 21px; color: #51497f; line-height: 1.35; }
+  .qr-cap b { color: #1b1736; }
+  .brand { margin-top: 18px; font-size: 14px; color: #8b84ad; letter-spacing: 0.2px; }
 </style>
 </head>
 <body>
   <div class="left">
-    <span class="kicker"><span class="dot"></span>Vence em ${escapeHtml(dataBr(vencimento).slice(0, 5))}</span>
-    <h1>Lembrete de pagamento da sua assinatura Aura</h1>
+    <span class="kicker"><span class="dot"></span>Lembrete de pagamento</span>
+    <h1>${escapeHtml(tituloDoLembrete(vencimento))}</h1>
     <p class="sub">${sub}</p>
 
     <div class="facts">
@@ -212,11 +221,9 @@ function montarHtml({ plano, numero, valor, vencimento, pixCode, qrBase64 }) {
 function montarLembrete({ payment, pixCode, qrBase64, extraNote }) {
   const plano = nomeDoPlano(payment.description);
   const vencimento = payment.dueDate;
-  const resumo = `${plano} — ${brl(payment.value)}, vencimento ${dataBr(vencimento)}. ` +
-    'Pague via Pix pelo QR Code ou pelo código copia e cola.' +
-    (extraNote ? ' ' + String(extraNote).trim() : '');
+  const resumo = TEXTO_DO_LEMBRETE + (extraNote ? ' ' + String(extraNote).trim() : '');
   return {
-    title: `Sua fatura Aura vence em ${dataBr(vencimento).slice(0, 5)}`,
+    title: tituloDoLembrete(vencimento),
     // O código vai também no texto: é o que sobra onde a peça HTML não
     // é desenhada. O e-mail usa `resumo` — lá o código tem bloco próprio.
     body: `${resumo}\n\nPIX copia e cola: ${pixCode}`,
@@ -224,7 +231,7 @@ function montarLembrete({ payment, pixCode, qrBase64, extraNote }) {
     htmlContent: montarHtml({
       plano, numero: payment.invoiceNumber, valor: payment.value, vencimento, pixCode, qrBase64,
     }),
-    ctaLabel: 'Abrir fatura no Asaas',
+    ctaLabel: ROTULO_DO_BOTAO,
     ctaUrl: linkDaFatura(payment),
     expiresAt: `${somarDias(vencimento, DIAS_NO_AR_APOS_VENCER)}T23:59:59-03:00`,
   };
