@@ -3,6 +3,7 @@
 //
 // 4.1 boas-vindas (teste que espera a primeira venda, teste em curso, outra
 // vertical), 4.2, 4.3 (no dia e na recuperação), 4.4 (com e sem cadastro),
+// 4.5 conta guardada (com contagem e com contagem zero; tq-111),
 // assinatura cancelada (com e sem o Caixa), "faz uns dias que você não
 // aparece" e o 2.6 (nova data). Mais as regras que valem para todos: carta
 // com a letra, WhatsApp da Aura, rodapé de descadastro do tipo, frases
@@ -146,6 +147,52 @@ describe('4.2 a 4.4', () => {
     const c = C.testeEncerrado({ nome: 'Ana', loja: 'Loja', nProdutos: 0, nClientes: 0, link: 'https://app.getaura.com.br/checkout', ...LINKS });
     expect(c.text).toContain('O Caixa segue liberado para você vender. As outras telas voltam');
     expect(c.text).not.toContain('continua guardado');
+  });
+});
+
+describe('4.5 sua conta da Aura fica guardada (tq-111)', () => {
+  const LINK = 'https://app.getaura.com.br/?empresa=emp-1';
+  const SEM_PROMESSA = [/R\$/, /plano/i, /prazo/i, /para sempre/i, /assin/i];
+
+  test('com produtos e clientes: texto do mock, com a contagem', () => {
+    const c = C.contaGuardada({ nome: 'Maria', loja: 'Modas da Maria', nProdutos: 48, nClientes: 112, link: LINK, ...LINKS });
+    regras(c);
+    comDescadastro(c);
+    expect(c.assunto).toBe('Sua conta da Aura fica guardada');
+    expect(c.previa).toBe('Quando quiser recomeçar, está tudo aqui');
+    expect(c.text).toContain('Oi, Maria.');
+    expect(c.text).toContain(
+      'Só passando para dizer que a conta da Modas da Maria fica guardada aqui. ' +
+      'Quando você quiser recomeçar, é só entrar: 48 produtos e 112 clientes estarão onde você deixou.'
+    );
+    expect(c.text).toContain('Sem pressa e sem compromisso. E se um dia precisar de uma mão para retomar, é só responder este e-mail.');
+    expect(c.text).toContain(`Abrir minha conta: ${LINK}`);
+    expect(c.text).toContain('Um abraço,\nCaio Alexander, fundador da Aura');
+    for (const f of SEM_PROMESSA) expect(c.text).not.toMatch(f);
+    expect(c.html).toMatchSnapshot();
+  });
+
+  test('singular: 1 produto e 1 cliente', () => {
+    const c = C.contaGuardada({ nome: 'Ana', loja: 'Loja', nProdutos: 1, nClientes: 1, link: LINK, ...LINKS });
+    expect(c.text).toContain('é só entrar: 1 produto e 1 cliente estarão onde você deixou.');
+  });
+
+  test.each([
+    ['produtos 0', 0, 7],
+    ['clientes 0', 9, 0],
+    ['os dois 0', 0, 0],
+  ])('contagem zero (%s): só "a conta da {loja} fica guardada aqui"', (_, p, k) => {
+    const c = C.contaGuardada({ nome: 'Ana', loja: 'Loja da Ana', nProdutos: p, nClientes: k, link: LINK, ...LINKS });
+    regras(c);
+    expect(c.text).toContain('Só passando para dizer que a conta da Loja da Ana fica guardada aqui.\n\nSem pressa');
+    expect(c.text).not.toContain('estarão onde você deixou');
+    expect(c.text).not.toContain('recomeçar, é só entrar');
+    for (const f of SEM_PROMESSA) expect(c.text).not.toMatch(f);
+  });
+
+  test('snapshot com contagem zero', () => {
+    const c = C.contaGuardada({ nome: 'Ana', loja: 'Loja da Ana', nProdutos: 0, nClientes: 0, link: LINK, ...LINKS });
+    expect(c.html).toMatchSnapshot();
   });
 });
 

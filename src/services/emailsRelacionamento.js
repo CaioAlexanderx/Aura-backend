@@ -3,7 +3,8 @@
 //
 // tq-80 (4.1 boas-vindas), tq-81 (4.2 primeira venda que não saiu, 4.3
 // teste terminando, 4.4 teste encerrado), tq-79 (assinatura cancelada) e
-// tq-82 (faz uns dias que você não aparece).
+// tq-82 (faz uns dias que você não aparece) e tq-111 (4.5 sua conta da Aura
+// fica guardada: texto do mock aprovado pelo Caio em 24/10).
 //
 // Textos 4.1 a 4.4: Cassie (cs-emails-textos-21-10.md), sem mudar o miolo.
 // {linha_do_teste} diz a verdade do modo da conta (services/trialRegra):
@@ -181,6 +182,35 @@ function testeEncerrado(d) {
   return comRodape(c, d);
 }
 
+// ── 4.5 Sua conta fica guardada (tq-111) ────────────────────────
+// Para quem se despediu por motivo externo, no lugar do 4.4. Texto do mock
+// aprovado pelo Caio (24/10). Com produtos E clientes, a segunda frase diz
+// quantos ficam guardados; se um dos dois for 0, ela sai e fica só "a conta
+// da {loja} fica guardada aqui". Sem preço, sem plano, sem prazo e nunca
+// "para sempre". "Fica guardada" é verdade: nenhum job apaga dado de conta
+// com teste vencido.
+function contaGuardada(d) {
+  const p = Number(d.nProdutos) || 0;
+  const k = Number(d.nClientes) || 0;
+  const contagem = p > 0 && k > 0
+    ? ` Quando você quiser recomeçar, é só entrar: ${plural(p, 'produto', 'produtos')} e ` +
+      `${plural(k, 'cliente', 'clientes')} estarão onde você deixou.`
+    : '';
+  const c = carta({
+    assunto: 'Sua conta da Aura fica guardada',
+    previa: 'Quando quiser recomeçar, está tudo aqui',
+    blocos: [
+      `Oi, ${d.nome}.`,
+      `Só passando para dizer que a conta da ${d.loja} fica guardada aqui.${contagem}`,
+      'Sem pressa e sem compromisso. E se um dia precisar de uma mão para retomar, é só responder este e-mail.',
+    ],
+    botao: { rotulo: 'Abrir minha conta', url: d.link },
+    whatsapp: `Oi, Caio! Recebi seu e-mail sobre a conta da ${d.loja} na Aura.`,
+    rodape: rodapeDoTipo({ ...d, motivo: `Você recebe este e-mail porque testou a Aura com a ${d.loja}.` }),
+  });
+  return comRodape(c, d);
+}
+
 // ── Assinatura cancelada (tq-79; TEXTO A APROVAR PELO CAIO) ─────
 // caixaSegue: só no shell Negócio e fora do atraso (em atraso o Caixa pausa
 // no dia 14; Odonto, Food e Studio vão ao checkout). Sem promessa nenhuma:
@@ -229,6 +259,7 @@ module.exports = {
   primeiraVendaNaoSaiu,
   testeTerminando,
   testeEncerrado,
+  contaGuardada,
   assinaturaCancelada,
   sumiu,
 };
