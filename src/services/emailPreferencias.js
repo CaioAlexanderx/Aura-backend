@@ -15,6 +15,16 @@
 // Cada desligamento pelo e-mail (descadastro, reclamação de spam) grava uma
 // linha em audit_log (action 'email.descadastro') por empresa desligada.
 //
+// Conta marcada "Não quer" (tq-110, Caio 24/10): a nota MAIS RECENTE com
+// resultado da empresa em company_admin_notes (migration 383) tem
+// resultado = 'nao_quer'. Ela sai de todo e-mail comercial (TIPOS_COMERCIAIS:
+// relatório, ajuda, acompanhamento e novidades), e tipoLigado() devolve
+// false. Uma nota mais nova com outro resultado (quer_assinar, respondeu,
+// sem_resposta...) derruba a marca. Nota livre (resultado NULL) não conta.
+// Cobrança, segurança, recibo e pedido da loja online não mudam. Ponto
+// único: empresaAceitaComercial() (lida na hora, sem cache) e, para as
+// seleções em lote, sqlMarcaNaoQuer() com a mesma regra.
+//
 // Kill switch (padrão ligado): RELATORIO_PADRAO_LIGADO=false ou
 // EMAILS_CICLO_ENABLED=false fazem a linha ausente do relatório valer
 // DESLIGADO: só recebe quem tem linha explícita ligada (as empresas que já
@@ -34,6 +44,10 @@ const TIPOS = Object.freeze({
 
 // Sem preferência: sempre saem.
 const TIPOS_SEMPRE = Object.freeze(['cobranca', 'seguranca']);
+
+// Comerciais (tq-110): a conta marcada "Não quer" não recebe. pedido_loja é
+// o aviso de pedido novo da própria loja: segue.
+const TIPOS_COMERCIAIS = Object.freeze(['relatorio', 'ajuda', 'acompanhamento', 'novidades']);
 
 // Blocos do relatório (mock da Nina, 21/10). O relatório longo (tq-85) lê
 // blocosDoRelatorio(): o que o dono deixou ligado E o plano tem.
@@ -153,12 +167,75 @@ async function linhasLegadas(db, companyId) {
   }
 }
 
+// ── Conta marcada "Não quer" (tq-110) ───────────────────────────
+
+/**
+ * Expressão SQL (booleana) "a empresa da coluna `colEmpresa` está marcada
+ * Não quer": a nota mais recente com resultado é 'nao_quer' (e, com
+ * `motivo`, tem esse motivo). A mesma regra de empresaAceitaComercial(),
+ * para as seleções em lote (relatório semanal, 4.5).
+ */
+function sqlMarcaNaoQuer(colEmpresa, { motivo = null } = {}) {
+  if (!/^[a-z_][a-z0-9_]*(\.[a-z_][a-z0-9_]*)?$/i.test(colEmpresa)) throw new Error('coluna inválida');
+  if (motivo != null && !/^[a-z_]+$/.test(motivo)) throw new Error('motivo inválido');
+  return `EXISTS (
+    SELECT 1 FROM (
+      SELECT n.resultado, n.motivo
+        FROM company_admin_notes n
+       WHERE n.company_id = ${colEmpresa} AND n.resultado IS NOT NULL
+       ORDER BY n.created_at DESC, n.id DESC
+       LIMIT 1
+    ) ultima_nota
+     WHERE ultima_nota.resultado = 'nao_quer'${motivo ? ` AND ultima_nota.motivo = '${motivo}'` : ''})`;
+}
+
+/**
+ * A nota mais recente com resultado da empresa: { resultado, motivo } ou
+ * null. Sem a tabela ou as colunas da 383 (42P01/42703): null.
+ */
+async function ultimaNotaComResultado(db, companyId) {
+  if (!companyId) return null;
+  try {
+    const { rows } = await db.query(
+      `SELECT resultado, motivo
+         FROM company_admin_notes
+        WHERE company_id = $1 AND resultado IS NOT NULL
+        ORDER BY created_at DESC, id DESC
+        LIMIT 1`,
+      [companyId]
+    );
+    const r = rows && rows[0];
+    return r && r.resultado ? { resultado: r.resultado, motivo: r.motivo || null } : null;
+  } catch (err) {
+    if (err && (err.code === '42P01' || err.code === '42703')) return null;
+    throw err;
+  }
+}
+
+/**
+ * A empresa aceita e-mail comercial? false quando a nota mais recente com
+ * resultado é 'nao_quer'. Lido na hora, sem cache: uma nota nova vale no
+ * próximo envio.
+ */
+async function empresaAceitaComercial(db, companyId) {
+  const nota = await ultimaNotaComResultado(db, companyId);
+  return !(nota && nota.resultado === 'nao_quer');
+}
+
 /**
  * O tipo está ligado para a empresa? Lido na hora, sem cache. Cobrança e
- * segurança: sempre true. Tipo desconhecido: false.
+ * segurança: sempre true. Tipo desconhecido: false. Tipo comercial de conta
+ * marcada "Não quer" (tq-110): false, salvo `aceitaNaoQuer` (só o 4.5, que
+ * é justamente o e-mail dessas contas).
  */
-async function tipoLigado(db, companyId, tipo, { env = process.env } = {}) {
+async function tipoLigado(db, companyId, tipo, { env = process.env, aceitaNaoQuer = false } = {}) {
   if (TIPOS_SEMPRE.includes(tipo)) return true;
+  if (!(await preferenciaLigada(db, companyId, tipo, env))) return false;
+  if (aceitaNaoQuer || !TIPOS_COMERCIAIS.includes(tipo)) return true;
+  return empresaAceitaComercial(db, companyId);
+}
+
+async function preferenciaLigada(db, companyId, tipo, env) {
   if (!tipoValido(tipo) || !companyId) return false;
   let linha = null;
   try {
@@ -471,6 +548,7 @@ function descadastroDoTipo(companyId, tipo, { grupo = false, env = process.env }
 module.exports = {
   TIPOS,
   TIPOS_SEMPRE,
+  TIPOS_COMERCIAIS,
   BLOCOS,
   BLOCOS_ESSENCIAL,
   VERSOES,
@@ -482,6 +560,9 @@ module.exports = {
   preferenciaEfetiva,
   preferenciasDaEmpresa,
   tipoLigado,
+  sqlMarcaNaoQuer,
+  ultimaNotaComResultado,
+  empresaAceitaComercial,
   donoDaEmpresa,
   enderecosExtras,
   destinatariosDe,

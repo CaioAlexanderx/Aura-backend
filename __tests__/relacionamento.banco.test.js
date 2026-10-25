@@ -6,7 +6,8 @@
 // (conta interna, sandbox, e-mail não confirmado, Karatê, outra vertical,
 // filial, quem já assinou, quem já vendeu), o último acesso por dono, o
 // espelho das assinaturas (ordem dos eventos, encerramento uma vez, marca
-// de quem pediu) e a idempotência de ponta a ponta pelo email_log. Tudo numa
+// de quem pediu), a conta "Não quer" e o 4.5 (tq-110, tq-111, migration 412)
+// e a idempotência de ponta a ponta pelo email_log. Tudo numa
 // transação revertida no banco do CI, como emailsCobranca.banco.test.js.
 // ============================================================
 'use strict';
@@ -373,5 +374,98 @@ describe('espelho das assinaturas (410)', () => {
     expect(log.rows).toEqual([{ status: 'sent' }]);
     expect(l.id).toBeTruthy();
     expect(velha.id).toBeTruthy();
+  });
+});
+
+describe('tq-110 e tq-111 no banco: conta "Não quer" e o 4.5 (migration 412)', () => {
+  let c;
+  const P = require('../src/services/emailPreferencias');
+
+  /** Nota do Registrar contato (company_admin_notes, 383) no instante dado. */
+  async function nota(cid, autor, resultado, motivo, quando) {
+    await client.query(
+      `INSERT INTO company_admin_notes (company_id, author_user_id, body, canal, resultado, motivo, created_at)
+       VALUES ($1, $2, 'fixture', 'whatsapp', $3, $4, $5::timestamptz)`,
+      [cid, autor, resultado, motivo, brt(quando)]
+    );
+  }
+
+  beforeAll(async () => {
+    // A 412 roda duas vezes dentro da transação: idempotente.
+    const sql = fs.readFileSync(path.join(__dirname, '..', 'migrations', '412_motivo_externo.sql'), 'utf8');
+    await client.query(sql);
+    await client.query(sql);
+    c = {
+      externo: await loja({ fim: '2026-10-24 08:00', produtos: 4, clientes: 6 }),
+      externoZero: await loja({ fim: '2026-10-23 20:00' }),
+      naoQuerPreco: await loja({ fim: '2026-10-24 08:00' }),
+      externoDepoisQuer: await loja({ fim: '2026-10-24 08:00' }),
+      externoHa2: await loja({ fim: '2026-10-22 20:00' }),
+      naoQuerTerminando: await loja({ fim: '2026-10-26 15:00' }),
+      naoQuerDepoisNotaLivre: await loja({ fim: '2026-10-26 15:00' }),
+    };
+    await nota(c.externo.id, c.externo.dono, 'nao_quer', 'motivo_externo', '2026-10-20 10:00');
+    await nota(c.externoZero.id, c.externoZero.dono, 'nao_quer', 'motivo_externo', '2026-10-20 10:00');
+    await nota(c.naoQuerPreco.id, c.naoQuerPreco.dono, 'nao_quer', 'preco_plano', '2026-10-20 10:00');
+    await nota(c.externoDepoisQuer.id, c.externoDepoisQuer.dono, 'nao_quer', 'motivo_externo', '2026-10-20 10:00');
+    await nota(c.externoDepoisQuer.id, c.externoDepoisQuer.dono, 'quer_assinar', null, '2026-10-21 10:00');
+    await nota(c.externoHa2.id, c.externoHa2.dono, 'nao_quer', 'motivo_externo', '2026-10-20 10:00');
+    await nota(c.naoQuerTerminando.id, c.naoQuerTerminando.dono, 'respondeu', null, '2026-10-19 10:00');
+    await nota(c.naoQuerTerminando.id, c.naoQuerTerminando.dono, 'nao_quer', 'concorrente', '2026-10-20 10:00');
+    await nota(c.naoQuerDepoisNotaLivre.id, c.naoQuerDepoisNotaLivre.dono, 'nao_quer', 'fiscal', '2026-10-20 10:00');
+    // Nota livre (sem resultado) depois: não derruba a marca.
+    await client.query(
+      `INSERT INTO company_admin_notes (company_id, author_user_id, body, created_at) VALUES ($1, $2, 'nota livre', $3::timestamptz)`,
+      [c.naoQuerDepoisNotaLivre.id, c.naoQuerDepoisNotaLivre.dono, brt('2026-10-21 10:00')]
+    );
+  });
+
+  test('a 412 aceita motivo_externo e continua recusando motivo desconhecido', async () => {
+    await client.query('SAVEPOINT motivo_ruim');
+    await expect(nota(c.externo.id, c.externo.dono, 'nao_quer', 'inventado', '2026-10-01 10:00')).rejects.toThrow(/company_admin_notes_motivo_check/);
+    await client.query('ROLLBACK TO SAVEPOINT motivo_ruim');
+  });
+
+  test('empresaAceitaComercial: a nota mais recente com resultado decide', async () => {
+    const db = conn();
+    expect(await P.empresaAceitaComercial(db, c.naoQuerPreco.id)).toBe(false);
+    expect(await P.empresaAceitaComercial(db, c.externoDepoisQuer.id)).toBe(true);
+    expect(await P.empresaAceitaComercial(db, c.naoQuerTerminando.id)).toBe(false);
+    expect(await P.empresaAceitaComercial(db, c.naoQuerDepoisNotaLivre.id)).toBe(false);
+    expect(await P.empresaAceitaComercial(db, uuid())).toBe(true);
+  });
+
+  test('seleção do 4.5: só "Não quer" por motivo externo, na janela do 4.4', async () => {
+    const rows = await selecionar(R.SQL_CONTA_GUARDADA);
+    const achou = ids(rows);
+    expect(achou.has(c.externo.id)).toBe(true);
+    expect(achou.has(c.externoZero.id)).toBe(true);
+    for (const k of ['naoQuerPreco', 'externoDepoisQuer', 'externoHa2', 'naoQuerTerminando']) {
+      expect([k, achou.has(c[k].id)]).toEqual([k, false]);
+    }
+    expect(rows.find((r) => r.company_id === c.externo.id)).toMatchObject({ n_produtos: 4, n_clientes: 6 });
+  });
+
+  test('de ponta a ponta: 4.5 uma vez no lugar do 4.4; marcada sem motivo externo não recebe nada; desmarcada recebe o 4.4', async () => {
+    const enviar = jest.fn(async () => ({ id: 're_nq' }));
+    await R.voltaDoTeste({ db: conn(), enviar, env: {}, now: AGORA });
+    await R.voltaDoTeste({ db: conn(), enviar, env: {}, now: AGORA });
+    const { rows } = await client.query(
+      `SELECT company_id, chave_idempotencia, status FROM email_log WHERE company_id = ANY($1::uuid[]) ORDER BY chave_idempotencia`,
+      [[c.externo.id, c.externoZero.id, c.naoQuerPreco.id, c.externoDepoisQuer.id, c.naoQuerTerminando.id, c.naoQuerDepoisNotaLivre.id]]
+    );
+    const chaves = rows.map((r) => r.chave_idempotencia);
+    expect(chaves).toEqual([
+      `conta-guardada:${c.externo.id}`,
+      `conta-guardada:${c.externoZero.id}`,
+      `teste-encerrado:${c.externoDepoisQuer.id}:2026-10-24`,
+    ].sort());
+    expect(rows.every((r) => r.status === 'sent')).toBe(true);
+    const guardada = enviar.mock.calls.map(([m]) => m).filter((m) => m.subject === 'Sua conta da Aura fica guardada');
+    expect(guardada).toHaveLength(2);
+    const comContagem = guardada.find((m) => m.text.includes('4 produtos e 6 clientes estarão onde você deixou'));
+    expect(comContagem).toBeTruthy();
+    const semContagem = guardada.find((m) => m !== comContagem);
+    expect(semContagem.text).not.toContain('estarão onde você deixou');
   });
 });

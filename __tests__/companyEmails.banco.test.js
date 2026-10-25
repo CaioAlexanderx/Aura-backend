@@ -264,6 +264,55 @@ describe('scheduler: quem entra no relatório', () => {
   });
 });
 
+describe('scheduler: conta "Não quer" fora do relatório (tq-110)', () => {
+  const dono2 = uuid();
+  const dono3 = uuid();
+  const e = {};
+
+  async function nota(cid, autor, resultado, motivo, minutosAtras) {
+    await q(
+      `INSERT INTO company_admin_notes (company_id, author_user_id, body, canal, resultado, motivo, created_at)
+       VALUES ($1, $2, 'fixture', 'whatsapp', $3, $4, NOW() - ($5 || ' minutes')::interval)`,
+      [cid, autor, resultado, motivo, String(minutosAtras)]
+    );
+  }
+
+  beforeAll(async () => {
+    await q(`INSERT INTO users (id, email, password_hash, full_name) VALUES ($1, $2, 'x', 'Dono Dois'), ($3, $4, 'x', 'Dono Tres')`,
+      [dono2, `dono2-${dono2.slice(0, 8)}@example.test`, dono3, `dono3-${dono3.slice(0, 8)}@example.test`]);
+    const casos = [
+      ['matrizMarcada', dono2, true], ['filialLimpa', dono2, false], ['filialDesmarcada', dono2, false],
+      ['soMarcadaA', dono3, true], ['soMarcadaB', dono3, false],
+    ];
+    for (const [nome, owner, primaria] of casos) {
+      e[nome] = uuid();
+      await q(`INSERT INTO companies (id, owner_id, legal_name, billing_status, is_primary) VALUES ($1, $2, $3, 'active', $4)`,
+        [e[nome], owner, 'Fixture ' + nome, primaria]);
+    }
+    await nota(e.matrizMarcada, dono2, 'nao_quer', 'preco_plano', 60);
+    await nota(e.filialDesmarcada, dono2, 'nao_quer', 'preco_plano', 60);
+    await nota(e.filialDesmarcada, dono2, 'quer_assinar', null, 10);
+    await nota(e.soMarcadaA, dono3, 'nao_quer', 'concorrente', 60);
+    await nota(e.soMarcadaB, dono3, 'nao_quer', 'atrito_produto', 30);
+  });
+
+  test('a marcada sai; nota posterior "quer_assinar" volta; no consolidado ela sai do grupo; todas marcadas, nada sai', async () => {
+    const { empresasElegiveis, getEligibleOwnerGroups } = require('../src/jobs/reportScheduler');
+    const dentro = new Set((await empresasElegiveis()).map((r) => r.id));
+    expect(dentro.has(e.matrizMarcada)).toBe(false);
+    expect(dentro.has(e.filialLimpa)).toBe(true);
+    expect(dentro.has(e.filialDesmarcada)).toBe(true);
+    expect(dentro.has(e.soMarcadaA)).toBe(false);
+    expect(dentro.has(e.soMarcadaB)).toBe(false);
+
+    const grupos = await getEligibleOwnerGroups();
+    const g2 = grupos.find((x) => x.owner_id === dono2);
+    expect(g2.all.map((x) => x.id).sort()).toEqual([e.filialLimpa, e.filialDesmarcada].sort());
+    expect(g2.primary.id).not.toBe(e.matrizMarcada);
+    expect(grupos.find((x) => x.owner_id === dono3)).toBeUndefined();
+  });
+});
+
 describe('"me enviar um agora"', () => {
   test('manda para o dono, não conta como envio da semana e para no terceiro do dia', async () => {
     reportGenerator.generateReport.mockResolvedValue({

@@ -20,6 +20,11 @@
 //     instancias nunca mandam o mesmo relatorio duas vezes. report_deliveries
 //     continua com o status de cada tentativa.
 // A trava em memoria virou so "nao rodar dois ticks ao mesmo tempo".
+//
+// 24/10/2026 (tq-110): empresa marcada "Nao quer" (nota mais recente com
+// resultado = 'nao_quer', emailPreferencias.sqlMarcaNaoQuer) sai da lista.
+// No consolidado, ela sai do grupo do dono; com todas marcadas, nada sai.
+// O "Me enviar um agora" e pedido do dono e continua valendo.
 // ============================================================
 
 const db = require('../config/database');
@@ -45,7 +50,8 @@ async function empresasElegiveis({ env = process.env } = {}) {
         c.is_active = true
     AND COALESCE(c.is_sandbox, false) = false
     AND COALESCE(c.vertical, '') <> ALL($1::text[])
-    AND COALESCE(c.vertical_active, '') <> ALL($1::text[])`;
+    AND COALESCE(c.vertical_active, '') <> ALL($1::text[])
+    AND NOT ${P.sqlMarcaNaoQuer('c.id')}`;
   const interna = `(COALESCE(u.is_staff, false) = true
                     OR lower(COALESCE(u.email, '')) LIKE '%@getaura.com.br'
                     OR lower(COALESCE(c.email, '')) LIKE '%@getaura.com.br')`;

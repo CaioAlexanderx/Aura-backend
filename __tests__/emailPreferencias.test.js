@@ -50,7 +50,8 @@ describe('padrões e linha ausente', () => {
     expect(await P.tipoLigado(db, EMP, 'seguranca')).toBe(true);
     expect(await P.tipoLigado(db, EMP, 'marketing')).toBe(false);
     expect(db.query).not.toHaveBeenCalled();
-    db.query.mockResolvedValueOnce({ rows: [] }).mockResolvedValueOnce({ rows: [{ ligado: false, config: {} }] });
+    // prefs (sem linha) + nota do tq-110 (sem nota); depois prefs desligada.
+    db.query.mockResolvedValueOnce({ rows: [] }).mockResolvedValueOnce({ rows: [] }).mockResolvedValueOnce({ rows: [{ ligado: false, config: {} }] });
     expect(await P.tipoLigado(db, EMP, 'novidades')).toBe(true);
     expect(await P.tipoLigado(db, EMP, 'novidades')).toBe(false); // lê de novo a cada envio
   });

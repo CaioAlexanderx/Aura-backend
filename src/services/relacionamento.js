@@ -8,7 +8,10 @@
 //          4.2 primeira venda que não saiu: 2 dias depois do cadastro (3 na
 //              recuperação), sem nenhuma venda;
 //          4.3 teste terminando: 2 dias antes do fim (1 na recuperação);
-//          4.4 teste encerrado: no dia em que acabou (ou no seguinte).
+//          4.4 teste encerrado: no dia em que acabou (ou no seguinte);
+//          4.5 conta guardada (tq-111): no lugar do 4.4, na mesma janela,
+//              uma vez só, para a conta cuja nota mais recente é "Não quer"
+//              com motivo 'motivo_externo'.
 // tq-82b "faz uns dias que você não aparece": 7 dias sem acesso (8 na
 //        recuperação), uma vez por período de ausência.
 //
@@ -32,9 +35,12 @@
 //     (utils/muroDeAssinatura do app: Odonto, Food, Studio e Karatê vão ao
 //     checkout). Para as outras verticais esses dois não saem. O 4.2 também
 //     fica só no varejo: o texto fala em achar o Caixa e imprimir etiqueta;
-//   - preferências: tipo "ajuda" (4.1 a 4.4) e "acompanhamento" (sumiu),
+//   - preferências: tipo "ajuda" (4.1 a 4.5) e "acompanhamento" (sumiu),
 //     lidas na hora do envio (emailPreferencias.tipoLigado); o rodapé leva
-//     "Ajustar meus e-mails" e o descadastro de um clique do tipo.
+//     "Ajustar meus e-mails" e o descadastro de um clique do tipo;
+//   - conta marcada "Não quer" (tq-110): tipoLigado devolve false para os
+//     tipos comerciais, então ela não recebe boas-vindas, 4.2, 4.3, 4.4 nem
+//     "sumiu". Só o 4.5 passa (aceitaNaoQuer), e só com motivo_externo.
 //
 // Kill switches: EMAILS_CICLO_ENABLED (geral), EMAIL_BOAS_VINDAS_ENABLED e
 // EMAILS_TESTE_ENABLED (padrão ligados), EMAIL_SUMIU_ENABLED (padrão
@@ -44,7 +50,7 @@
 
 const conteudos = require('./emailsRelacionamento');
 const { enviarEmailRegistrado } = require('./emailLog');
-const { tipoLigado, descadastroDoTipo } = require('./emailPreferencias');
+const { tipoLigado, descadastroDoTipo, sqlMarcaNaoQuer, ultimaNotaComResultado } = require('./emailPreferencias');
 const { appUrl } = require('./emailLinks');
 const { montarTrial } = require('./trialRegra');
 const L = require('./emailLayout');
@@ -137,8 +143,8 @@ function primeiroNome(full, loja) {
  * lendo a preferência na hora. Devolve o status do enviarEmailRegistrado,
  * ou 'desligado' quando a loja desligou o tipo.
  */
-async function enviarRelacionamento({ db, enviar, env, tipoPref, tipo, chave, alvo, montar, metadata }) {
-  if (!(await tipoLigado(db, alvo.companyId, tipoPref, { env }))) return 'desligado';
+async function enviarRelacionamento({ db, enviar, env, tipoPref, tipo, chave, alvo, montar, metadata, aceitaNaoQuer = false }) {
+  if (!(await tipoLigado(db, alvo.companyId, tipoPref, { env, aceitaNaoQuer }))) return 'desligado';
   const d = descadastroDoTipo(alvo.companyId, tipoPref, { env });
   const conteudo = montar({ descadastro: d.link, ajustar: d.ajustar });
   const r = await enviarEmailRegistrado({
@@ -259,6 +265,25 @@ SELECT ${COLUNAS_DA_LOJA},
  ORDER BY c.trial_ends_at
  LIMIT 500`;
 
+// 4.5 (tq-111): a mesma janela e os mesmos filtros do 4.4, só para a conta
+// cuja nota mais recente é "Não quer" com motivo_externo. Para ela o 4.4 não
+// sai (tipoLigado barra a conta marcada), e este sai uma vez só.
+const MOTIVO_CONTA_GUARDADA = 'motivo_externo';
+const SQL_CONTA_GUARDADA = `
+SELECT ${COLUNAS_DA_LOJA},
+       (SELECT COUNT(*)::int FROM products p WHERE p.company_id = c.id AND p.is_active IS NOT FALSE) AS n_produtos,
+       (SELECT COUNT(*)::int FROM customers k WHERE k.company_id = c.id AND k.is_active IS NOT FALSE) AS n_clientes
+  FROM companies c
+  JOIN users u ON u.id = c.owner_id
+ WHERE ${SQL_ELEGIVEL}
+   AND ${SQL_VAREJO}
+   AND ${SQL_EM_TESTE}
+   AND c.trial_ends_at <= $2::timestamptz
+   AND ($1::date - (c.trial_ends_at AT TIME ZONE '${TZ}')::date) BETWEEN 0 AND 1
+   AND ${sqlMarcaNaoQuer('c.id', { motivo: MOTIVO_CONTA_GUARDADA })}
+ ORDER BY c.trial_ends_at
+ LIMIT 500`;
+
 function alvoDaLinha(r) {
   const email = String(r.email || '').trim();
   return email.includes('@') ? { companyId: r.company_id, userId: r.user_id, email } : null;
@@ -269,7 +294,7 @@ function alvoDaLinha(r) {
  * situação. Nunca lança por uma loja: a falha de uma não para as outras.
  */
 async function voltaDoTeste({ db, enviar, env = process.env, now = Date.now() } = {}) {
-  const resumo = { sem_venda: {}, terminando: {}, encerrado: {} };
+  const resumo = { sem_venda: {}, terminando: {}, encerrado: {}, conta_guardada: {} };
   if (!emailsDoTesteLigados(env)) return { desligado: true, ...resumo };
   const hoje = hojeBrt(now);
   const agora = new Date(now).toISOString();
@@ -298,6 +323,17 @@ async function voltaDoTeste({ db, enviar, env = process.env, now = Date.now() } 
         link: linkDoApp('/checkout', r.company_id, env), ...links,
       }),
     },
+    {
+      // 4.5: uma vez por empresa (a chave não leva o fim), atrás do mesmo
+      // EMAILS_TESTE_ENABLED. aceitaNaoQuer: é o e-mail da conta marcada.
+      nome: 'conta_guardada', sql: SQL_CONTA_GUARDADA, tipo: 'ajuda_conta_guardada',
+      chave: (r) => `conta-guardada:${r.company_id}`,
+      aceitaNaoQuer: true,
+      montar: (r, nome, links) => conteudos.contaGuardada({
+        nome, loja: r.loja || 'sua loja', nProdutos: r.n_produtos, nClientes: r.n_clientes,
+        link: linkDoApp('/', r.company_id, env), ...links,
+      }),
+    },
   ];
 
   for (const e of etapas) {
@@ -317,9 +353,18 @@ async function voltaDoTeste({ db, enviar, env = process.env, now = Date.now() } 
         if (!ehVarejo(r)) { conta(e.nome, 'fora_do_varejo'); continue; }
         const alvo = alvoDaLinha(r);
         if (!alvo) { conta(e.nome, 'sem_email'); continue; }
+        if (e.aceitaNaoQuer) {
+          // Segunda trava do 4.5: a nota relida agora ainda é "Não quer"
+          // por motivo externo (uma nota mais nova derruba a marca).
+          const nota = await ultimaNotaComResultado(db, r.company_id);
+          if (!nota || nota.resultado !== 'nao_quer' || nota.motivo !== MOTIVO_CONTA_GUARDADA) {
+            conta(e.nome, 'sem_marca'); continue;
+          }
+        }
         const nome = primeiroNome(r.full_name, r.loja);
         const st = await enviarRelacionamento({
           db, enviar, env, tipoPref: 'ajuda', tipo: e.tipo, chave: e.chave(r), alvo,
+          aceitaNaoQuer: !!e.aceitaNaoQuer,
           metadata: { trial_ends_at: r.trial_ends_at || null, fim: r.fim || null },
           montar: (links) => e.montar(r, nome, links),
         });
@@ -426,6 +471,8 @@ module.exports = {
   SQL_SEM_VENDA,
   SQL_TERMINANDO,
   SQL_ENCERRADO,
+  SQL_CONTA_GUARDADA,
+  MOTIVO_CONTA_GUARDADA,
   SQL_SUMIU,
   boasVindasLigada,
   emailsDoTesteLigados,

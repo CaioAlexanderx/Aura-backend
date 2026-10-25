@@ -22,6 +22,10 @@ const RESULTADOS = ['respondeu', 'sem_resposta', 'pediu_tempo', 'combinou_ligaca
 const MOTIVOS = [
   'estoque_na_entrada', 'preco_plano', 'fiscal', 'atrito_produto', 'funcionalidade',
   'frente_errada', 'ritmo_do_cliente', 'concorrente', 'elogio',
+  // tq-111 (migration 412): saiu por um motivo de fora da Aura (fechou a
+  // loja, mudou de cidade...). Com resultado nao_quer, o fim do teste manda
+  // o 4.5 "Sua conta da Aura fica guardada" no lugar do 4.4.
+  'motivo_externo',
 ];
 const MARCADORES = ['importacao_assistida_pedida', 'importacao_assistida_entregue'];
 const COMO_CHEGOU = [
