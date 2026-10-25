@@ -40,6 +40,19 @@
 //   (o ciclo e' parte do combinado). Cupom/promocao seguem como hoje, sobre
 //   esse valor (ver getCouponDiscountAmount com baseValue).
 //
+// 25/10/2026: MULTI-CNPJ NA TABELA (decisao do Caio, confirmada no chat do
+//   Teo). Antes a regra morava em utils/multicnpjBilling.js com precos
+//   proprios (Negocio 169,90, extra fixo R$ 85, 2 CNPJs incluidos) que
+//   divergiam desta tabela. Agora a fonte e' esta:
+//     - Negocio: 1 CNPJ incluido; cada CNPJ a mais custa 50% do valor do
+//       plano NO CICLO da assinatura, arredondado com centavo para cima
+//       (arredondarCentavoParaCima). Ex.: anual 140,83 + 70,42 = 211,25;
+//       mensal 169,00 + 84,50 = 253,50.
+//     - Essencial e Expansao: sem mudanca (1 e 2 incluidos; extra fixo de
+//       R$ 45 e R$ 135 por mes, sem desconto de ciclo, como era).
+//     - Excecao explicita: NEGOCIO_DOIS_CNPJS_INCLUIDOS (Davi).
+//   getMulticnpjBreakdown() e' a entrada unica do valor de um grupo.
+//
 // getPlanValue() reproduz EXATAMENTE o comportamento que existia em
 // billing.js (validado por teste). getTotalValue() = plano + seats.
 // ============================================================
@@ -179,6 +192,118 @@ function valorDaAssinatura(company, plan, cycle, billingType, extraSeats = 0) {
   return { value: tableValue, custom: false, table_value: tableValue, note: null };
 }
 
+// ── Multi-CNPJ (25/10/2026) ─────────────────────────────────────────────────
+
+// Arredondamento da Aura para valores derivados de percentual: CENTAVO PARA
+// CIMA. Definido UMA vez aqui. O toFixed(6) tira o ruido de ponto flutuante
+// antes do ceil: 140,83 x 0,5 = 70,415 vira 7041,5 centavos -> 7042 -> 70,42;
+// 169 x 0,5 = 84,5 -> 8450 centavos -> 84,50 (nao sobe para 84,51); e um
+// valor que ja esta em centavos, como 70,42, continua 70,42 (7042,000000001
+// nao vira 7043).
+function arredondarCentavoParaCima(v) {
+  const n = Number(v);
+  if (!Number.isFinite(n)) return 0;
+  const centavos = Math.ceil(Number((n * 100).toFixed(6)));
+  return centavos / 100;
+}
+
+// Quantas empresas (CNPJs) a assinatura cobre sem custo extra.
+// 'personalizado' nao tem preco nesta tabela: nunca gera extra automatico.
+const INCLUDED_COMPANIES = {
+  essencial:     1,
+  negocio:       1,
+  expansao:      2,
+  personalizado: 999,
+};
+
+// Preco de cada empresa alem das incluidas, por plano.
+//   percentualDoPlano: fracao do valor do plano no ciclo (getPlanValue),
+//                      arredondada com arredondarCentavoParaCima.
+//   fixoMensal:        valor fixo por mes, igual no mensal e no anual
+//                      (regra que ja valia para Essencial e Expansao).
+const EXTRA_COMPANY_RULE = {
+  essencial: { fixoMensal: 45 },
+  negocio:   { percentualDoPlano: 0.5 },
+  expansao:  { fixoMensal: 135 },
+};
+
+// EXCECAO EXPLICITA (decisao do Caio, 25/10/2026): o Davi Rodrigues continua
+// com 2 CNPJs incluidos no Negocio, como foi vendido a ele. A chave e' a
+// empresa Davi Calcados Matriz (principal do grupo; a Villa Branca e' a
+// segunda). A excecao vale para o GRUPO que contem esta empresa, entao
+// continua valendo se a principal for transferida para a Villa Branca.
+// Nova excecao: so com decisao do Caio, registrada aqui com data e motivo.
+const NEGOCIO_DOIS_CNPJS_INCLUIDOS = Object.freeze({
+  '08c05f0e-b75b-4c12-870e-d7fb65f1dca0':
+    'Davi Rodrigues (Davi Calcados Matriz + Villa Branca): 2 CNPJs incluidos. Decisao do Caio, 25/10/2026.',
+});
+
+function excecaoDoGrupo(plan, companyIds) {
+  if (plan !== 'negocio' || !Array.isArray(companyIds)) return null;
+  for (const id of companyIds) {
+    const motivo = NEGOCIO_DOIS_CNPJS_INCLUIDOS[String(id)];
+    if (motivo) return { company_id: String(id), included: 2, motivo };
+  }
+  return null;
+}
+
+// CNPJs incluidos para o grupo (companyIds = ids das empresas do grupo, so
+// para checar a excecao). Plano desconhecido = 1, como era.
+function getIncludedCompanies(plan, companyIds = []) {
+  const excecao = excecaoDoGrupo(plan, companyIds);
+  if (excecao) return excecao.included;
+  return INCLUDED_COMPANIES[plan] || 1;
+}
+
+// Valor MENSAL de cada empresa extra para plano + ciclo. null se o plano nao
+// tem regra (personalizado / invalido).
+function getExtraCompanyValue(plan, cycle, billingType) {
+  const rule = EXTRA_COMPANY_RULE[plan];
+  if (!rule) return null;
+  if (rule.percentualDoPlano) {
+    const planValue = getPlanValue(plan, cycle, billingType);
+    if (planValue === null) return null;
+    return arredondarCentavoParaCima(planValue * rule.percentualDoPlano);
+  }
+  return round2(rule.fixoMensal);
+}
+
+// Valor RECORRENTE (mensal) de um grupo multi-CNPJ pela tabela:
+//   plano no ciclo + acessos extras + (empresas alem das incluidas x extra).
+// totalCompanies conta a principal. Retorna null se o plano nao tem preco
+// nesta tabela (quem chama nao deve cobrar nada automatico).
+function getMulticnpjBreakdown(plan, cycle, { totalCompanies = 1, companyIds = [], extraSeats = 0, billingType } = {}) {
+  const ciclo = cycle === 'annual' ? 'annual' : 'monthly';
+  const basePrice = getPlanValue(plan, ciclo, billingType);
+  const extraUnit = getExtraCompanyValue(plan, ciclo, billingType);
+  if (basePrice === null || extraUnit === null) return null;
+
+  const total = Number.isFinite(totalCompanies) && totalCompanies > 0 ? Math.floor(totalCompanies) : 1;
+  const excecao = excecaoDoGrupo(plan, companyIds);
+  const included = getIncludedCompanies(plan, companyIds);
+  const extras = Math.max(0, total - included);
+  const extrasValue = round2(extras * extraUnit);
+  const seatsValue = getSeatsValue(extraSeats, ciclo, billingType);
+  const rule = EXTRA_COMPANY_RULE[plan];
+
+  return {
+    plan,
+    cycle: ciclo,
+    base_price: basePrice,
+    seats_value: seatsValue,
+    included_in_plan: included,
+    total_companies: total,
+    extra_cnpjs: extras,
+    extra_unit_price: extraUnit,
+    extras_value: extrasValue,
+    total_monthly: round2(basePrice + seatsValue + extrasValue),
+    extra_rule: rule.percentualDoPlano
+      ? { tipo: 'percentual_do_plano', percentual: rule.percentualDoPlano * 100 }
+      : { tipo: 'fixo_mensal', valor: rule.fixoMensal },
+    excecao: excecao ? excecao.motivo : null,
+  };
+}
+
 module.exports = {
   PLANS,
   CYCLES,
@@ -195,4 +320,11 @@ module.exports = {
   getTotalValue,
   getFirstChargeValue,
   getCouponDiscountAmount,
+  arredondarCentavoParaCima,
+  INCLUDED_COMPANIES,
+  EXTRA_COMPANY_RULE,
+  NEGOCIO_DOIS_CNPJS_INCLUIDOS,
+  getIncludedCompanies,
+  getExtraCompanyValue,
+  getMulticnpjBreakdown,
 };
