@@ -22,8 +22,7 @@ DO $$ BEGIN
       CHECK (motivo IS NULL OR motivo IN
         ('estoque_na_entrada', 'preco_plano', 'fiscal', 'atrito_produto', 'funcionalidade',
          'frente_errada', 'ritmo_do_cliente', 'concorrente', 'elogio', 'motivo_externo'));
+    COMMENT ON COLUMN company_admin_notes.motivo IS
+      'O que pesou (10 classes; motivo_externo desde a 412). Obrigatorio quando resultado = nao_quer.';
   END IF;
 END $$;
-
-COMMENT ON COLUMN company_admin_notes.motivo IS
-  'O que pesou (10 classes; motivo_externo desde a 412). Obrigatorio quando resultado = nao_quer.';
