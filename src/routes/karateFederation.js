@@ -129,12 +129,23 @@ router.post('/federation/setup', requireAuth, async (req, res) => {
     // INSERTs irmãos (karateDojos/karateImport). E grava vertical_active junto
     // de vertical: toda a listagem/contagem da federação filtra por
     // vertical_active; sem ele a federação nasceria invisível para si mesma.
+    //
+    // 26/10/2026 (tq-41b): o formulario nao tem e-mail; a federacao nasce
+    // com o e-mail de quem a criou (users.email), como o cadastro (tq-41) —
+    // MENOS quando quem cria e da equipe Aura (is_staff, @getaura.com.br) ou
+    // usuario de sistema: ai fica NULL, como antes, em vez de gravar um
+    // e-mail interno na conta do cliente.
     const insertRes = await client.query(
       `INSERT INTO companies
          (id, name, legal_name, trade_name, slug, vertical, vertical_active,
-          owner_id, karate_logo_url, is_active, created_at, updated_at)
+          owner_id, karate_logo_url, email, is_active, created_at, updated_at)
        VALUES ($1, $2, $2, $2, $3, 'karate_federation', 'karate_federation',
-               $4, $5, true, NOW(), NOW())
+               $4, $5,
+               (SELECT u.email FROM users u
+                 WHERE u.id = $4
+                   AND COALESCE(u.is_staff, false) = false
+                   AND u.password_hash IS DISTINCT FROM '!locked-system-no-login'),
+               true, NOW(), NOW())
        RETURNING id, name, slug, vertical`,
       [newId, String(name).trim(), cleanSlug, ownerId, logo_url || null]
     );

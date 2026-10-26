@@ -339,6 +339,12 @@ router.post('/', async (req, res) => {
     }
 
     // 5. Criar a empresa (herda plano da primary, billing_owner = primary.id)
+    //
+    // 26/10/2026 (tq-41b): sem e-mail no formulario, a empresa nasce com o
+    // e-mail do dono (users.email), como o cadastro desde o tq-41 (#905).
+    // Na mesma consulta do INSERT, para nao mudar a sequencia de chamadas.
+    // Empresas antigas nao sao preenchidas.
+    const emailDoFormulario = typeof email === 'string' && email.trim() ? email.trim() : null;
     const insertRes = await db.query(
       `INSERT INTO companies (
          owner_id, legal_name, trade_name, cnpj, vertical_active,
@@ -347,7 +353,8 @@ router.post('/', async (req, res) => {
          is_active, billing_status, onboarding_step
        ) VALUES (
          $1, $2, $3, $4, $5,
-         COALESCE($6, 'simples_nacional'::tax_regime), $7::plan_type, $8, $9, $10,
+         COALESCE($6, 'simples_nacional'::tax_regime), $7::plan_type,
+         COALESCE($8, (SELECT u.email FROM users u WHERE u.id = $1)), $9, $10,
          false, $11,
          true, 'active', 'completed'
        )
@@ -361,7 +368,7 @@ router.post('/', async (req, res) => {
         vertical || null,
         tax_regime,
         primary.plan, // herda plano
-        email || null,
+        emailDoFormulario,
         phone || null,
         address || null,
         primary.id, // billing_owner = primary do mesmo owner
