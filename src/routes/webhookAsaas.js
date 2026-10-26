@@ -106,6 +106,20 @@
 //   - o e-mail de assinatura cancelada (tq-79) nao sai daqui: sai do job de
 //     relacionamento, 2 h depois, com as conferencias do servico.
 //
+// FIX (26/10/2026) — pagamento de cobranca antiga apagava o atraso de outra:
+//   A SHEID MANIA tinha a cobranca de 21/10 OVERDUE. Em 23/10 chegou
+//   PAYMENT_RECEIVED da cobranca de 21/09 (cartao confirmado em 21/09,
+//   creditado em 23/10) e o mapa CONFIRMED/RECEIVED -> 'active' gravou
+//   'active' por cima do atraso: o muro nao contou o atraso e a regua (que
+//   exige 'overdue') nao mandou e-mail. O tq-86 ja tinha corrigido a data
+//   (next_billing_date), nao o status. Agora pagamento confirmado so leva a
+//   'active' quando, fora a cobranca que acabou de ser paga, nao sobra outra
+//   OVERDUE da empresa (outrasVencidasDaEmpresa: Asaas primeiro, espelho
+//   assinatura_cobrancas se a Asaas falhar). Sobrando, fica 'overdue' (a
+//   filial segue a mesma decisao); last_payment_date, webhook_logs e o recibo
+//   continuam, porque o pagamento e real. OVERDUE, REFUNDED, CHARGEBACK,
+//   DELETED e os neutros nao mudaram.
+//
 // ATENCAO: quando operando sem segredo, o log fica MUITO barulhento de
 // proposito (WARN por requisicao) — ninguem deve poder dizer que "nao viu".
 //
@@ -272,6 +286,83 @@ async function vencidaMaisAntigaEmAberto(companyId, paymentId) {
     return (typeof v === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(v)) ? v : null;
   } catch (err) {
     return null;
+  }
+}
+
+// Cobranca que o fluxo de empresa trata como plano: o mesmo corte do router
+// (pedido do Canal Digital e pacote de marketing tem fluxo proprio e nao
+// dizem nada sobre a assinatura).
+function ehCobrancaDoPlano(p) {
+  var ref = String((p && p.externalReference) || '');
+  return ref.indexOf('digital-order-') !== 0 && ref.indexOf('wa-pack-') !== 0;
+}
+
+var DATA_ISO_RE = /^\d{4}-\d{2}-\d{2}$/;
+
+// Outras cobrancas VENCIDAS em aberto da empresa, fora a que acabou de ser
+// paga (26/10/2026, caso SHEID MANIA). Decide se um pagamento confirmado pode
+// levar a empresa a 'active'.
+//   1. Asaas: GET /payments?customer=...&status=OVERDUE (pega tambem cobranca
+//      de assinatura antiga, trocada de plano); sem cliente, as cobrancas da
+//      assinatura. E a fonte da verdade quando responde.
+//   2. Falhou: o espelho assinatura_cobrancas (408). O espelho so e
+//      atualizado por este evento DEPOIS do UPDATE em companies
+//      (aposEventoDaAssinatura), por isso a cobranca paga e excluida pelo id:
+//      ela ainda pode estar la como OVERDUE.
+//   3. Sem nenhuma das duas: lista vazia (o comportamento de antes, 'active'),
+//      com o motivo no log.
+// Devolve { fonte: 'asaas' | 'espelho' | 'nenhuma', vencidas: [{ id, vencimento }], asaasFalhou }.
+// Nunca lanca.
+async function outrasVencidasDaEmpresa(company, payment) {
+  var pago = String((payment && payment.id) || '');
+  var cliente = payment.customer || null;
+  var assinatura = company.asaas_subscription_id || payment.subscription || null;
+  var caminho = cliente
+    ? '/payments?customer=' + encodeURIComponent(cliente) + '&status=OVERDUE&limit=100'
+    : assinatura
+      ? '/subscriptions/' + encodeURIComponent(assinatura) + '/payments?status=OVERDUE&limit=100'
+      : null;
+  var asaasFalhou = false;
+  if (caminho) {
+    try {
+      var lista = await asaas('GET', caminho);
+      if (!lista || !Array.isArray(lista.data)) throw new Error('resposta sem lista de cobrancas');
+      var daAsaas = lista.data
+        .filter(function(p) {
+          return p && !p.deleted && p.status === 'OVERDUE' && p.id && p.id !== pago && ehCobrancaDoPlano(p);
+        })
+        .map(function(p) {
+          var v = p.dueDate ? String(p.dueDate).slice(0, 10) : null;
+          return { id: p.id, vencimento: DATA_ISO_RE.test(v || '') ? v : null };
+        });
+      return { fonte: 'asaas', vencidas: daAsaas, asaasFalhou: false };
+    } catch (err) {
+      asaasFalhou = true;
+      console.warn('[WEBHOOK] cobrancas vencidas da empresa ' + company.id + ' nao puderam ser lidas na Asaas (' +
+        err.message + ') — decidindo pelo espelho assinatura_cobrancas');
+    }
+  } else {
+    asaasFalhou = true;
+  }
+  try {
+    var r = await db.query(
+      `SELECT asaas_payment_id AS id, to_char(due_date, 'YYYY-MM-DD') AS vencimento
+         FROM assinatura_cobrancas
+        WHERE company_id = $1 AND status = 'OVERDUE' AND asaas_payment_id <> $2
+        ORDER BY due_date`,
+      [company.id, pago]
+    );
+    var linhas = (r && Array.isArray(r.rows)) ? r.rows : [];
+    return {
+      fonte: 'espelho',
+      vencidas: linhas.filter(function(l) { return l && l.id; }).map(function(l) {
+        return { id: l.id, vencimento: DATA_ISO_RE.test(l.vencimento || '') ? l.vencimento : null };
+      }),
+      asaasFalhou: asaasFalhou,
+    };
+  } catch (err) {
+    console.warn('[WEBHOOK] espelho assinatura_cobrancas indisponivel para a empresa ' + company.id + ': ' + err.message);
+    return { fonte: 'nenhuma', vencidas: [], asaasFalhou: asaasFalhou };
   }
 }
 
@@ -582,6 +673,30 @@ router.post('/', async function(req, res) {
       if (vencidaMaisAntiga && (!nextDue || vencidaMaisAntiga < nextDue)) nextDue = vencidaMaisAntiga;
     }
 
+    // 26/10/2026 (caso SHEID MANIA): pagamento confirmado so leva a 'active'
+    // quando nao sobra outra cobranca OVERDUE da empresa. Sobrando, fica
+    // 'overdue' — o pagamento segue registrado (last_payment_date, log,
+    // recibo) e as filiais recebem a mesma decisao pela propagacao abaixo.
+    var vencidasRestantes = null;
+    if (isPaid && newStatus === 'active') {
+      vencidasRestantes = await outrasVencidasDaEmpresa(company, payment);
+      if (vencidasRestantes.vencidas.length) {
+        newStatus = 'overdue';
+        var ids = vencidasRestantes.vencidas.map(function(v) { return v.id + (v.vencimento ? ' (' + v.vencimento + ')' : ''); });
+        console.log('[WEBHOOK] Company ' + company.id + ' — pagamento ' + payment.id + ' registrado, mas billing_status ' +
+          'fica overdue: ainda ha ' + ids.length + ' cobranca(s) vencida(s) em aberto [' + ids.join(', ') + '] ' +
+          '(fonte=' + vencidasRestantes.fonte + ')');
+        var maisAntiga = vencidasRestantes.vencidas.reduce(function(min, v) {
+          return v.vencimento && (!min || v.vencimento < min) ? v.vencimento : min;
+        }, null);
+        if (maisAntiga && (!nextDue || maisAntiga < nextDue)) nextDue = maisAntiga;
+      } else if (vencidasRestantes.asaasFalhou) {
+        console.warn('[WEBHOOK] Company ' + company.id + ' — pagamento ' + payment.id + ' leva a active sem confirmacao ' +
+          'da Asaas: leitura das vencidas falhou e o ' +
+          (vencidasRestantes.fonte === 'espelho' ? 'espelho nao tem outra cobranca vencida' : 'espelho tambem esta indisponivel'));
+      }
+    }
+
     // last_payment_date so avanca em pagamento efetivo; nos demais eventos
     // (OVERDUE, REFUNDED, CHARGEBACK) preserva o que ja estava la. E so
     // AVANCA: GREATEST ignora NULL e nunca devolve a data mais antiga, entao
@@ -644,13 +759,18 @@ router.post('/', async function(req, res) {
     await aposEventoDaAssinatura(event, payment, statusSource, company, nextDue);
 
     console.log('[WEBHOOK] Company ' + company.id + ' billing: ' + prevStatus + ' -> ' + newStatus);
-    res.status(200).json({
+    var corpo = {
       received: true,
       handled: true,
       status: newStatus,
       next_billing_date: nextDue,
       propagated_to_children: propagated,
-    });
+    };
+    if (vencidasRestantes && vencidasRestantes.vencidas.length) {
+      corpo.overdue_remaining = vencidasRestantes.vencidas.length;
+      corpo.overdue_source = vencidasRestantes.fonte;
+    }
+    res.status(200).json(corpo);
   } catch (err) {
     console.error('[WEBHOOK] Error processing billing:', err.message);
     res.status(200).json({ received: true, error: true });
