@@ -170,12 +170,31 @@ app.use(sentryContext);
 // authLimiter 10→20 e globalLimiter 300→600. Se um dia a API for
 // servida atras do Cloudflare (dominio proprio), revisar trust proxy.
 
+// tq-71 (26/10/2026): ate aqui o authLimiter era registrado no apiRouter
+// DEPOIS das rotas de /auth (ver "Rotas da API" abaixo) e nunca rodava —
+// medido: 21 logins errados seguidos do mesmo IP davam 21 x 401. Agora ele
+// e montado no app ANTES do apiRouter. Mesmos limites de sempre (20 por IP
+// a cada 15 min). No login so a tentativa que falha conta
+// (skipSuccessfulRequests): a loja com varios funcionarios no mesmo IP que
+// entra certo nunca bate no teto; quem chuta senha bate.
+// O IP e o req.ip do `trust proxy 1`: o ultimo item do X-Forwarded-For,
+// posto pela borda da Railway — forjar o comeco do header nao muda o balde.
 const authLimiter = rateLimit({
   windowMs:  15 * 60 * 1000,
   max:       20,
   message:   { error: 'Muitas tentativas. Tente novamente em 15 minutos.' },
   standardHeaders: true,
   legacyHeaders:   false,
+  skip: (req) => env.NODE_ENV === 'test',
+});
+
+const loginLimiter = rateLimit({
+  windowMs:  15 * 60 * 1000,
+  max:       20,
+  message:   { error: 'Muitas tentativas. Tente novamente em 15 minutos.' },
+  standardHeaders: true,
+  legacyHeaders:   false,
+  skipSuccessfulRequests: true,
   skip: (req) => env.NODE_ENV === 'test',
 });
 
@@ -363,10 +382,12 @@ app.get('/', function(req, res) {
 });
 
 // ── Rotas da API ────────────────────────────────────
+// Limitadores ANTES do apiRouter (tq-71): o Express roda as camadas na
+// ordem em que foram registradas; registrado depois, a rota responde antes.
+app.use('/api/v1/auth/login',           loginLimiter);
+app.use('/api/v1/auth/register',        authLimiter);
+app.use('/api/v1/auth/forgot-password', authLimiter);
 const apiRouter = require('./routes/index');
-apiRouter.use('/auth/login',           authLimiter);
-apiRouter.use('/auth/register',        authLimiter);
-apiRouter.use('/auth/forgot-password', authLimiter);
 apiRouter.use('/onboarding/cnpj-lookup', cnpjLimiter);
 app.use('/api/v1', apiRouter);
 
