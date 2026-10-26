@@ -3,17 +3,22 @@
 //
 // O CSS da vitrine escrevia color:#fff fixo sobre a cor principal. Com
 // cor clara (Felic Adega, #C7A956) o botao de comprar ficava com 2,3:1 de
-// contraste. Agora: branco enquanto o branco alcanca 4,5:1 (WCAG), senao
-// preto. Cor escura sai byte a byte igual a antes.
+// contraste. Agora: branco enquanto o branco alcanca 3:1 (decisao do
+// Caio, 26/10), senao preto. So cor clara troca; cor escura e cor media
+// saem byte a byte iguais a antes.
 // ============================================================
 'use strict';
 
-const { textoSobre, contraste, luminanciaRelativa } = require('../src/templates/storefrontContraste');
+const { textoSobre, contraste, luminanciaRelativa, MINIMO_WCAG } = require('../src/templates/storefrontContraste');
 const buildStyles = require('../src/templates/storefrontStyles');
 const buildStorefrontPage = require('../src/templates/storefrontPage');
 
 const FELIC = '#C7A956';
 const ESCURAS = ['#7c3aed', '#1f2937', '#5b2a86', '#0e8345', '#b91c1c', '#000000'];
+// Medias e saturadas: entre 3:1 e 4,5:1 com o branco. Continuam brancas.
+const MEDIAS = ['#EF4444', '#3B82F6', '#16A34A', '#EA580C', '#8B5CF6', '#e91e63'];
+// Claras: o branco nao chega a 3:1.
+const CLARAS = ['#C7A956', '#F97316', '#22C55E', '#10B981', '#F59E0B', '#f5f5f5'];
 
 /** O CSS como era antes: a mesma montagem com o texto sobre a marca sempre #fff. */
 function cssComBrancoFixo(primary, accent, dark, font) {
@@ -52,9 +57,21 @@ describe('a regra (WCAG 2.x)', () => {
     for (const cor of ESCURAS) expect(textoSobre(cor)).toBe('#fff');
   });
 
-  test('o corte e 4,5:1 com o branco', () => {
-    expect(textoSobre('#767676')).toBe('#fff'); // 4,54:1
-    expect(textoSobre('#777777')).toBe('#000'); // 4,48:1
+  test('cores medias (entre 3:1 e 4,5:1 com o branco) continuam brancas', () => {
+    for (const cor of MEDIAS) {
+      expect(contraste(cor, '#fff')).toBeGreaterThanOrEqual(3);
+      expect(textoSobre(cor)).toBe('#fff');
+    }
+  });
+
+  test('cores claras (branco abaixo de 3:1) viram preto', () => {
+    for (const cor of CLARAS) expect(textoSobre(cor)).toBe('#000');
+  });
+
+  test('o corte e 3:1 com o branco', () => {
+    expect(MINIMO_WCAG).toBe(3);
+    expect(textoSobre('#949494')).toBe('#fff'); // 3,03:1
+    expect(textoSobre('#959595')).toBe('#000'); // 2,99:1
   });
 
   test('hex curto, maiusculo e com espaco tambem', () => {
@@ -70,8 +87,8 @@ describe('a regra (WCAG 2.x)', () => {
 });
 
 describe('CSS da vitrine', () => {
-  test('cor escura: o CSS sai identico ao de antes (claro e escuro, com e sem accent)', () => {
-    for (const cor of ESCURAS) {
+  test('cor escura e cor media: o CSS sai identico ao de antes (claro e escuro, com e sem accent)', () => {
+    for (const cor of [...ESCURAS, ...MEDIAS]) {
       for (const dark of [false, true]) {
         expect(buildStyles(cor, null, dark, 'classic')).toBe(cssComBrancoFixo(cor, null, dark, 'classic'));
         expect(buildStyles(cor, '#1f2937', dark, 'modern')).toBe(cssComBrancoFixo(cor, '#1f2937', dark, 'modern'));

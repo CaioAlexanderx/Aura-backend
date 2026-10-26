@@ -5,10 +5,12 @@
 // comprar, finalizar, chips selecionados...). Com cor clara o botao fica
 // ilegivel: na Felic Adega (#C7A956) o contraste do branco e 2,3:1.
 //
-// Regra (WCAG 2.x, contraste de texto 4,5:1): branco enquanto o branco
-// alcancar 4,5:1 sobre a cor; abaixo disso, preto. Quando o branco nao
-// alcanca 4,5:1 a luminancia da cor passa de ~0,18 e o preto da mais de
-// 4,6:1, entao a troca sempre melhora.
+// Regra (decisao do Caio, 26/10/2026): branco enquanto o branco alcancar
+// 3:1 sobre a cor (o minimo do WCAG 2.x para texto grande e componentes);
+// abaixo disso, preto. So as cores CLARAS trocam: as medias e saturadas
+// (#EF4444, #3B82F6, #16A34A, #EA580C, #8B5CF6), que ficam entre 3:1 e
+// 4,5:1 com o branco, continuam brancas como sempre. Quando o branco nao
+// alcanca 3:1 o preto da mais de 7:1, entao a troca sempre melhora.
 //
 // Cor que nao e hex (#rgb ou #rrggbb) fica no branco de sempre: a regra
 // nunca muda uma loja que ela nao sabe ler. Para a cor que fica no branco
@@ -18,7 +20,7 @@
 
 const BRANCO = '#fff';
 const PRETO = '#000';
-const MINIMO_WCAG = 4.5;
+const MINIMO_WCAG = 3;
 
 /** '#abc' ou '#aabbcc' -> [r, g, b] (0-255); qualquer outra coisa -> null. */
 function rgbDoHex(cor) {
