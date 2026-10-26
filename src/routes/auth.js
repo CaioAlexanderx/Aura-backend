@@ -942,6 +942,17 @@ router.post('/logout', async (req, res) => {
   res.json({ message: 'Logout realizado com sucesso' });
 });
 
+// tq-115 (26/10/2026): handshake mais recente da empresa, no formato do
+// register (signupHandshake.moldar). Nunca lanca: qualquer falha vira null
+// e o /me segue igual.
+async function handshakeDoDono(companyId) {
+  try {
+    return signupHandshake.moldar(await signupHandshake.doCliente(db, companyId));
+  } catch (_) {
+    return null;
+  }
+}
+
 // POST /api/v1/auth/me
 //
 // 23/09/2026: as quatro consultas saem JUNTAS. O backend (Railway, us-west)
@@ -1041,6 +1052,7 @@ router.post('/me', requireAuth, async (req, res) => {
     const companyCount = countRows[0]?.cnt || 0;
 
     let companyOut = null;
+    let whatsappHandshake = null;
     if (company) {
       const extraMap = await extraSeatsP;
       const trialCols = await trialP;
@@ -1052,7 +1064,13 @@ router.post('/me', requireAuth, async (req, res) => {
       };
       // tq-86: por ultimo (e so em atraso), para nao mudar a ordem das
       // consultas acima.
-      companyOut = await withBillingDates(companyOut, company.id, company.billing_status);
+      const billingP = withBillingDates(companyOut, company.id, company.billing_status);
+      // tq-115 (26/10/2026): estado do WhatsApp do cadastro (handshake,
+      // tq-66), so para o dono. Sai junto com as datas do atraso (sem mais
+      // uma ida e volta em fila) e depois dela na ordem das consultas.
+      const handshakeP = memberRole === 'owner' ? handshakeDoDono(company.id) : null;
+      companyOut = await billingP;
+      whatsappHandshake = handshakeP ? await handshakeP : null;
     }
 
     res.json({
@@ -1060,6 +1078,9 @@ router.post('/me', requireAuth, async (req, res) => {
       company: companyOut,
       consolidated_view: jwtConsolidated,
       company_count: companyCount,
+      // { codigo, estado: 'aguardando'|'confirmado', link, ... } ou null
+      // (membro, visao consolidada, conta sem handshake, tabela ausente).
+      whatsapp_handshake: whatsappHandshake,
     });
   } catch (err) { console.error('me error:', err); res.status(500).json({ error: 'Erro ao buscar perfil' }); }
 });
