@@ -17,6 +17,21 @@ module.exports = `
   var hi=document.getElementById('heroInitial'); if(hi) hi.textContent=(SITE.name||'L')[0].toUpperCase();
 })();
 
+// tq-59 (26/10/2026): logo que e EMBLEMA (ate 1,5 de largura por 1 de
+// altura) nao traz o nome escrito, e o topo escondia o nome sempre que
+// havia logo. Medida a imagem, o emblema marca .topbar-brand com
+// .com-emblema e o CSS mostra o nome da loja ao lado, como na loja sem
+// logo. Logo largo (com o nome escrito) fica como sempre foi.
+(function(){
+  var img=document.querySelector('.topbar-logo img'); if(!img) return;
+  function medir(){
+    if(img.naturalHeight&&img.naturalWidth<=img.naturalHeight*1.5){
+      var b=img.closest('.topbar-brand'); if(b) b.classList.add('com-emblema');
+    }
+  }
+  if(img.complete) medir(); else img.addEventListener('load',medir);
+})();
+
 (function(){
   var pills=[];
   if(CONTACT.address) pills.push('📍 '+CONTACT.address.split(',')[0]);

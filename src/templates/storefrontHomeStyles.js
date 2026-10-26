@@ -29,6 +29,11 @@ function homeStyles({ fontSerif, fontSans, fontMono }) {
 .topbar-logo:has(img){height:46px;}
 /* O nome so aparece quando NAO ha logo: a logo e a identidade. */
 .topbar-logo:has(img)+.topbar-brand-text .topbar-name{display:none;}
+/* tq-59 (26/10/2026): logo EMBLEMA (sem o nome escrito) ganha o nome ao
+   lado, como a loja sem logo. A classe vem da medida do logo
+   (storefront/parts/init.js, proporcao ate 1,5:1); logo largo fica como
+   antes. */
+.topbar-brand.com-emblema .topbar-logo:has(img)+.topbar-brand-text .topbar-name{display:block;}
 .topbar-brand-text{gap:4px;}
 .topnav{display:flex;align-items:center;gap:4px;flex:1 1 auto;min-width:0;overflow:hidden;}
 .topnav-item{appearance:none;background:none;border:0;padding:8px 11px;cursor:pointer;font-family:${fontSans};font-size:13.5px;font-weight:500;letter-spacing:.2px;color:var(--sf-ink);display:inline-flex;align-items:center;gap:5px;white-space:nowrap;border-bottom:2px solid transparent;transition:color var(--sf-motion) var(--sf-ease),border-color var(--sf-motion) var(--sf-ease);}
@@ -624,6 +629,10 @@ body.sf-dark .checkout-topo-logo img{mix-blend-mode:normal;}
   .topbar-logo:has(img){height:36px;max-width:118px;}
   .topbar-logo img{max-width:118px;}
   .topbar-brand-text{display:none;}
+  /* tq-59: no celular o emblema mostra so o nome (o selo Fechada segue fora). */
+  .topbar-brand.com-emblema .topbar-brand-text{display:flex;}
+  .topbar-brand.com-emblema .open-badge{display:none;}
+  .topbar-brand.com-emblema .topbar-name{font-size:16px;}
   .topbar-right{order:2;gap:0;}
   .cart-btn{width:44px;height:44px;border:0;background:transparent;}
   .cart-btn:hover{transform:none;box-shadow:none;}
