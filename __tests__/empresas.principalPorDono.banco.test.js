@@ -166,12 +166,14 @@ describe('cadastro — INSERT com is_primary no schema de verdade', () => {
       // Colunas e VALUES exatamente como o cadastro grava; o RETURNING vira
       // só id + is_primary (o schema do CI não tem todas as colunas que o
       // RETURNING do cadastro lê, como module_overrides).
-      const insert = m[1].replace(/RETURNING[\s\S]*$/, 'RETURNING id, is_primary');
-      expect(insert).toMatch(/tax_regime, is_primary\)/);
+      const insert = m[1].replace(/RETURNING[\s\S]*$/, 'RETURNING id, is_primary, email');
+      // tq-41 (26/10/2026): o INSERT grava tambem o e-mail do dono ($11).
+      expect(insert).toMatch(/tax_regime, is_primary, email\)/);
       const { rows: [c] } = await client.query(insert, [
-        dono, 'Loja Fixture 404', 'negocio', null, null, null, null, null, null, null,
+        dono, 'Loja Fixture 404', 'negocio', null, null, null, null, null, null, null, 'dono-404@exemplo.com.br',
       ]);
       expect(c.is_primary).toBe(true);
+      expect(c.email).toBe('dono-404@exemplo.com.br');
     } finally {
       await client.query('ROLLBACK TO SAVEPOINT cad404');
     }
