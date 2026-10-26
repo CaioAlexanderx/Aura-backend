@@ -21,6 +21,7 @@
 
 const pool = require('../../config/database');
 const { semDojo } = require('../../utils/empresasDaGestao');
+const { semPendente } = require('../../utils/contaPendente');
 
 const TZ = 'America/Sao_Paulo';
 
@@ -41,9 +42,12 @@ const ID_CANARY = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}
 // canário (pedido de Produto e Financeiro; card P1).
 // 19/10/2026 (decisão do Caio): dojô (vertical 'karate_dojo') sai do universo
 // inteiro: é dado da federação, não cliente da Aura (utils/empresasDaGestao).
+// 26/10/2026 (tq-113, decisão do Caio): conta pendente (dono nunca confirmou o
+// e-mail) também sai do universo inteiro (utils/contaPendente).
 const SEM_INTERNAS = `COALESCE(c.email, '') NOT ILIKE '%@getaura.com.br'`
   + ` AND c.is_sandbox IS NOT TRUE`
   + ` AND ${semDojo('c')}`
+  + ` AND ${semPendente('c')}`
   + (ID_CANARY ? ` AND c.id <> '${ID_CANARY}'::uuid` : '');
 
 // 14/10/2026 (card t1-11, estende o #820): quem NÃO conta como pagante da Aura.

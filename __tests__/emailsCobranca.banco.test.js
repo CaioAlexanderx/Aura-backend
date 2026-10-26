@@ -39,7 +39,8 @@ beforeAll(async () => {
   dono = uuid();
   empresa = uuid();
   await client.query(
-    `INSERT INTO users (id, email, password_hash, full_name) VALUES ($1, $2, 'x', 'Maria Fixture')`,
+    // tq-113: dono com e-mail confirmado (conta pendente não recebe cobrança).
+    `INSERT INTO users (id, email, password_hash, full_name, email_verified) VALUES ($1, $2, 'x', 'Maria Fixture', true)`,
     [dono, `maria-${dono}@example.test`]
   );
   await client.query(

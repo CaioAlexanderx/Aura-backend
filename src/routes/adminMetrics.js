@@ -18,6 +18,8 @@ const { PAGA_POR_OUTRA } = require('../services/painelBlocos/_base');
 const custosMensais = require('../services/custosMensais');
 // 19/10/2026 (decisão do Caio): dojô não aparece nem conta na Gestão Aura.
 const { semDojo, companyIdSemDojo } = require('../utils/empresasDaGestao');
+// tq-113 (26/10/2026): conta pendente (dono nunca confirmou o e-mail) sai junto.
+const { companyIdSemPendente, semPendente } = require('../utils/contaPendente');
 
 const adminOnly = [requireAuth, requireRole('admin')];
 
@@ -31,7 +33,7 @@ router.get('/metrics/overview', ...adminOnly, asyncHandler(async (req, res) => {
        COUNT(*) FILTER(WHERE billing_status='active') AS paying,
        COUNT(*) FILTER(WHERE billing_status='trial' AND trial_ends_at > NOW()) AS trial,
        COUNT(*) FILTER(WHERE billing_status IN ('pending','overdue')) AS overdue
-     FROM companies WHERE is_active=true AND (federation_id IS NULL OR federation_id = id) AND ${semDojo()} GROUP BY plan`
+     FROM companies WHERE is_active=true AND (federation_id IS NULL OR federation_id = id) AND ${semDojo()} AND ${semPendente()} GROUP BY plan`
   );
   const counts = { essencial: 0, negocio: 0, expansao: 0, personalizado: 0 };
   const paying = { essencial: 0, negocio: 0, expansao: 0 };
@@ -83,17 +85,17 @@ router.get('/metrics/overview', ...adminOnly, asyncHandler(async (req, res) => {
 
   // Novos clientes este mes
   const { rows: newRows } = await pool.query(
-    `SELECT COUNT(*) AS total FROM companies WHERE is_active=true AND (federation_id IS NULL OR federation_id = id) AND ${semDojo()} AND created_at >= date_trunc('month', NOW() AT TIME ZONE 'America/Sao_Paulo')`
+    `SELECT COUNT(*) AS total FROM companies WHERE is_active=true AND (federation_id IS NULL OR federation_id = id) AND ${semDojo()} AND ${semPendente()} AND created_at >= date_trunc('month', NOW() AT TIME ZONE 'America/Sao_Paulo')`
   );
   const newThisMonth = parseInt(newRows[0]?.total || 0);
 
   // Metricas de uso agregado
   const { rows: usageRows } = await pool.query(
     `SELECT
-       (SELECT COUNT(*) FROM transactions WHERE ${companyIdSemDojo('company_id')} AND created_at >= date_trunc('month', NOW() AT TIME ZONE 'America/Sao_Paulo')) AS tx_month,
-       (SELECT COUNT(*) FROM sales WHERE ${companyIdSemDojo('company_id')} AND created_at >= date_trunc('month', NOW() AT TIME ZONE 'America/Sao_Paulo')) AS sales_month,
-       (SELECT COUNT(*) FROM products WHERE ${companyIdSemDojo('company_id')}) AS total_products,
-       (SELECT COUNT(*) FROM customers WHERE ${companyIdSemDojo('company_id')}) AS total_customers`
+       (SELECT COUNT(*) FROM transactions WHERE ${companyIdSemDojo('company_id')} AND ${companyIdSemPendente('company_id')} AND created_at >= date_trunc('month', NOW() AT TIME ZONE 'America/Sao_Paulo')) AS tx_month,
+       (SELECT COUNT(*) FROM sales WHERE ${companyIdSemDojo('company_id')} AND ${companyIdSemPendente('company_id')} AND created_at >= date_trunc('month', NOW() AT TIME ZONE 'America/Sao_Paulo')) AS sales_month,
+       (SELECT COUNT(*) FROM products WHERE ${companyIdSemDojo('company_id')} AND ${companyIdSemPendente('company_id')}) AS total_products,
+       (SELECT COUNT(*) FROM customers WHERE ${companyIdSemDojo('company_id')} AND ${companyIdSemPendente('company_id')}) AS total_customers`
   );
   const usage = usageRows[0] || {};
 
@@ -138,7 +140,7 @@ router.get('/metrics/mrr-trend', ...adminOnly, asyncHandler(async (req, res) => 
   // Se nao tem snapshots, gera um estimado baseado no estado atual
   if (rows.length === 0) {
     const { rows: planCounts } = await pool.query(
-      `SELECT plan, COUNT(*) FILTER(WHERE billing_status='active') AS paying FROM companies WHERE is_active=true AND (federation_id IS NULL OR federation_id = id) AND ${semDojo()} GROUP BY plan`
+      `SELECT plan, COUNT(*) FILTER(WHERE billing_status='active') AS paying FROM companies WHERE is_active=true AND (federation_id IS NULL OR federation_id = id) AND ${semDojo()} AND ${semPendente()} GROUP BY plan`
     );
     const now = new Date();
     const current = { month: now.toISOString().slice(0,7), essencial: 0, negocio: 0, expansao: 0 };
@@ -170,7 +172,7 @@ router.get('/alerts', ...adminOnly, asyncHandler(async (req, res) => {
   const { rows: trialRows } = await pool.query(
     `SELECT c.id, c.trade_name, c.legal_name, c.trial_ends_at, u.email, u.full_name
      FROM companies c LEFT JOIN users u ON u.id=c.owner_id
-     WHERE c.is_active=true AND (c.federation_id IS NULL OR c.federation_id = c.id) AND ${semDojo('c')} AND c.billing_status='trial'
+     WHERE c.is_active=true AND (c.federation_id IS NULL OR c.federation_id = c.id) AND ${semDojo('c')} AND ${semPendente('c')} AND c.billing_status='trial'
        AND c.trial_ends_at IS NOT NULL
        AND c.trial_ends_at <= NOW() + INTERVAL '3 days'
        AND c.trial_ends_at >= NOW() - make_interval(days => $1)
@@ -201,7 +203,7 @@ router.get('/alerts', ...adminOnly, asyncHandler(async (req, res) => {
   const { rows: overdueRows } = await pool.query(
     `SELECT c.id, c.trade_name, c.legal_name, c.plan, c.billing_status, c.next_billing_date, u.email
      FROM companies c LEFT JOIN users u ON u.id=c.owner_id
-     WHERE c.is_active=true AND (c.federation_id IS NULL OR c.federation_id = c.id) AND ${semDojo('c')} AND c.billing_status IN ('pending','overdue')
+     WHERE c.is_active=true AND (c.federation_id IS NULL OR c.federation_id = c.id) AND ${semDojo('c')} AND ${semPendente('c')} AND c.billing_status IN ('pending','overdue')
        AND c.plan != 'essencial'
        AND NOT ${PAGA_POR_OUTRA}
      ORDER BY c.next_billing_date ASC`
@@ -223,7 +225,7 @@ router.get('/alerts', ...adminOnly, asyncHandler(async (req, res) => {
        (SELECT MAX(created_at) FROM transactions WHERE company_id=c.id) AS last_tx,
        c.last_active_at
      FROM companies c LEFT JOIN users u ON u.id=c.owner_id
-     WHERE c.is_active=true AND (c.federation_id IS NULL OR c.federation_id = c.id) AND ${semDojo('c')} AND c.billing_status NOT IN ('trial','cancelled')
+     WHERE c.is_active=true AND (c.federation_id IS NULL OR c.federation_id = c.id) AND ${semDojo('c')} AND ${semPendente('c')} AND c.billing_status NOT IN ('trial','cancelled')
      ORDER BY c.created_at`
   );
   inactiveRows.forEach(r => {
@@ -248,7 +250,7 @@ router.get('/alerts', ...adminOnly, asyncHandler(async (req, res) => {
      FROM client_health_scores h
      JOIN companies c ON c.id=h.company_id
      LEFT JOIN users u ON u.id=c.owner_id
-     WHERE h.score < 30 AND c.is_active=true AND ${semDojo('c')}
+     WHERE h.score < 30 AND c.is_active=true AND ${semDojo('c')} AND ${semPendente('c')}
      ORDER BY h.score ASC`
   );
   healthRows.forEach(r => {

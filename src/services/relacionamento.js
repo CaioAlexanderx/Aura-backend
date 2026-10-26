@@ -54,6 +54,9 @@ const { tipoLigado, descadastroDoTipo, sqlMarcaNaoQuer, ultimaNotaComResultado }
 const { appUrl } = require('./emailLinks');
 const { montarTrial } = require('./trialRegra');
 const L = require('./emailLayout');
+// tq-113 (26/10/2026): a definição única de conta pendente. O ciclo já exigia
+// u.email_verified; o fragmento entra para a regra ser a mesma de todo lugar.
+const { semPendente } = require('../utils/contaPendente');
 
 const TZ = 'America/Sao_Paulo';
 
@@ -101,7 +104,8 @@ const SQL_ELEGIVEL_BASE = `
   AND u.is_staff IS NOT TRUE
   AND lower(COALESCE(u.email, '')) NOT LIKE '%@getaura.com.br'
   AND lower(COALESCE(c.email, '')) NOT LIKE '%@getaura.com.br'
-  AND u.email_verified IS TRUE`;
+  AND u.email_verified IS TRUE
+  AND ${semPendente('c')}`;
 
 // Filial de grupo (multi-CNPJ) herda o status da matriz e não recebe cópia.
 const SQL_ELEGIVEL = `${SQL_ELEGIVEL_BASE}

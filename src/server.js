@@ -226,6 +226,13 @@ function startServer() {
     // ..._PUBLICAR=false cria o banner inativo.
     const { initBannerIndicacaoTrialJob } = require('./jobs/bannerIndicacaoTrialJob');
     initBannerIndicacaoTrialJob();
+
+    // Contas pendentes (tq-113, migration 413): 1x por dia após 05h BRT
+    // desativa (is_active=false, nunca DELETE) a empresa cujo dono não
+    // confirmou o e-mail em 7 dias, sem venda, pagamento nem assinatura.
+    // Kill switch LIMPEZA_PENDENTES_ENABLED=false; ..._DRY_RUN=true só loga.
+    const { initLimpezaPendentesJob } = require('./jobs/limpezaPendentesJob');
+    initLimpezaPendentesJob();
   });
 
   instalarEncerramento();

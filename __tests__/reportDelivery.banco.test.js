@@ -52,7 +52,8 @@ beforeAll(async () => {
   const userId = uuid();
   companyId = uuid();
   await client.query(
-    `INSERT INTO users (id, email, password_hash, full_name) VALUES ($1, $2, 'x', 'Fixture tq-72')`,
+    // tq-113: dono com e-mail confirmado (conta pendente fica fora do relatório).
+    `INSERT INTO users (id, email, password_hash, full_name, email_verified) VALUES ($1, $2, 'x', 'Fixture tq-72', true)`,
     [userId, `fixture-${userId}@example.test`]
   );
   await client.query(

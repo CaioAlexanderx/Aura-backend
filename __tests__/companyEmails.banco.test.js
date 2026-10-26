@@ -57,7 +57,7 @@ beforeAll(async () => {
     return p;
   });
 
-  await q(`INSERT INTO users (id, email, password_hash, full_name) VALUES ($1, $2, 'x', 'Maria Dona'), ($3, $4, 'x', 'Vendedor')`,
+  await q(`INSERT INTO users (id, email, password_hash, full_name, email_verified) VALUES ($1, $2, 'x', 'Maria Dona', true), ($3, $4, 'x', 'Vendedor', true)`,
     [dono, EMAIL_DONO, vendedor, `vend-${vendedor.slice(0, 8)}@example.test`]);
   // Hotfix 26/10: o scheduler só inclui empresa criada antes do fim do período reportado.
   await q(`INSERT INTO companies (id, owner_id, legal_name, trade_name, email, plan, billing_status, created_at)
@@ -282,7 +282,7 @@ describe('scheduler: conta criada depois do fim do período fica fora (hotfix 26
     const { endDate } = resolvePeriodForReport('weekly');
     const { rows: [r] } = await q(`SELECT (($1::date + 1)::timestamp AT TIME ZONE 'America/Sao_Paulo') AS fim`, [endDate]);
     fimLocal = r.fim;
-    await q(`INSERT INTO users (id, email, password_hash, full_name) VALUES ($1, $2, 'x', 'Dono Novo'), ($3, $4, 'x', 'Dono Grupo')`,
+    await q(`INSERT INTO users (id, email, password_hash, full_name, email_verified) VALUES ($1, $2, 'x', 'Dono Novo', true), ($3, $4, 'x', 'Dono Grupo', true)`,
       [donoNovo, `novo-${donoNovo.slice(0, 8)}@example.test`, donoGrupo, `grupo-${donoGrupo.slice(0, 8)}@example.test`]);
     const fim = `'${fimLocal.toISOString()}'::timestamptz`;
     await criar('criadaAgora', donoNovo, 'NOW()');
@@ -330,7 +330,7 @@ describe('scheduler: conta "Não quer" fora do relatório (tq-110)', () => {
   }
 
   beforeAll(async () => {
-    await q(`INSERT INTO users (id, email, password_hash, full_name) VALUES ($1, $2, 'x', 'Dono Dois'), ($3, $4, 'x', 'Dono Tres')`,
+    await q(`INSERT INTO users (id, email, password_hash, full_name, email_verified) VALUES ($1, $2, 'x', 'Dono Dois', true), ($3, $4, 'x', 'Dono Tres', true)`,
       [dono2, `dono2-${dono2.slice(0, 8)}@example.test`, dono3, `dono3-${dono3.slice(0, 8)}@example.test`]);
     const casos = [
       ['matrizMarcada', dono2, true], ['filialLimpa', dono2, false], ['filialDesmarcada', dono2, false],

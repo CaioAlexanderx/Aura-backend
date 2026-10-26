@@ -29,6 +29,7 @@ const L = require('./emailLayout');
 const conteudos = require('./emailsCobranca');
 const { enviarEmailRegistrado } = require('./emailLog');
 const { linkQrDoPix } = require('./emailLinks');
+const { ehContaPendente } = require('../utils/contaPendente');
 
 // Decisões do Caio (21/10/2026): em atraso, as outras telas pausam no dia 7
 // e o Caixa no dia 14, contados do vencimento da cobrança OVERDUE mais antiga.
@@ -238,13 +239,15 @@ const VERTICAIS_FORA = ['karate_dojo', 'karate_federation'];
 /**
  * Quem recebe o e-mail de cobrança da empresa (o dono), ou null quando a
  * empresa fica fora: inativa, sandbox, Karatê/dojô, conta interna (is_staff
- * ou @getaura.com.br). Sem e-mail no cadastro: o objeto vem com email null.
+ * ou @getaura.com.br) e conta pendente (tq-113: dono nunca confirmou o
+ * e-mail, utils/contaPendente). Sem e-mail no cadastro: o objeto vem com
+ * email null.
  */
 async function destinatarioDaEmpresa(db, companyId) {
   const r = await db.query(
     `SELECT c.id, COALESCE(c.trade_name, c.legal_name) AS loja, c.email AS company_email,
             c.is_active, c.is_sandbox, c.vertical, c.vertical_active,
-            u.id AS user_id, u.email AS user_email, u.full_name, u.is_staff
+            u.id AS user_id, u.email AS user_email, u.full_name, u.is_staff, u.email_verified
        FROM companies c
        LEFT JOIN users u ON u.id = c.owner_id
       WHERE c.id = $1`,
@@ -257,6 +260,12 @@ async function destinatarioDaEmpresa(db, companyId) {
   if (c.is_staff === true) return null;
   const internos = [c.user_email, c.company_email].filter(Boolean).map((e) => String(e).toLowerCase());
   if (internos.some((e) => e.trim().endsWith('@getaura.com.br'))) return null;
+  // tq-113: conta pendente não recebe e-mail de cobrança. Só decide quando a
+  // linha trouxe o dono (user_id) e o campo email_verified.
+  if (c.user_id && c.email_verified !== undefined && ehContaPendente({
+    email_verified: c.email_verified, is_staff: c.is_staff, is_sandbox: c.is_sandbox,
+    owner_email: c.user_email, company_email: c.company_email,
+  })) return null;
   const email = String(c.user_email || c.company_email || '').trim();
   return {
     companyId: c.id,

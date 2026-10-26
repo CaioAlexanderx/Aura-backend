@@ -30,6 +30,7 @@ const { requireAuth } = require('../middleware/auth');
 const { sendVerificationLinkEmail } = require('../services/mailer');
 const { validateRuntimeEnv } = require('../config/env');
 const relacionamento = require('../services/relacionamento');
+const limpezaPendentes = require('../services/limpezaPendentes');
 const { contextoDaRequisicao } = require('../middleware/auditLog');
 const { porUsuario: limitePorUsuario } = require('../middleware/limiteCorrigirEmail');
 
@@ -142,6 +143,21 @@ function aoConfirmar(resultado, userId) {
     .catch((err) => console.error('[verify] boas-vindas falhou (seguindo): ' + (err && err.message)));
 }
 
+// tq-113 (26/10/2026): a empresa desativada pela limpeza das contas
+// pendentes (dono não confirmou o e-mail em 7 dias) volta quando o e-mail é
+// confirmado. AGUARDADO antes da resposta: o app recarrega a sessão logo em
+// seguida e precisa achar a empresa ativa. Só reabre empresa marcada pelo
+// job (companies.desativada_por = 'conta_pendente'); nunca lança.
+async function reabrirSeDesativada(resultado, userId) {
+  if (!resultado || !Array.isArray(resultado.rows) || !resultado.rows.length) return [];
+  try {
+    return await limpezaPendentes.reativarAoConfirmar(userId, { db });
+  } catch (err) {
+    console.error('[verify] reativação falhou (seguindo): ' + (err && err.message));
+    return [];
+  }
+}
+
 // -- POST /auth/send-verification --
 router.post('/send-verification', requireAuth, async (req, res) => {
   try {
@@ -232,8 +248,9 @@ router.post('/verify-email', requireAuth, async (req, res) => {
       'UPDATE users SET email_verified=true WHERE id=$1 AND email_verified IS NOT TRUE RETURNING id', [req.user.id]
     );
     console.log(`[verify] Email confirmed via OTP for user ${req.user.id}`);
+    const reabertas = await reabrirSeDesativada(confirmou, req.user.id);
     aoConfirmar(confirmou, req.user.id);
-    res.json({ valid: true, email_verified: true });
+    res.json({ valid: true, email_verified: true, ...(reabertas.length ? { empresa_reativada: true } : {}) });
   } catch (err) {
     console.error('[verify-email] error:', err.message);
     res.status(500).json({ error: 'Erro ao verificar codigo' });
@@ -267,6 +284,7 @@ router.get('/confirm-email/:token', async (req, res) => {
     );
 
     console.log(`[verify] Email confirmed for user ${vc.user_id} (${vc.full_name})`);
+    await reabrirSeDesativada(confirmou, vc.user_id);
     aoConfirmar(confirmou, vc.user_id);
     res.redirect(`${APP_URL}/?email_verified=true`);
   } catch (err) {

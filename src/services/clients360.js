@@ -13,6 +13,8 @@ const { getExtraSeatsMap } = require('./extraSeats');
 const { classifyLifecycle } = require('./clientLifecycle');
 // 19/10/2026 (decisão do Caio): dojô não aparece nem conta na Gestão Aura.
 const { semDojo } = require('../utils/empresasDaGestao');
+// tq-113 (26/10/2026): conta pendente (dono nunca confirmou o e-mail) sai junto.
+const { semPendente } = require('../utils/contaPendente');
 
 // ── Funil do trial (12/10/2026) ───────────────────────────────
 // Importou estoque conta planilha/XML de produtos (import_logs module
@@ -124,7 +126,7 @@ async function listarClients360({ companyId = null } = {}) {
         FROM audit_log a
        WHERE a.company_id = c.id AND a.action = 'checkout.viewed'
     ) ck ON true
-    WHERE ${companyId ? 'c.id = $1' : `(c.federation_id IS NULL OR c.federation_id = c.id) AND ${semDojo('c')}`}
+    WHERE ${companyId ? 'c.id = $1' : `(c.federation_id IS NULL OR c.federation_id = c.id) AND ${semDojo('c')} AND ${semPendente('c')}`}
     ORDER BY h.score ASC NULLS LAST, c.created_at DESC
   `, companyId ? [companyId] : []);
 

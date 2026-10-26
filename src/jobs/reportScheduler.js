@@ -37,6 +37,8 @@
 
 const db = require('../config/database');
 const P = require('../services/emailPreferencias');
+// tq-113 (26/10/2026): conta pendente (dono nunca confirmou o e-mail) não recebe o relatório.
+const { semPendente } = require('../utils/contaPendente');
 const { reservarEnvio, marcarEnviado, marcarFalha } = require('../services/emailLog');
 const { resolvePeriodForReport } = require('../services/reportDataQueries');
 
@@ -63,6 +65,7 @@ async function empresasElegiveis({ env = process.env } = {}) {
     AND COALESCE(c.vertical, '') <> ALL($1::text[])
     AND COALESCE(c.vertical_active, '') <> ALL($1::text[])
     AND NOT ${P.sqlMarcaNaoQuer('c.id')}
+    AND ${semPendente('c')}
     AND c.created_at < ((${pFim}::date + 1)::timestamp AT TIME ZONE 'America/Sao_Paulo')`;
   const interna = `(COALESCE(u.is_staff, false) = true
                     OR lower(COALESCE(u.email, '')) LIKE '%@getaura.com.br'
