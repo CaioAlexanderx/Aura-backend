@@ -294,11 +294,12 @@ function blocoPagamentosEstoque(b, { modo, companyId, env }) {
     ])));
   }
   if (!partes.length) return '';
-  // Estoque e financeiro (formas de pagamento e contas abrem a mesma tela).
-  const temFinanceiro = (b.pagamentos && b.pagamentos.length) || (b.contas && b.contas.pagar.qtd > 0);
+  // Um botão por tela de destino (Nina, 26/10): o "Ver o financeiro" fica
+  // só com as contas a pagar ("Pede atenção"); formas de pagamento e margem
+  // não repetem o botão.
   partes.push(botoes([
     b.estoqueBaixo ? botao('Ver o estoque', linkDoApp('/estoque', companyId, env)) : '',
-    temFinanceiro ? botao('Ver o financeiro', linkDoApp('/financeiro', companyId, env)) : '',
+    b.contas && b.contas.pagar.qtd > 0 ? botao('Ver o financeiro', linkDoApp('/financeiro', companyId, env)) : '',
   ]));
   return caixaDoBloco(partes.join(''));
 }
@@ -342,7 +343,7 @@ function blocoEquipeMargem(b, { modo, companyId, env }) {
       if (!ant || ant.pct == null) notas.push('Na semana passada não houve venda com custo suficiente para comparar.');
       if (notas.length) partes.push(miuda(notas.join(' ')));
     }
-    partes.push(botoes([botao('Ver o financeiro', linkDoApp('/financeiro', companyId, env))]));
+    // Sem botão: o "Ver o financeiro" fica só com as contas a pagar.
   }
   return partes.length ? caixaDoBloco(partes.join('')) : '';
 }

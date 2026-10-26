@@ -431,3 +431,28 @@ describe('várias lojas: nome, loja nova e grupo com mais de 3 lojas (26/10)', (
     expect(e.html).not.toContain('53.000.000');
   });
 });
+
+describe('"Clientes que voltaram" conta clientes distintos, não vendas (26/10)', () => {
+  const donoR = uuid();
+  const R = uuid();
+  const VOLTOU = uuid(); const NOVA = uuid();
+
+  beforeAll(async () => {
+    await q(`INSERT INTO users (id, email, password_hash, full_name) VALUES ($1, $2, 'x', 'Dono R')`, [donoR, `r-${donoR.slice(0, 8)}@example.test`]);
+    await q(`INSERT INTO companies (id, owner_id, legal_name, trade_name, email, plan, billing_status, is_primary, pdv_settings)
+             VALUES ($1, $2, 'R LTDA', 'Loja R', 'r@example.test', 'negocio', 'active', true, '{}'::jsonb)`, [R, donoR]);
+    await q(`INSERT INTO customers (id, company_id, name) VALUES ($1, $3, 'Cliente Voltou'), ($2, $3, 'Cliente Nova')`, [VOLTOU, NOVA, R]);
+    const seg = period.startDate;
+    // VOLTOU comprou há 3 semanas e comprou 3 vezes nesta semana; NOVA, 2 vezes nesta semana.
+    await venda({ empresa: R, total: 50, cliente: VOLTOU, quando: ts(dia(seg, -21)) });
+    for (const k of [0, 2, 4]) await venda({ empresa: R, total: 30, cliente: VOLTOU, quando: ts(dia(seg, k)) });
+    for (const k of [1, 3]) await venda({ empresa: R, total: 40, cliente: NOVA, quando: ts(dia(seg, k)) });
+  });
+
+  test('o mesmo cliente com 3 vendas na semana conta 1', async () => {
+    const { buildReportData } = require('../src/services/reportGenerator');
+    const d = await buildReportData(R, 'weekly', period, { semNarrativas: true });
+    expect(d.relatorio.vendas.vendas).toBe(5);
+    expect(d.relatorio.clientes).toMatchObject({ atendidos: 2, voltaram: 1, novos: 1 });
+  });
+});

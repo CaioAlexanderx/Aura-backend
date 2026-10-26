@@ -25,7 +25,8 @@
 //   loja: no app essas telas não têm consolidado (o ranking e a curva ABC
 //   pedem para escolher a loja; o crediário fica vazio).
 //
-// Botões: os mesmos do relatório de uma loja (botao(), bulletproof).
+// Botões: os mesmos do relatório de uma loja (botao(), bulletproof), um só
+// por tela de destino em cada e-mail (Nina, 26/10).
 // Nenhum nome de cliente final: só quantidades e valores.
 // ============================================================
 'use strict';
@@ -230,7 +231,7 @@ function blocoPagamentos(r, { modo, env }) {
     partes.push(miuda(vis.map((x) => `${esc(x.rotulo)} ${x.pct}% · ${brlH(x.valor)}`).join(' &nbsp;·&nbsp; ')));
   }
   partes.push(miuda('O total das lojas juntas.'));
-  partes.push(botoes([botao('Ver o financeiro do grupo', linkDoApp('/financeiro', TODAS, env))]));
+  // Sem botão: a mesma tela de "Ver as contas do grupo" (um botão por destino).
   return caixaDoBloco(partes.join(''));
 }
 

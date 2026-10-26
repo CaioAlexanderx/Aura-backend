@@ -92,6 +92,8 @@ function regras(html) {
   // Painel na página) é um botão bulletproof.
   expect((html.match(/class="a-btn"/g) || []).length).toBe(1);
   const nosBotoes = new Set(botoesDe(html).map((b) => b.href));
+  // Um botão por tela de destino (Nina, 26/10): nenhum href repetido.
+  expect(nosBotoes.size).toBe(botoesDe(html).length);
   for (const u of linksDoApp(html)) {
     if (u === URL_RELATORIO || /^https:\/\/app\.getaura\.com\.br\/\?empresa=/.test(u)) continue;
     expect([u, nosBotoes.has(u)]).toEqual([u, true]);
@@ -114,6 +116,8 @@ describe('botões no relatório de uma loja', () => {
     expect(e.html).toContain('>Ver o relatório completo</a>');
     expect(e.html).toContain('class="a-wa"');
     for (const x of botoesDe(e.html)) expect(x.href).toContain(`empresa=${F.ID.matriz}`);
+    // "Ver o financeiro" uma vez só: com as contas a pagar, não na margem.
+    expect(b.filter((t) => t === 'Ver o financeiro')).toHaveLength(1);
     expect(e.html).toMatchSnapshot('email');
     const p = paginaDe(m, relatorio, 'Modas Exemplo');
     regras(p);
@@ -150,7 +154,9 @@ describe('relatório de várias lojas', () => {
     const b = botoesDe(e.html);
     const por = (t) => b.find((x) => x.texto === t);
     expect(por('Ver as vendas do grupo').href).toBe('https://app.getaura.com.br/vendas?empresa=todas');
-    expect(por('Ver o financeiro do grupo').href).toBe('https://app.getaura.com.br/financeiro?empresa=todas');
+    // Formas de pagamento não repetem o botão das contas (mesma tela).
+    expect(por('Ver as contas do grupo').href).toBe('https://app.getaura.com.br/financeiro?empresa=todas');
+    expect(por('Ver o financeiro do grupo')).toBeUndefined();
     expect(por('Ver o estoque da Matriz').href).toBe(`https://app.getaura.com.br/estoque?empresa=${F.ID.matriz}`);
     expect(por('Ver o estoque do Centro').href).toBe(`https://app.getaura.com.br/estoque?empresa=${F.ID.centro}`);
     expect(por('Chamar de volta os clientes do Centro').href).toBe(`https://app.getaura.com.br/clientes/reativacao?empresa=${F.ID.centro}`);
