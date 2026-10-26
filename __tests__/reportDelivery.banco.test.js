@@ -57,8 +57,9 @@ beforeAll(async () => {
   );
   await client.query(
     // tq-88: o scheduler só manda para teste vigente ou assinatura ativa.
-    `INSERT INTO companies (id, owner_id, legal_name, email, weekly_report_enabled, billing_status)
-     VALUES ($1, $2, 'Fixture tq-72', 'dona-tq72@example.test', true, 'active')`,
+    // Hotfix 26/10: só entra no relatório a empresa criada antes do fim do período.
+    `INSERT INTO companies (id, owner_id, legal_name, email, weekly_report_enabled, billing_status, created_at)
+     VALUES ($1, $2, 'Fixture tq-72', 'dona-tq72@example.test', true, 'active', NOW() - interval '30 days')`,
     [companyId, userId]
   );
 });

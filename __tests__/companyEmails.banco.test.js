@@ -59,8 +59,9 @@ beforeAll(async () => {
 
   await q(`INSERT INTO users (id, email, password_hash, full_name) VALUES ($1, $2, 'x', 'Maria Dona'), ($3, $4, 'x', 'Vendedor')`,
     [dono, EMAIL_DONO, vendedor, `vend-${vendedor.slice(0, 8)}@example.test`]);
-  await q(`INSERT INTO companies (id, owner_id, legal_name, trade_name, email, plan, billing_status)
-           VALUES ($1, $2, 'Modas Fixture LTDA', 'Modas Fixture', 'loja@example.test', 'negocio', 'active')`, [empresa, dono]);
+  // Hotfix 26/10: o scheduler só inclui empresa criada antes do fim do período reportado.
+  await q(`INSERT INTO companies (id, owner_id, legal_name, trade_name, email, plan, billing_status, created_at)
+           VALUES ($1, $2, 'Modas Fixture LTDA', 'Modas Fixture', 'loja@example.test', 'negocio', 'active', NOW() - interval '30 days')`, [empresa, dono]);
   await q(`INSERT INTO company_members (company_id, user_id, role_label, status, is_active) VALUES ($1, $2, 'vendedor', 'active', true)`,
     [empresa, vendedor]);
 
@@ -225,7 +226,7 @@ describe('scheduler: quem entra no relatório', () => {
     ];
     for (const [nome, owner, set] of casos) {
       ids[nome] = uuid();
-      await q(`INSERT INTO companies (id, owner_id, legal_name) VALUES ($1, $2, $3)`, [ids[nome], owner, 'Fixture ' + nome]);
+      await q(`INSERT INTO companies (id, owner_id, legal_name, created_at) VALUES ($1, $2, $3, NOW() - interval '30 days')`, [ids[nome], owner, 'Fixture ' + nome]);
       await q(`UPDATE companies SET ${set} WHERE id = $1`, [ids[nome]]);
     }
     await q(`INSERT INTO company_email_prefs (company_id, tipo, ligado) VALUES ($1, 'relatorio', true), ($2, 'relatorio', false)`,
@@ -264,6 +265,57 @@ describe('scheduler: quem entra no relatório', () => {
   });
 });
 
+describe('scheduler: conta criada depois do fim do período fica fora (hotfix 26/10)', () => {
+  const donoNovo = uuid();
+  const donoGrupo = uuid();
+  const c = {};
+  let fimLocal; // 00:00 de São Paulo do dia seguinte ao fim do período (timestamptz)
+
+  async function criar(nome, owner, criadaSql, primaria = false) {
+    c[nome] = uuid();
+    await q(`INSERT INTO companies (id, owner_id, legal_name, billing_status, is_primary, created_at)
+             VALUES ($1, $2, $3, 'active', $4, ${criadaSql})`, [c[nome], owner, 'Fixture ' + nome, primaria]);
+  }
+
+  beforeAll(async () => {
+    const { resolvePeriodForReport } = require('../src/services/reportDataQueries');
+    const { endDate } = resolvePeriodForReport('weekly');
+    const { rows: [r] } = await q(`SELECT (($1::date + 1)::timestamp AT TIME ZONE 'America/Sao_Paulo') AS fim`, [endDate]);
+    fimLocal = r.fim;
+    await q(`INSERT INTO users (id, email, password_hash, full_name) VALUES ($1, $2, 'x', 'Dono Novo'), ($3, $4, 'x', 'Dono Grupo')`,
+      [donoNovo, `novo-${donoNovo.slice(0, 8)}@example.test`, donoGrupo, `grupo-${donoGrupo.slice(0, 8)}@example.test`]);
+    const fim = `'${fimLocal.toISOString()}'::timestamptz`;
+    await criar('criadaAgora', donoNovo, 'NOW()');
+    await criar('criadaNoFim', donoNovo, fim);
+    await criar('criadaAntes', donoNovo, `${fim} - interval '1 minute'`);
+    await criar('criadaNaSemana', donoNovo, `${fim} - interval '3 days'`);
+    await criar('grupoMatriz', donoGrupo, `NOW() - interval '60 days'`, true);
+    await criar('grupoFilialAntiga', donoGrupo, `${fim} - interval '2 days'`);
+    await criar('grupoFilialNova', donoGrupo, 'NOW()');
+  });
+
+  test('criada depois do fim do período não recebe; criada antes (inclusive 1 min antes da meia-noite) recebe', async () => {
+    const { empresasElegiveis } = require('../src/jobs/reportScheduler');
+    const dentro = new Set((await empresasElegiveis()).map((r) => r.id));
+    expect(dentro.has(c.criadaAgora)).toBe(false);
+    expect(dentro.has(c.criadaNoFim)).toBe(false);
+    expect(dentro.has(c.criadaAntes)).toBe(true);
+    expect(dentro.has(c.criadaNaSemana)).toBe(true);
+  });
+
+  test('grupo com uma loja criada depois: manda só as anteriores', async () => {
+    const { getEligibleOwnerGroups } = require('../src/jobs/reportScheduler');
+    const g = (await getEligibleOwnerGroups()).find((x) => x.owner_id === donoGrupo);
+    expect(g.all.map((x) => x.id).sort()).toEqual([c.grupoMatriz, c.grupoFilialAntiga].sort());
+  });
+
+  test('"Me enviar um agora" não olha a data de criação', async () => {
+    const src = require('fs').readFileSync(require.resolve('../src/jobs/reportScheduler'), 'utf8');
+    const corpo = src.slice(src.indexOf('async function enviarRelatorioAgora'), src.indexOf('// ── Tick'));
+    expect(corpo).not.toMatch(/created_at/);
+  });
+});
+
 describe('scheduler: conta "Não quer" fora do relatório (tq-110)', () => {
   const dono2 = uuid();
   const dono3 = uuid();
@@ -286,7 +338,7 @@ describe('scheduler: conta "Não quer" fora do relatório (tq-110)', () => {
     ];
     for (const [nome, owner, primaria] of casos) {
       e[nome] = uuid();
-      await q(`INSERT INTO companies (id, owner_id, legal_name, billing_status, is_primary) VALUES ($1, $2, $3, 'active', $4)`,
+      await q(`INSERT INTO companies (id, owner_id, legal_name, billing_status, is_primary, created_at) VALUES ($1, $2, $3, 'active', $4, NOW() - interval '30 days')`,
         [e[nome], owner, 'Fixture ' + nome, primaria]);
     }
     await nota(e.matrizMarcada, dono2, 'nao_quer', 'preco_plano', 60);
