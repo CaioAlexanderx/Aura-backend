@@ -5,6 +5,7 @@
 // GET  /auth/confirm-email/:token    (PUBLICO - valida e redireciona)
 // POST /auth/send-phone-verification (phone OTP - 4 digitos)
 // POST /auth/verify-phone            (valida codigo)
+// POST /auth/corrigir-email         (troca o e-mail de quem ainda nao confirmou)
 //
 // Task Sign Up (03/08/2026) — a espera da confirmacao era o ponto de
 // erro mais constante do cadastro. Mudancas:
@@ -29,6 +30,8 @@ const { requireAuth } = require('../middleware/auth');
 const { sendVerificationLinkEmail } = require('../services/mailer');
 const { validateRuntimeEnv } = require('../config/env');
 const relacionamento = require('../services/relacionamento');
+const { contextoDaRequisicao } = require('../middleware/auditLog');
+const { porUsuario: limitePorUsuario } = require('../middleware/limiteCorrigirEmail');
 
 const env = validateRuntimeEnv();
 const API_URL = env.API_URL;
@@ -270,6 +273,153 @@ router.get('/confirm-email/:token', async (req, res) => {
     console.error('[confirm-email] error:', err.message);
     res.redirect(`${APP_URL}/?verify_error=server`);
   }
+});
+
+// -- POST /auth/corrigir-email -- (26/10/2026)
+// Quem criou a conta com o e-mail errado (erro de digitacao) nao tinha como
+// corrigir: o botao da tela de confirmacao so saia da conta, e recadastrar
+// com o e-mail certo nao resolve (com CNPJ a conta nova entra como vendedor
+// da empresa que ja existe; com CPF da 409 CPF_ALREADY_REGISTERED).
+// Esta rota troca o e-mail SO de quem ainda nao confirmou.
+//
+// Numa transacao: users.email; companies.email das empresas de que a pessoa
+// e dona e que tinham o e-mail antigo; apaga os links e codigos pendentes
+// do e-mail antigo (link velho cai em verify_error=invalid, codigo velho
+// some); grava no audit_log o antigo e o novo. Depois do COMMIT, o envio
+// novo sai pelo mesmo caminho do reenvio (issueVerification) — e-mail nao
+// volta atras com ROLLBACK, entao fica fora da transacao. Se o envio
+// falhar, a troca vale e a resposta diz sent:false: o app oferece o
+// reenvio de sempre (POST /auth/send-verification).
+//
+// O JWT nao carrega e-mail (so id, role, plan, company...): nao ha token
+// novo. A resposta devolve o usuario atualizado e o app troca o e-mail
+// mostrado; o /auth/me ja le do banco.
+//
+// Limite: 5 por hora por IP (src/app.js, antes do apiRouter) e 5 por hora
+// por usuario (limitePorUsuario abaixo, antes do handler).
+const EMAIL_MAX = 254;
+const EMAIL_RE = /^[^\s@]+@[^\s@.]+(\.[^\s@.]+)+$/;
+// Conta interna (@getaura.com.br) ganha is_staff no cadastro e nao passa
+// pela confirmacao; nao se chega nela trocando o e-mail de conta comum.
+const DOMINIO_INTERNO = '@getaura.com.br';
+
+function normalizarEmail(bruto) {
+  if (typeof bruto !== 'string') return null;
+  const email = bruto.trim().toLowerCase();
+  if (!email || email.length > EMAIL_MAX || !EMAIL_RE.test(email)) return null;
+  const tld = email.slice(email.lastIndexOf('.') + 1);
+  if (tld.length < 2) return null;
+  return email;
+}
+
+router.post('/corrigir-email', requireAuth, limitePorUsuario, async (req, res) => {
+  const novo = normalizarEmail(req.body && req.body.email);
+  if (!novo) {
+    return res.status(400).json({ error: 'Esse e-mail não parece completo. Confira e tente de novo.', code: 'EMAIL_INVALIDO' });
+  }
+  if (novo.endsWith(DOMINIO_INTERNO)) {
+    return res.status(400).json({ error: 'Esse e-mail não pode ser usado aqui. Fale com a gente.', code: 'EMAIL_DOMINIO_RESERVADO' });
+  }
+
+  const userId = req.user.id;
+  const client = await db.connect();
+  let usuario;
+  let antigo;
+  try {
+    await client.query('BEGIN');
+    const { rows } = await client.query(
+      'SELECT id, full_name, email, email_verified, role, is_staff FROM users WHERE id = $1 FOR UPDATE',
+      [userId]
+    );
+    if (!rows.length) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ error: 'Usuario nao encontrado' });
+    }
+    usuario = rows[0];
+    antigo = usuario.email;
+    if (usuario.email_verified) {
+      await client.query('ROLLBACK');
+      return res.status(409).json({
+        error: 'Seu e-mail já está confirmado. Para trocar, fale com a gente.',
+        code: 'EMAIL_JA_CONFIRMADO',
+      });
+    }
+    if (String(antigo || '').toLowerCase() === novo) {
+      await client.query('ROLLBACK');
+      return res.status(400).json({ error: 'Esse já é o e-mail da sua conta.', code: 'EMAIL_IGUAL' });
+    }
+    // Sem dizer de quem e: so que o e-mail ja tem conta.
+    const { rows: emUso } = await client.query(
+      'SELECT 1 FROM users WHERE lower(email) = $1 AND id <> $2 LIMIT 1',
+      [novo, userId]
+    );
+    if (emUso.length) {
+      await client.query('ROLLBACK');
+      return res.status(409).json({ error: 'Esse e-mail já tem uma conta na Aura.', code: 'EMAIL_EM_USO' });
+    }
+
+    await client.query('UPDATE users SET email = $2, updated_at = NOW() WHERE id = $1', [userId, novo]);
+    const { rows: empresas } = await client.query(
+      `UPDATE companies SET email = $2
+        WHERE owner_id = $1 AND lower(email) = lower($3)
+        RETURNING id`,
+      [userId, novo, antigo]
+    );
+    const { rowCount: codigosApagados } = await client.query(
+      `DELETE FROM verification_codes
+        WHERE user_id = $1 AND type IN ('email', 'email_otp') AND verified_at IS NULL`,
+      [userId]
+    );
+    const ctx = contextoDaRequisicao(req);
+    await client.query(
+      `INSERT INTO audit_log (user_id, company_id, action, detail, metadata, ip_address, user_agent)
+       VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+      [
+        userId,
+        empresas.length ? empresas[0].id : null,
+        'corrigir_email',
+        ('E-mail corrigido antes da confirmacao: ' + antigo + ' -> ' + novo).substring(0, 500),
+        JSON.stringify({
+          email_antigo: antigo,
+          email_novo: novo,
+          empresas: empresas.map((e) => e.id),
+          codigos_invalidados: codigosApagados || 0,
+        }),
+        ctx.ip,
+        ctx.userAgent,
+      ]
+    );
+    await client.query('COMMIT');
+  } catch (err) {
+    try { await client.query('ROLLBACK'); } catch (_) {}
+    // Corrida com outro cadastro no mesmo e-mail: a UNIQUE de users.email.
+    if (err && err.code === '23505') {
+      return res.status(409).json({ error: 'Esse e-mail já tem uma conta na Aura.', code: 'EMAIL_EM_USO' });
+    }
+    console.error('[corrigir-email] error:', err && err.message);
+    return res.status(500).json({ error: 'Não deu para trocar o e-mail agora. Tente de novo em instantes.' });
+  } finally {
+    client.release();
+  }
+
+  console.log(`[corrigir-email] user ${userId}: e-mail trocado antes da confirmacao`);
+  const envio = await issueVerification(userId, novo, usuario.full_name);
+  res.json({
+    ok: true,
+    user: {
+      id: usuario.id,
+      name: usuario.full_name,
+      email: novo,
+      role: usuario.role,
+      is_staff: usuario.is_staff || false,
+      email_verified: false,
+    },
+    sent: !!envio.sent,
+    reason: envio.sent ? undefined : (envio.reason || 'send_failed'),
+    expires_in: envio.sent ? VERIFY_TTL_MIN * 60 : undefined,
+    retry_after: DEDUPE_SECONDS,
+    otp_available: otpSupported,
+  });
 });
 
 // -- Phone verification --

@@ -387,6 +387,9 @@ app.get('/', function(req, res) {
 app.use('/api/v1/auth/login',           loginLimiter);
 app.use('/api/v1/auth/register',        authLimiter);
 app.use('/api/v1/auth/forgot-password', authLimiter);
+// 26/10/2026: "Corrigir meu e-mail" (5 por hora por IP). O teto por usuario
+// fica na cadeia da rota, depois do requireAuth (middleware/limiteCorrigirEmail).
+app.use('/api/v1/auth/corrigir-email',  require('./middleware/limiteCorrigirEmail').porIp);
 const apiRouter = require('./routes/index');
 apiRouter.use('/onboarding/cnpj-lookup', cnpjLimiter);
 app.use('/api/v1', apiRouter);
