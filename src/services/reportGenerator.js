@@ -10,6 +10,12 @@
 //     opts: { destinatarios?, semEntrega? } (tq-88), { config? } (tq-85)
 //   updateDelivery(id, status, { resendId?, error? }) -> true/false
 //
+// Várias lojas (26/10/2026): o consolidado ganha `relatorio.grupo` (nome do
+// grupo pelas lojas, uma linha por loja, base da comparação só com as lojas
+// que venderam nas duas semanas, loja nova marcada) e `relatorio.porLoja`.
+// O nome da loja nunca sai com razão social de MEI nem número de CNPJ
+// (services/relatorioGrupo).
+//
 // tq-85 (24/10/2026): relatório longo. buildReportData também devolve
 // `relatorio`, os blocos da versão completa (services/relatorioBlocos): os
 // ligados nas preferências que o plano tem. O consolidado junta os blocos
@@ -32,6 +38,7 @@ const { buildWeeklyReportHtml } = require('../templates/weeklyReport');
 const { signWeeklyReportToken } = require('../utils/reportToken');
 const P = require('./emailPreferencias');
 const RB = require('./relatorioBlocos');
+const G = require('./relatorioGrupo');
 const { apiUrl } = require('./emailLinks');
 
 /**
@@ -185,11 +192,16 @@ async function buildReportData(companyId, type, periodOverride = null, opts = {}
   const period = periodOverride || resolvePeriodForReport(type);
 
   const { rows: [company] } = await db.query(
-    `SELECT id, COALESCE(trade_name, legal_name) AS name, email, plan, logo_url, is_primary, owner_id
-     FROM companies WHERE id = $1 AND is_active = true`,
+    `SELECT c.id, COALESCE(c.trade_name, c.legal_name) AS name, c.trade_name, c.legal_name, c.created_at,
+            c.email, c.plan, c.logo_url, c.is_primary, c.owner_id, dc.site_name
+     FROM companies c
+     LEFT JOIN digital_channel_config dc ON dc.company_id = c.id
+     WHERE c.id = $1 AND c.is_active = true`,
     [companyId]
   );
   if (!company) throw new Error('Empresa nao encontrada ou inativa');
+  // Nome fantasia, sem o prefixo do MEI (26/10): services/relatorioGrupo.
+  company.name = G.nomeDaLojaNoRelatorio(company, { site_name: company.site_name }) || company.name;
 
   const prevPeriod = getPrevPeriod(period, type);
   const [salesCurrent, salesPrev, staleProducts, dormantCustomers, healthHistory, heatmapData] = await Promise.all([
@@ -352,6 +364,29 @@ async function buildReportData(companyId, type, periodOverride = null, opts = {}
   };
 }
 
+/**
+ * Produtos ativos das lojas sem venda (para o passo da loja nova:
+ * "Cadastrar os produtos" ou "Abrir o Caixa"). Só leitura; erro = sem número.
+ */
+async function produtosAtivos(companyIds) {
+  const out = new Map();
+  if (!companyIds.length) return out;
+  try {
+    const { rows } = await db.query(
+      `SELECT company_id, COUNT(*)::int AS n
+         FROM products
+        WHERE company_id = ANY($1::uuid[]) AND COALESCE(is_active, true) = true
+        GROUP BY company_id`,
+      [companyIds]
+    );
+    for (const id of companyIds) out.set(id, 0);
+    for (const r of rows) out.set(r.company_id, parseInt(r.n, 10) || 0);
+  } catch (err) {
+    console.error(`[reportGenerator] produtos das lojas novas: ${err.message}`);
+  }
+  return out;
+}
+
 // opts (tq-85): { semBlocos?, config?, decisorId? }. Os blocos do grupo são
 // os da config da primária (decisorId, ou a primeira empresa), filtrados pelo
 // plano de cada empresa.
@@ -371,6 +406,31 @@ async function buildConsolidatedReportData(companyIds, type, periodOverride = nu
 
   const primary = perCompany.find(r => r.company.is_primary) || perCompany[0];
   const N = perCompany.length;
+  // O desenho de várias lojas vale até 3 (Caio, 26/10). Acima disso o e-mail
+  // usa só o corte de segurança; o aviso diz à Nina quando revisar.
+  if (N > G.MAX_LOJAS_NO_EMAIL) {
+    console.warn(`[reportGenerator] grupo com mais de ${G.MAX_LOJAS_NO_EMAIL} lojas: primary=${primary.company.id} lojas=${N}`);
+  }
+
+  // Várias lojas (26/10): estado de cada loja na semana, base da comparação
+  // (venda não cancelada nas duas semanas) e o nome do grupo pelas lojas.
+  const semVendaIds = perCompany.filter(r => !(r.kpis.sales > 0)).map(r => r.company.id);
+  const produtosPorLoja = await produtosAtivos(semVendaIds);
+  const lojas = G.lojasDoGrupo(perCompany.map(r => ({
+    companyId:       r.company.id,
+    tradeName:       r.company.trade_name,
+    legalName:       r.company.legal_name,
+    siteName:        r.company.site_name,
+    criadaEm:        r.company.created_at,
+    vendas:          r.kpis.sales,
+    receita:         r.kpis.revenue,
+    vendasAnterior:  r.kpis._prev_sales,
+    receitaAnterior: r.kpis._prev_revenue,
+    produtos:        produtosPorLoja.has(r.company.id) ? produtosPorLoja.get(r.company.id) : null,
+  })), period);
+  const base = G.baseDaComparacao(lojas);
+  const nomeGrupo = G.nomeDoGrupo(lojas);
+  const rotulo = new Map(lojas.map(l => [l.companyId, l.nome]));
 
   const totalRev          = perCompany.reduce((s, r) => s + (r.kpis.revenue || 0), 0);
   const totalSales        = perCompany.reduce((s, r) => s + (r.kpis.sales || 0), 0);
@@ -390,8 +450,9 @@ async function buildConsolidatedReportData(companyIds, type, periodOverride = nu
   const HEALTH_SCORE = 71;
   const kpis = {
     revenue:         totalRev,
-    revenue_delta:   pct(totalRev, totalPrevRev),
-    revenue_dir:     totalRev >= totalPrevRev ? 'up' : 'down',
+    // A variação é só das lojas com venda nas duas semanas (base).
+    revenue_delta:   base.variacaoPct != null ? base.variacaoPct : 0,
+    revenue_dir:     base.receita >= base.receitaAnterior ? 'up' : 'down',
     sales:           totalSales,
     active_days:     activeDays,
     avg_ticket:      parseFloat(avgTicket.toFixed(2)),
@@ -509,21 +570,20 @@ async function buildConsolidatedReportData(companyIds, type, periodOverride = nu
   }
 
   const relatorio = opts.semBlocos || type !== 'weekly' ? null : RB.consolidarBlocos(
-    perCompany.map(r => ({ companyId: r.company.id, nome: r.company.name, dados: r.relatorio })),
-    { kpis, dailyRevenue, prevRevenue: totalPrevRev }
+    perCompany.map(r => ({ companyId: r.company.id, nome: rotulo.get(r.company.id), dados: r.relatorio })),
+    { kpis, dailyRevenue, prevRevenue: totalPrevRev, baseIds: base.ids }
   );
+  if (relatorio) relatorio.grupo = { nome: nomeGrupo, lojas, base };
 
   delete kpis._prev_revenue;
   delete kpis._prev_sales;
   delete kpis._prev_customers;
 
-  const companyName = primary.company.name;
-  const consolidatedName = `${companyName} (${N} unidades)`;
-
   return {
     company: {
       ...primary.company,
-      name: consolidatedName,
+      // "Matriz e Centro" / "suas 5 lojas" (antes: "<principal> (2 unidades)").
+      name: nomeGrupo,
       consolidated: true,
       unit_count: N,
     },
@@ -544,7 +604,7 @@ async function buildConsolidatedReportData(companyIds, type, periodOverride = nu
     dormantCustomers,
     breakdown: perCompany.map(r => ({
       company_id:   r.company.id,
-      company_name: r.company.name,
+      company_name: rotulo.get(r.company.id),
       revenue:      r.kpis.revenue,
       sales:        r.kpis.sales,
       avg_ticket:   r.kpis.avg_ticket,

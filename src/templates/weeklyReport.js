@@ -13,26 +13,25 @@
 // Substitui o painel escuro antigo (glassmorphism, "saúde do negócio" fixa
 // em 71, mapa de calor), que só aparecia na prévia da equipe: o e-mail
 // nunca usou este HTML e a página do app monta a tela a partir do JSON.
+//
+// Várias lojas (26/10/2026): com `relatorio.grupo`, a página segue a mesma
+// estrutura do e-mail de várias lojas (templates/relatorioMultiloja, modo
+// 'pagina'): total do grupo, uma linha por loja e todas as lojas (o e-mail
+// corta acima de 3). O antigo "Por unidade" saiu: a tabela de vendas por
+// loja faz o papel dele. As ações são botões (sem "→").
 // ============================================================
 'use strict';
 
 const L = require('../services/emailLayout');
 const B = require('./relatorioSemanalBlocos');
+const M = require('./relatorioMultiloja');
+const G = require('../services/relatorioGrupo');
 
-const { COR, esc, brl } = L;
+const { COR, esc } = L;
 const FONTE = "-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif";
 
 function hojeBR(now = Date.now()) {
   return L.dataLonga(new Date(now - 3 * 3600000).toISOString().slice(0, 10));
-}
-
-function unidades(breakdown, env) {
-  if (!Array.isArray(breakdown) || breakdown.length < 2) return '';
-  const linhas = breakdown.map((u) => [
-    `${esc(u.company_name)} <a class="a-link" href="${esc(B.linkDoApp('/vendas', u.company_id, env))}" style="color:${COR.violeta};font-size:12px;text-decoration:none;">abrir &rarr;</a>`,
-    `${esc(brl(u.revenue))} · ${String(Math.round(u.sales || 0))} vendas`,
-  ]);
-  return B.caixaDoBloco(B.sub('Por unidade') + B.tabelaSimples(linhas));
 }
 
 /**
@@ -41,7 +40,8 @@ function unidades(breakdown, env) {
  * @param {string} d.companyId           empresa dos links (primária no consolidado)
  * @param {{inicio, fim}} d.periodo      AAAA-MM-DD (fim inclusivo)
  * @param {object} d.relatorio           blocos (relatorioBlocos)
- * @param {Array}  [d.breakdown]         consolidado: uma linha por unidade
+ * @param {Array}  [d.breakdown]         consolidado (não usado no HTML: o
+ *                                       grupo vem em d.relatorio.grupo)
  * @param {object} [d.env]
  * @param {number} [d.now]
  */
@@ -49,11 +49,17 @@ function buildWeeklyReportHtml(d) {
   const env = d.env || process.env;
   const nome = (d.company && d.company.name) || 'sua loja';
   const periodo = d.periodo || {};
-  const blocos = B.renderBlocos(d.relatorio, { modo: 'pagina', companyId: d.companyId, env });
+  const grupo = M.ehGrupo(d.relatorio);
+  const blocos = grupo
+    ? M.renderGrupo(d.relatorio, { modo: 'pagina', env })
+    : B.renderBlocos(d.relatorio, { modo: 'pagina', companyId: d.companyId, env });
   const vazio = !blocos.trim()
     ? B.caixaDoBloco(B.frase('Não há dados para mostrar nesta semana.'))
     : '';
-  const painel = B.linkDoApp('/', d.companyId, env);
+  // Grupo: o Painel consolidado (?empresa=todas); uma loja: o Painel dela.
+  const painel = B.linkDoApp('/', grupo ? M.TODAS : d.companyId, env);
+  const titulo = grupo ? G.tituloDoGrupo(d.relatorio.grupo) : `Sua semana na ${nome}`;
+  const nomes = grupo ? G.nomesNaLinha(d.relatorio.grupo) : null;
 
   return `<!DOCTYPE html>
 <html lang="pt-BR">
@@ -62,7 +68,7 @@ function buildWeeklyReportHtml(d) {
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <meta name="robots" content="noindex, nofollow">
 <meta name="color-scheme" content="light dark">
-<title>Sua semana · ${esc(nome)}</title>
+<title>${esc(titulo)}</title>
 <style>
   :root { color-scheme: light dark; }
   body { margin: 0; }
@@ -76,6 +82,7 @@ function buildWeeklyReportHtml(d) {
     .a-btn { background: #a78bfa !important; color: #14102b !important; }
     .a-link { color: #a78bfa !important; }
     .a-bar { background: #3b3270 !important; }
+    ${B.ESTILO_ESCURO_BOTAO}
   }
 </style>
 </head>
@@ -89,10 +96,10 @@ function buildWeeklyReportHtml(d) {
         <span class="a-ink2" style="font-size:12px;color:${COR.tinta2};vertical-align:middle;margin-left:6px;">Relatório da semana</span>
       </td></tr>
       <tr><td style="padding:22px;font-family:${FONTE};">
-        <h1 class="a-ink" style="margin:0 0 4px;font-size:26px;line-height:1.2;font-weight:700;color:${COR.tinta};">Sua semana na ${esc(nome)}</h1>
-        <p class="a-ink2" style="margin:0 0 18px;color:${COR.tinta2};font-size:14px;">De ${esc(L.dataCurta(periodo.inicio))} a ${esc(L.dataCurta(periodo.fim))}.</p>
-        ${unidades(d.breakdown, env)}${blocos}${vazio}
-        <div style="margin:10px 0 0;"><a class="a-btn" href="${esc(painel)}" style="display:inline-block;background:${COR.violeta};color:#ffffff;font-weight:700;font-size:14px;text-decoration:none;padding:11px 18px;border-radius:10px;">Abrir meu Painel</a></div>
+        <h1 class="a-ink" style="margin:0 0 4px;font-size:26px;line-height:1.2;font-weight:700;color:${COR.tinta};">${esc(titulo)}</h1>
+        <p class="a-ink2" style="margin:0 0 18px;color:${COR.tinta2};font-size:14px;">De ${esc(L.dataCurta(periodo.inicio))} a ${esc(L.dataCurta(periodo.fim))}${nomes ? ` · ${esc(nomes)}` : ''}.</p>
+        ${blocos}${vazio}
+        <div style="margin:10px 0 0;"><a class="a-btn" href="${esc(painel)}" style="display:inline-block;background:${COR.violeta};color:#ffffff;font-weight:700;font-size:14px;text-decoration:none;padding:11px 18px;border-radius:10px;">${grupo ? 'Abrir o Painel do grupo' : 'Abrir meu Painel'}</a></div>
       </td></tr>
       <tr><td class="a-line a-ink2" style="padding:12px 22px;border-top:1px solid ${COR.linha};color:${COR.tinta2};font-size:11.5px;line-height:1.6;font-family:${FONTE};">
         Gerado pela Aura em ${esc(hojeBR(d.now))}. Os links abrem o app na empresa certa. · Aura. Tecnologia para negócios

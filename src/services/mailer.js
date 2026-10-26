@@ -510,6 +510,10 @@ async function sendOwnerNewOrderEmail(to, opts) {
 // Versão 'resumo', ou sem blocos: o e-mail curto de sempre. Nos dois, a
 // "saúde do negócio" saiu: o número era fixo (71 no reportGenerator), não
 // calculado, e o relatório não mostra número inventado.
+// Várias lojas (26/10/2026): com `opts.relatorio.grupo` (consolidado), o
+// e-mail é o de várias lojas (templates/relatorioMultiloja): o grupo pelo
+// nome das lojas, total no topo e uma linha por loja. Nos dois, as ações são
+// botões (sem "→"); "Ver o relatório completo" é o único preenchido.
 
 /**
  * Monta o e-mail do relatório (sem enviar). Usado pelo envio e pela rota
@@ -524,9 +528,12 @@ function montarEmailDoRelatorio(company, kpis, reportUrl, opts = {}) {
   const ajustar = company && company.id ? linkAjustarEmails(company.id) : null;
   const { quandoDoRelatorio } = require('./emailPreferencias');
   const B = require('../templates/relatorioSemanalBlocos');
+  const M = require('../templates/relatorioMultiloja');
+  const G = require('./relatorioGrupo');
 
-  const nome = company.name;
   const completa = opts.versao !== 'resumo' && opts.relatorio && B.blocosVisiveis(opts.relatorio).length > 0;
+  const grupo = completa && M.ehGrupo(opts.relatorio);
+  const nome = grupo ? opts.relatorio.grupo.nome : company.name;
 
   let corpo;
   let assunto;
@@ -535,21 +542,27 @@ function montarEmailDoRelatorio(company, kpis, reportUrl, opts = {}) {
   if (completa) {
     const periodo = opts.periodo || {};
     const v = opts.relatorio.vendas;
-    assunto = `Sua semana na ${nome}`;
+    const titulo = grupo ? G.tituloDoGrupo(opts.relatorio.grupo) : `Sua semana na ${nome}`;
+    const nomesDoGrupo = grupo ? G.nomesNaLinha(opts.relatorio.grupo) : null;
+    assunto = titulo;
     if (v && v.vendas > 0) {
       assunto += `: ${L.brl(v.receita)}`;
       const pctRedondo = v.variacaoPct != null ? Math.round(Math.abs(v.variacaoPct)) : 0;
       if (pctRedondo > 0) assunto += ` (${v.variacaoPct > 0 ? '+' : '-'}${pctRedondo}%)`;
     }
-    previa = B.previaDosBlocos(opts.relatorio);
+    previa = grupo ? M.previaDoGrupo(opts.relatorio) : B.previaDosBlocos(opts.relatorio);
     corpo = [
-      `<h1 class="a-ink" style="margin:0 0 4px;font-size:24px;line-height:1.2;font-weight:700;color:${L.COR.tinta};">Sua semana na ${L.esc(nome)}</h1>`,
+      `<h1 class="a-ink" style="margin:0 0 4px;font-size:24px;line-height:1.2;font-weight:700;color:${L.COR.tinta};">${L.esc(titulo)}</h1>`,
       periodo.inicio
-        ? `<p class="a-ink2" style="margin:0 0 16px;color:${L.COR.tinta2};font-size:13.5px;">De ${L.esc(L.dataCurta(periodo.inicio))} a ${L.esc(L.dataCurta(periodo.fim))}.</p>`
+        ? `<p class="a-ink2" style="margin:0 0 16px;color:${L.COR.tinta2};font-size:13.5px;">De ${L.esc(L.dataCurta(periodo.inicio))} a ${L.esc(L.dataCurta(periodo.fim))}${nomesDoGrupo ? ` · ${L.esc(nomesDoGrupo)}` : ''}.</p>`
         : '',
-      B.renderBlocos(opts.relatorio, { modo: 'email', companyId: company.id }),
+      grupo
+        ? M.renderGrupo(opts.relatorio, { modo: 'email' })
+        : B.renderBlocos(opts.relatorio, { modo: 'email', companyId: company.id }),
     ].join('\n');
-    textoDoResumo = `Aura. — Sua semana na ${nome}.` +
+    textoDoResumo = grupo
+      ? M.textoDoGrupo(opts.relatorio)
+      : `Aura. — Sua semana na ${nome}.` +
       (v ? ` Faturamento: ${L.brl(v.receita)} | Vendas: ${v.vendas} | Ticket medio: ${L.brl(v.ticket)}` : '');
   } else {
     const kpi = (rot, val) =>
@@ -580,13 +593,15 @@ function montarEmailDoRelatorio(company, kpis, reportUrl, opts = {}) {
     assunto,
     previa,
     corpo,
-    botao: { rotulo: 'Ver relatório completo', url },
-    whatsapp: { mensagem: `Oi, Caio! Recebi o relatório semanal da ${nome}.` },
+    botao: { rotulo: grupo ? 'Ver o relatório completo do grupo' : 'Ver o relatório completo', url },
+    whatsapp: { mensagem: grupo ? 'Oi, Caio! Recebi o relatório semanal das minhas lojas.' : `Oi, Caio! Recebi o relatório semanal da ${nome}.` },
     assinatura: false,
     rodape,
+    // Escuro do app de e-mail para os botões secundários dos blocos.
+    ...(completa ? { estiloEscuro: B.ESTILO_ESCURO_BOTAO } : {}),
   });
 
-  const text = `${textoDoResumo}\n\nVer relatorio completo: ${url}`
+  const text = `${textoDoResumo}\n\nVer o relatorio completo: ${url}`
     + (ajustar ? `\n\nAjustar meus e-mails: ${ajustar}` : '')
     + (descadastro ? `\n\nParar de receber: ${descadastro}` : '');
 
