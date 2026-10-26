@@ -96,13 +96,75 @@ function normalizeTransaction(tx) {
   return n;
 }
 
+// 26/10/2026 (tq-102): cada erro de validacao tem um codigo de motivo. As
+// mensagens da resposta sao as de sempre (o app mostra errors[].errors[0]);
+// os codigos vao contados para import_logs.meta.motivos.
+const MENSAGEM_DO_MOTIVO = {
+  tipo_invalido:         (tx, linha) => `Linha ${linha}: tipo invalido '${tx.type}' (use 'income' ou 'expense')`,
+  valor_invalido:        (tx, linha) => `Linha ${linha}: valor invalido '${tx.amount}'`,
+  descricao_obrigatoria: (tx, linha) => `Linha ${linha}: descricao obrigatoria`,
+  data_invalida:         (tx, linha) => `Linha ${linha}: data invalida '${tx.due_date}' (use YYYY-MM-DD ou DD/MM/YYYY)`,
+};
+
+function motivosDaLinha(tx) {
+  const motivos = [];
+  if (!tx.type || !VALID_TYPES.includes(tx.type)) motivos.push('tipo_invalido');
+  if (!tx.amount || isNaN(parseFloat(tx.amount)) || parseFloat(tx.amount) <= 0) motivos.push('valor_invalido');
+  if (!tx.description || String(tx.description).trim().length === 0) motivos.push('descricao_obrigatoria');
+  if (!tx.due_date || isNaN(Date.parse(tx.due_date))) motivos.push('data_invalida');
+  return motivos;
+}
+
 function validateTransaction(tx, index) {
-  const errors = [];
-  if (!tx.type || !VALID_TYPES.includes(tx.type)) errors.push(`Linha ${index + 1}: tipo invalido '${tx.type}' (use 'income' ou 'expense')`);
-  if (!tx.amount || isNaN(parseFloat(tx.amount)) || parseFloat(tx.amount) <= 0) errors.push(`Linha ${index + 1}: valor invalido '${tx.amount}'`);
-  if (!tx.description || String(tx.description).trim().length === 0) errors.push(`Linha ${index + 1}: descricao obrigatoria`);
-  if (!tx.due_date || isNaN(Date.parse(tx.due_date))) errors.push(`Linha ${index + 1}: data invalida '${tx.due_date}' (use YYYY-MM-DD ou DD/MM/YYYY)`);
-  return errors;
+  return motivosDaLinha(tx).map((m) => MENSAGEM_DO_MOTIVO[m](tx, index + 1));
+}
+
+// ── O que fica no import_logs.meta (tq-102, 26/10/2026) ──────
+// Para a equipe entender por que uma importacao deu errado sem pedir o
+// arquivo. NADA de dado pessoal: so contagens e nomes de coluna.
+//   motivos              { tipo_invalido: 3, data_invalida: 1, erro_ao_salvar: 1 }
+//                        (linhas por motivo; uma linha pode ter mais de um)
+//   erros_do_banco       { "22P02": 1 } (SQLSTATE do erro ao salvar; sem a mensagem,
+//                        que pode repetir o valor da linha)
+//   linhas_com_erro      quantas linhas ficaram de fora
+//   colunas_reconhecidas as colunas que o importador le, das que vieram
+//   colunas_outras       QUANTAS outras vieram. O nome delas nao e gravado:
+//                        planilha sem cabecalho vira objeto com a primeira
+//                        linha como nome de coluna (nome de cliente, CPF...).
+const COLUNAS_LIDAS = new Set([
+  'type', 'tipo', 'amount', 'valor', 'due_date', 'data', 'description', 'descricao',
+  'category', 'categoria', 'notes', 'observacao', 'status', 'paid_at', 'data_pagamento',
+  'pago', 'paid', 'vendedor', 'employee_name', 'seller',
+]);
+
+function colunasRecebidas(transactions) {
+  const vistas = new Set();
+  for (const tx of transactions) {
+    if (tx && typeof tx === 'object' && !Array.isArray(tx)) Object.keys(tx).forEach((k) => vistas.add(k));
+  }
+  const reconhecidas = [...vistas].filter((k) => COLUNAS_LIDAS.has(k)).sort();
+  return { colunas_reconhecidas: reconhecidas, colunas_outras: vistas.size - reconhecidas.length };
+}
+
+function metaDoLote({ transactions, errorItems, dbErrors }) {
+  const motivos = {};
+  for (const e of errorItems) {
+    for (const m of motivosDaLinha(e.data)) motivos[m] = (motivos[m] || 0) + 1;
+  }
+  const erros_do_banco = {};
+  if (dbErrors.length) {
+    motivos.erro_ao_salvar = dbErrors.length;
+    for (const e of dbErrors) {
+      const cod = /^[0-9A-Z]{5}$/.test(String(e.code || '')) ? e.code : 'sem_codigo';
+      erros_do_banco[cod] = (erros_do_banco[cod] || 0) + 1;
+    }
+  }
+  return {
+    motivos,
+    ...(dbErrors.length ? { erros_do_banco } : {}),
+    linhas_com_erro: errorItems.length + dbErrors.length,
+    ...colunasRecebidas(transactions),
+  };
 }
 
 // ── Status do lancamento importado por planilha (14/10/2026, cartao tq-10) ──
@@ -200,13 +262,15 @@ router.post('/batch', requireAuth, async (req, res) => {
         saved++;
         if (st.status === 'pending') pendingSaved++;
       } catch (err) {
-        dbErrors.push({ index, error: err.message, data });
+        // code so para o import_logs.meta (tq-102); a resposta segue igual.
+        dbErrors.push({ index, error: err.message, data, code: err.code });
         if (!partial) throw err;
       }
     }
     await client.query(
-      `INSERT INTO import_logs (company_id, module, format, total_rows, imported_rows, error_rows, batch_id, created_by) VALUES ($1, 'transactions', 'batch', $2, $3, $4, $5, $6)`,
-      [companyId, transactions.length, saved, errorItems.length + dbErrors.length, batchId, req.user?.id || null]
+      `INSERT INTO import_logs (company_id, module, format, total_rows, imported_rows, error_rows, batch_id, created_by, meta) VALUES ($1, 'transactions', 'batch', $2, $3, $4, $5, $6, $7)`,
+      [companyId, transactions.length, saved, errorItems.length + dbErrors.length, batchId, req.user?.id || null,
+       JSON.stringify(metaDoLote({ transactions, errorItems, dbErrors }))]
     );
     await client.query('COMMIT');
   } catch (err) {
@@ -215,7 +279,7 @@ router.post('/batch', requireAuth, async (req, res) => {
     return res.status(500).json({ error: 'Erro ao salvar lancamentos', detail: err.message });
   } finally { client.release(); }
 
-  res.status(201).json({ saved, pending: pendingSaved, total: transactions.length, error_count: errorItems.length + dbErrors.length, batch_id: batchId, employees_matched: Object.keys(employeeMap).length, errors: [...errorItems, ...dbErrors].sort((a, b) => a.index - b.index).slice(0, 20) });
+  res.status(201).json({ saved, pending: pendingSaved, total: transactions.length, error_count: errorItems.length + dbErrors.length, batch_id: batchId, employees_matched: Object.keys(employeeMap).length, errors: [...errorItems, ...dbErrors.map(({ code, ...e }) => e)].sort((a, b) => a.index - b.index).slice(0, 20) });
 });
 
 // POST /companies/:id/transactions/import-ofx
@@ -303,3 +367,4 @@ router.delete('/import/:batch_id', requireAuth, async (req, res) => {
 
 module.exports = router;
 module.exports.statusImportado = statusImportado;
+module.exports.metaDoLote = metaDoLote;
