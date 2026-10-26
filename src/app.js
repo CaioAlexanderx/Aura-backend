@@ -390,8 +390,11 @@ app.use('/api/v1/auth/forgot-password', authLimiter);
 // 26/10/2026: "Corrigir meu e-mail" (5 por hora por IP). O teto por usuario
 // fica na cadeia da rota, depois do requireAuth (middleware/limiteCorrigirEmail).
 app.use('/api/v1/auth/corrigir-email',  require('./middleware/limiteCorrigirEmail').porIp);
+// tq-114 (26/10/2026): o cnpjLimiter tambem era registrado no apiRouter
+// depois de /onboarding e nunca rodava (medido: 21 consultas seguidas do
+// mesmo IP davam 21 x 200). Mesmo limite de sempre: 20 por IP por hora.
+app.use('/api/v1/onboarding/cnpj-lookup', cnpjLimiter);
 const apiRouter = require('./routes/index');
-apiRouter.use('/onboarding/cnpj-lookup', cnpjLimiter);
 app.use('/api/v1', apiRouter);
 
 // ── Error handlers ──────────────────────────────────
