@@ -183,10 +183,10 @@ describe('POST /auth/register — a empresa nasce principal', () => {
     expect(res.status).toBe(201);
     const ins = fake.writesTo(/INSERT INTO companies/);
     expect(ins).toHaveLength(1);
-    expect(ins[0].text).toMatch(/federation_id, tax_regime, is_primary\)/);
-    expect(ins[0].text).toMatch(/'simples_nacional'::tax_regime\), true\)/);
-    // os parâmetros posicionais não mudaram (is_primary é literal)
-    expect(ins[0].params).toHaveLength(10);
+    expect(ins[0].text).toMatch(/federation_id, tax_regime, is_primary, email\)/);
+    expect(ins[0].text).toMatch(/'simples_nacional'::tax_regime\), true, \$11\)/);
+    // is_primary é literal; o $11 é o e-mail do dono (tq-41, 26/10/2026)
+    expect(ins[0].params).toHaveLength(11);
   });
 
   test('5b. entrar numa empresa existente pelo CNPJ não cria empresa nem mexe em is_primary', async () => {

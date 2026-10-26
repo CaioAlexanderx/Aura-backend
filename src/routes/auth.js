@@ -579,11 +579,17 @@ router.post('/register', async (req, res) => {
       // mesma transação, então não tem nenhuma outra empresa — esta é a
       // primeira e única. Convite (sem empresa) e entrada numa empresa
       // existente pelo CNPJ não passam por aqui e não mudam.
+      //
+      // 26/10/2026 (tq-41): a empresa nasce com o e-mail do dono em
+      // companies.email ($11, o mesmo users.email gravado acima). Antes o
+      // INSERT não gravava e 2 de 3 cadastros desde 28/09 ficavam sem e-mail
+      // (o relatório semanal legado e o painel da gestão leem a coluna).
+      // Vale para o cadastro com CNPJ, com CPF e o de dojô: todos passam aqui.
       const { rows: [newCompany] } = await client.query(
-        `INSERT INTO companies (owner_id, legal_name, trade_name, plan, onboarding_step, trial_ends_at, access_code_used, cnpj, phone, vertical, vertical_active, federation_id, tax_regime, is_primary)
-         VALUES ($1, $2, $2, $3, 'cnpj', $4, $5, $6, $7, $8, $8, $9, COALESCE($10::tax_regime, 'simples_nacional'::tax_regime), true)
+        `INSERT INTO companies (owner_id, legal_name, trade_name, plan, onboarding_step, trial_ends_at, access_code_used, cnpj, phone, vertical, vertical_active, federation_id, tax_regime, is_primary, email)
+         VALUES ($1, $2, $2, $3, 'cnpj', $4, $5, $6, $7, $8, $8, $9, COALESCE($10::tax_regime, 'simples_nacional'::tax_regime), true, $11)
          RETURNING id, legal_name, trade_name, plan, onboarding_step, trial_ends_at, module_overrides, access_code_used, vertical_active, vertical, ai_enabled, ai_consent_at, federation_id, segment, tax_regime, is_primary`,
-        [user.id, company_name.trim(), plan, trialEndsAt, access_code || null, cnpj ? cnpj.replace(/\D/g, '') : null, telefoneDaEmpresa || null, newVertical, newFederationId, regimeDoCadastro]
+        [user.id, company_name.trim(), plan, trialEndsAt, access_code || null, cnpj ? cnpj.replace(/\D/g, '') : null, telefoneDaEmpresa || null, newVertical, newFederationId, regimeDoCadastro, user.email]
       );
       company = newCompany;
 
