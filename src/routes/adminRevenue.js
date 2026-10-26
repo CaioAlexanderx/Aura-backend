@@ -13,6 +13,8 @@ const asyncHandler = require('../utils/asyncHandler');
 const custosMensais = require('../services/custosMensais');
 // 19/10/2026 (decisão do Caio): dojô não aparece nem conta na Gestão Aura.
 const { semDojo } = require('../utils/empresasDaGestao');
+// tq-113 (26/10/2026): conta pendente (dono nunca confirmou o e-mail) sai junto.
+const { semPendente } = require('../utils/contaPendente');
 
 const adminOnly = [requireAuth, requireRole('admin')];
 const PLAN_PRICES = { essencial: 89, negocio: 199, expansao: 299 };
@@ -33,14 +35,14 @@ router.get('/metrics/mrr-waterfall', ...adminOnly, asyncHandler(async (req, res)
 
   // MRR atual
   const { rows: planCounts } = await pool.query(
-    `SELECT plan, COUNT(*) FILTER(WHERE billing_status='active') AS paying FROM companies WHERE is_active=true AND ${semDojo()} GROUP BY plan`
+    `SELECT plan, COUNT(*) FILTER(WHERE billing_status='active') AS paying FROM companies WHERE is_active=true AND ${semDojo()} AND ${semPendente()} GROUP BY plan`
   );
   let currentMRR = 0;
   planCounts.forEach(r => { currentMRR += (parseInt(r.paying) || 0) * (PLAN_PRICES[r.plan] || 0); });
 
   // New MRR (clientes criados este mes que estao pagando)
   const { rows: newRows } = await pool.query(
-    `SELECT plan, COUNT(*) AS n FROM companies WHERE is_active=true AND billing_status='active' AND ${semDojo()} AND created_at >= $1 GROUP BY plan`,
+    `SELECT plan, COUNT(*) AS n FROM companies WHERE is_active=true AND billing_status='active' AND ${semDojo()} AND ${semPendente()} AND created_at >= $1 GROUP BY plan`,
     [startOfMonth]
   );
   let newMRR = 0;
@@ -75,13 +77,13 @@ router.get('/metrics/mrr-waterfall', ...adminOnly, asyncHandler(async (req, res)
 router.get('/metrics/unit-economics', ...adminOnly, asyncHandler(async (req, res) => {
   // Clientes pagantes
   const { rows: clients } = await pool.query(
-    `SELECT COUNT(*) AS paying FROM companies WHERE is_active=true AND billing_status='active' AND ${semDojo()}`
+    `SELECT COUNT(*) AS paying FROM companies WHERE is_active=true AND billing_status='active' AND ${semDojo()} AND ${semPendente()}`
   );
   const payingClients = parseInt(clients[0]?.paying || 0);
 
   // MRR
   const { rows: planCounts } = await pool.query(
-    `SELECT plan, COUNT(*) AS n FROM companies WHERE is_active=true AND billing_status='active' AND ${semDojo()} GROUP BY plan`
+    `SELECT plan, COUNT(*) AS n FROM companies WHERE is_active=true AND billing_status='active' AND ${semDojo()} AND ${semPendente()} GROUP BY plan`
   );
   let mrr = 0;
   planCounts.forEach(r => { mrr += (parseInt(r.n) || 0) * (PLAN_PRICES[r.plan] || 0); });
@@ -105,7 +107,7 @@ router.get('/metrics/unit-economics', ...adminOnly, asyncHandler(async (req, res
   const mkt = await custosMensais.marketingDosMeses({ db: pool, meses: 3 });
   const mktSpend3m = mkt.valor;
   const { rows: newClients3m } = await pool.query(
-    `SELECT COUNT(*) AS total FROM companies WHERE is_active=true AND ${semDojo()} AND created_at >= NOW() - INTERVAL '90 days'`
+    `SELECT COUNT(*) AS total FROM companies WHERE is_active=true AND ${semDojo()} AND ${semPendente()} AND created_at >= NOW() - INTERVAL '90 days'`
   );
   const newCount3m = parseInt(newClients3m[0]?.total || 0);
   const cac = mktSpend3m === null ? null : (newCount3m > 0 ? mktSpend3m / newCount3m : 0);
@@ -157,7 +159,7 @@ router.get('/metrics/unit-economics', ...adminOnly, asyncHandler(async (req, res
 router.get('/metrics/forecast', ...adminOnly, asyncHandler(async (req, res) => {
   // MRR atual
   const { rows: planCounts } = await pool.query(
-    `SELECT plan, COUNT(*) FILTER(WHERE billing_status='active') AS paying FROM companies WHERE is_active=true AND ${semDojo()} GROUP BY plan`
+    `SELECT plan, COUNT(*) FILTER(WHERE billing_status='active') AS paying FROM companies WHERE is_active=true AND ${semDojo()} AND ${semPendente()} GROUP BY plan`
   );
   let currentMRR = 0;
   planCounts.forEach(r => { currentMRR += (parseInt(r.paying) || 0) * (PLAN_PRICES[r.plan] || 0); });

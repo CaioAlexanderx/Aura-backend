@@ -219,8 +219,9 @@ describe('contagens e métricas sem dojôs', () => {
       consultas = [];
       const res = await get(url);
       expect(res.status).toBe(200);
-      // As subconsultas do próprio helper (dojo_gestao/loja_gestao) não contam.
-      const semFiltro = consultas.filter((s) => /FROM companies/.test(s.replace(/FROM companies (dojo|loja)_gestao/g, ''))
+      // As subconsultas dos helpers (dojo_gestao/loja_gestao; pend_empresa da
+      // conta pendente, tq-113) não contam.
+      const semFiltro = consultas.filter((s) => /FROM companies/.test(s.replace(/FROM companies ((dojo|loja)_gestao|pend_empresa)/g, ''))
         && !/WHERE (c\.)?id ?= ?\$1/.test(s) && !/ANY\(\$1/.test(s) && !FRAGMENTO.test(s));
       expect({ url, semFiltro }).toEqual({ url, semFiltro: [] });
     }

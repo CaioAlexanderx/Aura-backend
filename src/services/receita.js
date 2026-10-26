@@ -40,6 +40,8 @@ const { PAGA_POR_OUTRA, DOJO_SEM_ASSINATURA } = require('./painelBlocos/_base');
 // nem no MRR. Em 19/10 nenhum dos 116 dojôs tinha assinatura própria, então o
 // MRR não muda; a regra vale para um dojô com assinatura que surja depois.
 const { semDojo } = require('../utils/empresasDaGestao');
+// tq-113 (26/10/2026): conta pendente (dono nunca confirmou o e-mail) sai junto.
+const { semPendente } = require('../utils/contaPendente');
 
 const PLANOS = ['essencial', 'negocio', 'expansao'];
 
@@ -90,7 +92,7 @@ async function fonteCompanies({ db = pool } = {}) {
         AND c.is_sandbox IS NOT TRUE
         AND NOT ${PAGA_POR_OUTRA}
         AND NOT ${DOJO_SEM_ASSINATURA}
-        AND ${semDojo('c')}
+        AND ${semDojo('c')} AND ${semPendente('c')}
       ORDER BY 2`
   );
   const seats = await getExtraSeatsMap(rows.map((r) => r.company_id));

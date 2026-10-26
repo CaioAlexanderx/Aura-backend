@@ -14,6 +14,8 @@ const AppError = require('../errors/AppError');
 const custosMensais = require('../services/custosMensais');
 // 19/10/2026 (decisão do Caio): dojô não aparece nem conta na Gestão Aura.
 const { semDojo } = require('../utils/empresasDaGestao');
+// tq-113 (26/10/2026): conta pendente (dono nunca confirmou o e-mail) sai junto.
+const { semPendente } = require('../utils/contaPendente');
 
 const adminOnly = [requireAuth, requireRole('admin')];
 const analystAccess = [requireAuth, requireRole('admin', 'analyst')];
@@ -38,7 +40,7 @@ function normalizeProfile(profile) {
 
 router.get('/dashboard', ...adminOnly, asyncHandler(async (req, res) => {
   const { rows: planCounts } = await pool.query(
-    `SELECT plan, COUNT(*) AS total FROM companies WHERE is_active = true AND (federation_id IS NULL OR federation_id = id) AND ${semDojo()} GROUP BY plan`
+    `SELECT plan, COUNT(*) AS total FROM companies WHERE is_active = true AND (federation_id IS NULL OR federation_id = id) AND ${semDojo()} AND ${semPendente()} GROUP BY plan`
   );
   const counts = { essencial: 0, negocio: 0, expansao: 0 };
   planCounts.forEach((r) => { counts[r.plan] = parseInt(r.total, 10); });
@@ -241,7 +243,7 @@ router.get('/clients', ...adminOnly, asyncHandler(async (req, res) => {
             -- 05/10/2026: frente da empresa (migration 366) pro painel de gestao
             c.segment, c.segment_source, c.segment_suggested, c.cnae_principal
      FROM companies c LEFT JOIN users u ON u.id = c.owner_id
-     WHERE (c.federation_id IS NULL OR c.federation_id = c.id) AND ${semDojo('c')}
+     WHERE (c.federation_id IS NULL OR c.federation_id = c.id) AND ${semDojo('c')} AND ${semPendente('c')}
      ORDER BY c.created_at DESC`
   );
   res.json({
@@ -297,7 +299,9 @@ router.post('/reports/trigger', adminSecretAuth, async (req, res) => {
     } else {
       const { rows } = await db.query(
         `SELECT id, COALESCE(trade_name, legal_name) AS name, email, plan
-         FROM companies WHERE is_active = true AND email IS NOT NULL AND email != '' AND (federation_id IS NULL OR federation_id = id) LIMIT 100`
+         FROM companies WHERE is_active = true AND email IS NOT NULL AND email != '' AND (federation_id IS NULL OR federation_id = id)
+           -- tq-113: nada de relatório para e-mail que o dono nunca confirmou.
+           AND ${semPendente()} LIMIT 100`
       );
       companies = rows;
     }

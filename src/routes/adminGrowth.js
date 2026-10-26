@@ -14,13 +14,15 @@ const asyncHandler = require('../utils/asyncHandler');
 
 // 19/10/2026 (decisão do Caio): dojô não aparece nem conta na Gestão Aura.
 const { semDojo, usuarioSemDojo } = require('../utils/empresasDaGestao');
+// tq-113 (26/10/2026): conta pendente (dono nunca confirmou o e-mail) sai junto.
+const { semPendente, usuarioSemPendente } = require('../utils/contaPendente');
 
 const adminOnly = [requireAuth, requireRole('admin')];
 
 // — GET /admin/metrics/feature-adoption ——————————————————
 router.get('/metrics/feature-adoption', ...adminOnly, asyncHandler(async (req, res) => {
   const { rows: companies } = await pool.query(
-    `SELECT c.id, c.trade_name, c.legal_name, c.plan FROM companies c WHERE c.is_active=true AND (c.federation_id IS NULL OR c.federation_id = c.id) AND ${semDojo('c')} ORDER BY c.created_at`
+    `SELECT c.id, c.trade_name, c.legal_name, c.plan FROM companies c WHERE c.is_active=true AND (c.federation_id IS NULL OR c.federation_id = c.id) AND ${semDojo('c')} AND ${semPendente('c')} ORDER BY c.created_at`
   );
 
   const modules = ['financeiro','pdv','estoque','crm','folha','contabilidade','nfe','canal','ia','agendamento'];
@@ -76,11 +78,11 @@ router.get('/metrics/feature-adoption', ...adminOnly, asyncHandler(async (req, r
 // — GET /admin/metrics/geography ——————————————————
 router.get('/metrics/geography', ...adminOnly, asyncHandler(async (req, res) => {
   const { rows } = await pool.query(
-    `SELECT city, state, COUNT(*) AS total FROM companies WHERE is_active=true AND city IS NOT NULL AND (federation_id IS NULL OR federation_id = id) AND ${semDojo()} GROUP BY city, state ORDER BY total DESC`
+    `SELECT city, state, COUNT(*) AS total FROM companies WHERE is_active=true AND city IS NOT NULL AND (federation_id IS NULL OR federation_id = id) AND ${semDojo()} AND ${semPendente()} GROUP BY city, state ORDER BY total DESC`
   );
   // Fallback: se nao tem city, agrupa por regime
   const { rows: regimes } = await pool.query(
-    `SELECT tax_regime, COUNT(*) AS total FROM companies WHERE is_active=true AND (federation_id IS NULL OR federation_id = id) AND ${semDojo()} GROUP BY tax_regime ORDER BY total DESC`
+    `SELECT tax_regime, COUNT(*) AS total FROM companies WHERE is_active=true AND (federation_id IS NULL OR federation_id = id) AND ${semDojo()} AND ${semPendente()} GROUP BY tax_regime ORDER BY total DESC`
   );
   res.json({
     by_city: rows,
@@ -96,7 +98,7 @@ router.get('/metrics/verticals', ...adminOnly, asyncHandler(async (req, res) => 
     `SELECT c.id, c.plan, c.module_overrides, c.trade_name,
        (SELECT COUNT(*) FROM barbershop_professionals WHERE company_id=c.id) AS barber_data,
        (SELECT COUNT(*) FROM barbershop_appointments WHERE company_id=c.id) AS barber_appts
-     FROM companies c WHERE c.is_active=true AND (c.federation_id IS NULL OR c.federation_id = c.id) AND ${semDojo('c')}`
+     FROM companies c WHERE c.is_active=true AND (c.federation_id IS NULL OR c.federation_id = c.id) AND ${semDojo('c')} AND ${semPendente('c')}`
   ).catch(() => ({ rows: [] }));
 
   const verticals = { sem_vertical: 0, barbearia: 0, dental: 0, food: 0, salao: 0, estetica: 0, pet: 0 };
@@ -109,7 +111,7 @@ router.get('/metrics/verticals', ...adminOnly, asyncHandler(async (req, res) => 
   });
 
   const { rows: planDist } = await pool.query(
-    `SELECT plan, COUNT(*) AS total FROM companies WHERE is_active=true AND (federation_id IS NULL OR federation_id = id) AND ${semDojo()} GROUP BY plan ORDER BY total DESC`
+    `SELECT plan, COUNT(*) AS total FROM companies WHERE is_active=true AND (federation_id IS NULL OR federation_id = id) AND ${semDojo()} AND ${semPendente()} GROUP BY plan ORDER BY total DESC`
   );
 
   res.json({
@@ -120,11 +122,11 @@ router.get('/metrics/verticals', ...adminOnly, asyncHandler(async (req, res) => 
 
 // — GET /admin/metrics/funnel ——————————————————
 router.get('/metrics/funnel', ...adminOnly, asyncHandler(async (req, res) => {
-  const { rows: total } = await pool.query(`SELECT COUNT(*) AS n FROM users u WHERE ${usuarioSemDojo('u')}`);
-  const { rows: withCompany } = await pool.query(`SELECT COUNT(DISTINCT owner_id) AS n FROM companies WHERE (federation_id IS NULL OR federation_id = id) AND ${semDojo()}`);
-  const { rows: trial } = await pool.query(`SELECT COUNT(*) AS n FROM companies WHERE billing_status='trial' AND trial_ends_at > NOW() AND is_active=true AND (federation_id IS NULL OR federation_id = id) AND ${semDojo()}`);
-  const { rows: paying } = await pool.query(`SELECT COUNT(*) AS n FROM companies WHERE billing_status='active' AND is_active=true AND (federation_id IS NULL OR federation_id = id) AND ${semDojo()}`);
-  const { rows: churned } = await pool.query(`SELECT COUNT(*) AS n FROM companies WHERE (is_active=false OR billing_status='cancelled') AND (federation_id IS NULL OR federation_id = id) AND ${semDojo()}`);
+  const { rows: total } = await pool.query(`SELECT COUNT(*) AS n FROM users u WHERE ${usuarioSemDojo('u')} AND ${usuarioSemPendente('u')}`);
+  const { rows: withCompany } = await pool.query(`SELECT COUNT(DISTINCT owner_id) AS n FROM companies WHERE (federation_id IS NULL OR federation_id = id) AND ${semDojo()} AND ${semPendente()}`);
+  const { rows: trial } = await pool.query(`SELECT COUNT(*) AS n FROM companies WHERE billing_status='trial' AND trial_ends_at > NOW() AND is_active=true AND (federation_id IS NULL OR federation_id = id) AND ${semDojo()} AND ${semPendente()}`);
+  const { rows: paying } = await pool.query(`SELECT COUNT(*) AS n FROM companies WHERE billing_status='active' AND is_active=true AND (federation_id IS NULL OR federation_id = id) AND ${semDojo()} AND ${semPendente()}`);
+  const { rows: churned } = await pool.query(`SELECT COUNT(*) AS n FROM companies WHERE (is_active=false OR billing_status='cancelled') AND (federation_id IS NULL OR federation_id = id) AND ${semDojo()} AND ${semPendente()}`);
 
   const signups = parseInt(total[0]?.n || 0);
   const companies_created = parseInt(withCompany[0]?.n || 0);
