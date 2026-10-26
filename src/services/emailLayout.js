@@ -203,6 +203,9 @@ function rodapePadrao({ variante, marca }) {
  * @param {string} [o.rodape]   HTML do rodapé (substitui o padrão)
  * @param {string} [o.rodapeExtra] HTML acrescentado acima do rodapé padrão
  * @param {{nome,logoUrl}} [o.marca]  loja/portal
+ * @param {string} [o.estiloEscuro] regras a mais para o escuro do app de
+ *        e-mail (ex.: os botões secundários do relatório). Sem ela, o
+ *        <style> fica igual ao de sempre.
  */
 function montarEmail(o) {
   const variante = VARIANTES.includes(o.variante) ? o.variante : 'aura-transacional';
@@ -250,7 +253,7 @@ function montarEmail(o) {
     .a-btn { background: #a78bfa !important; color: #14102b !important; }
     .a-wa { color: #6ee7b7 !important; border-color: #6ee7b7 !important; }
     .a-link { color: #a78bfa !important; }
-    .a-sig { filter: invert(1) brightness(1.6); }
+    .a-sig { filter: invert(1) brightness(1.6); }${o.estiloEscuro ? '\n    ' + o.estiloEscuro : ''}
   }
 </style>
 </head>

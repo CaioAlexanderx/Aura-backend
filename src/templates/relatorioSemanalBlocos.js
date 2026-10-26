@@ -19,12 +19,29 @@
 //
 // Nenhum nome de cliente final sai daqui: clientes e crediário só com
 // quantidades e valores. Nome de produto e de vendedor da própria loja, sim.
+//
+// Botões em vez de "Ver X →" (Caio, 26/10: "usar botões de hyperlink ao
+// invés da frase com setinha. Dessa forma fica claro o CTA"). Cada ação é um
+// botão de e-mail à prova de cliente (botao()): tabela com o fundo na <td>,
+// mso-padding-alt para o Outlook (que ignora padding no <a>) e o <a> com
+// display:block e padding para o resto, área de toque de 44 px de altura.
+// Violeta claro, borda fina, sem seta; o verbo diz o que acontece. "Ver o
+// relatório completo" continua o único botão preenchido (emailLayout).
 // ============================================================
 'use strict';
 
 const L = require('../services/emailLayout');
 
 const { COR, esc, brl } = L;
+const FONTE = "-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif";
+// Borda fina do botão secundário (violeta claro do mock da Nina).
+const BORDA_BOTAO = '#d8c9fa';
+
+// Escuro do aplicativo de e-mail para os botões (vai no <style> do e-mail e
+// da página; as cores claras ficam inline).
+const ESTILO_ESCURO_BOTAO =
+  '.a-lkbg { background: #1d1938 !important; border-color: #4c3f8f !important; }\n' +
+  '    .a-lk { color: #c4b5fd !important; }';
 
 const DIAS = { Dom: 'Domingo', Seg: 'Segunda', Ter: 'Terça', Qua: 'Quarta', Qui: 'Quinta', Sex: 'Sexta', Sab: 'Sábado' };
 const DIAS_CURTOS = { Dom: 'dom', Seg: 'seg', Ter: 'ter', Qua: 'qua', Qui: 'qui', Sex: 'sex', Sab: 'sáb' };
@@ -66,8 +83,25 @@ function pctTexto(p) {
   return `${Math.round(a)}%`;
 }
 
-function lk(texto, href) {
-  return `<a class="a-link" href="${esc(href)}" style="color:${COR.violeta};font-weight:700;font-size:12.5px;text-decoration:none;">${esc(texto)} &rarr;</a>`;
+/**
+ * Botão secundário do e-mail (bulletproof). `texto` é texto puro.
+ * Altura: 12 + 18 + 12 de padding/linha + 2 de borda = 44 px.
+ * display:inline-block na tabela: lado a lado e quebrando linha no Gmail e
+ * no Apple Mail; o Outlook (Word) ignora e empilha, o que também serve.
+ */
+function botao(texto, href) {
+  const url = L.urlSegura(href);
+  if (!url || !texto) return '';
+  return `<table role="presentation" border="0" cellpadding="0" cellspacing="0" style="display:inline-block;vertical-align:top;margin:0 8px 8px 0;border-collapse:separate;">` +
+    `<tr><td align="center" valign="middle" bgcolor="${COR.suave}" class="a-lkbg" style="background:${COR.suave};border:1px solid ${BORDA_BOTAO};border-radius:9px;mso-padding-alt:12px 16px;">` +
+    `<a href="${esc(url)}" class="a-lk" style="display:block;padding:12px 16px;color:${COR.violeta};font-family:${FONTE};font-size:14px;line-height:18px;font-weight:700;text-decoration:none;border-radius:9px;mso-line-height-rule:exactly;">${esc(texto)}</a>` +
+    `</td></tr></table>`;
+}
+
+/** Linha de botões (font-size 0 tira o espaço entre os inline-block). */
+function botoes(lista) {
+  const vis = (lista || []).filter(Boolean);
+  return vis.length ? `<div style="margin:6px 0 0;font-size:0;line-height:0;">${vis.join('')}</div>` : '';
 }
 
 function sub(texto) {
@@ -161,11 +195,6 @@ function tabelaSimples(linhas) {
   return `<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin:0 0 8px;">${tr}</table>`;
 }
 
-function linksDoBloco(links) {
-  const vis = links.filter(Boolean);
-  return vis.length ? `<p style="margin:2px 0 0;">${vis.join(' &nbsp; ')}</p>` : '';
-}
-
 // ── Blocos ──────────────────────────────────────────────────────
 
 function blocoVendas(v, { modo, companyId, env }) {
@@ -201,7 +230,7 @@ function blocoVendas(v, { modo, companyId, env }) {
     partes.push(barras(v.semanas.map((s) => s.receita), ['há 3', 'há 2', 'anterior', 'esta'], 3));
     partes.push(tabelaSimples(v.semanas.map((s) => [`${esc(L.dataCurta(s.inicio))} a ${esc(L.dataCurta(s.fim))}`, brlH(s.receita)])));
   }
-  partes.push(linksDoBloco([lk('Ver as vendas', linkDoApp('/vendas', companyId, env))]));
+  partes.push(botoes([botao('Ver as vendas', linkDoApp('/vendas', companyId, env))]));
   return caixaDoBloco(partes.join(''));
 }
 
@@ -220,7 +249,7 @@ function blocoMaisVendidos(m, { modo, companyId, env }) {
       `Curva ${g}`, `${plural(m.curva[g].produtos, 'produto', 'produtos')} · ${m.curva[g].receitaPct}%`,
     ])));
   }
-  partes.push(linksDoBloco([lk('Ver a curva ABC completa', linkDoApp('/financeiro/produtos', companyId, env))]));
+  partes.push(botoes([botao('Ver a curva ABC completa', linkDoApp('/financeiro/produtos', companyId, env))]));
   return caixaDoBloco(partes.join(''));
 }
 
@@ -246,10 +275,10 @@ function blocoPagamentosEstoque(b, { modo, companyId, env }) {
   }
   const atencao = [];
   if (b.estoqueBaixo) {
-    atencao.push(`${plural(b.estoqueBaixo.qtd, 'produto está', 'produtos estão')} com o estoque no mínimo ou abaixo. ${lk('Ver o estoque', linkDoApp('/estoque', companyId, env))}`);
+    atencao.push(`${plural(b.estoqueBaixo.qtd, 'produto está', 'produtos estão')} com o estoque no mínimo ou abaixo.`);
   }
   if (b.contas && b.contas.pagar.qtd > 0) {
-    atencao.push(`${brlH(b.contas.pagar.valor)} em contas a pagar até ${esc(L.dataCurta(b.contas.ate))} (${plural(b.contas.pagar.qtd, 'conta', 'contas')}). ${lk('Ver as contas', linkDoApp('/financeiro', companyId, env))}`);
+    atencao.push(`${brlH(b.contas.pagar.valor)} em contas a pagar até ${esc(L.dataCurta(b.contas.ate))} (${plural(b.contas.pagar.qtd, 'conta', 'contas')}).`);
   }
   if (b.contas && b.contas.receber.qtd > 0) {
     atencao.push(`${brlH(b.contas.receber.valor)} a receber até ${esc(L.dataCurta(b.contas.ate))} (${plural(b.contas.receber.qtd, 'lançamento', 'lançamentos')}).`);
@@ -265,7 +294,13 @@ function blocoPagamentosEstoque(b, { modo, companyId, env }) {
     ])));
   }
   if (!partes.length) return '';
-  if (b.pagamentos && b.pagamentos.length) partes.push(linksDoBloco([lk('Ver o financeiro', linkDoApp('/financeiro', companyId, env))]));
+  // Um botão por tela de destino (Nina, 26/10): o "Ver o financeiro" fica
+  // só com as contas a pagar ("Pede atenção"); formas de pagamento e margem
+  // não repetem o botão.
+  partes.push(botoes([
+    b.estoqueBaixo ? botao('Ver o estoque', linkDoApp('/estoque', companyId, env)) : '',
+    b.contas && b.contas.pagar.qtd > 0 ? botao('Ver o financeiro', linkDoApp('/financeiro', companyId, env)) : '',
+  ]));
   return caixaDoBloco(partes.join(''));
 }
 
@@ -283,13 +318,13 @@ function blocoEquipeMargem(b, { modo, companyId, env }) {
       for (const x of comEquipe) {
         partes.push(frase(`<strong>${esc(x.nome)}</strong>`, 'margin:0 0 4px;'));
         partes.push(lista(linhasDaEquipe(x.equipe, max)));
-        partes.push(linksDoBloco([lk('Ver o ranking', linkDoApp('/vendas?tab=ranking', x.companyId, env))]));
+        partes.push(botoes([botao('Ver o ranking', linkDoApp('/vendas?tab=ranking', x.companyId, env))]));
       }
     }
   } else if (b.equipe && b.equipe.length) {
     partes.push(sub('Sua equipe'));
     partes.push(lista(linhasDaEquipe(b.equipe, max)));
-    partes.push(linksDoBloco([lk('Ver o relatório da equipe', linkDoApp('/vendas?tab=ranking', companyId, env))]));
+    partes.push(botoes([botao('Ver o relatório da equipe', linkDoApp('/vendas?tab=ranking', companyId, env))]));
   }
   if (b.margem && b.margem.atual) {
     const a = b.margem.atual;
@@ -308,7 +343,7 @@ function blocoEquipeMargem(b, { modo, companyId, env }) {
       if (!ant || ant.pct == null) notas.push('Na semana passada não houve venda com custo suficiente para comparar.');
       if (notas.length) partes.push(miuda(notas.join(' ')));
     }
-    partes.push(linksDoBloco([lk('Ver o financeiro', linkDoApp('/financeiro', companyId, env))]));
+    // Sem botão: o "Ver o financeiro" fica só com as contas a pagar.
   }
   return partes.length ? caixaDoBloco(partes.join('')) : '';
 }
@@ -324,17 +359,20 @@ function blocoClientes(c, { companyId, env }) {
   }
   const itens = [];
   if (c.aniversariantes > 0) {
-    itens.push(`${plural(c.aniversariantes, 'cliente faz', 'clientes fazem')} aniversário nos próximos 7 dias. ${lk('Ver os aniversariantes', linkDoApp('/clientes', companyId, env))}`);
+    itens.push(`${plural(c.aniversariantes, 'cliente faz', 'clientes fazem')} aniversário nos próximos 7 dias.`);
   }
   if (c.parados > 0) {
-    itens.push(`${plural(c.parados, 'cliente não compra', 'clientes não compram')} há mais de ${c.diasParado} dias. ${lk('Chamar de volta', linkDoApp('/clientes/reativacao', companyId, env))}`);
+    itens.push(`${plural(c.parados, 'cliente não compra', 'clientes não compram')} há mais de ${c.diasParado} dias.`);
   }
   if (itens.length) {
     if (!partes.length) partes.push(sub('Clientes'));
     partes.push(lista(itens));
   }
   if (!partes.length) return '';
-  partes.push(linksDoBloco([lk('Ver meus clientes', linkDoApp('/clientes', companyId, env))]));
+  partes.push(botoes([
+    c.parados > 0 ? botao('Chamar de volta', linkDoApp('/clientes/reativacao', companyId, env)) : '',
+    botao(c.aniversariantes > 0 ? 'Ver os aniversariantes' : 'Ver meus clientes', linkDoApp('/clientes', companyId, env)),
+  ]));
   return caixaDoBloco(partes.join(''));
 }
 
@@ -348,7 +386,7 @@ function blocoLojaOnline(o, { companyId, env }) {
   } else {
     partes.push(frase('Nenhum pedido confirmado na loja online nesta semana.'));
   }
-  partes.push(linksDoBloco([lk('Ver a loja online', linkDoApp('/canal', companyId, env))]));
+  partes.push(botoes([botao('Ver a loja online', linkDoApp('/canal', companyId, env))]));
   return caixaDoBloco(partes.join(''));
 }
 
@@ -375,11 +413,14 @@ function blocoCrediario(c, { modo, companyId, env }) {
   partes.push(lista(itens));
   if (modo === 'pagina' && c.porEmpresa && c.porEmpresa.length > 1) {
     partes.push(tabelaSimples(c.porEmpresa.map((x) => [
-      `${esc(x.nome)} ${lk('abrir', linkDoApp('/crediario', x.companyId, env))}`,
+      esc(x.nome),
       `saldo ${brlH(x.saldo)} · vencido ${brlH(x.vencido)}`,
     ])));
+    // A tela do crediário é por loja: um botão por loja.
+    partes.push(botoes(c.porEmpresa.map((x) => botao(`Ver o crediário: ${x.nome}`, linkDoApp('/crediario', x.companyId, env)))));
+    return caixaDoBloco(partes.join(''));
   }
-  partes.push(linksDoBloco([lk('Ver o crediário', linkDoApp('/crediario', companyId, env))]));
+  partes.push(botoes([botao('Ver o crediário', linkDoApp('/crediario', companyId, env))]));
   return caixaDoBloco(partes.join(''));
 }
 
@@ -437,7 +478,21 @@ function previaDosBlocos(dados) {
 
 module.exports = {
   ORDEM,
+  ESTILO_ESCURO_BOTAO,
+  FONTE,
   linkDoApp,
+  botao,
+  botoes,
+  brlH,
+  n,
+  qtd,
+  plural,
+  pctTexto,
+  lista,
+  medidor,
+  pilha,
+  DIAS,
+  DIAS_CURTOS,
   renderBlocos,
   blocosVisiveis,
   previaDosBlocos,

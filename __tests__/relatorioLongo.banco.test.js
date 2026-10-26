@@ -11,7 +11,10 @@
 //   4. consolidado (dono com duas empresas);
 //   5. "Ver um exemplo" (GET /companies/:id/emails/relatorio/exemplo): só o
 //      dono, devolve o HTML, não envia nem grava nada;
-//   6. página pública /reports/weekly/:token/pagina.
+//   6. página pública /reports/weekly/:token/pagina;
+//   7. várias lojas (26/10): base da comparação, nome pela cadeia (nome
+//      fantasia -> loja online -> razão social sem o prefixo do MEI), loja
+//      nova e o aviso de grupo com mais de 3 lojas.
 // ============================================================
 'use strict';
 
@@ -287,6 +290,14 @@ describe('consolidado (dono com duas empresas)', () => {
     expect(sqls.filter((s) => ESCRITA.test(s))).toEqual([]);
     const r = d.relatorio;
     expect(d.company.consolidated).toBe(true);
+    expect(d.company.name).toBe('Loja A e Loja B');
+    expect(r.grupo.nome).toBe('Loja A e Loja B');
+    // B não vendeu na semana anterior: a comparação é só de A (350 contra 100).
+    expect(r.grupo.base).toMatchObject({ ids: [A], lojas: 1, todasQueVenderam: false });
+    expect(r.vendas.variacaoPct).toBe(250);
+    expect(r.vendas.receitaAnterior).toBe(100);
+    expect(r.equipe_margem.margem.anterior).toEqual({ pct: 70, cobertura: 100 });
+    expect(Object.keys(r.porLoja).sort()).toEqual([A, B].sort());
     expect(r.vendas.receita).toBe(450);
     expect(r.vendas.vendas).toBe(4);
     expect(r.mais_vendidos.top.map((p) => p.nome)).toEqual(['Vestido', 'Bolsa', 'Meia']);
@@ -349,13 +360,99 @@ describe('página pública /reports/weekly/:token/pagina', () => {
     expect(r.status).toBe(200);
     expect(r.headers['content-type']).toMatch(/text\/html/);
     expect(r.headers['content-security-policy']).toContain("img-src https://app.getaura.com.br");
-    expect(r.text).toContain('Por unidade');
+    expect(r.text).toContain('Sua semana nas suas 2 lojas');
     expect(r.text).toContain('Loja B');
+    expect(r.text).toContain('/vendas?empresa=todas');
+    expect(r.text).not.toContain('&rarr;');
     expect(sqls.filter((s) => ESCRITA.test(s))).toEqual([]);
     const j = await request(app).get(`/reports/weekly/${tk}`);
     expect(j.status).toBe(200);
     expect(j.body.blocos.vendas.receita).toBe(450);
     expect(j.body.blocos.mais_vendidos._todos).toBeUndefined();
     expect((await request(app).get('/reports/weekly/abc/pagina')).status).toBe(401);
+  });
+});
+
+describe('várias lojas: nome, loja nova e grupo com mais de 3 lojas (26/10)', () => {
+  const donoM = uuid();
+  const M = uuid(); const N = uuid(); const O = uuid(); const Q = uuid();
+  const MEI_M = '53.000.000 LUIS EXEMPLO FERREIRA'; // fictício, no formato do caso real
+  const MEI_N = '68.000.000 JORGE EXEMPLO VIEIRA';
+
+  beforeAll(async () => {
+    await q(`INSERT INTO users (id, email, password_hash, full_name) VALUES ($1, $2, 'x', 'Dono M')`, [donoM, `m-${donoM.slice(0, 8)}@example.test`]);
+    await q(`INSERT INTO companies (id, owner_id, legal_name, trade_name, email, plan, billing_status, is_primary, pdv_settings, created_at)
+             VALUES ($1, $5, $6, $6, 'm@example.test', 'negocio', 'active', true, '{}'::jsonb, NOW() - INTERVAL '400 days'),
+                    ($2, $5, $7, $7, 'n@example.test', 'negocio', 'active', false, '{}'::jsonb, NOW() - INTERVAL '300 days'),
+                    ($3, $5, 'O LTDA', 'Loja O', 'o@example.test', 'negocio', 'active', false, '{}'::jsonb, NOW() - INTERVAL '2 days'),
+                    ($4, $5, 'Q LTDA', 'Loja Q', 'q@example.test', 'negocio', 'active', false, '{}'::jsonb, NOW() - INTERVAL '3 days')`,
+    [M, N, O, Q, donoM, MEI_M, MEI_N]);
+    // M tem loja online com nome; N não.
+    await q(`INSERT INTO digital_channel_config (company_id, is_published, site_name) VALUES ($1, true, 'Adega Exemplo')`, [M]);
+    const pm = uuid(); const pn = uuid(); const pq = uuid();
+    await q(`INSERT INTO products (id, company_id, name, price, stock_qty, stock_min, is_active) VALUES
+             ($1, $4, 'Vinho', 80, 10, 0, true), ($2, $5, 'Cerveja', 80, 10, 0, true), ($3, $6, 'Taça', 20, 5, 0, true)`, [pm, pn, pq, M, N, Q]);
+    const seg = period.startDate;
+    await venda({ empresa: M, total: 160, itens: [{ produto: pm, qtd: 2, preco: 80, custo: 40 }], quando: ts(dia(seg, -6)) });
+    await venda({ empresa: M, total: 240, itens: [{ produto: pm, qtd: 3, preco: 80, custo: 40 }], quando: ts(dia(seg, 1)) });
+    await venda({ empresa: N, total: 80, itens: [{ produto: pn, qtd: 1, preco: 80, custo: 40 }], quando: ts(dia(seg, 2)) });
+  });
+
+  test('nome pela cadeia, lojas novas marcadas, aviso de mais de 3 lojas, sem escrita', async () => {
+    const { buildConsolidatedReportData } = require('../src/services/reportGenerator');
+    sqls.length = 0;
+    const d = await buildConsolidatedReportData([M, N, O, Q], 'weekly', period, { decisorId: M, semNarrativas: true });
+    expect(sqls.filter((s) => ESCRITA.test(s))).toEqual([]);
+    const g = d.relatorio.grupo;
+    expect(g.lojas.map((l) => l.nome)).toEqual(['Adega Exemplo', 'JORGE EXEMPLO VIEIRA', 'Loja O', 'Loja Q']);
+    expect(d.company.name).toBe('suas 4 lojas');
+    expect(g.lojas.map((l) => [l.nova, l.produtos])).toEqual([[false, null], [false, null], [true, 0], [true, 1]]);
+    expect(g.base).toMatchObject({ ids: [M], receita: 240, receitaAnterior: 160, variacaoPct: 50 });
+    expect(console.warn).toHaveBeenCalledWith(`[reportGenerator] grupo com mais de 3 lojas: primary=${M} lojas=4`);
+    // Nada do que vai para o e-mail, a página e o JSON público leva o prefixo.
+    expect(JSON.stringify(d.relatorio)).not.toMatch(/\d{2}\.\d{3}\.\d{3} /);
+    expect(JSON.stringify(d.breakdown)).not.toMatch(/\d{2}\.\d{3}\.\d{3} /);
+    // Uma loja só: o nome também segue a cadeia.
+    const { buildReportData } = require('../src/services/reportGenerator');
+    expect((await buildReportData(N, 'weekly', period, { semNarrativas: true, semBlocos: true })).company.name).toBe('JORGE EXEMPLO VIEIRA');
+  });
+
+  test('o e-mail das 4 lojas: as 3 maiores e "Outra loja"; cadastrar os produtos da loja nova vazia', async () => {
+    const { buildConsolidatedReportData } = require('../src/services/reportGenerator');
+    const { montarEmailDoRelatorio } = require('../src/services/mailer');
+    const { semInternos } = require('../src/services/relatorioBlocos');
+    const d = await buildConsolidatedReportData([M, N, O, Q], 'weekly', period, { decisorId: M, semNarrativas: true });
+    const e = montarEmailDoRelatorio({ id: M, name: d.company.name }, d.kpis, 'https://app.getaura.com.br/relatorios/semanal/t',
+      { relatorio: semInternos(d.relatorio), versao: 'completa', periodo: { inicio: period.startDate, fim: period.endDate }, grupo: true });
+    expect(e.assunto).toBe('Sua semana nas suas 4 lojas: R$ 320,00 (+50%)');
+    expect(e.html).toContain('Outra loja');
+    expect(e.html).toContain(`/estoque?empresa=${O}`); // Loja O: sem produto
+    expect(e.html).toContain(`/pdv?empresa=${Q}`); // Loja Q: já tem produto, o passo é o Caixa
+    expect(e.html).not.toContain('53.000.000');
+  });
+});
+
+describe('"Clientes que voltaram" conta clientes distintos, não vendas (26/10)', () => {
+  const donoR = uuid();
+  const R = uuid();
+  const VOLTOU = uuid(); const NOVA = uuid();
+
+  beforeAll(async () => {
+    await q(`INSERT INTO users (id, email, password_hash, full_name) VALUES ($1, $2, 'x', 'Dono R')`, [donoR, `r-${donoR.slice(0, 8)}@example.test`]);
+    await q(`INSERT INTO companies (id, owner_id, legal_name, trade_name, email, plan, billing_status, is_primary, pdv_settings)
+             VALUES ($1, $2, 'R LTDA', 'Loja R', 'r@example.test', 'negocio', 'active', true, '{}'::jsonb)`, [R, donoR]);
+    await q(`INSERT INTO customers (id, company_id, name) VALUES ($1, $3, 'Cliente Voltou'), ($2, $3, 'Cliente Nova')`, [VOLTOU, NOVA, R]);
+    const seg = period.startDate;
+    // VOLTOU comprou há 3 semanas e comprou 3 vezes nesta semana; NOVA, 2 vezes nesta semana.
+    await venda({ empresa: R, total: 50, cliente: VOLTOU, quando: ts(dia(seg, -21)) });
+    for (const k of [0, 2, 4]) await venda({ empresa: R, total: 30, cliente: VOLTOU, quando: ts(dia(seg, k)) });
+    for (const k of [1, 3]) await venda({ empresa: R, total: 40, cliente: NOVA, quando: ts(dia(seg, k)) });
+  });
+
+  test('o mesmo cliente com 3 vendas na semana conta 1', async () => {
+    const { buildReportData } = require('../src/services/reportGenerator');
+    const d = await buildReportData(R, 'weekly', period, { semNarrativas: true });
+    expect(d.relatorio.vendas.vendas).toBe(5);
+    expect(d.relatorio.clientes).toMatchObject({ atendidos: 2, voltaram: 1, novos: 1 });
   });
 });

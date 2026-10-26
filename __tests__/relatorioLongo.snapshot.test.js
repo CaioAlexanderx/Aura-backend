@@ -150,7 +150,8 @@ describe('e-mail do relatório longo (versão completa)', () => {
     regras(c.html);
     expect(c.subject).toBe('Sua semana na Modas da Maria: R$ 4.820,00 (+12%)');
     expect(c.html).toContain('Vendas, mais vendidos, estoque e contas, equipe e margem, clientes, loja online e crediário da semana');
-    expect(c.html).toContain('Ver relatório completo');
+    expect(c.html).toContain('>Ver o relatório completo</a>');
+    expect(c.html).not.toContain('&rarr;'); // botões, não "Ver X →" (26/10)
     expect(c.html).toContain(`href="${URL_RELATORIO}"`);
     for (const t of ['Vendas da semana', 'O que mais saiu', 'Como pagaram', 'Pede atenção', 'Sua equipe', 'Margem bruta da semana', 'Clientes da semana', 'Loja online', 'Crediário da semana']) {
       expect(c.html).toContain(t);
@@ -275,38 +276,20 @@ describe('página "Ver relatório completo"', () => {
     expect(html).toMatchSnapshot();
   });
 
-  test('consolidado: por unidade, equipe por empresa e crediário com a linha de cada uma', () => {
+  test('consolidado: a página de várias lojas (uma linha por loja, equipe e crediário por loja)', () => {
     const { RB, P, pagina } = carregar();
-    const base = relatorioCompleto(RB, [...P.BLOCOS]);
-    const relatorio = {
-      ...base,
-      equipe_margem: RB._montar.montarEquipeMargem({
-        equipe: [],
-        somas: { atual: { receita: 4820, receitaComCusto: 4820, custo: 2843.8 }, anterior: null },
-        porEmpresa: [
-          { companyId: EMPRESA, nome: 'Matriz', equipe: [{ nome: 'Ana', receita: 1980, vendas: 13 }] },
-          { companyId: FILIAL, nome: 'Filial', equipe: [{ nome: 'Bia', receita: 900, vendas: 6 }] },
-        ],
-      }),
-      crediario: { ...base.crediario, porEmpresa: [
-        { companyId: EMPRESA, nome: 'Matriz', saldo: 5000, vencido: 1000, recebido: 600, novoFiado: 800 },
-        { companyId: FILIAL, nome: 'Filial', saldo: 1480, vencido: 240, recebido: 260, novoFiado: 350 },
-      ] },
-    };
+    const G = require('../src/services/relatorioGrupo');
+    const F = require('./fixtures/relatorioMultiloja');
+    const relatorio = F.relatorioDoGrupo(F.CENARIOS.duas, { RB, P, G });
     const html = pagina.buildWeeklyReportHtml({
-      company: { name: 'Modas da Maria (2 unidades)' }, companyId: EMPRESA, periodo: PERIODO, relatorio, now: NOW,
-      breakdown: [
-        { company_id: EMPRESA, company_name: 'Matriz', revenue: 3200, sales: 20 },
-        { company_id: FILIAL, company_name: 'Filial', revenue: 1620, sales: 11 },
-      ],
+      company: { name: relatorio.grupo.nome }, companyId: F.ID.matriz, periodo: PERIODO, relatorio, now: NOW,
     });
     regras(html);
-    expect(html).toContain('Por unidade');
-    expect(html).toContain(`/vendas?tab=ranking&amp;empresa=${FILIAL}`);
-    expect(html).toContain(`/crediario?empresa=${FILIAL}`);
-    expect(html).toContain(`/vendas?empresa=${FILIAL}`);
-    expect(html).toContain('Bia · R$&nbsp;900,00 em 6 vendas');
-    expect(html).toMatchSnapshot();
+    expect(html).toContain('Sua semana nas suas 2 lojas');
+    expect(html).toContain(`/vendas?tab=ranking&amp;empresa=${F.ID.centro}`);
+    expect(html).toContain(`/crediario?empresa=${F.ID.centro}`);
+    expect(html).toContain('/vendas?empresa=todas');
+    expect(html).toContain('Carla · R$&nbsp;970,45 em 6 vendas');
   });
 
   test('sem nenhum bloco com dado: frase curta', () => {
@@ -356,7 +339,8 @@ describe('links e números', () => {
     expect(c.vendas.receita).toBe(400);
     expect(c.vendas.variacaoPct).toBe(100);
     expect(c.vendas.semanas.map((s) => s.receita)).toEqual([15, 27]);
-    expect(c.mais_vendidos.top[0]).toEqual({ nome: 'Compartilhado', qtd: 5, receita: 150 });
+    expect(c.mais_vendidos.top[0]).toEqual({ nome: 'Compartilhado', qtd: 5, receita: 150, lojas: ['A', 'B'] });
+    expect(Object.keys(c.porLoja)).toEqual([EMPRESA, FILIAL]);
     expect(c.clientes).toEqual({ atendidos: 5, novos: 2, voltaram: 3, aniversariantes: 1, parados: 3, diasParado: 30 });
     expect(c.equipe_margem.margem.atual).toEqual({ pct: 35, cobertura: 100 }); // (400-260)/400
     expect(c.equipe_margem.porEmpresa.map((x) => x.nome)).toEqual(['A', 'B']);

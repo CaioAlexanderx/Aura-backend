@@ -194,7 +194,11 @@ function montarMaisVendidos(todos) {
     curva[g] = { produtos: itens.length, receitaPct: total > 0 ? Math.round((rec / total) * 100) : 0 };
   }
   return {
-    top: ordenados.slice(0, 5).map((p) => ({ nome: p.nome, qtd: Math.round(p.qtd * 100) / 100, receita: num(p.receita) })),
+    top: ordenados.slice(0, 5).map((p) => ({
+      nome: p.nome, qtd: Math.round(p.qtd * 100) / 100, receita: num(p.receita),
+      // Consolidado: em que lojas saiu (o mesmo id = produto do grupo).
+      ...(Array.isArray(p.lojas) ? { lojas: p.lojas } : {}),
+    })),
     curva,
     produtosVendidos: ordenados.length,
     _todos: ordenados,
@@ -512,14 +516,22 @@ async function dadosDosBlocos(companyId, ctx) {
  *   crediário: soma, com a linha de cada empresa na página completa (a
  *     tela do crediário também é por CNPJ).
  *
+ * Várias lojas (26/10/2026): `agregado.baseIds` são as lojas com venda nas
+ * duas semanas. Com ela, a comparação com a semana anterior (vendas e
+ * margem) usa só essas lojas ("das mesmas N lojas"): uma loja que começou na
+ * semana não infla a variação. `porLoja` guarda os blocos de cada loja (sem
+ * os campos internos) para o e-mail e a página mostrarem uma linha por loja.
+ *
  * @param {Array<{companyId, nome, dados}>} porEmpresa
- * @param {object} agregado  { kpis, dailyRevenue, prevRevenue, payments }
+ * @param {object} agregado  { kpis, dailyRevenue, prevRevenue, payments, baseIds? }
  */
 function consolidarBlocos(porEmpresa, agregado) {
   const lista = (porEmpresa || []).filter((x) => x && x.dados);
   const blocos = [...new Set(lista.flatMap((x) => x.dados.blocos || []))];
   const out = { blocos };
   const de = (b) => lista.filter((x) => x.dados[b]).map((x) => ({ ...x, d: x.dados[b] }));
+  const baseIds = Array.isArray(agregado && agregado.baseIds) ? new Set(agregado.baseIds.map(String)) : null;
+  const naBase = (x) => !baseIds || baseIds.has(String(x.companyId));
 
   if (blocos.includes('vendas') && de('vendas').length) {
     const semanas = [];
@@ -528,6 +540,14 @@ function consolidarBlocos(porEmpresa, agregado) {
       semanas.push({ ...s, receita: num(de('vendas').reduce((acc, x) => acc + ((x.d.semanas[i] && x.d.semanas[i].receita) || 0), 0)) });
     });
     out.vendas = montarVendas({ kpis: agregado.kpis, dailyRevenue: agregado.dailyRevenue, prevRevenue: agregado.prevRevenue, semanas });
+    if (baseIds) {
+      const base = de('vendas').filter(naBase);
+      const receita = num(base.reduce((s, x) => s + x.d.receita, 0));
+      const anterior = num(base.reduce((s, x) => s + x.d.receitaAnterior, 0));
+      out.vendas.receitaAnterior = anterior;
+      out.vendas.variacaoPct = pct(receita, anterior);
+      out.vendas.base = { lojas: base.length, receita };
+    }
   }
 
   if (de('mais_vendidos').length) {
@@ -535,9 +555,10 @@ function consolidarBlocos(porEmpresa, agregado) {
     for (const x of de('mais_vendidos')) {
       for (const p of x.d._todos || []) {
         const k = String(p.id);
-        const atual = porId.get(k) || { id: p.id, nome: p.nome, qtd: 0, receita: 0 };
+        const atual = porId.get(k) || { id: p.id, nome: p.nome, qtd: 0, receita: 0, lojas: [] };
         atual.qtd += p.qtd;
         atual.receita += p.receita;
+        if (!atual.lojas.includes(x.nome)) atual.lojas.push(x.nome);
         porId.set(k, atual);
       }
     }
@@ -568,9 +589,10 @@ function consolidarBlocos(porEmpresa, agregado) {
 
   if (de('equipe_margem').length) {
     const xs = de('equipe_margem');
+    // A semana anterior só com as lojas da base (as mesmas da comparação).
     const somar = (k) => {
       const s = { receita: 0, receitaComCusto: 0, custo: 0 };
-      for (const x of xs) {
+      for (const x of (k === 'anterior' ? xs.filter(naBase) : xs)) {
         const v = x.d._somas && x.d._somas[k];
         if (!v) continue;
         s.receita += v.receita; s.receitaComCusto += v.receitaComCusto; s.custo += v.custo;
@@ -604,6 +626,9 @@ function consolidarBlocos(porEmpresa, agregado) {
   if (de('crediario').length) {
     out.crediario = somarCrediarios(de('crediario').map((x) => ({ companyId: x.companyId, nome: x.nome, crediario: x.d })), (agregado.kpis && agregado.kpis.sales) || 0);
   }
+
+  out.porLoja = {};
+  for (const x of lista) out.porLoja[x.companyId] = semInternos(x.dados);
   return out;
 }
 
@@ -612,6 +637,13 @@ function semInternos(dados) {
   if (!dados || typeof dados !== 'object') return dados;
   const out = { ...dados };
   for (const k of Object.keys(out)) {
+    if (k === 'porLoja' && out[k] && typeof out[k] === 'object') {
+      const pl = {};
+      for (const id of Object.keys(out[k])) pl[id] = semInternos(out[k][id]);
+      out[k] = pl;
+      continue;
+    }
+    if (k === 'grupo') continue;
     if (out[k] && typeof out[k] === 'object' && !Array.isArray(out[k])) {
       const b = { ...out[k] };
       delete b._todos;
