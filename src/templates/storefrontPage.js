@@ -20,6 +20,7 @@
 //  • favicon: injeta <link rel="icon"> com logo_url quando disponível
 // ============================================================
 const buildStyles   = require('./storefrontStyles');
+const { textoSobre } = require('./storefrontContraste');
 // GA4, Pixel e Open Graph (04/09/2026) — ver services/rastreadores.js.
 const { scriptsDoHead, metatagsDeSeo } = require('../services/rastreadores');
 const { linkDeFontes } = require('./storefrontTypography');
@@ -137,9 +138,11 @@ function buildStorefrontPage(data, slug) {
   // e a caixa livre do logo, e um img invisivel ainda casaria o :has().
   // O object-fit dos dois e "contain" (no CSS): cover cortava qualquer
   // logo que nao fosse quadrado — o da Finesse e retangular, com texto.
+  // A inicial fica sobre a cor da loja: preta ou branca pelo contraste (tq-56).
+  const corDaInicial = textoSobre(primary);
   const logoInTopbar = logoUrl
-    ? `<img src="${logoUrl}" alt="" onerror="this.remove();var s=document.getElementById('logoInitial');if(s){s.style.display='flex';}"><span id="logoInitial" style="display:none;width:100%;height:100%;align-items:center;justify-content:center;font-size:15px;font-weight:400;color:#fff;font-family:inherit;"></span>`
-    : `<span id="logoInitial" style="display:flex;width:100%;height:100%;align-items:center;justify-content:center;font-size:15px;font-weight:400;color:#fff;font-family:inherit;"></span>`;
+    ? `<img src="${logoUrl}" alt="" onerror="this.remove();var s=document.getElementById('logoInitial');if(s){s.style.display='flex';}"><span id="logoInitial" style="display:none;width:100%;height:100%;align-items:center;justify-content:center;font-size:15px;font-weight:400;color:${corDaInicial};font-family:inherit;"></span>`
+    : `<span id="logoInitial" style="display:flex;width:100%;height:100%;align-items:center;justify-content:center;font-size:15px;font-weight:400;color:${corDaInicial};font-family:inherit;"></span>`;
   // (O hero antigo com logo e capa saiu na fase 3: o hero e full-bleed e a
   // capa da loja foi aposentada — decisao 4/18 de 02/09/2026.)
 

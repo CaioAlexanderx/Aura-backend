@@ -3,6 +3,8 @@
 const { parTipografico } = require('./storefrontTypography');
 // A home e o cabecalho do redesign (fase 3) moram num arquivo proprio.
 const homeStyles = require('./storefrontHomeStyles');
+// tq-56: texto preto ou branco sobre a cor da loja, pelo contraste WCAG.
+const { textoSobre } = require('./storefrontContraste');
 // Aceita assinatura legada buildStyles(primary) — accent cai em color-mix,
 // dark=false, font='classic'.
 //
@@ -57,6 +59,12 @@ function buildStyles(primary, accent, dark, font) {
   primary = primary || '#7c3aed';
   accent  = accent  || primary;
   font    = font    || 'classic';
+  // tq-56 (26/10/2026): a cor do texto e dos icones SOBRE a cor da loja
+  // (botao de comprar, finalizar, chip selecionado...). Era #fff fixo; com
+  // cor clara vira preto (storefrontContraste). Cor escura segue #fff e o
+  // CSS sai igual ao de antes.
+  const noBrand  = textoSobre(primary);
+  const noAccent = textoSobre(accent);
 
   // O par vem do espelho compartilhado. Antes o corpo era SEMPRE DM Sans,
   // entao `modern` saia como Fraunces + DM Sans aqui e Fraunces + Manrope
@@ -174,7 +182,7 @@ h3{font-size:26px;}
    ============================================================ */
 .topbar{position:sticky;top:0;z-index:100;background:color-mix(in oklab,var(--sf-bg) 92%,transparent);backdrop-filter:saturate(180%) blur(12px);-webkit-backdrop-filter:saturate(180%) blur(12px);border-bottom:1px solid var(--sf-border);padding:0 max(20px,calc((100% - 1280px)/2 + 20px));height:64px;display:flex;align-items:center;justify-content:space-between;gap:12px;}
 .topbar-brand{display:flex;align-items:center;gap:12px;text-decoration:none;flex:0 1 auto;min-width:0;transition:opacity .2s ease;}
-.topbar-logo{width:46px;height:46px;border-radius:10px;background:var(--sf-brand);display:flex;align-items:center;justify-content:center;font-size:17px;color:#fff;font-weight:400;font-family:${fontSerif};flex-shrink:0;overflow:hidden;box-shadow:inset 0 0 0 1px color-mix(in oklab,var(--sf-brand) 40%,transparent);}
+.topbar-logo{width:46px;height:46px;border-radius:10px;background:var(--sf-brand);display:flex;align-items:center;justify-content:center;font-size:17px;color:${noBrand};font-weight:400;font-family:${fontSerif};flex-shrink:0;overflow:hidden;box-shadow:inset 0 0 0 1px color-mix(in oklab,var(--sf-brand) 40%,transparent);}
 /* O logo da lojista entra INTEIRO. object-fit:cover cortava qualquer
    logo que nao fosse quadrado — o da Finesse e retangular, com texto, e
    virava um recorte ilegivel. Com imagem, a caixa larga o quadrado (e o
@@ -232,7 +240,7 @@ body.sf-dark .open-badge.is-closed{color:var(--sf-ink-2);}
 
 .cart-btn{position:relative;width:42px;height:42px;border-radius:0;background:transparent;border:0;display:flex;align-items:center;justify-content:center;cursor:pointer;transition:color .2s;color:var(--sf-ink-2);}
 .cart-btn:hover{color:var(--sf-ink);background:transparent;}
-.cart-badge{position:absolute;top:-2px;right:-2px;background:var(--sf-accent);color:#fff;width:18px;height:18px;border-radius:50%;font-size:10px;font-weight:700;display:none;align-items:center;justify-content:center;border:2px solid var(--sf-bg);font-family:${fontMono};}
+.cart-badge{position:absolute;top:-2px;right:-2px;background:var(--sf-accent);color:${noAccent};width:18px;height:18px;border-radius:50%;font-size:10px;font-weight:700;display:none;align-items:center;justify-content:center;border:2px solid var(--sf-bg);font-family:${fontMono};}
 .cart-badge.visible{display:flex;}
 
 /* ============================================================
@@ -579,7 +587,7 @@ body.sf-dark .open-badge.is-closed{color:var(--sf-ink-2);}
 .qty-ctrl{display:flex;align-items:center;justify-content:space-between;gap:6px;background:var(--sf-brand-wash);border:1px solid var(--sf-border);border-radius:10px;padding:4px;}
 .product-card .qty-ctrl{width:100%;margin-top:10px;}
 .product-card .qty-num{flex:1;text-align:center;font-size:12.5px;font-weight:700;color:var(--sf-brand-ink);}
-.qty-btn{width:28px;height:28px;border-radius:999px;background:var(--sf-brand);color:#fff;border:none;cursor:pointer;display:flex;align-items:center;justify-content:center;font-size:16px;font-weight:600;}
+.qty-btn{width:28px;height:28px;border-radius:999px;background:var(--sf-brand);color:${noBrand};border:none;cursor:pointer;display:flex;align-items:center;justify-content:center;font-size:16px;font-weight:600;}
 .qty-num{font-size:13px;font-weight:600;color:var(--sf-brand-ink);min-width:18px;text-align:center;font-family:${fontMono};}
 
 /* Minimal card */
@@ -632,7 +640,7 @@ body.card-style-image-heavy .product-desc{display:none;}
 .cart-summary-row{display:flex;justify-content:space-between;align-items:center;font-size:13px;color:var(--sf-ink-2);margin-bottom:8px;font-family:${fontMono};}
 .cart-summary-row.total{font-family:${fontSerif};font-size:20px;font-weight:400;color:var(--sf-ink);margin-bottom:18px;letterSpacing:-0.3px;}
 .cart-summary-row.total span:last-child{font-family:${fontMono};}
-.checkout-btn{width:100%;padding:16px;background:var(--sf-brand);color:#fff;border:none;border-radius:var(--sf-r);font-size:15px;font-weight:600;cursor:pointer;display:flex;align-items:center;justify-content:center;gap:8px;font-family:${fontSans};letter-spacing:0.2px;transition:transform var(--sf-motion) var(--sf-ease),box-shadow var(--sf-motion) var(--sf-ease),background var(--sf-motion) var(--sf-ease);}
+.checkout-btn{width:100%;padding:16px;background:var(--sf-brand);color:${noBrand};border:none;border-radius:var(--sf-r);font-size:15px;font-weight:600;cursor:pointer;display:flex;align-items:center;justify-content:center;gap:8px;font-family:${fontSans};letter-spacing:0.2px;transition:transform var(--sf-motion) var(--sf-ease),box-shadow var(--sf-motion) var(--sf-ease),background var(--sf-motion) var(--sf-ease);}
 .checkout-btn:hover{transform:translateY(var(--sf-lift));box-shadow:var(--sf-shadow-hover);}
 /* Loja fechada (19/10/2026): aviso de quando o pedido sera preparado. Informa, nao e erro. */
 .aviso-fechada{margin:0 0 12px;padding:10px 12px;border-radius:var(--sf-r);background:var(--sf-bg);border:1px solid var(--sf-border);font-size:13px;line-height:1.45;color:var(--sf-ink-2);font-family:${fontSans};}
@@ -656,7 +664,7 @@ body.card-style-image-heavy .product-desc{display:none;}
 .steps-bar{padding:14px 24px;display:flex;align-items:center;justify-content:center;gap:10px;border-bottom:1px solid var(--sf-border);flex-shrink:0;}
 .step{display:flex;flex-direction:column;align-items:center;gap:4px;}
 .step-dot{width:22px;height:22px;border-radius:999px;display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:700;background:transparent;border:1px solid var(--sf-border-2);color:var(--sf-ink-3);transition:all .2s;font-family:${fontMono};}
-.step-dot.done{background:var(--sf-brand);border-color:var(--sf-brand);color:#fff;}
+.step-dot.done{background:var(--sf-brand);border-color:var(--sf-brand);color:${noBrand};}
 .step-dot.active{background:var(--sf-brand-wash);border-color:var(--sf-brand);color:var(--sf-brand-ink);}
 .step-label{font-size:11px;font-weight:500;color:var(--sf-ink-3);}
 .step-label.active{color:var(--sf-ink);font-weight:600;}
@@ -672,7 +680,7 @@ body.card-style-image-heavy .product-desc{display:none;}
 .delivery-opt.disabled{opacity:.55;cursor:not-allowed;}
 .delivery-opt-radio{width:18px;height:18px;border-radius:999px;border:2px solid var(--sf-border-2);display:flex;align-items:center;justify-content:center;flex-shrink:0;}
 .delivery-opt.active .delivery-opt-radio{border-color:var(--sf-brand);background:var(--sf-brand);}
-.delivery-opt.active .delivery-opt-radio::after{content:'';width:6px;height:6px;background:#fff;border-radius:999px;}
+.delivery-opt.active .delivery-opt-radio::after{content:'';width:6px;height:6px;background:${noBrand};border-radius:999px;}
 .delivery-opt-icon{font-size:22px;flex-shrink:0;}
 .delivery-opt-info{flex:1;}
 .delivery-opt-name{font-size:14px;font-weight:600;}
@@ -696,7 +704,7 @@ body.card-style-image-heavy .product-desc{display:none;}
 .summary-row.total{font-family:${fontSerif};font-size:18px;font-weight:400;color:var(--sf-ink);border-top:1px solid var(--sf-border);padding-top:10px;margin-top:6px;letter-spacing:-0.2px;}
 .summary-row.total span:last-child{font-family:${fontMono};}
 .checkout-foot{padding:18px 24px 26px;border-top:1px solid var(--sf-border);flex-shrink:0;}
-.next-btn{width:100%;padding:16px;background:var(--sf-brand);color:#fff;border:none;border-radius:var(--sf-r);font-size:15px;font-weight:600;cursor:pointer;transition:transform var(--sf-motion) var(--sf-ease),box-shadow var(--sf-motion) var(--sf-ease),background var(--sf-motion) var(--sf-ease);display:flex;align-items:center;justify-content:center;gap:8px;font-family:${fontSans};letter-spacing:0.2px;}
+.next-btn{width:100%;padding:16px;background:var(--sf-brand);color:${noBrand};border:none;border-radius:var(--sf-r);font-size:15px;font-weight:600;cursor:pointer;transition:transform var(--sf-motion) var(--sf-ease),box-shadow var(--sf-motion) var(--sf-ease),background var(--sf-motion) var(--sf-ease);display:flex;align-items:center;justify-content:center;gap:8px;font-family:${fontSans};letter-spacing:0.2px;}
 .next-btn:hover{transform:translateY(var(--sf-lift));box-shadow:var(--sf-shadow-hover);}
 .next-btn:disabled{background:var(--sf-border);color:var(--sf-ink-3);cursor:not-allowed;}
 .next-btn.green{background:#10b981;}
@@ -801,7 +809,7 @@ body.card-style-image-heavy .product-desc{display:none;}
 
 .op-chip{font-family:${fontSans};font-size:13.5px;font-weight:600;color:var(--sf-ink-2);background:var(--sf-bg-card);border:1.5px solid var(--sf-border);border-radius:10px;min-width:48px;padding:9px 14px;cursor:pointer;transition:border-color 200ms cubic-bezier(.4,0,.2,1),color 200ms cubic-bezier(.4,0,.2,1);}
 .op-chip:hover{border-color:var(--sf-brand);}
-.op-chip.sel{background:var(--sf-brand);border-color:var(--sf-brand);color:#fff;}
+.op-chip.sel{background:var(--sf-brand);border-color:var(--sf-brand);color:${noBrand};}
 
 /* Indisponivel: risco diagonal, nao so cinza — cinza sozinho parece
    "nao selecionado" e a pessoa clica achando que vai funcionar. */
@@ -819,7 +827,7 @@ body.card-style-image-heavy .product-desc{display:none;}
    paginacao, do cabecalho e do banner, o par de botoes aqui e o unico
    lugar cheio de cor da jornada inteira, que e onde ele deve estar. */
 .pd-comprar{font-family:${fontSans};font-size:14.5px;font-weight:700;border-radius:var(--sf-r);padding:15px 20px;cursor:pointer;transition:background var(--sf-motion) var(--sf-ease),border-color var(--sf-motion) var(--sf-ease),transform var(--sf-motion) var(--sf-ease),box-shadow var(--sf-motion) var(--sf-ease);border:1.5px solid var(--sf-brand);}
-.pd-comprar{background:var(--sf-brand);color:#fff;}
+.pd-comprar{background:var(--sf-brand);color:${noBrand};}
 .pd-comprar:hover:not(.off){transform:translateY(var(--sf-lift));box-shadow:var(--sf-shadow-hover);}
 .pd-comprar.off{opacity:.45;cursor:not-allowed;}
 
@@ -845,7 +853,7 @@ body.card-style-image-heavy .product-desc{display:none;}
 .pd-rel-nome{font-family:${fontSerif};font-size:14.5px;line-height:1.25;color:var(--sf-ink);margin-top:9px;}
 .pd-rel-preco{font-family:${fontSans};font-size:13px;font-weight:800;color:var(--sf-brand-ink);margin-top:3px;font-variant-numeric:tabular-nums;}
 
-${homeStyles({ fontSerif, fontSans, fontMono })}
+${homeStyles({ fontSerif, fontSans, fontMono, noBrand })}
 
 /* ============================================================
    Quem pediu pra parar de mexer.
