@@ -345,6 +345,8 @@ router.get('/', async (req, res) => {
 });
 
 // ─── GET /:pid/variants ────────────────────────────
+// 26/10/2026 (tq-55b): color_name (migration 414), o nome da cor como a
+// lojista digitou; NULL em variante antiga ou sem cor.
 router.get('/:pid/variants', async (req, res) => {
   const { id: companyId, pid: productId } = req.params;
   try {
@@ -354,11 +356,11 @@ router.get('/:pid/variants', async (req, res) => {
     );
     if (!check.length) return res.status(404).json({ error: 'Produto nao encontrado' });
     const { rows } = await db.query(`
-      SELECT pv.id, pv.sku_suffix, pv.price_override, pv.stock_qty, pv.barcode,
+      SELECT pv.id, pv.sku_suffix, pv.price_override, pv.stock_qty, pv.barcode, pv.color_name,
         COALESCE(json_agg(json_build_object('attribute', pvv.attribute_name, 'value', pvv.value) ORDER BY pvv.attribute_name) FILTER (WHERE pvv.id IS NOT NULL), '[]'::json) AS attributes
       FROM product_variants pv LEFT JOIN product_variant_values pvv ON pvv.variant_id = pv.id
       WHERE pv.product_id = $1 AND pv.is_active = true
-      GROUP BY pv.id, pv.sku_suffix, pv.price_override, pv.stock_qty, pv.barcode ORDER BY pv.created_at ASC`, [productId]);
+      GROUP BY pv.id, pv.sku_suffix, pv.price_override, pv.stock_qty, pv.barcode, pv.color_name ORDER BY pv.created_at ASC`, [productId]);
     res.json({ variants: rows });
   } catch (err) { console.error('[products] variants error:', err.message); res.status(500).json({ error: 'Erro ao buscar variantes' }); }
 });

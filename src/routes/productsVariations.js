@@ -6,7 +6,7 @@
 // cor x tamanho forma o estoque por combinacao. Preco unico do pai.
 //
 // Shape da API:
-//   GET  -> { colors: [{hex, name}], sizes: ["P","M"], matrix: {"#FF0000|P": 5, ...}, barcodes: {"#FF0000|P": "7891234567890", ...}, images: {"#FF0000|P": "https://..."}, mode: 'none'|'color'|'size'|'matrix' }
+//   GET  -> { colors: [{hex, name}] (name = color_name da 414, senao o tirado do sku_suffix), sizes: ["P","M"], matrix: {"#FF0000|P": 5, ...}, barcodes: {"#FF0000|P": "7891234567890", ...}, images: {"#FF0000|P": "https://..."}, mode: 'none'|'color'|'size'|'matrix' }
 //   PUT  -> recebe mesmo shape, reescreve variantes (soft-delete antigas)
 //
 // Schema preservado: usa product_variants + product_variant_values
@@ -135,6 +135,17 @@ function skuSuffixFromAttrs(colorHex, colorName, sizeValue) {
   return parts.join('-');
 }
 
+// 26/10/2026 (tq-55b, migration 414): o nome da cor como a lojista digitou
+// vai para product_variants.color_name, sem caixa alta nem corte (o
+// sku_suffix continua o de sempre). So tira espaco das pontas; vazio, hex
+// ou nao-texto vira NULL. Teto de 60 caracteres so para nao gravar lixo.
+function colorNameParaGravar(name) {
+  if (typeof name !== 'string') return null;
+  const t = name.trim();
+  if (!t || /^#?[0-9A-Fa-f]{6}$/.test(t)) return null;
+  return t.slice(0, 60);
+}
+
 // 23/05/2026: Extrai a combinacao (color_hex, size_value) de um array
 // de attributes vindo do GET. Usado tanto pelo GET (expor images map)
 // quanto pelo PUT (snapshot pra preservar fotos no rewrite).
@@ -163,7 +174,7 @@ router.get('/:pid/variations', async (req, res) => {
 
     // Busca variantes ativas + atributos (23/05/2026: inclui image_url)
     const { rows: variantRows } = await db.query(
-      `SELECT pv.id, pv.sku_suffix, pv.stock_qty, pv.barcode, pv.image_url,
+      `SELECT pv.id, pv.sku_suffix, pv.stock_qty, pv.barcode, pv.image_url, pv.color_name,
         COALESCE(json_agg(
           json_build_object('attribute', pvv.attribute_name, 'value', pvv.value)
           ORDER BY pvv.attribute_name
@@ -171,7 +182,7 @@ router.get('/:pid/variations', async (req, res) => {
        FROM product_variants pv
        LEFT JOIN product_variant_values pvv ON pvv.variant_id = pv.id
        WHERE pv.product_id = $1 AND pv.is_active = true
-       GROUP BY pv.id, pv.sku_suffix, pv.stock_qty, pv.barcode, pv.image_url
+       GROUP BY pv.id, pv.sku_suffix, pv.stock_qty, pv.barcode, pv.image_url, pv.color_name
        ORDER BY pv.created_at ASC`,
       [pid]
     );
@@ -185,13 +196,15 @@ router.get('/:pid/variations', async (req, res) => {
 
     for (const v of variantRows) {
       const { colorHex, sizeValue } = extractAttrs(v.attributes);
-      let colorName = null;
-      if (colorHex && v.sku_suffix) {
+      // 26/10/2026 (tq-55b): o nome gravado na 414 vem primeiro; sem ele,
+      // o de sempre, tirado do sku_suffix.
+      let colorName = colorHex && v.color_name ? v.color_name : null;
+      if (!colorName && colorHex && v.sku_suffix) {
         // Tenta extrair nome do sku_suffix (VERMELHO-P -> VERMELHO)
         const first = v.sku_suffix.split('-')[0];
         if (first && !/^[0-9A-F]{6}$/i.test(first)) colorName = first;
       }
-      if (colorHex) colorsMap.set(colorHex, colorName || null);
+      if (colorHex) colorsMap.set(colorHex, colorName || colorsMap.get(colorHex) || null);
       if (sizeValue) sizesSet.add(sizeValue);
       const key = buildMatrixKey(colorHex, sizeValue);
       matrix[key] = parseInt(v.stock_qty) || 0;
@@ -373,7 +386,7 @@ router.put('/:pid/variations', async (req, res) => {
         for (const s of sizes) {
           const key = buildMatrixKey(c.hex, s);
           combinations.push({
-            colorHex: c.hex, colorName: c.name || null,
+            colorHex: c.hex, colorName: c.name || null, colorNameFull: colorNameParaGravar(c.name),
             sizeValue: s,
             stock: parseInt(matrix[key]) || 0,
           });
@@ -383,7 +396,7 @@ router.put('/:pid/variations', async (req, res) => {
       for (const c of colors) {
         const key = buildMatrixKey(c.hex, null);
         combinations.push({
-          colorHex: c.hex, colorName: c.name || null,
+          colorHex: c.hex, colorName: c.name || null, colorNameFull: colorNameParaGravar(c.name),
           sizeValue: null,
           stock: parseInt(matrix[key]) || 0,
         });
@@ -392,7 +405,7 @@ router.put('/:pid/variations', async (req, res) => {
       for (const s of sizes) {
         const key = buildMatrixKey(null, s);
         combinations.push({
-          colorHex: null, colorName: null,
+          colorHex: null, colorName: null, colorNameFull: null,
           sizeValue: s,
           stock: parseInt(matrix[key]) || 0,
         });
@@ -411,9 +424,9 @@ router.put('/:pid/variations', async (req, res) => {
 
       // Cria variante (inclui barcode e image_url se houver)
       const { rows: variantRow } = await client.query(
-        `INSERT INTO product_variants (product_id, sku_suffix, stock_qty, barcode, image_url, is_active)
-         VALUES ($1, $2, $3, $4, $5, true) RETURNING id`,
-        [pid, skuSuffix || null, combo.stock, barcodeVal, imageVal]
+        `INSERT INTO product_variants (product_id, sku_suffix, stock_qty, barcode, image_url, color_name, is_active)
+         VALUES ($1, $2, $3, $4, $5, $6, true) RETURNING id`,
+        [pid, skuSuffix || null, combo.stock, barcodeVal, imageVal, combo.colorNameFull || null]
       );
       const variantId = variantRow[0].id;
 
