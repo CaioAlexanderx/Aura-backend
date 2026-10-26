@@ -25,6 +25,14 @@
 // resultado = 'nao_quer', emailPreferencias.sqlMarcaNaoQuer) sai da lista.
 // No consolidado, ela sai do grupo do dono; com todas marcadas, nada sai.
 // O "Me enviar um agora" e pedido do dono e continua valendo.
+//
+// 26/10/2026 (hotfix): so entra no relatorio a empresa criada ANTES do fim
+// do periodo reportado (endDate, data de Brasilia, inclusivo). Sem isso a
+// conta criada na segunda a tarde entrava na janela (dia escolhido, a partir
+// da hora) e recebia, segundos depois do cadastro, o relatorio de uma semana
+// em que ainda nao existia. No grupo, a loja criada durante a semana
+// reportada entra (o relatorio marca "comecou em dd/mm"); a criada depois do
+// fim do periodo fica fora.
 // ============================================================
 
 const db = require('../config/database');
@@ -45,13 +53,17 @@ function nowBRT(now = Date.now()) {
  */
 async function empresasElegiveis({ env = process.env } = {}) {
   const padraoLigado = P.relatorioPadraoLigado(env);
-  const params = [VERTICAIS_FORA, padraoLigado];
-  const filtros = `
+  // Fim do periodo reportado: 'YYYY-MM-DD' (BRT, inclusivo). Empresa criada a
+  // partir da meia-noite de Sao Paulo do dia seguinte nao tinha movimento.
+  const fimDoPeriodo = resolvePeriodForReport('weekly').endDate;
+  const params = [VERTICAIS_FORA, padraoLigado, fimDoPeriodo];
+  const filtros = (pFim) => `
         c.is_active = true
     AND COALESCE(c.is_sandbox, false) = false
     AND COALESCE(c.vertical, '') <> ALL($1::text[])
     AND COALESCE(c.vertical_active, '') <> ALL($1::text[])
-    AND NOT ${P.sqlMarcaNaoQuer('c.id')}`;
+    AND NOT ${P.sqlMarcaNaoQuer('c.id')}
+    AND c.created_at < ((${pFim}::date + 1)::timestamp AT TIME ZONE 'America/Sao_Paulo')`;
   const interna = `(COALESCE(u.is_staff, false) = true
                     OR lower(COALESCE(u.email, '')) LIKE '%@getaura.com.br'
                     OR lower(COALESCE(c.email, '')) LIKE '%@getaura.com.br')`;
@@ -65,7 +77,7 @@ async function empresasElegiveis({ env = process.env } = {}) {
          FROM companies c
          LEFT JOIN users u ON u.id = c.owner_id
          LEFT JOIN company_email_prefs p ON p.company_id = c.id AND p.tipo = 'relatorio'
-        WHERE ${filtros}
+        WHERE ${filtros('$3')}
           AND (p.ligado = true OR (p.ligado IS NULL AND $2::boolean AND NOT ${interna}))
           AND (
                 ${interna}
@@ -88,11 +100,11 @@ async function empresasElegiveis({ env = process.env } = {}) {
               lower(COALESCE(NULLIF(c.report_email_override, ''), c.email)) AS legado_email
          FROM companies c
          LEFT JOIN users u ON u.id = c.owner_id
-        WHERE ${filtros}
+        WHERE ${filtros('$2')}
           AND c.weekly_report_enabled = true
         ORDER BY c.owner_id NULLS LAST, c.is_primary DESC NULLS LAST, c.created_at ASC
         LIMIT 2000`,
-      [VERTICAIS_FORA]
+      [VERTICAIS_FORA, fimDoPeriodo]
     );
     return rows;
   }
