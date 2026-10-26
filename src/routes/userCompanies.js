@@ -32,10 +32,16 @@ const { logAuditAction, contextoDaRequisicao } = require('../middleware/auditLog
 const {
   calculateMulticnpjValue,
   safeSyncSubscriptionValue,
-  PLAN_PRICES,
-  EXTRA_PRICES,
+  previewDaAssinatura,
   INCLUDED_CNPJS,
 } = require('../utils/multicnpjBilling');
+const { getPlanValue, getExtraCompanyValue } = require('../services/billingPricing');
+
+// R$ 1.234,56 sem depender de Intl (mensagens da API).
+function brl(v) {
+  const [int, dec] = Number(v || 0).toFixed(2).split('.');
+  return 'R$ ' + int.replace(/\B(?=(\d{3})+(?!\d))/g, '.') + ',' + dec;
+}
 
 router.use(requireAuth);
 
@@ -92,6 +98,11 @@ router.get('/', async (req, res) => {
 // Retorna o valor atual da assinatura E o que ela seria com
 // +1 CNPJ. Usado pelo modal de "Adicionar empresa" pra mostrar
 // "Sua mensalidade vai de R$X para R$Y" antes do user confirmar.
+//
+// 25/10/2026: o cálculo é o da tabela única (billingPricing, via
+// multicnpjBilling.previewDaAssinatura). current.total_monthly é o que a
+// loja paga hoje (valor combinado ou o da Asaas); if_add_one.ajuste_pela_equipe
+// avisa quando a próxima empresa não ajusta a assinatura sozinha.
 // ──────────────────────────────────────────────────────────
 router.get('/billing-preview', async (req, res) => {
   try {
@@ -108,28 +119,14 @@ router.get('/billing-preview', async (req, res) => {
     const primaryId = primaryRes.rows[0].id;
     const planKey = String(primaryRes.rows[0].plan || '').toLowerCase();
 
-    const current = await calculateMulticnpjValue(primaryId);
-    if (!current) {
+    const preview = await previewDaAssinatura(primaryId);
+    if (!preview) {
       return res.status(500).json({ error: 'Erro ao calcular valor atual' });
     }
 
-    // Simula 1 empresa a mais
-    const basePrice = PLAN_PRICES[planKey] || 0;
-    const extraPrice = EXTRA_PRICES[planKey] || 0;
-    const included = INCLUDED_CNPJS[planKey] || 1;
-    const wouldBeTotal = current.total_companies + 1;
-    const wouldBeExtras = Math.max(0, wouldBeTotal - included);
-    const wouldBeMonthly = Math.round((basePrice + wouldBeExtras * extraPrice) * 100) / 100;
-    const delta = Math.round((wouldBeMonthly - current.total_monthly) * 100) / 100;
-
     return res.json({
-      current: current,
-      if_add_one: {
-        total_companies: wouldBeTotal,
-        extra_cnpjs: wouldBeExtras,
-        new_total_monthly: wouldBeMonthly,
-        delta_monthly: delta,
-      },
+      current: preview.current,
+      if_add_one: preview.if_add_one,
       can_add: planKey !== 'essencial',
       block_reason: planKey === 'essencial' ? 'Plano Essencial não permite multi-CNPJ' : null,
     });
@@ -287,16 +284,22 @@ router.post('/', async (req, res) => {
     const planKey = String(primary.plan || '').toLowerCase();
 
     // 2. Validar limite por plano (Essencial = 1 CNPJ apenas)
+    // 25/10/2026: no Negócio o 2º CNPJ deixou de vir incluído e custa 50% do
+    // plano (preços da tabela única, billingPricing).
     if (planKey === 'essencial') {
+      const negocioMensal = getPlanValue('negocio', 'monthly');
+      const extraMensal = getExtraCompanyValue('negocio', 'monthly');
+      const negocioAnual = getPlanValue('negocio', 'annual');
+      const extraAnual = getExtraCompanyValue('negocio', 'annual');
       return res.status(403).json({
         error: 'PLAN_LIMIT_REACHED',
         message:
-          'O plano Essencial inclui apenas 1 CNPJ. Faça upgrade para o plano Negócio (R$169,90/mês) que inclui até 2 CNPJs e desbloqueia: CRM, Folha, Agenda, WhatsApp, Canal Digital, IA Analista e mais.',
+          `O plano Essencial inclui apenas 1 CNPJ. No plano Negócio (${brl(negocioMensal)}/mês), o segundo CNPJ tem 50% de desconto sobre o plano (${brl(extraMensal)}/mês), e você desbloqueia CRM, Folha, Agenda, WhatsApp, Canal Digital, IA Analista e mais.`,
         current_plan: primary.plan,
         suggested_plan: 'negocio',
-        suggested_plan_price: PLAN_PRICES.negocio,
+        suggested_plan_price: negocioMensal,
         upgrade_savings_note:
-          'Adicionar 2º CNPJ no Essencial custaria R$45/mês extra (total R$134). Migrar para Negócio custa R$169,90 e desbloqueia muito mais.',
+          `Negócio com 2 CNPJs: ${brl(negocioMensal)} + ${brl(extraMensal)} = ${brl(negocioMensal + extraMensal)} por mês. No anual: ${brl(negocioAnual)} + ${brl(extraAnual)} = ${brl(negocioAnual + extraAnual)} por mês.`,
       });
     }
 
@@ -416,18 +419,27 @@ router.post('/', async (req, res) => {
     const billingCalc = await calculateMulticnpjValue(primary.id);
 
     // 9. M2-02: sincroniza com Asaas (não bloqueia se falhar — user
-    //    já tem a empresa criada; sync rodará novamente em retries
-    //    futuros, ex: ao trocar de empresa ou manualmente).
-    const syncResult = await safeSyncSubscriptionValue(primary.id);
+    //    já tem a empresa criada). Não há nova tentativa automática: o
+    //    recálculo só roda nesta ação e no DELETE (25/10/2026, sem
+    //    retroatividade). evento='add' é obrigatório para o sync gravar.
+    const syncResult = await safeSyncSubscriptionValue(primary.id, {
+      evento: 'add',
+      companyId: newCompany.id,
+      companyName: newCompany.trade_name || newCompany.legal_name,
+    });
 
     // Decide a "note" exibida ao user com base no resultado real do sync
     let billingNote;
     if (syncResult.synced) {
-      billingNote = `Mensalidade atualizada de R$${syncResult.old_value?.toFixed(2)} para R$${syncResult.new_value.toFixed(2)} no Asaas. Próxima fatura virá com o novo valor.`;
+      billingNote = `Mensalidade atualizada de ${brl(syncResult.old_value)} para ${brl(syncResult.new_value)}. A próxima fatura já vem com o novo valor.`;
+    } else if (syncResult.reason === 'valor_combinado' || syncResult.reason === 'fora_da_tabela') {
+      // 25/10/2026: assinatura com condição especial não muda sozinha. A
+      // equipe já foi avisada no sino e confirma o ajuste com a loja.
+      billingNote = 'Sua assinatura tem uma condição especial, então não mudamos o valor sozinhos. A equipe Aura vai falar com você para confirmar o ajuste.';
     } else if (syncResult.reason === 'no_subscription') {
       billingNote = 'Você está em período de teste. O valor será cobrado apenas quando ativar pagamento.';
     } else if (syncResult.reason === 'no_change') {
-      billingNote = 'Nenhuma alteração de valor — esta empresa cabe nos CNPJs já inclusos do seu plano.';
+      billingNote = 'Nenhuma alteração de valor: esta empresa cabe nos CNPJs já incluídos no seu plano.';
     } else if (syncResult.reason === 'subscription_not_found_in_asaas') {
       billingNote = 'Atenção: sua assinatura no Asaas não foi encontrada. Reative o pagamento em Configurações > Faturamento.';
     } else if (syncResult.reason === 'error') {
@@ -454,10 +466,15 @@ router.post('/', async (req, res) => {
         total_companies: billingCalc.total_companies,
         included_in_plan: billingCalc.included_in_plan,
         extra_cnpjs: billingCalc.extra_cnpjs,
-        plan_base_price: billingCalc.base_price,
-        extra_unit_price: billingCalc.extra_unit_price,
-        extras_price: billingCalc.extras_value,
-        new_total_monthly: billingCalc.total_monthly,
+        // Plano sem preço na tabela (personalizado): números em 0, como antes.
+        plan_base_price: billingCalc.base_price ?? 0,
+        seats_price: billingCalc.seats_value || 0,
+        extra_unit_price: billingCalc.extra_unit_price ?? 0,
+        extras_price: billingCalc.extras_value || 0,
+        new_total_monthly: billingCalc.total_monthly ?? 0,
+        // true = a assinatura não mudou sozinha (valor combinado ou fora da
+        // tabela): o total acima é o da tabela e a equipe confirma o ajuste.
+        ajuste_pela_equipe: syncResult.reason === 'valor_combinado' || syncResult.reason === 'fora_da_tabela',
         note: billingNote,
         // Metadata adicional pra UI mostrar status real do Asaas
         asaas_synced: syncResult.synced,
@@ -466,7 +483,7 @@ router.post('/', async (req, res) => {
         // Fallback se o helper falhar (improvável — primary acabou de ser lida)
         total_companies: currentCount + 1,
         included_in_plan: INCLUDED_CNPJS[planKey] || 1,
-        new_total_monthly: PLAN_PRICES[planKey] || 0,
+        new_total_monthly: getPlanValue(planKey, 'monthly') || 0,
         note: 'Cálculo de mensalidade indisponível no momento.',
       },
       message: `Empresa "${newCompany.trade_name || newCompany.legal_name}" criada com sucesso.`,
@@ -795,16 +812,22 @@ router.delete('/:companyId', async (req, res) => {
     );
 
     // 5. Sincronizar Asaas (reduz mensalidade)
-    const syncResult = await safeSyncSubscriptionValue(company.billing_owner_company_id);
+    const syncResult = await safeSyncSubscriptionValue(company.billing_owner_company_id, {
+      evento: 'remove',
+      companyId,
+      companyName: company.trade_name || company.legal_name,
+    });
     const billingCalc = await calculateMulticnpjValue(company.billing_owner_company_id);
 
     let note;
     if (syncResult.synced) {
-      note = `Mensalidade reduzida de R$${syncResult.old_value?.toFixed(2)} para R$${syncResult.new_value.toFixed(2)}.`;
+      note = `Mensalidade reduzida de ${brl(syncResult.old_value)} para ${brl(syncResult.new_value)}.`;
+    } else if (syncResult.reason === 'valor_combinado' || syncResult.reason === 'fora_da_tabela') {
+      note = 'Empresa removida. Sua assinatura tem uma condição especial: a equipe Aura vai falar com você sobre o novo valor.';
     } else if (syncResult.reason === 'no_subscription') {
       note = 'Empresa removida. Sem assinatura ativa para atualizar.';
     } else if (syncResult.reason === 'no_change') {
-      note = 'Empresa removida. Mensalidade permanece a mesma (ainda dentro dos CNPJs inclusos).';
+      note = 'Empresa removida. A mensalidade continua a mesma: as empresas que ficaram cabem nos CNPJs incluídos no seu plano.';
     } else {
       note = 'Empresa removida.';
     }
