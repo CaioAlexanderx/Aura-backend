@@ -24,12 +24,42 @@
 //
 // So pedido ja 'cancelled': quem chama muda o status antes (ou na mesma
 // transacao) e chama esta funcao. Pedido em outro status nao devolve nada.
+//
+// 27/10/2026 — TROCA NO CAIXA. Item do pedido que ja voltou ao estoque por
+// uma troca no Caixa (troca_returned_items.original_digital_order_item_id,
+// migration 415, troca nao cancelada) nao volta de novo no cancelamento:
+// devolve so a quantidade que ainda nao voltou. Consulta sob SAVEPOINT —
+// sem a coluna (deploy antes da 415) o cancelamento segue como antes.
 // ============================================================
 'use strict';
 
 const db = require('../config/database');
 
 const REFERENCIA = 'digital_order_cancel';
+
+// Quanto de cada item do pedido ja voltou ao estoque por troca no Caixa
+// (trocas nao canceladas). Map<digital_order_items.id (texto), quantidade>.
+async function quantidadeDevolvidaEmTrocas(c, orderId) {
+  const mapa = new Map();
+  try {
+    await c.query('SAVEPOINT sp_troca_do_pedido');
+    const { rows } = await c.query(
+      `SELECT tri.original_digital_order_item_id AS item_id, SUM(tri.quantity) AS qtd
+         FROM troca_returned_items tri
+         JOIN sales ts ON ts.id = tri.troca_sale_id
+        WHERE tri.original_digital_order_id = $1
+          AND COALESCE(ts.status, 'completed') <> 'cancelled'
+        GROUP BY tri.original_digital_order_item_id`,
+      [orderId]
+    );
+    await c.query('RELEASE SAVEPOINT sp_troca_do_pedido');
+    for (const r of rows || []) if (r.item_id) mapa.set(String(r.item_id), Number(r.qtd) || 0);
+  } catch (e) {
+    try { await c.query('ROLLBACK TO SAVEPOINT sp_troca_do_pedido'); } catch (_) { /* sem transacao */ }
+    if (e.code !== '42703' && e.code !== '42P01') throw e;
+  }
+  return mapa;
+}
 
 /**
  * Devolve ao estoque os itens de um pedido cancelado que teve baixa.
@@ -65,14 +95,15 @@ async function devolverEstoqueDoPedido(orderId, { client, db: banco } = {}) {
     }
 
     const { rows: itens } = await c.query(
-      `SELECT product_id, variant_id, quantity FROM digital_order_items WHERE order_id = $1`,
+      `SELECT product_id, variant_id, quantity, id FROM digital_order_items WHERE order_id = $1`,
       [orderId]
     );
+    const jaVoltouNaTroca = await quantidadeDevolvidaEmTrocas(c, orderId);
 
     const nota = `Cancelamento do pedido #${pedido.order_number ?? ''} da loja online`.trim();
     let devolvidos = 0;
     for (const item of itens) {
-      const qtd = Number(item.quantity);
+      const qtd = Number(item.quantity) - (jaVoltouNaTroca.get(String(item.id)) || 0);
       if (!Number.isFinite(qtd) || qtd <= 0) continue;
 
       let produtoId = item.product_id || null;
