@@ -51,6 +51,9 @@ function showConfirmation(order){
 }
 
 function chooseMethod(method){
+  // Pedido sendo enviado (27/10/2026): o toque em outra forma de pagamento
+  // nao troca o metodo nem dispara outro envio.
+  if(typeof enviandoPedido!=='undefined' && enviandoPedido) return;
   customerData.payment_method=method;
   if(typeof renderResumoDoCheckout==='function') renderResumoDoCheckout();
   submitOrder();

@@ -79,7 +79,9 @@ app.disable('x-powered-by');
 app.use('/api/v1/storefront', function(req, res, next) {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, X-Request-ID');
+  // Idempotency-Key (27/10/2026): o POST do pedido aceita a chave tambem
+  // pelo cabecalho; a vitrine manda no body.
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, X-Request-ID, Idempotency-Key');
   res.setHeader('Access-Control-Max-Age', '600');
   // Sem Allow-Credentials (incompativel com origin '*' e nao precisamos)
   if (req.method === 'OPTIONS') return res.sendStatus(204);

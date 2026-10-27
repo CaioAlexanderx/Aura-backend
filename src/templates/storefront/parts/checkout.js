@@ -24,6 +24,18 @@
 //   email no blur, e localStorage `aura_customer_{SLUG}` lembra nome/fone/
 //   email/CPF/endereço pra cliente que retorna não redigitar tudo.
 //   ViaCEP + máscara de CEP/UF já existiam.
+//
+// 27/10/2026 (pedido duplicado, migration 416): cada compra gerava de 3 a 5
+// pedidos iguais — os botões de forma de pagamento chamavam submitOrder()
+// sem trava e a marca de pedido em andamento só era gravada depois da
+// resposta. Agora:
+//  • trava de envio: no primeiro toque todos os botões de pagamento (e o
+//    "Continuar") ficam desabilitados com "Enviando…"; só voltam se der erro;
+//  • chave de idempotência por tentativa de checkout (crypto.randomUUID com
+//    fallback), guardada enquanto a página está aberta e mandada no POST. O
+//    servidor devolve o pedido já criado para a mesma chave
+//    (services/pedidoOnlineIdempotente.js). Erro de rede mantém a chave — a
+//    nova tentativa não duplica; pedido criado troca a chave.
 'use strict';
 
 module.exports = `
@@ -57,6 +69,66 @@ function avisoDoPedidoConcluido(){
   var fechada=(currentOrder.loja_fechada!==undefined)?currentOrder.loja_fechada:lojaFechadaAgora();
   if(!fechada) return '';
   return avisoDaLojaFechada(selectedDelivery, currentOrder.abre_em!==undefined?currentOrder.abre_em:undefined);
+}
+// ── Trava do envio do pedido + chave de idempotência (27/10/2026) ──
+var enviandoPedido=false;
+var chaveDoPedido=null;
+var BOTOES_DE_PAGAMENTO={pix:'opt_pix_method',card:'opt_card_method',on_delivery:'opt_od_method'};
+function novaChaveDoPedido(){
+  try{
+    if(typeof crypto!=='undefined' && crypto && typeof crypto.randomUUID==='function') return crypto.randomUUID();
+  }catch(_){}
+  try{
+    if(typeof crypto!=='undefined' && crypto && typeof crypto.getRandomValues==='function'){
+      var b=new Uint8Array(16), h='';
+      crypto.getRandomValues(b);
+      for(var i=0;i<b.length;i++){ h+=(b[i]<16?'0':'')+b[i].toString(16); }
+      return h;
+    }
+  }catch(_){}
+  return Date.now().toString(36)+'-'+Math.random().toString(36).slice(2)+Math.random().toString(36).slice(2);
+}
+function chaveDaTentativa(){
+  if(!chaveDoPedido) chaveDoPedido=novaChaveDoPedido();
+  return chaveDoPedido;
+}
+function travarEnvio(metodo){
+  enviandoPedido=true;
+  Object.keys(BOTOES_DE_PAGAMENTO).forEach(function(m){
+    var el=document.getElementById(BOTOES_DE_PAGAMENTO[m]);
+    if(!el) return;
+    el.setAttribute('aria-disabled','true');
+    el.style.pointerEvents='none';
+    el.style.opacity=(m===metodo)?'1':'.5';
+    if(m===metodo){
+      var d=el.querySelector && el.querySelector('.delivery-opt-detail');
+      if(d){ d.setAttribute('data-texto',d.textContent); d.textContent='Enviando…'; }
+    }
+  });
+  var btn=document.getElementById('nextBtn');
+  if(btn){
+    if(!btn.disabled) btn.setAttribute('data-texto',btn.textContent);
+    btn.disabled=true; btn.textContent='Enviando…';
+  }
+}
+function destravarEnvio(){
+  enviandoPedido=false;
+  Object.keys(BOTOES_DE_PAGAMENTO).forEach(function(m){
+    var el=document.getElementById(BOTOES_DE_PAGAMENTO[m]);
+    if(!el) return;
+    el.removeAttribute('aria-disabled');
+    el.style.pointerEvents='';
+    el.style.opacity='';
+    var d=el.querySelector && el.querySelector('.delivery-opt-detail');
+    if(d && d.getAttribute('data-texto')!=null){ d.textContent=d.getAttribute('data-texto'); d.removeAttribute('data-texto'); }
+  });
+  var btn=document.getElementById('nextBtn');
+  if(btn){ btn.disabled=false; btn.textContent=btn.getAttribute('data-texto')||'Continuar para o pagamento'; }
+}
+// Voltar do Mercado Pago pelo "voltar" do navegador restaura a página da
+// memória (bfcache) ainda travada: destrava para não ficar sem botão.
+if(typeof window!=='undefined' && window.addEventListener){
+  window.addEventListener('pageshow',function(e){ if(e && e.persisted && enviandoPedido) destravarEnvio(); });
 }
 function htmlDoAvisoConcluido(){
   var t=avisoDoPedidoConcluido();
@@ -634,6 +706,8 @@ function selectDelivery(type){
 }
 
 function submitOrder(){
+  // Toque repetido enquanto o pedido está sendo enviado: ignora (27/10/2026).
+  if(enviandoPedido) return;
   // Migration 121: dedup — checa se já existe pedido em andamento
   // criado nos últimos 10min (localStorage). Evita duplicação por
   // duplo-clique, abrir 2 abas, ou voltar pela back_url do MP.
@@ -667,8 +741,7 @@ function submitOrder(){
       }
     }
   } catch(_) {}
-  var btn=document.getElementById('nextBtn');
-  btn.disabled=true;btn.textContent='Criando pedido...';
+  travarEnvio(customerData.payment_method);
   var items=Object.values(cart).map(function(i){return{product_id:i.product_id,variant_id:i.variant_id||null,quantity:i.qty};});
   // Fase 5: anti-tampering — envia fee que o cliente esta vendo
   var expectedFee=null;
@@ -692,12 +765,23 @@ function submitOrder(){
     address_city:customerData.address_city||null,
     address_state:customerData.address_state||null,
     expected_delivery_fee:expectedFee,
+    // Mesma chave em todo toque repetido e em toda nova tentativa depois de
+    // erro de rede: o servidor devolve o pedido já criado em vez de outro.
+    idempotency_key:chaveDaTentativa(),
   };
   fetch(API_BASE + '/api/v1/storefront/'+SLUG+'/order',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)})
   .then(function(r){return r.json().then(function(d){return{ok:r.ok,data:d};});})
   .then(function(res){
-    if(!res.ok){showToast(res.data.error||'Erro ao criar pedido');btn.disabled=false;btn.textContent='Ir para pagamento';return;}
+    if(!res.ok){
+      // A chave já foi usada por um pedido com outros itens: a próxima
+      // tentativa é um pedido novo, com chave nova.
+      if(res.data && res.data.code==='IDEMPOTENCY_KEY_REUSED') chaveDoPedido=null;
+      showToast((res.data && res.data.error)||'Erro ao criar pedido');destravarEnvio();return;
+    }
     currentOrder=res.data; paymentMarked=false;
+    // Pedido criado: a próxima compra nesta página leva chave nova.
+    chaveDoPedido=null;
+    if(currentOrder.payment_method) customerData.payment_method=currentOrder.payment_method;
     saveCustomerToLocalStorage();
     // Migration 121: salva pedido em andamento pro dedup
     try {
@@ -710,9 +794,13 @@ function submitOrder(){
         card: currentOrder.card||null,
       }));
     } catch(_) {}
+    // Cartão: continua travado até sair para o Mercado Pago.
     if(currentOrder.payment_method==='card' && currentOrder.card && currentOrder.card.init_point){ window.location.href=currentOrder.card.init_point; return; }
+    enviandoPedido=false;
     checkoutStep=3; renderCheckoutStep();
   })
-  .catch(function(){showToast('Erro de conexão. Tente novamente.');btn.disabled=false;btn.textContent='Ir para pagamento';});
+  // Erro de rede: o pedido pode ter sido criado. A chave fica — o novo
+  // toque devolve o mesmo pedido em vez de criar outro.
+  .catch(function(){showToast('Erro de conexão. Tente novamente.');destravarEnvio();});
 }
 `;
