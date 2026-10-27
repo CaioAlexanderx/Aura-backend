@@ -67,6 +67,7 @@
 const router      = require('express').Router({ mergeParams: true });
 const db          = require('../config/database');
 const trocaV2     = require('../services/trocaV2');
+const { buscarPedidosParaTroca, juntarComPedidos } = require('../services/trocaPedidoOnline');
 const { createCreditSale, cancelCreditSale } = require('../services/creditLedger');
 // 10/10/2026: um carne por compra (services/credit/carneAuto.js).
 const carneAuto = require('../services/credit/carneAuto');
@@ -1151,7 +1152,8 @@ router.delete('/sale/:saleId', async (req, res) => {
 // ===== POST /troca =====
 router.post('/troca', async (req, res) => {
   const b = req.body || {};
-  if (Array.isArray(b.original_sale_ids)) return trocaV2.handle(req, res);
+  // 27/10/2026: original_digital_order_ids[] (pedido da loja online) tambem e v2.
+  if (Array.isArray(b.original_sale_ids) || Array.isArray(b.original_digital_order_ids)) return trocaV2.handle(req, res);
   if (!b.original_sale_id) return res.status(400).json({ error: 'original_sale_id obrigatorio' });
   const returned = Array.isArray(b.returned_items) ? b.returned_items : [];
   const resolvedReturned = await Promise.all(
@@ -1274,7 +1276,11 @@ router.get('/sales-for-troca', async (req, res) => {
         ORDER BY s.created_at DESC LIMIT ${lim}`,
       vals
     );
-    res.json(rows);
+    // 27/10/2026: pedidos elegiveis da loja online entram na mesma lista
+    // (origin_kind='digital_order'). Best-effort: falha nao derruba a busca.
+    res.json(await juntarComPedidos(rows, () => buscarPedidosParaTroca(db, req.params.id, {
+      q, customer_id, order_number, nfce_chave, days: winDays, limit: lim,
+    }), lim));
   } catch (e) {
     console.error('[PDV] Erro ao buscar vendas para troca:', e.message);
     res.status(500).json({ error: 'Erro ao buscar vendas elegiveis' });
@@ -1338,7 +1344,10 @@ router.get('/sales-by-product-barcode', async (req, res) => {
         ORDER BY s.created_at DESC LIMIT ${lim}`,
       [req.params.id, alts]
     );
-    res.json(rows);
+    // 27/10/2026: pedidos da loja online com o item bipado (ver acima).
+    res.json(await juntarComPedidos(rows, () => buscarPedidosParaTroca(db, req.params.id, {
+      barcodes: alts, days: winDays, limit: lim,
+    }), lim));
   } catch (e) {
     console.error('[PDV] Erro em sales-by-product-barcode:', e.message);
     res.status(500).json({ error: 'Erro ao buscar vendas por barcode' });

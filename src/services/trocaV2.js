@@ -3,6 +3,26 @@
 // Handler do contrato v2 do POST /pdv/troca.
 // Doc: Aura/AUDITORIA_TROCA_PDV_2026-05-17.docx
 //
+// 27/10/2026 (troca de pedido da loja online — migration 415):
+//   - Origem pode ser pedido da loja online: original_digital_order_ids[]
+//     e, em returned_items, original_digital_order_id +
+//     original_digital_order_item_id (no lugar de original_sale_id/_item_id).
+//     original_sale_ids[] pode vir vazio quando so ha pedido online.
+//   - Elegivel: pedido do mesmo grupo (billing_owner_company_id, mesmo
+//     criterio da venda), status != 'cancelled' e stock_deducted = TRUE —
+//     ou seja, a baixa de estoque da confirmacao aconteceu
+//     (digitalOrderConfirmation.onOrderConfirmed). Sem baixa nao ha o que
+//     repor. payment_status NAO entra: pedido "pagar na entrega" entregue
+//     fica com payment_status='pending' para sempre.
+//   - Linha do pedido travada (FOR UPDATE) durante a troca: serializa com
+//     outra troca do mesmo pedido e com o cancelamento do pedido.
+//   - Estoque: a devolucao repoe pelo mesmo adjustStock da venda, com
+//     produto/variante tirados do item do pedido (nao do payload). Guarda
+//     contra devolver duas vezes: SUM por original_digital_order_item_id em
+//     trocas nao canceladas, igual a de original_sale_item_id.
+//   - Fiscal: pedido online nao tem NFC-e -> estrategia 'none' sempre.
+//   - Venda do Caixa: caminho identico ao de antes.
+//
 // 12/08/2026 (auditoria troca fiscal — 3 fixes):
 //   - UPDATE pos-COMMIT da emissao pendente (e o da reemissao manual)
 //     virou NON-FATAL: um erro de banco nesse UPDATE nao pode mais
@@ -295,6 +315,148 @@ async function validateReturnedItems(client, originSales, returnedItems) {
         error: `Tentando devolver ${totalNow} de "${origItem.product_name_snapshot}", mas so restam ${stillAvailable} (ja foram devolvidos ${already} em trocas anteriores).`,
         code: 'DOUBLE_RETURN_BLOCKED',
         original_sale_item_id: ret.original_sale_item_id,
+        already_returned: already,
+        original_qty: origQty,
+        attempting: totalNow,
+      });
+    }
+  }
+}
+
+// ── Pedido da loja online como origem (27/10/2026, migration 415) ──
+// Nome legivel do item do pedido: "Vestido · M / Azul" quando ha variante.
+function digitalItemName(it) {
+  const base = it.product_name || '';
+  return it.variant_label ? `${base} · ${it.variant_label}` : base;
+}
+
+// Carrega e trava os pedidos online de origem. Mesmo criterio de grupo da
+// venda (billing_owner_company_id). Elegivel: nao cancelado e com baixa de
+// estoque feita (stock_deducted) — ver cabecalho.
+async function lookupOriginDigitalOrders(client, currentCompanyId, orderIds) {
+  if (!Array.isArray(orderIds) || orderIds.length === 0) return [];
+  const placeholders = orderIds.map((_, i) => `$${i + 2}`).join(',');
+  const { rows: orders } = await client.query(
+    `SELECT o.id, o.order_number, o.status, o.payment_status, o.stock_deducted,
+            o.company_id, o.customer_id, o.total, o.created_at, o.nfce_id
+       FROM digital_orders o
+       JOIN companies c ON c.id = $1
+      WHERE o.id IN (${placeholders})
+        AND (
+          o.company_id = $1
+          OR EXISTS (
+            SELECT 1 FROM companies c2
+             WHERE c2.id = o.company_id
+               AND COALESCE(NULLIF(c2.billing_owner_company_id, c2.id), c2.id)
+                 = COALESCE(NULLIF(c.billing_owner_company_id, c.id), c.id)
+          )
+        )
+      FOR UPDATE OF o`,
+    [currentCompanyId, ...orderIds]
+  );
+
+  if (orders.length !== orderIds.length) {
+    const found = new Set(orders.map((o) => o.id));
+    throw new TrocaV2Error(404, {
+      error: 'Pedido da loja online nao encontrado (mesma empresa ou grupo)',
+      code: 'DIGITAL_ORDER_NOT_FOUND',
+      missing_digital_order_ids: orderIds.filter((id) => !found.has(id)),
+    });
+  }
+  const notEligible = orders.filter((o) => o.status === 'cancelled' || o.stock_deducted !== true);
+  if (notEligible.length) {
+    const o = notEligible[0];
+    const why = o.status === 'cancelled'
+      ? 'esta cancelado'
+      : 'ainda nao foi confirmado (o estoque nao saiu)';
+    throw new TrocaV2Error(409, {
+      error: `O pedido #${o.order_number} da loja online ${why} e nao pode ser trocado.`,
+      code: 'DIGITAL_ORDER_NOT_ELIGIBLE',
+      not_eligible_digital_order_ids: notEligible.map((x) => x.id),
+    });
+  }
+
+  const idPlaceholders = orderIds.map((_, i) => `$${i + 1}`).join(',');
+  const { rows: items } = await client.query(
+    `SELECT id, order_id, product_id, variant_id, quantity, unit_price, product_name, variant_label
+       FROM digital_order_items WHERE order_id IN (${idPlaceholders})`,
+    orderIds
+  );
+  const itemsByOrder = new Map();
+  for (const it of items) {
+    if (!itemsByOrder.has(it.order_id)) itemsByOrder.set(it.order_id, []);
+    itemsByOrder.get(it.order_id).push({ ...it, product_name_snapshot: digitalItemName(it) });
+  }
+
+  return orders.map((o) => ({
+    ...o,
+    kind: 'digital_order',
+    seller_id: null,
+    employee_id: null,
+    items: itemsByOrder.get(o.id) || [],
+    nfce: null,
+    is_cross_filial: o.company_id !== currentCompanyId,
+  }));
+}
+
+// Valida os itens devolvidos que apontam para pedido online. Produto e
+// variante vem do ITEM DO PEDIDO (sobrescreve o payload): e o que garante que
+// o estoque volta para a mesma variante que a confirmacao baixou.
+async function validateDigitalReturnedItems(client, originDigitalOrders, returnedItems) {
+  if (!returnedItems.length) return;
+  const orderIdSet = new Set(originDigitalOrders.map((o) => o.id));
+  const itemsByOrder = new Map(originDigitalOrders.map((o) => [o.id, o.items]));
+  const requestedByItem = new Map();
+  const origByItem = new Map();
+
+  for (const ret of returnedItems) {
+    if (!orderIdSet.has(ret.original_digital_order_id)) {
+      throw new TrocaV2Error(400, { error: `returned_item aponta pro pedido ${ret.original_digital_order_id} que nao esta em original_digital_order_ids[]` });
+    }
+    if (ret.original_digital_order_item_id == null || ret.original_digital_order_item_id === '') {
+      throw new TrocaV2Error(400, { error: 'returned_item.original_digital_order_item_id obrigatorio (digital_order_items.id da linha do pedido)' });
+    }
+    const key = String(ret.original_digital_order_item_id);
+    const origItem = (itemsByOrder.get(ret.original_digital_order_id) || []).find((i) => String(i.id) === key);
+    if (!origItem) {
+      throw new TrocaV2Error(400, { error: `digital_order_items.${key} nao pertence ao pedido ${ret.original_digital_order_id}` });
+    }
+    ret.product_id = origItem.product_id || null;
+    ret.variant_id = origItem.variant_id || null;
+    if (!ret.product_name_snapshot) ret.product_name_snapshot = origItem.product_name_snapshot;
+    if (!Number.isFinite(parseFloat(ret.unit_price))) ret.unit_price = toFiniteNum(origItem.unit_price);
+    const qty = parseFloat(ret.quantity);
+    if (!qty || qty <= 0) throw new TrocaV2Error(400, { error: 'returned_item.quantity deve ser > 0' });
+    if (qty > parseFloat(origItem.quantity)) {
+      throw new TrocaV2Error(400, { error: `quantity ${qty} excede a quantidade original ${origItem.quantity} de "${origItem.product_name_snapshot}"` });
+    }
+    requestedByItem.set(key, (requestedByItem.get(key) || 0) + qty);
+    origByItem.set(key, origItem);
+  }
+
+  const itemIds = Array.from(requestedByItem.keys());
+  const { rows: prev } = await client.query(
+    `SELECT tri.original_digital_order_item_id AS item_id, SUM(tri.quantity) AS already_returned
+       FROM troca_returned_items tri
+       JOIN sales ts ON ts.id = tri.troca_sale_id
+      WHERE tri.original_digital_order_item_id = ANY($1::text[])
+        AND COALESCE(ts.status, 'completed') != 'cancelled'
+      GROUP BY tri.original_digital_order_item_id`,
+    [itemIds]
+  );
+  const alreadyByItem = new Map(prev.map((r) => [String(r.item_id), parseFloat(r.already_returned) || 0]));
+
+  for (const key of itemIds) {
+    const origItem = origByItem.get(key);
+    const origQty = parseFloat(origItem.quantity);
+    const already = alreadyByItem.get(key) || 0;
+    const stillAvailable = origQty - already;
+    const totalNow = requestedByItem.get(key);
+    if (totalNow > stillAvailable + 0.0001) {
+      throw new TrocaV2Error(409, {
+        error: `Tentando devolver ${totalNow} de "${origItem.product_name_snapshot}", mas so restam ${stillAvailable} (ja foram devolvidos ${already} em trocas anteriores).`,
+        code: 'DOUBLE_RETURN_BLOCKED',
+        original_digital_order_item_id: key,
         already_returned: already,
         original_qty: origQty,
         attempting: totalNow,
@@ -621,10 +783,20 @@ async function insertTrocaPayouts(client, trocaSaleId, companyId, sessaoId, cust
   return inserted;
 }
 
-async function insertAggregateTransactions(client, trocaSaleId, primaryCompanyId, totals, originalSaleIds, userId) {
-  const summary = originalSaleIds.length === 1
-    ? `Troca PDV — venda ${originalSaleIds[0].slice(0, 8)}`
-    : `Troca PDV — ${originalSaleIds.length} vendas originais`;
+function trocaSummary(originalSaleIds, digitalOrderNumbers = []) {
+  if (!digitalOrderNumbers.length) {
+    return originalSaleIds.length === 1
+      ? `Troca PDV — venda ${originalSaleIds[0].slice(0, 8)}`
+      : `Troca PDV — ${originalSaleIds.length} vendas originais`;
+  }
+  const pedidos = `pedido da loja online #${digitalOrderNumbers.join(', #')}`;
+  return originalSaleIds.length
+    ? `Troca PDV — ${originalSaleIds.length} venda(s) + ${pedidos}`
+    : `Troca PDV — ${pedidos}`;
+}
+
+async function insertAggregateTransactions(client, trocaSaleId, primaryCompanyId, totals, originalSaleIds, userId, digitalOrderNumbers = []) {
+  const summary = trocaSummary(originalSaleIds, digitalOrderNumbers);
   if (totals.returnedValue > 0) {
     await client.query(
       `INSERT INTO transactions
@@ -725,7 +897,7 @@ async function reemitirEmissao(emission) {
 
 async function handle(req, res) {
   const {
-    original_sale_ids, returned_items = [], new_items = [],
+    original_sale_ids, original_digital_order_ids, returned_items = [], new_items = [],
     payment_splits = [], refund_splits = [],
     customer_id, employee_id, seller_name,
     nfce_strategy = 'per_origin',
@@ -773,8 +945,19 @@ async function handle(req, res) {
     if (!caixaCheck.ok) { await client.query('ROLLBACK'); return res.status(caixaCheck.status).json(caixaCheck.body); }
     const sessaoId = caixaCheck.sessaoId || (await getActiveSessaoId(client, companyId));
 
-    const originSales = await lookupOriginSales(client, companyId, original_sale_ids);
-    await validateReturnedItems(client, originSales, returned_items);
+    // 27/10/2026: origem pode ser venda do Caixa e/ou pedido da loja online.
+    // So pedido online -> original_sale_ids vem vazio e a busca de vendas
+    // nao roda. Sem nenhuma das duas, o 400 de sempre.
+    const digitalIds = Array.isArray(original_digital_order_ids) ? original_digital_order_ids.filter(Boolean) : [];
+    const saleIds = Array.isArray(original_sale_ids) ? original_sale_ids : [];
+    const originSales = (digitalIds.length && saleIds.length === 0)
+      ? []
+      : await lookupOriginSales(client, companyId, original_sale_ids);
+    const originDigital = await lookupOriginDigitalOrders(client, companyId, digitalIds);
+    const digitalReturns = (returned_items || []).filter((r) => r && r.original_digital_order_id);
+    const saleReturns = (returned_items || []).filter((r) => !(r && r.original_digital_order_id));
+    await validateReturnedItems(client, originSales, saleReturns);
+    await validateDigitalReturnedItems(client, originDigital, digitalReturns);
     // Reconciliacao de splits NAO bloqueante: deriva do metodo unico legado
     // (payment_method_legacy / payment_method) quando os splits vem vazios e
     // auto-ajusta quando nao batem. Resolve o bug Davi (adapter v1 mandava
@@ -787,9 +970,14 @@ async function handle(req, res) {
 
     preCancelled = await preCancelNfces(originSales, strategyMap);
 
-    const primarySale = originSales[0];
+    // Pedido online so vira "primario" quando nao ha venda do Caixa na troca.
+    const primarySale = originSales[0] || originDigital[0];
     const saleCompanyId = primarySale.company_id;
-    const isCrossFilial = originSales.some((s) => s.is_cross_filial);
+    const isCrossFilial = originSales.some((s) => s.is_cross_filial) || originDigital.some((o) => o.is_cross_filial);
+    const digitalOrderNumbers = originDigital.map((o) => o.order_number);
+    const trocaNotes = digitalOrderNumbers.length
+      ? `Troca v2 — ${trocaSummary(saleIds, digitalOrderNumbers).replace(/^Troca PDV — /, '')}`
+      : `Troca v2 — ${saleIds.length} venda(s) original(is)`;
 
     const { rows: colCheck } = await client.query(
       `SELECT COUNT(*) AS n FROM information_schema.columns
@@ -824,8 +1012,8 @@ async function handle(req, res) {
           exchangeSellerId, exchangeEmployeeId,
           totals.saleTotal,
           trocaPaymentMethod,
-          `Troca v2 — ${original_sale_ids.length} venda(s) original(is)`,
-          original_sale_ids[0],
+          trocaNotes,
+          saleIds[0] || null,
         ]
       );
       trocaSaleRow = r.rows[0];
@@ -841,8 +1029,8 @@ async function handle(req, res) {
           trocaSellerId, trocaEmployeeId, seller_name || null,
           totals.saleTotal,
           trocaPaymentMethod,
-          `Troca v2 — ${original_sale_ids.length} venda(s) original(is)`,
-          original_sale_ids[0],
+          trocaNotes,
+          saleIds[0] || null,
         ]
       );
       trocaSaleRow = r.rows[0];
@@ -871,7 +1059,7 @@ async function handle(req, res) {
       );
     }
 
-    for (const ret of returned_items) {
+    for (const ret of saleReturns) {
       await client.query(
         `INSERT INTO troca_returned_items
            (troca_sale_id, original_sale_id, original_sale_item_id,
@@ -880,13 +1068,26 @@ async function handle(req, res) {
         [trocaSaleRow.id, ret.original_sale_id, ret.original_sale_item_id, ret.product_id || null, ret.variant_id || null, toFiniteNum(ret.quantity), toFiniteNum(ret.unit_price), ret.product_name_snapshot || null]
       );
     }
+    // 27/10/2026: item de pedido da loja online (migration 415) — sem
+    // original_sale_id; a guarda anti-dupla-devolucao le
+    // original_digital_order_item_id.
+    for (const ret of digitalReturns) {
+      await client.query(
+        `INSERT INTO troca_returned_items
+           (troca_sale_id, original_sale_id, original_sale_item_id,
+            original_digital_order_id, original_digital_order_item_id,
+            product_id, variant_id, quantity, unit_price, product_name_snapshot)
+         VALUES ($1,NULL,NULL,$2,$3,$4,$5,$6,$7,$8)`,
+        [trocaSaleRow.id, ret.original_digital_order_id, String(ret.original_digital_order_item_id), ret.product_id || null, ret.variant_id || null, toFiniteNum(ret.quantity), toFiniteNum(ret.unit_price), ret.product_name_snapshot || null]
+      );
+    }
 
     // ── B) Lock de estoque atomico (dentro da transacao) ──
     await adjustStock(client, returned_items, new_items, companyId, trocaSaleRow.id);
 
     await insertSalePayments(client, trocaSaleRow.id, companyId, sessaoId, totals, _paymentSplits, _refundSplits);
     const payoutsInserted = await insertTrocaPayouts(client, trocaSaleRow.id, companyId, sessaoId, effectiveCustomerId, _refundSplits, req.user?.id);
-    await insertAggregateTransactions(client, trocaSaleRow.id, saleCompanyId, totals, original_sale_ids, req.user?.id);
+    await insertAggregateTransactions(client, trocaSaleRow.id, saleCompanyId, totals, saleIds, req.user?.id, digitalOrderNumbers);
 
     for (const c of preCancelled) {
       await client.query(
@@ -1061,6 +1262,18 @@ async function handle(req, res) {
         });
       }
     }
+    // 27/10/2026: pedido da loja online nao tem NFC-e — sempre 'none'.
+    for (const o of originDigital) {
+      fiscalResults.push({
+        origin_sale_id: null,
+        origin_digital_order_id: o.id,
+        origin_order_number: o.order_number,
+        strategy: 'none',
+        status: 'none',
+        chave_acesso: null,
+        error: null,
+      });
+    }
 
     const { rows: respNewItems } = await db.query(
       `SELECT si.*, COALESCE(p.name, si.product_name_snapshot) AS product_name
@@ -1085,7 +1298,7 @@ async function handle(req, res) {
       new_value: totals.newValue,
       cross_filial: isCrossFilial,
       origin_company_id: saleCompanyId,
-      origin_company_ids: Array.from(new Set(originSales.map((s) => s.company_id))),
+      origin_company_ids: Array.from(new Set([...originSales, ...originDigital].map((s) => s.company_id))),
       physical_company_id: companyId,
       payouts: payoutsInserted,
       fiscal: {
@@ -1093,7 +1306,8 @@ async function handle(req, res) {
         per_origin: fiscalResults,
         // Cada item: { origin_sale_id, strategy, status ('autorizada'|'pendente'|'falha'|'none'), chave_acesso, error }
       },
-      original_sale_ids,
+      original_sale_ids: saleIds,
+      original_digital_order_ids: originDigital.map((o) => o.id),
       receipt_url: `/companies/${companyId}/print/receipt/${trocaSaleRow.id}`,
     });
   } catch (err) {
@@ -1120,5 +1334,5 @@ module.exports = {
   handle,
   reemitirEmissao,
   TrocaV2Error,
-  _internal: { computeAndValidateTotals, balanceSplits, decideFiscalPerOrigin, normalizeMethodForSalePayments, bestEffort, toFiniteNum },
+  _internal: { computeAndValidateTotals, balanceSplits, decideFiscalPerOrigin, normalizeMethodForSalePayments, bestEffort, toFiniteNum, lookupOriginDigitalOrders, validateDigitalReturnedItems, trocaSummary },
 };
