@@ -37,7 +37,13 @@ function homeStyles({ fontSerif, fontSans, fontMono, noBrand = '#fff' }) {
    antes. */
 .topbar-brand.com-emblema .topbar-logo:has(img)+.topbar-brand-text .topbar-name{display:block;}
 .topbar-brand-text{gap:4px;}
-.topnav{display:flex;align-items:center;gap:4px;flex:1 1 auto;min-width:0;overflow:hidden;}
+/* flex-basis 0 (nao auto): o nav cresce ate onde sobrar, mas o tamanho de
+   quebra de linha dele nao e mais a soma de todas as categorias. Com basis
+   auto, o cabecalho (flex-wrap) media o nav pelo texto inteiro e, se
+   marca + nav + busca + sacola nao coubessem, jogava a sacola sozinha pra
+   segunda linha — o selo "Fechada · Abre amanha as 11:00" so aumentava a
+   marca e empurrava o limite. Largura final do nav nao muda. */
+.topnav{display:flex;align-items:center;gap:4px;flex:1 1 0;min-width:0;overflow:hidden;}
 .topnav-item{appearance:none;background:none;border:0;padding:8px 11px;cursor:pointer;font-family:${fontSans};font-size:13.5px;font-weight:500;letter-spacing:.2px;color:var(--sf-ink);display:inline-flex;align-items:center;gap:5px;white-space:nowrap;border-bottom:2px solid transparent;transition:color var(--sf-motion) var(--sf-ease),border-color var(--sf-motion) var(--sf-ease);}
 .topnav-item:hover,.topnav-item.active{color:var(--sf-brand);}
 .topnav-item.active{border-bottom-color:var(--sf-brand);font-weight:600;}
@@ -638,7 +644,9 @@ body.sf-dark .checkout-topo-logo img{mix-blend-mode:normal;}
   .topbar-right{order:2;gap:0;}
   .cart-btn{width:44px;height:44px;border:0;background:transparent;}
   .cart-btn:hover{transform:none;box-shadow:none;}
-  .search-pill{order:4;flex:1 0 100%;width:auto;margin:0 8px 12px;height:42px;}
+  /* A base e 100% MENOS as margens: com flex-basis 100% + margin 0 8px a
+     busca passava 16px do cabecalho e era cortada na borda direita. */
+  .search-pill{order:4;flex:1 0 calc(100% - 16px);width:auto;margin:0 8px 12px;height:42px;}
   .search-pill:focus-within{width:auto;}
   .hero{height:340px;}
   /* Banner do celular (image_url_mobile): quadrado, quando a lojista subiu. */
