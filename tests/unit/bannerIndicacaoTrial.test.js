@@ -150,8 +150,9 @@ describe('lerConfig', () => {
 
 // ── 2. o banner ─────────────────────────────────────────────
 describe('montarBanner', () => {
-  it('texto, rota, alvo, validade de 7 dias e chave de dedupe', () => {
-    const b = montarBanner(CID, { agora: AGORA });
+  it('texto, rota, alvo, validade de 7 dias e chave de dedupe (fora da Black Friday)', () => {
+    const DEPOIS = new Date(svc.FIM_BLACK_FRIDAY_INDICACAO.getTime() + 1);
+    const b = montarBanner(CID, { agora: DEPOIS });
     expect(b).toMatchObject({
       type: 'banner',
       title: 'Conhece outro lojista que ia gostar da Aura?',
@@ -161,13 +162,60 @@ describe('montarBanner', () => {
       dedupeKey: 'indicacao-trial:' + CID,
     });
     expect(b.body).toBe('Indique e ganhe um mês grátis quando ele assinar.');
-    expect(new Date(b.expiresAt).getTime() - AGORA.getTime()).toBe(7 * DIA);
+    expect(new Date(b.expiresAt).getTime() - DEPOIS.getTime()).toBe(7 * DIA);
   });
 
   it('nasce ativo por padrão e inativo só com publicar=false', () => {
     expect(montarBanner(CID, { agora: AGORA }).isActive).toBe(true);
     expect(montarBanner(CID, { agora: AGORA, publicar: true }).isActive).toBe(true);
     expect(montarBanner(CID, { agora: AGORA, publicar: false }).isActive).toBe(false);
+  });
+});
+
+// ── 2b. Black Friday: só o texto, até 30/11/2026 23:59:59 BRT ──
+describe('banner na Black Friday', () => {
+  const FIM = svc.FIM_BLACK_FRIDAY_INDICACAO;
+  const TITULO_BF = 'Black Friday: você indica, vocês dois ganham.';
+  const TEXTO_BF = 'Seu indicado tem 50% na primeira mensalidade com o código BLACK50, até 30/11 ou enquanto houver cupons. Quando ele pagar, você ganha 1 mensalidade grátis.';
+  const TITULO_HOJE = 'Conhece outro lojista que ia gostar da Aura?';
+  const TEXTO_HOJE = 'Indique e ganhe um mês grátis quando ele assinar.';
+
+  it('o fim é 30/11/2026 23:59:59 em Brasília', () => {
+    expect(FIM.toISOString()).toBe('2026-12-01T02:59:59.000Z');
+  });
+
+  it('um instante antes do fim: texto da Black Friday', () => {
+    const b = montarBanner(CID, { agora: new Date(FIM.getTime() - 1) });
+    expect(b.title).toBe(TITULO_BF);
+    expect(b.body).toBe(TEXTO_BF);
+  });
+
+  it('exatamente no fim: texto da Black Friday', () => {
+    expect(svc.emBlackFridayDaIndicacao(FIM)).toBe(true);
+    const b = montarBanner(CID, { agora: FIM });
+    expect(b.title).toBe(TITULO_BF);
+    expect(b.body).toBe(TEXTO_BF);
+  });
+
+  it('um instante depois do fim: o texto de hoje, idêntico', () => {
+    const depois = new Date(FIM.getTime() + 1);
+    expect(svc.emBlackFridayDaIndicacao(depois)).toBe(false);
+    const b = montarBanner(CID, { agora: depois });
+    expect(b.title).toBe(TITULO_HOJE);
+    expect(b.body).toBe(TEXTO_HOJE);
+    expect(svc.bannerVigente(depois)).toBe(svc.BANNER);
+  });
+
+  it('não há data de início: hoje já é Black Friday', () => {
+    expect(montarBanner(CID, { agora: AGORA }).title).toBe(TITULO_BF);
+  });
+
+  it('só o texto muda: botão, rota, validade, chave e ativo iguais', () => {
+    const bf = montarBanner(CID, { agora: new Date(FIM.getTime() - 1000) });
+    const hoje = montarBanner(CID, { agora: new Date(FIM.getTime() + 1000) });
+    for (const campo of ['type', 'ctaLabel', 'ctaRoute', 'targetCompanyId', 'dedupeKey', 'isActive']) {
+      expect(bf[campo]).toBe(hoje[campo]);
+    }
   });
 });
 
