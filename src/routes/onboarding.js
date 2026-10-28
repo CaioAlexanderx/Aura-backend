@@ -11,6 +11,7 @@ const db      = require('../config/database');
 const { requireAuth } = require('../middleware/auth');
 const { lookupCNPJ, validateCNPJ, sanitizeCNPJ } = require('../services/cnpj');
 const { suggestSegmentFromCnae, normalizeCnae } = require('../services/segment');
+const regimeLog = require('../services/regimeLog');
 
 let redis = null;
 try { redis = require('../config/redis').default || require('../config/redis'); } catch (_) {}
@@ -46,7 +47,8 @@ router.post('/cnpj-lookup', async (req, res) => {
     return res.status(429).json({ error: 'Limite de consultas atingido. Tente novamente em 1 hora.' });
 
   try {
-    const data = await lookupCNPJ(cnpj, redis);
+    // 28/10/2026: [REGIME] regime da Receita, provedor e erro (services/regimeLog).
+    const data = await regimeLog.lookupComLog(lookupCNPJ, 'cnpj-lookup')(cnpj, redis);
     if (!data.is_active) {
       return res.status(422).json({
         error: 'CNPJ com situação irregular na Receita Federal.',
