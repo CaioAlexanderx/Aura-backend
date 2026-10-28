@@ -125,6 +125,7 @@ const trialRegra = require('../services/trialRegra');
 const { applySegment, isValidSegment, normalizeCnae, ALLOWED_EXTRAS } = require('../services/segment');
 const signupOrigem = require('../services/signupOrigem');
 const { lookupCNPJ } = require('../services/cnpj');
+const regimeLog = require('../services/regimeLog');
 const documentoEmpresa = require('../services/documentoEmpresa');
 const whatsappCadastro = require('../services/whatsappCadastro');
 const signupHandshake = require('../services/signupHandshake');
@@ -675,10 +676,27 @@ router.post('/register', async (req, res) => {
     }
     await client.query('COMMIT');
 
+    // 28/10/2026: [REGIME] o que veio no corpo e o que foi ao INSERT
+    // (services/regimeLog). So log: nada gravado, nenhuma regra muda.
+    regimeLog.logCadastro({
+      cnpj,
+      temCpf: !!cleanCpf,
+      taxRegimeDoCorpo: tax_regime,
+      regimeDoCadastro,
+      regimesValidos: REGIMES,
+      caminho: isNewCompany ? 'empresa_nova' : (company ? 'empresa_existente' : 'sem_empresa'),
+      regimeGravado: isNewCompany ? company.tax_regime : null,
+      companyId: company ? company.id : null,
+      selfServe: isSelfServe,
+      temCodigo: !!access_code,
+    });
+
     // 15/10/2026 (t2-09): cidade do CNPJ na empresa nova (best-effort, em
     // segundo plano; o cadastro do site ja aqueceu o cache do lookup).
+    // 28/10/2026: a mesma consulta (sem chamada nova) loga o regime que a
+    // Receita devolve para o CNPJ, ao lado do [REGIME] do cadastro acima.
     if (isNewCompany && !isDojoSignup && cnpj) {
-      signupOrigem.completarCidadePeloCnpj({ db, companyId: company.id, cnpj: String(cnpj), lookup: lookupCNPJ, redis })
+      signupOrigem.completarCidadePeloCnpj({ db, companyId: company.id, cnpj: String(cnpj), lookup: regimeLog.lookupComLog(lookupCNPJ, 'register'), redis })
         .catch(() => {});
     }
 
