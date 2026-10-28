@@ -74,6 +74,11 @@ const { lerAtribuicao, gravarAtribuicao } = require('../services/atribuicaoDoPed
 const lojaEvents          = require('../services/lojaEvents');
 // A MESMA validacao de CPF/CNPJ nas duas lojas (services/cpfCnpj.js).
 const { validateCpfCnpj } = require('../services/cpfCnpj');
+// Toque repetido no checkout nao vira pedido novo (migration 416, 27/10/2026).
+const pedidoIdem          = require('../services/pedidoOnlineIdempotente');
+// Sentinela: a chave ja tem pedido gravado — desfaz a transacao e responde
+// com o pedido que existe.
+const PEDIDO_REPETIDO     = Symbol('pedido-repetido');
 
 // listVisibilityWhere vive em services/storefrontBuilder.js e e
 // importada acima. A copia local daqui era IDENTICA (conferido por
@@ -583,6 +588,51 @@ router.post('/:slug/order', async (req, res) => {
     const cardEnabled = config.card_enabled !== false;
     const hasCard = hasMpGateway && cardEnabled;
 
+    // Preferencia do Checkout Pro (cartao). A mesma funcao serve o pedido
+    // novo e a repeticao que nao achou a resposta guardada — o MP devolve a
+    // MESMA preferencia (X-Idempotency-Key pref-<pedido>, mpService).
+    // Custom domain (22/05/2026): usa custom_domain como base da back_url quando configurado.
+    // Fix: prefixo /api/v1/ estava faltando no fallback Railway.
+    const criarCartao = async (pedido, itensDoCartao, { email, cpf }) => {
+      const hasCustomDomain = config.custom_domain && config.custom_domain_status === 'active';
+      const backBase = hasCustomDomain
+        ? `https://${config.custom_domain}`
+        : `${STOREFRONT_API_BASE}/api/v1/storefront/${slug}/page`;
+      return createMpPreference({
+        accessToken:     mpGateway.access_token,
+        orderId:         pedido.id,
+        orderNumber:     pedido.order_number,
+        orderItems:      itensDoCartao,
+        customerEmail:   email || null,
+        payerCpf:        cpf || null,
+        storeName:       config.company_display_name || null,
+        notificationUrl: `${STOREFRONT_API_BASE}/api/v1/webhooks/mp`,
+        backUrlSuccess:  `${backBase}?order_id=${pedido.id}&payment=approved`,
+        backUrlFailure:  `${backBase}?order_id=${pedido.id}&payment=failed`,
+        backUrlPending:  `${backBase}?order_id=${pedido.id}&payment=pending`,
+      });
+    };
+
+    // Toque repetido no checkout (27/10/2026): a mesma chave da mesma loja
+    // devolve o pedido ja criado. Sem chave (pagina antiga), tudo como antes.
+    const idemKey = await pedidoIdem.chaveDoPedido(req);
+    const repeticao = () => pedidoIdem.responderRepeticao(res, {
+      companyId: cid, key: idemKey, itens: items,
+      remontarCartao: hasMpGateway
+        ? async (pedido, itensGravados) => {
+          const c = await criarCartao(pedido, itensGravados, {
+            email: pedido.customer_email, cpf: pedido.customer_cpf_cnpj,
+          });
+          return { init_point: c.init_point, preference_id: c.preference_id };
+        }
+        : null,
+    });
+    // Antes das conferencias: a repeticao que chega depois do primeiro ter
+    // terminado nao pode cair num "estoque insuficiente" falso.
+    if (idemKey && await pedidoIdem.buscarPedido(cid, idemKey)) {
+      if (await repeticao()) return;
+    }
+
     const dtype = delivery_type || 'pickup';
     if (dtype === 'delivery' && !config.delivery_enabled) {
       return res.status(400).json({ error: 'Entrega nao disponivel nesta loja' });
@@ -793,8 +843,11 @@ router.post('/:slug/order', async (req, res) => {
 
     const client = await db.connect();
     let order;
+    let repetido = false;
     try {
       await client.query('BEGIN');
+      // O toque simultaneo com a mesma chave espera aqui o primeiro gravar.
+      if (idemKey && await pedidoIdem.travarEBuscar(client, cid, idemKey)) throw PEDIDO_REPETIDO;
       let composedAddress = delivery_address || null;
       if (dtype === 'delivery' && !composedAddress && address_street) {
         composedAddress = `${address_street}, ${address_number}` +
@@ -815,7 +868,7 @@ router.post('/:slug/order', async (req, res) => {
           customer_cpf_cnpj, nfce_requested,
           address_zip, address_street, address_number, address_complement,
           address_neighborhood, address_city, address_state,
-          courier_name, courier_plate${comDesconto ? ', discount_amount, discount_reason' : ''}
+          courier_name, courier_plate${comDesconto ? ', discount_amount, discount_reason' : ''}${idemKey ? ', idempotency_key' : ''}
         ) VALUES (
           $1, next_digital_order_number($1), $2, $3, $4,
           $5, $6, $7, $8, $9,
@@ -824,7 +877,7 @@ router.post('/:slug/order', async (req, res) => {
           $14, $15,
           $16, $17, $18, $19,
           $20, $21, $22,
-          $23, $24${comDesconto ? ', $25, $26' : ''}
+          $23, $24${comDesconto ? ', $25, $26' : ''}${idemKey ? (comDesconto ? ', $27' : ', $25') : ''}
         ) RETURNING *
       `, [
         cid, customer_name, customer_phone, customer_email || null,
@@ -837,7 +890,8 @@ router.post('/:slug/order', async (req, res) => {
         address_state ? String(address_state).toUpperCase() : null,
         courierData ? courierData.courier_name : null,
         courierData ? courierData.courier_plate : null,
-      ].concat(comDesconto ? [discount_amount, discount_amount > 0 ? 'pix' : null] : []));
+      ].concat(comDesconto ? [discount_amount, discount_amount > 0 ? 'pix' : null] : [])
+        .concat(idemKey ? [idemKey] : []));
       let newOrder;
       try {
         ({ rows: [newOrder] } = await insertPedido(true));
@@ -845,6 +899,8 @@ router.post('/:slug/order', async (req, res) => {
         if (e.code !== '42703') throw e;
         await client.query('ROLLBACK');
         await client.query('BEGIN');
+        // O ROLLBACK soltou a trava da chave: trava de novo.
+        if (idemKey && await pedidoIdem.travarEBuscar(client, cid, idemKey)) throw PEDIDO_REPETIDO;
         ({ rows: [newOrder] } = await insertPedido(false));
         newOrder.discount_amount = discount_amount;
       }
@@ -860,9 +916,16 @@ router.post('/:slug/order', async (req, res) => {
       await client.query('COMMIT');
     } catch (txErr) {
       await client.query('ROLLBACK');
-      throw txErr;
+      // A chave ja tem pedido (achado pela trava ou, em ultimo caso, pelo
+      // indice unico): nada foi gravado aqui; responde com o que existe.
+      if (txErr === PEDIDO_REPETIDO || (idemKey && pedidoIdem.ehColisaoDaChave(txErr))) repetido = true;
+      else throw txErr;
     } finally {
       client.release();
+    }
+    if (repetido) {
+      if (await repeticao()) return;
+      return res.status(500).json({ error: 'Erro ao criar pedido' });
     }
 
     // AURINHA (313): atribuição do pedido — a loja manda origem/conversa
@@ -919,28 +982,10 @@ router.post('/:slug/order', async (req, res) => {
       }
     }
 
-    // Custom domain (22/05/2026): usa custom_domain como base da back_url quando configurado.
-    // Fix: prefixo /api/v1/ estava faltando no fallback Railway.
     let cardData = null;
     if (pmethod === 'card') {
       try {
-        const hasCustomDomain = config.custom_domain && config.custom_domain_status === 'active';
-        const backBase = hasCustomDomain
-          ? `https://${config.custom_domain}`
-          : `${STOREFRONT_API_BASE}/api/v1/storefront/${slug}/page`;
-        cardData = await createMpPreference({
-          accessToken:     mpGateway.access_token,
-          orderId:         order.id,
-          orderNumber:     order.order_number,
-          orderItems,
-          customerEmail:   customer_email || null,
-          payerCpf:        cpfNorm || null,
-          storeName:       config.company_display_name || null,
-          notificationUrl: `${STOREFRONT_API_BASE}/api/v1/webhooks/mp`,
-          backUrlSuccess:  `${backBase}?order_id=${order.id}&payment=approved`,
-          backUrlFailure:  `${backBase}?order_id=${order.id}&payment=failed`,
-          backUrlPending:  `${backBase}?order_id=${order.id}&payment=pending`,
-        });
+        cardData = await criarCartao(order, orderItems, { email: customer_email, cpf: cpfNorm });
       } catch (mpErr) {
         console.error('[storefront] MP Preference error:', mpErr.message);
         return res.status(500).json({ error: 'Erro ao criar preferencia de pagamento. Tente novamente.' });
@@ -971,7 +1016,7 @@ router.post('/:slug/order', async (req, res) => {
         .catch(err => console.error('[storefront] notifyManualPixOrder error:', err.message));
     }
 
-    res.status(201).json({
+    const corpo = {
       order_id:       order.id,
       order_number:   order.order_number,
       total,
@@ -994,7 +1039,11 @@ router.post('/:slug/order', async (req, res) => {
         init_point:    cardData.init_point,
         preference_id: cardData.preference_id,
       } : null,
-    });
+    };
+    // Guardado ANTES de responder: o toque repetido devolve este corpo
+    // (com o Pix e o link do cartao), nao um pedido novo.
+    if (idemKey) await pedidoIdem.guardarResposta({ companyId: cid, orderId: order.id, corpo });
+    res.status(201).json(corpo);
   } catch (err) {
     console.error('create order error:', err);
     res.status(500).json({ error: 'Erro ao criar pedido' });
