@@ -16,6 +16,8 @@
 //   4. limite de 20 medidas
 //   5. chave desconhecida dentro da medida / modelo sem calibracao => descartada
 //   6. GET devolve o que foi salvo; PUT de outra chave nao apaga
+//   7. dobraMm (linha de dobra da tag): opcional, sem padrao; ausente/0 nao
+//      cria a chave; menor que alturaMm
 //
 // Mock por CONTEUDO DO SQL, nunca fila posicional.
 // ============================================================
@@ -161,6 +163,67 @@ describe('pdv_settings -- label_custom_specs', () => {
     res = await put({ label_custom_specs: vinte.concat([{ ...MEDIDA, id: 'm20' }]) });
     expect(res.status).toBe(400);
     expect(JSON.stringify(res.body)).toMatch(/ate 20 medidas/);
+    expect(updates()).toHaveLength(0);
+  });
+});
+
+describe('pdv_settings -- label_custom_specs.dobraMm (linha de dobra da tag)', () => {
+  // Medida real da Doce Encanto (tag couche 35x60, 3 colunas), como esta gravada.
+  const TAG = {
+    id: 'mtag35x60v1', nome: 'Tag 35x60 (3 col)', colunas: 3, alturaMm: 60, larguraMm: 35,
+    ajusteXMm: 0, ajusteYMm: 0, espacoLadoMm: 0, espacoLinhaMm: 0,
+  };
+
+  test('PUT: medida sem dobraMm continua sem a chave (o que ja esta gravado nao muda)', async () => {
+    mockSql({ label_custom_specs: [TAG] });
+    const res = await put({ label_custom_specs: [TAG] });
+    expect(res.status).toBe(200);
+    const salvo = gravado().label_custom_specs[0];
+    expect(salvo).toEqual(TAG);
+    expect(Object.prototype.hasOwnProperty.call(salvo, 'dobraMm')).toBe(false);
+  });
+
+  test.each([[null], [0], [''], ['0']])('PUT: dobraMm %p = sem dobra, a chave nao entra', async (valor) => {
+    mockSql({});
+    const res = await put({ label_custom_specs: [{ ...TAG, dobraMm: valor }] });
+    expect(res.status).toBe(200);
+    const salvo = gravado().label_custom_specs[0];
+    expect(salvo).toEqual(TAG);
+    expect(Object.prototype.hasOwnProperty.call(salvo, 'dobraMm')).toBe(false);
+  });
+
+  test('PUT: grava a dobra, arredondada a decimos e aceitando virgula', async () => {
+    mockSql({});
+    let res = await put({ label_custom_specs: [{ ...TAG, dobraMm: 43 }] });
+    expect(res.status).toBe(200);
+    expect(gravado().label_custom_specs).toEqual([{ ...TAG, dobraMm: 43 }]);
+
+    jest.resetAllMocks();
+    mockSql({});
+    res = await put({ label_custom_specs: [{ ...TAG, dobraMm: '42,96' }] });
+    expect(res.status).toBe(200);
+    expect(gravado().label_custom_specs[0].dobraMm).toBe(43);
+  });
+
+  test('GET: devolve a dobra salva', async () => {
+    mockSql({ label_custom_specs: [{ ...TAG, dobraMm: 43 }] });
+    const res = await request(app).get(url).set(auth);
+    expect(res.status).toBe(200);
+    expect(res.body.settings.label_custom_specs).toEqual([{ ...TAG, dobraMm: 43 }]);
+  });
+
+  test.each([
+    ['dobra negativa', { dobraMm: -1 }, /dobraMm.*0 e 300/],
+    ['dobra acima de 300', { dobraMm: 301 }, /dobraMm.*0 e 300/],
+    ['dobra que nao e numero', { dobraMm: 'meio' }, /dobraMm/],
+    ['dobra boolean', { dobraMm: true }, /dobraMm/],
+    ['dobra igual a altura', { dobraMm: 60 }, /dobraMm \(linha de dobra\) deve ser menor que alturaMm \(60 mm\)/],
+    ['dobra abaixo da etiqueta', { dobraMm: 75 }, /dobraMm.*menor que alturaMm/],
+  ])('PUT: %s => 400 com mensagem e nada gravado', async (_rotulo, troca, msg) => {
+    mockSql({ label_custom_specs: [TAG] });
+    const res = await put({ label_custom_specs: [{ ...TAG, ...troca }] });
+    expect(res.status).toBe(400);
+    expect(JSON.stringify(res.body)).toMatch(msg);
     expect(updates()).toHaveLength(0);
   });
 });
