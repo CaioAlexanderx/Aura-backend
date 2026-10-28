@@ -182,6 +182,11 @@ const LABEL_CUSTOM_FIELDS = {
   espacoLinhaMm: { min: 0,  max: 10,  padrao: 2 },
   ajusteXMm:     { min: -8, max: 8,   padrao: 0 },
   ajusteYMm:     { min: -8, max: 8,   padrao: 0 },
+  // Linha de dobra/picote da tag: mm do topo da etiqueta ate a linha (tag
+  // couche 35x60 com dobra a ~43 mm). Opcional SEM padrao: ausente, null ou
+  // 0 = sem dobra, e a medida NAO ganha a chave (o que ja esta gravado nao
+  // muda). Precisa ser menor que alturaMm (conferido depois do laco).
+  dobraMm:       { min: 0,  max: 300, opcional: true },
 };
 
 // Espelha aura-app labelPrinterPrefs.ts + buildLabelHtml.ts: so os modelos
@@ -243,10 +248,17 @@ function validarMedidasDeEtiqueta(raw) {
       const valor = m[campo];
       if (valor === undefined || valor === null || valor === '') {
         if (regra.obrigatorio) throw new AppError(onde + '.' + campo + ' e obrigatorio', 400);
+        if (regra.opcional) continue; // sem padrao: a chave nao entra
         spec[campo] = regra.padrao;
         continue;
       }
-      spec[campo] = numeroNaFaixa(onde + '.' + campo, valor, regra);
+      const v = numeroNaFaixa(onde + '.' + campo, valor, regra);
+      if (regra.opcional && v === 0) continue; // 0 = ausente
+      spec[campo] = v;
+    }
+    if (spec.dobraMm !== undefined && spec.dobraMm >= spec.alturaMm) {
+      throw new AppError(onde + '.dobraMm (linha de dobra) deve ser menor que alturaMm ('
+        + spec.alturaMm + ' mm)', 400);
     }
     if (m.nome !== undefined && m.nome !== null) {
       if (typeof m.nome !== 'string' || m.nome.trim().length > LABEL_CUSTOM_NOME_MAX) {
