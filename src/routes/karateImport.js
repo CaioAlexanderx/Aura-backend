@@ -335,13 +335,17 @@ const batchFpktHandler = async (req, res) => {
     // ── Usuário de SISTEMA dono dos dojôs (companies.owner_id é NOT NULL) ──
     // Dojôs NÃO podem pertencer ao admin da federação (faz o login dele cair em
     // "visão consolidada" por ter >1 empresa). Reusa o dono de um dojô já existente
-    // da federação (o usuário de sistema); senão acha/cria um usuário de sistema
-    // dedicado com login travado. Só necessário se houver dojôs a INSERIR.
+    // da federação SE ele for usuário de sistema (senha travada; dojô que se
+    // cadastrou sozinho tem dono real e não serve, tq-41c); senão acha/cria um
+    // usuário de sistema dedicado com login travado. Só necessário se houver
+    // dojôs a INSERIR.
     let systemOwnerId = null;
     if (dojos.length) {
       const ex = await client.query(
-        `SELECT owner_id FROM companies
-         WHERE federation_id = $1 AND vertical = 'karate_dojo' AND owner_id IS NOT NULL
+        `SELECT c.owner_id FROM companies c
+           JOIN users u ON u.id = c.owner_id AND u.password_hash = '!locked-system-no-login'
+         WHERE c.federation_id = $1 AND c.vertical = 'karate_dojo' AND c.owner_id IS NOT NULL
+         ORDER BY c.created_at
          LIMIT 1`,
         [federationId]
       );

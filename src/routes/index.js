@@ -128,6 +128,10 @@ router.use('/webhooks', require('./webhookMarketplaceStub'));
 // (sem auth — usa state com companyId).
 router.use('/marketplaces', require('./marketplaceAuthPublic'));
 
+// 29/10/2026 (tq-94): retorno do OAuth do Mercado Pago (loja online).
+// GET /api/v1/mp/oauth/callback — público; a empresa vem do state assinado.
+router.use('/mp/oauth', require('./mpOAuthCallback'));
+
 // Visual Engine F3 (03/07/2026): template visual público pro preview 2D/3D
 // do storefront (products.visual_template_key → studio_visual_templates).
 // Montado ANTES de studioStorefront — rota específica, sem colisão com o

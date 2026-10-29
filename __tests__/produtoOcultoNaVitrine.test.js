@@ -5,7 +5,10 @@
 // continua aparecendo. Não era o botão — era o alcance da regra.
 //
 // `featured_product_ids` é lista de INCLUSÃO: vazia, mostra tudo; cheia,
-// mostra só o que está nela. Essa regra morava DENTRO da consulta da
+// mostra só o que está nela. Desde o tq-57 (29/10/2026) `hidden_product_ids`
+// também vale: o que está ali some, e o oculto ganha da lista.
+//
+// Essa regra morava DENTRO da consulta da
 // grade. O redesign de 09/2026 trouxe blocos de home, árvore de
 // categorias e facetas — todos nasceram sem ela.
 //
@@ -37,7 +40,20 @@ describe('NA_VITRINE, o fragmento', () => {
   test('lê a config por $1, como visibilityWhere', () => {
     // $1 é o company da loja e já é o primeiro parâmetro de todas essas
     // consultas — é o que permite ao fragmento viajar sem assinatura nova.
-    expect((NA_VITRINE.match(/\$1/g) || []).length).toBe(2);
+    // Três leituras: lista vazia?, está na lista?, está nos ocultos? (tq-57)
+    expect((NA_VITRINE.match(/\$1/g) || []).length).toBe(3);
+    // E nenhum parâmetro além dele: o fragmento não pode exigir $2.
+    expect(NA_VITRINE).not.toMatch(/\$[2-9]/);
+  });
+
+  test('ocultar (tq-57): o produto em hidden_product_ids some, e o oculto ganha da lista', () => {
+    // text[] (migration 119): contenção de array, e NULL não esconde nada.
+    expect(NA_VITRINE).toContain('dch.hidden_product_ids @> ARRAY[products.id::text]');
+    // O oculto entra com AND por fora da regra da lista de inclusão —
+    // nunca com OR, que deixaria a peça oculta voltar pela lista.
+    const i = NA_VITRINE.indexOf('dch.hidden_product_ids');
+    const antes = NA_VITRINE.slice(0, i);
+    expect(antes.trimEnd()).toMatch(/\)\s*AND NOT EXISTS \(\s*SELECT 1 FROM digital_channel_config dch\s*WHERE dch\.company_id = \$1\s*AND$/);
   });
 
   test('diz products-ponto, como EM_ESTOQUE e COM_FOTO', () => {

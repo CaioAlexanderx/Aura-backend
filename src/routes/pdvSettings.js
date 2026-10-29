@@ -163,7 +163,11 @@ const ALLOWED_RANGED_KEYS = {
 //   - forma errada ou numero fora da faixa => 400 com o nome do campo e a
 //     faixa, e NADA e gravado (o app ja satura os valores antes de enviar,
 //     entao fora da faixa aqui e bug ou chamada manual);
-//   - chave desconhecida dentro de uma medida ou de um modelo => descartada;
+//   - chave desconhecida dentro de uma medida ou de um modelo => descartada
+//     (campos de uma medida: id, nome, larguraMm, alturaMm, colunas,
+//     espacoLadoMm, espacoLinhaMm, ajusteXMm, ajusteYMm, dobraMm, estilo; o
+//     estilo so existe quando vale exatamente "boutique", qualquer outro
+//     valor e ignorado sem erro);
 //   - numeros arredondados a decimos (o app trabalha em decimos de mm);
 //   - medida com id repetido => fica a primeira (igual ao app).
 // null = a loja nunca salvou na conta: o app usa o que tiver no navegador e
@@ -267,6 +271,9 @@ function validarMedidasDeEtiqueta(raw) {
       const nome = m.nome.trim();
       if (nome) spec.nome = nome;
     }
+    // Estilo opcional da etiqueta: so "boutique" e gravado. Ausente ou outro
+    // valor => sem a chave, sem 400 (app antigo/novo nao quebra).
+    if (m.estilo === 'boutique') spec.estilo = 'boutique';
     if (vistos.has(id)) return; // id repetido: fica a primeira
     vistos.add(id);
     out.push(spec);

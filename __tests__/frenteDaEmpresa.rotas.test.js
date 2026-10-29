@@ -95,6 +95,21 @@ describe('POST /auth/register — frente no cadastro', () => {
     expect(c.segment_suggested).toBe('varejo');
   });
 
+  test('segment=adega no cadastro grava a frente, sem ligar nada, com a sugestao do CNAE', async () => {
+    const fake = fakeSegmentDb();
+    db.connect.mockResolvedValueOnce(fake.client);
+    const res = await request(app).post('/api/v1/auth/register').send(body({
+      segment: 'adega', cnae_principal: '4723-7/00',
+      cnae_descricao: 'Comércio varejista de bebidas', segment_suggested: 'adega',
+    }));
+    expect(res.status).toBe(201);
+    const c = newCompany(fake);
+    expect(c.segment).toBe('adega');
+    expect(c.segment_source).toBe('user');
+    expect(c.segment_suggested).toBe('adega');
+    expect(c.pdv_settings).toEqual({});
+  });
+
   test('access_code COMECAR tambem aplica a frente', async () => {
     const fake = fakeSegmentDb({
       accessCode: { id: 'ac1', type: 'trial', plan: 'negocio', discount_pct: 0, trial_days: 7, max_uses: 999, uses: 1, expires_at: null, is_active: true, referrer_id: null },
@@ -289,6 +304,7 @@ describe('GET /companies/:id/onboarding/first-steps', () => {
     assistencia: ['primeira_os', 'termo_de_garantia_preenchido', 'pecas_ou_servicos_cadastrados'],
     studio: ['catalogo_montado', 'primeiro_orcamento', 'primeiro_item_em_producao'],
     varejo: ['produtos_cadastrados', 'primeira_venda', 'cliente_cadastrado'],
+    adega: ['produtos_cadastrados', 'primeira_venda', 'cliente_cadastrado'], // mesmos passos do varejo (tq-50)
   };
 
   test.each(Object.keys(KEYS))('%s: tres passos com as chaves estaveis, done do EXISTS', async (segment) => {
