@@ -23,12 +23,14 @@
 //   siteName, tagline, logoInTopbar, logoNoRodape, contactBar,
 //   addrText, horarioTexto, cnpjTexto, announcementBar, banners[],
 //   serviceCards[], isOpenNow, nextOpenText, pagamentos, politicaTroca,
-//   whatsNum, whatsBloco,
+//   whatsNum, whatsBloco, textosDaFrente,
 // }) → string HTML
 //
 // whatsNum ja chega com o 55 (services/whatsappDaLoja.js, tq-61).
 // whatsBloco = { titulo, texto } da lojista (migration 401); null nos
 // dois = o bloco de hoje, byte a byte.
+// textosDaFrente = services/textosDaFrente.js (tq-58): o titulo PADRAO
+// do bloco pela frente da conta. null ou loja de roupa = o de sempre.
 //
 // O texto da politica e as formas de pagamento moram em
 // services/rodapeInstitucional.js — a vitrine Studio desenha o MESMO
@@ -54,7 +56,7 @@ function buildHtmlBody({
   siteName, tagline, logoInTopbar, logoNoRodape, contactBar,
   addrText, horarioTexto, cnpjTexto, announcementBar, banners, serviceCards,
   isOpenNow, nextOpenText,
-  pagamentos, politicaTroca, whatsNum, redes, whatsBloco,
+  pagamentos, politicaTroca, whatsNum, redes, whatsBloco, textosDaFrente,
 }) {
   banners = Array.isArray(banners) ? banners : [];
   serviceCards = Array.isArray(serviceCards) ? serviceCards : [];
@@ -229,13 +231,16 @@ ${serviceCards.map((c) => `  <div class="service-card">
   // o <style> das outras lojas nao mudar. Sem nada escrito, o bloco de
   // hoje, byte a byte.
   const tituloDela = whatsBloco && whatsBloco.titulo ? String(whatsBloco.titulo) : '';
+  // O titulo padrao pela frente (tq-58). Roupa: BLOCO_PADRAO.titulo.
+  const tituloPadrao = textosDaFrente && textosDaFrente.duvidaTitulo
+    ? String(textosDaFrente.duvidaTitulo) : BLOCO_PADRAO.titulo;
   const textoDele = whatsBloco && whatsBloco.texto ? String(whatsBloco.texto) : '';
   const blocoDela = !!(tituloDela || textoDele);
   const whatsBlock = (whatsNum && blocoDela) ? `
 <section class="whats-block">
   <a class="whats-block-inner" href="https://wa.me/${whatsNum}" target="_blank" rel="noopener" style="color:inherit;text-decoration:none;">
     <div>
-      <div class="whats-block-tit serif">${escHtml(tituloDela || BLOCO_PADRAO.titulo)}</div>
+      <div class="whats-block-tit serif">${escHtml(tituloDela || tituloPadrao)}</div>
       <div class="whats-block-txt">${escHtml(textoDele || BLOCO_PADRAO.texto)}</div>
     </div>
     <span class="whatsapp-cta">${WHATSAPP_GLYPH}Chamar no WhatsApp</span>
@@ -244,7 +249,7 @@ ${serviceCards.map((c) => `  <div class="service-card">
 <section class="whats-block">
   <div class="whats-block-inner">
     <div>
-      <div class="whats-block-tit serif">Dúvida sobre tamanho ou modelo?</div>
+      <div class="whats-block-tit serif">${escHtml(tituloPadrao)}</div>
       <div class="whats-block-txt">Fale direto com a gente no WhatsApp.</div>
     </div>
     <a class="whatsapp-cta" href="https://wa.me/${whatsNum}" target="_blank" rel="noopener">${WHATSAPP_GLYPH}Chamar no WhatsApp</a>

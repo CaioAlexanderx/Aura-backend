@@ -73,6 +73,8 @@ function camposParaApagar(body) {
 const { lerPecaDoDestaque } = require('../services/pecaDoDestaque');
 // Horario que vira a meia-noite e valido; abertura igual ao fechamento nao (19/10/2026).
 const { problemasDoHorario, mensagemDosProblemas } = require('../services/horarioDaLoja');
+// Pagar na entrega com forma escolhida e aceite (tq-44, 29/10/2026).
+const { normalizarFormas, formasParaGravar } = require('../services/pagarNaEntrega');
 
 const ALLOWED_ICONS = ['truck','pkg','shield','sparkle','leaf','heart','star','pix','card','receipt','bag','user'];
 
@@ -270,6 +272,8 @@ router.get('/', async (req, res) => {
       pedidos_ate: comoData(config.pedidos_ate),
       pedidos_recado: config.pedidos_recado ?? null,
       courier_pickup_enabled: config.courier_pickup_enabled === true,
+      // tq-44: [] = nenhuma forma marcada (pagar na entrega de hoje, sem aceite).
+      pay_on_delivery_methods: normalizarFormas(config.pay_on_delivery_methods),
       ga4_measurement_id: config.ga4_measurement_id ?? null,
       meta_pixel_id: config.meta_pixel_id ?? null,
       politica_troca_padrao: POLITICA_PADRAO,
@@ -583,6 +587,8 @@ router.put('/', requireRole('client', 'analyst', 'admin'), async (req, res) => {
     delivery_radius_km, pickup_enabled, is_published,
     pix_key, pix_key_type, pix_holder_name, pix_holder_city,
     pay_on_delivery_enabled,
+    // tq-44 (migration 420): formas de pagar na entrega (cash, card, pix).
+    pay_on_delivery_methods,
     card_enabled,
     card_max_installments,
     politica_troca,
@@ -1240,6 +1246,29 @@ router.put('/', requireRole('client', 'analyst', 'admin'), async (req, res) => {
       } catch (e) {
         if (e.code === '42703') {
           console.error(`[canal-whats-bloco] coluna ${coluna} inexistente — skip:`, e.message);
+        } else {
+          throw e;
+        }
+      }
+    }
+
+    // tq-44 (migration 420) — formas de pagar na entrega. Lista vazia grava
+    // NULL: a loja volta ao pagar na entrega de hoje (sem aceite). UPDATE
+    // separado e 42703 tolerado, como os outros campos novos.
+    const formasNaEntrega = formasParaGravar(pay_on_delivery_methods);
+    if (formasNaEntrega !== undefined) {
+      try {
+        const { rows: updated } = await db.query(
+          `UPDATE digital_channel_config
+             SET pay_on_delivery_methods = $1, updated_at = NOW()
+           WHERE company_id = $2
+           RETURNING *`,
+          [formasNaEntrega, cid]
+        );
+        if (updated.length) savedConfig = updated[0];
+      } catch (e) {
+        if (e.code === '42703') {
+          console.error('[canal-na-entrega] coluna pay_on_delivery_methods inexistente — skip:', e.message);
         } else {
           throw e;
         }

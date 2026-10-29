@@ -16,6 +16,13 @@
 //   hidden_product_ids fica DORMENTE — parseHiddenIds segue exportado para
 //   nao quebrar imports externos, mas e ignorado no storefront publico.
 //
+// tq-57 (29/10/2026): hidden_product_ids VOLTA a valer, como "ocultar".
+//   A regra mora no fragmento NA_VITRINE (catalogoPaginado.js), que toda
+//   consulta da vitrine ja usa: peca oculta some, peca nova entra sozinha.
+//   featured cheio continua lista de inclusao (nenhuma loja muda o que
+//   mostra); a conversao featured -> ocultos e por loja, com o script
+//   scripts/vitrine-featured-para-ocultos.js.
+//
 // fix (20/05/2026): variantes ordenadas por tamanho numérico ASC (menor → maior).
 //   Usa split_part(sku_suffix, '/', 1) para lidar com ranges tipo "25/26".
 //
@@ -48,12 +55,14 @@
 'use strict';
 
 const db = require('../config/database');
+const mpGatewaySvc = require('./mpGateway');
 // Aberta/fechada: uma regra so, compartilhada com o aviso do pedido feito com a loja fechada (19/10/2026).
 const { estaAberta, momentoNoFuso, parseHHMM } = require('./horarioDaLoja');
 // O rodape institucional e o MESMO nas duas lojas — ver o modulo.
 const { montarRodape } = require('./rodapeInstitucional');
 const { rastreadoresDaLoja } = require('./rastreadores');
 const { montarRedes } = require('./redesSociais');
+const { formasDaLoja } = require('./pagarNaEntrega');
 // A tira de categorias da home: quem entra e regra unica das duas lojas.
 const { montarTira } = require('./tiraDeCategorias');
 // Redesign 09/2026: os blocos da home nascem do estoque e do Caixa. As
@@ -61,6 +70,8 @@ const { montarTira } = require('./tiraDeCategorias');
 const { montarHome, capasDasCategorias, ehNovo } = require('./homeDaLoja');
 // Migration 323 — galeria por cor na peca aberta pela URL propria.
 const { agruparGaleria } = require('./productImageGallery');
+// Textos fixos da vitrine pela frente da conta (tq-58).
+const { textosDaFrente } = require('./textosDaFrente');
 
 /**
  * Os selos padrao, DERIVADOS do que a lojista ligou (decisao 7, 02/09/2026).
@@ -72,6 +83,15 @@ const { agruparGaleria } = require('./productImageGallery');
  * aqui nasce de uma configuracao real; "Troca em 7 dias" nasce do CDC.
  * Ela pode reescrever tudo em service_cards.
  */
+/**
+ * tq-44: `{ pay_on_delivery_methods: [...] }` quando a loja usa pagar na
+ * entrega com formas; `{}` nas outras — a chave nem aparece no payload.
+ */
+function formasNaEntregaNoPayload(config) {
+  const formas = formasDaLoja(config);
+  return formas.length ? { pay_on_delivery_methods: formas } : {};
+}
+
 function selosPadrao(cfg) {
   const c = cfg || {};
   const selos = [];
@@ -979,14 +999,8 @@ async function buildStorefront(config) {
   const company = companies[0] || {};
 
   // Fase 2 (21/05/2026): detecta gateway MP para expor has_card e corrigir has_pix
-  let hasMpGateway = false;
-  try {
-    const { rows: gws } = await db.query(
-      `SELECT id FROM companies_payment_gateways WHERE company_id = $1 AND gateway = 'mercadopago' LIMIT 1`,
-      [cid]
-    );
-    hasMpGateway = gws.length > 0;
-  } catch (_) { /* tabela pode não existir em deployment antigo */ }
+  // tq-94: conexão por OAuth que caiu não conta (services/mpGateway).
+  const hasMpGateway = await mpGatewaySvc.temGatewayAtivo(db, cid);
 
   const hasStaticPix = !!(config.pix_key && String(config.pix_key).trim());
   const hasPix = hasStaticPix || hasMpGateway;
@@ -1078,6 +1092,10 @@ async function buildStorefront(config) {
         ? (config.card_max_installments || null)
         : null,
       pay_on_delivery_enabled:  payOnDeliveryEnabled,
+      // tq-44: as formas de pagar na entrega (cash, card, pix) entram SO
+      // quando a loja marcou alguma. Sem a chave, a pagina e o checkout das
+      // outras lojas saem byte a byte iguais (ver formasNaEntregaNoPayload).
+      ...formasNaEntregaNoPayload(config),
       pickup_eta_text:   config.pickup_eta_text   || null,
       delivery_eta_text: config.delivery_eta_text || null,
       delivery_pricing_mode: config.delivery_pricing_mode || 'flat',
@@ -1118,6 +1136,12 @@ async function buildStorefront(config) {
       titulo: config.whats_bloco_titulo || null,
       texto: config.whats_bloco_texto || null,
     },
+    // tq-58 — "Sobre esta peça" e "Dúvida sobre tamanho ou modelo?" sao
+    // textos de loja de roupa. company_segment vem da rota da pagina
+    // (JOIN companies); sem ele, os textos de roupa de sempre. Fica FORA
+    // do storeData (o <script> copia campo a campo): a pagina recebe o
+    // texto ja resolvido no servidor.
+    textos_da_frente: textosDaFrente(config.company_segment),
     // Rodape institucional JA RESOLVIDO. A vitrine Studio nao remonta a
     // lista de formas nem repete o texto padrao: se repetisse, uma
     // correcao no texto valeria numa loja e nao na outra.
@@ -1144,6 +1168,7 @@ module.exports = {
   // computeOpenState ja saia daqui embaixo.
   parseHHMM,
   buildStorefront, parseFeaturedIds, parseHiddenIds, computeOpenState,
+  formasNaEntregaNoPayload,
   // URL propria do produto (08/09/2026).
   produtoPublicoPorId,
   // Previa do link na vitrine Studio (BE-1, 25/09/2026): a peca, a regra

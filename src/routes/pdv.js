@@ -67,6 +67,7 @@
 const router      = require('express').Router({ mergeParams: true });
 const db          = require('../config/database');
 const trocaV2     = require('../services/trocaV2');
+const { resolveManualDiscount } = require('../services/descontoManual');
 const { buscarPedidosParaTroca, juntarComPedidos } = require('../services/trocaPedidoOnline');
 const { createCreditSale, cancelCreditSale } = require('../services/creditLedger');
 // 10/10/2026: um carne por compra (services/credit/carneAuto.js).
@@ -305,41 +306,7 @@ async function fetchCustomerPhone(customerId) {
 // POST /sale-com-sinal. `opts.signalSale` liga o desenho da venda com sinal.
 // Desconto manual (contrato do seletor R$ / % do PDV):
 //   { discount_type: 'fixed' | 'percent', discount_value: number }
-// Os campos legados discount_amount e discount_pct continuam aceitos para que
-// versoes anteriores do app possam finalizar vendas durante a atualizacao.
-function resolveManualDiscount(body, subtotal) {
-  const hasType = body.discount_type !== undefined;
-  const hasValue = body.discount_value !== undefined;
-  if (hasType || hasValue) {
-    if (!hasType || !hasValue || !['fixed', 'percent'].includes(body.discount_type)) {
-      return { error: 'Informe o tipo (R$ ou %) e o valor do desconto.' };
-    }
-
-    const value = Number(body.discount_value);
-    if (!Number.isFinite(value) || value < 0) {
-      return { error: 'O valor do desconto deve ser um numero maior ou igual a zero.' };
-    }
-    if (body.discount_type === 'percent' && value > 100) {
-      return { error: 'O desconto percentual nao pode ser maior que 100%.' };
-    }
-
-    const amount = body.discount_type === 'percent'
-      ? Math.round(subtotal * value) / 100
-      : value;
-    return { amount: Math.round(amount * 100) / 100 };
-  }
-
-  // Compatibilidade com o contrato anterior. O valor em reais prevalece se
-  // os dois campos forem enviados, preservando o comportamento ja publicado.
-  const amount = Number(body.discount_amount || 0);
-  const pct = Number(body.discount_pct || 0);
-  if (!Number.isFinite(amount) || !Number.isFinite(pct) || amount < 0 || pct < 0) {
-    return { error: 'O valor do desconto deve ser um numero maior ou igual a zero.' };
-  }
-  if (pct > 100) return { error: 'O desconto percentual nao pode ser maior que 100%.' };
-  return { amount: amount > 0 ? amount : Math.round(subtotal * pct) / 100 };
-}
-
+// Regra em services/descontoManual.js (29/10/2026: a troca usa a mesma).
 async function handleSale(req, res, opts = {}) {
   const {
     items, customer_id, employee_id, payment_method,
@@ -1184,6 +1151,10 @@ router.post('/troca', async (req, res) => {
     customer_id: b.customer_id, employee_id: b.employee_id,
     seller_name: b.seller_name, nfce_strategy: b.nfce_strategy||'none',
     customer_address: b.customer_address, idempotency_key: b.idempotency_key,
+    // 29/10/2026: desconto da troca (mesmo contrato do POST /sale). Os
+    // new_items ja passam inteiros, com o item_discount do lapis.
+    discount_type: b.discount_type, discount_value: b.discount_value,
+    discount_amount: b.discount_amount, discount_pct: b.discount_pct,
   };
   return trocaV2.handle(req, res);
 });

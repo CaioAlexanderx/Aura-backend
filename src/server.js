@@ -187,6 +187,13 @@ function startServer() {
     const { initOticaReminderJob } = require('./jobs/oticaReminderJob');
     initOticaReminderJob();
 
+    // Mercado Pago por OAuth (419, tq-94): renova o token com 30 dias de
+    // folga e confere a conexão (GET /users/me) — diario 06h20 BRT. Conexão
+    // que caiu sai do checkout. Dormente sem MP_CLIENT_ID/MP_CLIENT_SECRET;
+    // kill switch MP_CONEXAO_DIARIA_ENABLED=false.
+    const { initMpConexaoDiariaJob } = require('./jobs/mpConexaoDiariaJob');
+    initMpConexaoDiariaJob();
+
     // Matcon M1 (352): orcamento open com validade vencida vira expired —
     // diario 00h05 BRT e uma vez logo apos o boot. Sem mensagem. Kill
     // switch MATCON_QUOTE_EXPIRY_ENABLED=false.

@@ -52,7 +52,8 @@ describe('os dois retornos da rota mandam o rodape', () => {
     // Se o gateway fosse consultado so no caminho com produto, a loja
     // recem-aberta anunciaria formas diferentes da mesma loja com
     // produto cadastrado.
-    const gateway = fonte.indexOf("gateway = 'mercadopago'");
+    // tq-94: a consulta mora em services/mpGateway (conexão caída fora).
+    const gateway = fonte.indexOf('mpGatewaySvc.temGatewayAtivo(db, cid)');
     const retornoVazio = fonte.indexOf('if (!products.length)');
     expect(gateway).toBeGreaterThan(0);
     expect(gateway).toBeLessThan(retornoVazio);

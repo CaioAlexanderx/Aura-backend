@@ -38,7 +38,7 @@
 //     primeiro_item_em_producao  pedido na esteira de producao:
 //                                sales/digital_orders com
 //                                studio_production_status preenchido
-//   varejo / outro / NULL:
+//   varejo / adega / outro / NULL:   (adega: mesmos passos do varejo por ora, tq-50)
 //     produtos_cadastrados       >= 1 produto ativo (proprio ou do grupo)
 //     primeira_venda             sales nao cancelada
 //     cliente_cadastrado         customers da empresa
@@ -99,6 +99,9 @@ const STEPS_BY_SEGMENT = {
     ['cliente_cadastrado', `EXISTS (SELECT 1 FROM customers WHERE company_id = $1)`],
   ],
 };
+
+// Adega e bar: mesmos passos do varejo por ora (29/10/2026, tq-50).
+STEPS_BY_SEGMENT.adega = STEPS_BY_SEGMENT.varejo;
 
 function stepsFor(segment) {
   return STEPS_BY_SEGMENT[segment] || STEPS_BY_SEGMENT.varejo; // outro / NULL

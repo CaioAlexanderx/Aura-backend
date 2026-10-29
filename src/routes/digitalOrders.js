@@ -23,10 +23,54 @@ const { onOrderConfirmed } = require('../services/digitalOrderConfirmation');
 // Cancelar devolve o estoque, so quando houve baixa (19/10/2026).
 const { devolverEstoqueDoPedido } = require('../services/devolucaoDoEstoqueDoPedido');
 const lojaEvents = require('../services/lojaEvents');
+// Pagar na entrega com aceite (tq-44, 29/10/2026).
+const aceite = require('../services/aceiteDoPedido');
+const { AGUARDANDO_ACEITE, fraseDoPagamento, trocoALevar, usaFluxoComAceite } = require('../services/pagarNaEntrega');
+// Aviso a cliente pelo wa.me da lojista, com texto pronto (tq-47).
+const { avisoDoPedido, precisaDevolver } = require('../services/avisoDoPedidoNoWhatsapp');
+
+/** Nome da loja como a cliente conhece (nome do site, fantasia ou razao). */
+async function nomeDaLoja(cid) {
+  try {
+    const { rows } = await db.query(
+      `SELECT COALESCE(NULLIF(dcc.site_name, ''), c.trade_name, c.legal_name) AS nome
+         FROM companies c
+         LEFT JOIN digital_channel_config dcc ON dcc.company_id = c.id
+        WHERE c.id = $1 LIMIT 1`, [cid]);
+    return (rows[0] && rows[0].nome) || '';
+  } catch (_) {
+    return '';
+  }
+}
+
+/** O aviso de um passo (ou do status atual), com o nome da loja. null = nenhum. */
+async function avisoComLoja(cid, order, passo) {
+  try {
+    const base = avisoDoPedido(order, { passo: passo || undefined });
+    if (!base) return null;
+    return avisoDoPedido(order, { loja: await nomeDaLoja(cid), passo: base.passo });
+  } catch (_) {
+    return null;
+  }
+}
+
+/** A loja usa a fila com aceite (formas de pagar na entrega marcadas)? */
+async function lojaComAceite(cid) {
+  try {
+    const { rows } = await db.query(
+      `SELECT pay_on_delivery_enabled, pay_on_delivery_methods FROM digital_channel_config WHERE company_id = $1`, [cid]);
+    return usaFluxoComAceite(rows[0]);
+  } catch (_) {
+    return false; // base sem a migration 420
+  }
+}
 
 // GET — Lista pedidos com filtro por status e paginação
 // Fila de pedidos (10/09/2026): consulta e apresentacao em um servico testavel.
 const { montarConsultaDaFila, apresentarLinhaDaFila, nomeLegivelDoItem } = require('../services/filaDePedidos');
+
+// Cache por processo: a base ja tem as colunas da migration 420?
+let filaComEntrega = true;
 
 router.get('/', async (req, res) => {
   const cid = req.params.id;
@@ -39,8 +83,18 @@ router.get('/', async (req, res) => {
     // 10/09/2026: a consulta mora em services/filaDePedidos.js — busca por
     // numero/telefone/texto e foto + nome do primeiro item. A lista antiga
     // so devolvia a contagem de itens e nao tinha busca.
-    const consulta = montarConsultaDaFila({ cid, status, q, limit: porPagina, offset });
-    const { rows } = await db.query(consulta.sql, consulta.params);
+    // tq-44: com as colunas do pagar na entrega (migration 420) quando a
+    // base ja as tem; no 42703 segue sem, como antes, e lembra.
+    let rows;
+    try {
+      const consulta = montarConsultaDaFila({ cid, status, q, limit: porPagina, offset, comEntrega: filaComEntrega });
+      ({ rows } = await db.query(consulta.sql, consulta.params));
+    } catch (e) {
+      if (e.code !== '42703' || !filaComEntrega) throw e;
+      filaComEntrega = false;
+      const consulta = montarConsultaDaFila({ cid, status, q, limit: porPagina, offset });
+      ({ rows } = await db.query(consulta.sql, consulta.params));
+    }
     const orders = rows.map(apresentarLinhaDaFila);
     const totalFiltrado = rows.length ? Number(rows[0].total_filtrado) || 0 : 0;
 
@@ -49,6 +103,8 @@ router.get('/', async (req, res) => {
         COUNT(*)::int                                                 AS total,
         COUNT(*) FILTER (WHERE status = 'pending_payment')::int      AS pending_payment,
         COUNT(*) FILTER (WHERE status = 'awaiting_approval')::int    AS awaiting_approval,
+        COUNT(*) FILTER (WHERE status = '${AGUARDANDO_ACEITE}')::int AS aguardando_aceite,
+        COUNT(*) FILTER (WHERE status = 'out_for_delivery')::int     AS out_for_delivery,
         COUNT(*) FILTER (WHERE status = 'confirmed')::int            AS confirmed,
         COUNT(*) FILTER (WHERE status = 'preparing')::int            AS preparing,
         COUNT(*) FILTER (WHERE status = 'ready')::int                AS ready,
@@ -61,6 +117,9 @@ router.get('/', async (req, res) => {
     res.json({
       orders,
       counts: counts[0],
+      // tq-47: a loja usa a fila com aceite? O painel mostra Aceitar/Recusar
+      // tambem no Pix pago que ainda nao foi aceito.
+      fila_com_aceite: await lojaComAceite(cid),
       pagination: {
         page:  pagina,
         limit: porPagina,
@@ -96,6 +155,15 @@ router.get('/:oid', async (req, res) => {
     );
     res.json({
       ...orders[0],
+      // tq-44: a frase pronta do pagamento na entrega ("Dinheiro. Paga com
+      // R$ 100,00: levar R$ 22,00 de troco.") e o troco a levar. null no
+      // pedido que nao e de pagar na entrega com forma escolhida.
+      pagamento_na_entrega: fraseDoPagamento(orders[0]),
+      // tq-47: texto pronto e link wa.me para avisar a cliente do passo atual.
+      aviso_whatsapp: await avisoComLoja(cid, orders[0]),
+      // Pago online e recusado: a lojista devolve por fora e marca aqui.
+      devolver_por_fora: precisaDevolver(orders[0]) && !orders[0].refund_marked_at,
+      troco_a_levar: trocoALevar(orders[0]),
       items: items.map((it) => ({ ...it, product_name_display: nomeLegivelDoItem(it.product_name) })),
     });
   } catch (err) {
@@ -114,7 +182,7 @@ router.patch('/:oid/status', requireRole('client', 'analyst', 'admin'), async (r
     ? String(reason).trim().substring(0, 200)
     : null;
 
-  const ALLOWED = ['confirmed', 'preparing', 'ready', 'delivered', 'cancelled'];
+  const ALLOWED = ['confirmed', 'preparing', 'ready', 'out_for_delivery', 'delivered', 'cancelled'];
   if (!ALLOWED.includes(status)) {
     return res.status(400).json({
       error: `Status inválido. Permitidos: ${ALLOWED.join(', ')}`,
@@ -132,7 +200,15 @@ router.patch('/:oid/status', requireRole('client', 'analyst', 'admin'), async (r
     if (current === 'delivered' || current === 'cancelled') {
       return res.status(409).json({ error: `Pedido já finalizado com status "${current}"` });
     }
-    const FLOW = ['pending_payment', 'awaiting_approval', 'confirmed', 'preparing', 'ready', 'delivered'];
+    // tq-44: o pedido que espera aceite so sai daqui pelo aceite (que baixa
+    // o estoque e lanca) ou pela recusa/cancelamento. Avancar o status a
+    // mao pularia a baixa e o lancamento.
+    if (current === AGUARDANDO_ACEITE && status !== 'cancelled') {
+      return res.status(409).json({
+        error: 'Este pedido ainda espera o seu aceite. Aceite ou recuse o pedido primeiro.',
+      });
+    }
+    const FLOW = ['pending_payment', 'awaiting_approval', AGUARDANDO_ACEITE, 'confirmed', 'preparing', 'ready', 'out_for_delivery', 'delivered'];
     const curIdx = FLOW.indexOf(current);
     const newIdx = FLOW.indexOf(status);
     if (status !== 'cancelled' && newIdx < curIdx) {
@@ -165,9 +241,23 @@ router.patch('/:oid/status', requireRole('client', 'analyst', 'admin'), async (r
     // exatamente o que denuncia a devolucao pendente.
     if (status === 'cancelled') {
       await devolverNoCancelamento(oid, updated[0]);
+      // Pagar na entrega ja aceito: o lancamento a receber e estornado.
+      await aceite.estornarAReceber(updated[0])
+        .catch(err => console.error('[orders] estorno do a receber falhou:', oid, err.message));
+      // Cancelar quem ainda esperava aceite e recusar: fica registrado assim.
+      if (current === AGUARDANDO_ACEITE) updated[0].cancel_kind = await marcarComoRecusado(oid, updated[0]);
+    }
+    // Entregue: o pagar na entrega foi recebido na porta. Quita o a receber.
+    if (status === 'delivered') {
+      await aceite.quitarNaEntrega(updated[0])
+        .catch(err => console.error('[orders] quitacao na entrega falhou:', oid, err.message));
     }
 
-    res.json({ order: updated[0], updated: true });
+    // tq-47: saiu para entrega, entregue e recusa trazem o aviso pronto.
+    const aviso = ['out_for_delivery', 'delivered'].includes(status) || (status === 'cancelled' && current === AGUARDANDO_ACEITE)
+      ? await avisoComLoja(cid, updated[0])
+      : null;
+    res.json({ order: updated[0], updated: true, ...(aviso ? { aviso_whatsapp: aviso } : {}) });
 
     if (status === 'confirmed' && current !== 'confirmed') {
       onOrderConfirmed(oid)
@@ -188,6 +278,114 @@ router.patch('/:oid/status', requireRole('client', 'analyst', 'admin'), async (r
   } catch (err) {
     console.error('digital order status update error:', err);
     res.status(500).json({ error: 'Erro ao atualizar status' });
+  }
+});
+
+/** Cancelamento de pedido que esperava aceite = recusa (cancel_kind). */
+async function marcarComoRecusado(oid, linha) {
+  try {
+    await db.query(
+      `UPDATE digital_orders SET cancel_kind = 'recusado_pela_loja' WHERE id = $1`, [oid]);
+    return 'recusado_pela_loja';
+  } catch (err) {
+    console.error('[orders] marcar como recusado falhou:', oid, err.message);
+    return linha.cancel_kind;
+  }
+}
+
+// ============================================================
+// POST /:oid/accept — Lojista aceita o pedido de pagar na entrega (tq-44)
+// Corpo: { prep_minutes }. Baixa o estoque e lanca a receber, uma vez so.
+// ============================================================
+router.post('/:oid/accept', requireRole('client', 'analyst', 'admin'), async (req, res) => {
+  const { id: cid, oid } = req.params;
+  const { prep_minutes } = req.body || {};
+  try {
+    const { order, jaAceito } = await aceite.aceitarPedido({ orderId: oid, companyId: cid, prepMinutes: prep_minutes });
+    res.json({ order, accepted: true, ja_aceito: jaAceito, aviso_whatsapp: await avisoComLoja(cid, order, 'aceito') });
+    if (jaAceito) return;
+    notify.notifyStatusChange(order)
+      .catch(err => console.error('[notify] accept error:', err.message));
+  } catch (err) {
+    if (err.status) {
+      return res.status(err.status).json({ error: err.message, status: err.statusAtual || undefined });
+    }
+    console.error('[orders] accept error:', err.message, err.code || '');
+    res.status(500).json({
+      error: 'Não conseguimos aceitar o pedido agora. Nada foi alterado. Tente de novo em instantes.',
+    });
+  }
+});
+
+// ============================================================
+// POST /:oid/refuse — Lojista recusa o pedido que esperava aceite (tq-44)
+// Corpo: { reason } (obrigatorio: e o que a cliente vai ler).
+// ============================================================
+router.post('/:oid/refuse', requireRole('client', 'analyst', 'admin'), async (req, res) => {
+  const { id: cid, oid } = req.params;
+  const { reason } = req.body || {};
+  try {
+    const order = await aceite.recusarPedido({ orderId: oid, companyId: cid, motivo: reason });
+    // Regra de todo cancelamento: passa pela devolucao (aqui nao ha baixa).
+    await devolverNoCancelamento(oid, order);
+    res.json({
+      order, refused: true,
+      // Pago online: devolver o valor por fora e marcar como devolvido.
+      devolver_por_fora: precisaDevolver(order),
+      aviso_whatsapp: await avisoComLoja(cid, order, 'recusado'),
+    });
+    notify.notifyStatusChange(order)
+      .catch(err => console.error('[notify] refuse error:', err.message));
+    lojaEvents.emit('loja_pedido_cancelado', order);
+  } catch (err) {
+    if (err.status) {
+      return res.status(err.status).json({ error: err.message, status: err.statusAtual || undefined });
+    }
+    console.error('[orders] refuse error:', err.message, err.code || '');
+    res.status(500).json({
+      error: 'Não conseguimos recusar o pedido agora. Nada foi alterado. Tente de novo em instantes.',
+    });
+  }
+});
+
+// ============================================================
+// POST /:oid/out-for-delivery — Saiu para entrega (tq-47)
+// ============================================================
+router.post('/:oid/out-for-delivery', requireRole('client', 'analyst', 'admin'), async (req, res) => {
+  const { id: cid, oid } = req.params;
+  try {
+    const { order, jaSaiu } = await aceite.saiuParaEntrega({ orderId: oid, companyId: cid });
+    res.json({ order, ja_saiu: jaSaiu, aviso_whatsapp: await avisoComLoja(cid, order, 'saiu') });
+    if (jaSaiu) return;
+    notify.notifyStatusChange(order)
+      .catch(err => console.error('[notify] out-for-delivery error:', err.message));
+  } catch (err) {
+    if (err.status) {
+      return res.status(err.status).json({ error: err.message, status: err.statusAtual || undefined });
+    }
+    console.error('[orders] out-for-delivery error:', err.message, err.code || '');
+    res.status(500).json({
+      error: 'Não conseguimos marcar a saída agora. Nada foi alterado. Tente de novo em instantes.',
+    });
+  }
+});
+
+// ============================================================
+// POST /:oid/refund-marked — "Já devolvi o valor" (tq-47). Pix/cartao pago
+// e pedido recusado: a lojista devolve por fora ate existir reembolso no
+// gateway (decisao do Caio) e marca aqui.
+// ============================================================
+router.post('/:oid/refund-marked', requireRole('client', 'analyst', 'admin'), async (req, res) => {
+  const { id: cid, oid } = req.params;
+  try {
+    const order = await aceite.marcarDevolvido({ orderId: oid, companyId: cid });
+    res.json({ order, devolvido: true });
+  } catch (err) {
+    if (err.status) {
+      return res.status(err.status).json({ error: err.message, status: err.statusAtual || undefined });
+    }
+    console.error('[orders] refund-marked error:', err.message, err.code || '');
+    res.status(500).json({ error: 'Não conseguimos marcar agora. Tente de novo em instantes.' });
   }
 });
 
