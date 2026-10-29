@@ -22,6 +22,9 @@ const filtros       = require('./parts/filtros');
 const sacola        = require('./parts/sacola');
 const cart          = require('./parts/cart');
 const checkout      = require('./parts/checkout');
+// Pagar na entrega com forma e troco (tq-44): so na loja que marcou as
+// formas. Nas outras, o checkout sai exatamente como antes.
+const naEntrega     = require('./parts/na_entrega');
 const pix           = require('./parts/pix');
 const productDetail = require('./parts/product_detail');
 const toast         = require('./parts/toast');
@@ -47,7 +50,8 @@ const { FONTE: fonteDasFotos } = require('../../services/fotosDaVitrine');
 // chamam numeroDoWhatsapp() em vez de so tirar o que nao e digito.
 const { FONTE: fonteDoWhatsapp } = require('../../services/whatsappDaLoja');
 
-function buildScript(storeData, escapedSlug, apiBase) {
+function buildScript(storeData, escapedSlug, apiBase, opcoes) {
+  const comNaEntrega = !!(opcoes && opcoes.naEntrega);
   return prelude(storeData, escapedSlug, apiBase)
        + init
        + stateUtils
@@ -65,7 +69,7 @@ function buildScript(storeData, escapedSlug, apiBase) {
        + filtros
        + sacola
        + cart
-       + checkout
+       + (comNaEntrega ? naEntrega.aplicar(checkout) : checkout)
        + pix
        + productDetail
        + toast

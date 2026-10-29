@@ -113,6 +113,7 @@ describe('apresentacao da linha', () => {
 describe('a rota usa o servico', () => {
   const rota = fs.readFileSync(path.join(__dirname, '..', 'src', 'routes', 'digitalOrders.js'), 'utf8');
   test('lista, total filtrado e contagem de expirados', () => {
+    expect(rota).toContain('montarConsultaDaFila({ cid, status, q, limit: porPagina, offset, comEntrega: filaComEntrega })');
     expect(rota).toContain('montarConsultaDaFila({ cid, status, q, limit: porPagina, offset })');
     expect(rota).toContain('rows.map(apresentarLinhaDaFila)');
     expect(rota).toContain("COUNT(*) FILTER (WHERE status = 'cancelled' AND payment_status = 'expired')::int AS expired");

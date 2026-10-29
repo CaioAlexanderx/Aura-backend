@@ -434,7 +434,10 @@ async function sendOrderStatusEmail(to, { order_number, customer_name, status, s
 // Destinatários: services/digitalOrderNotifications (tq-88) segue a
 // preferência pedido_loja da empresa (padrão: todos os company_members).
 async function sendOwnerNewOrderEmail(to, opts) {
-  const { order_number, customer_name, customer_phone, total, delivery_type, store_name, payment_method, aguardando_pagamento, company_id } = opts;
+  const { order_number, customer_name, customer_phone, total, delivery_type, store_name, payment_method, aguardando_pagamento, aguardando_aceite, company_id } = opts;
+  // tq-44 (29/10/2026): pagar na entrega com aceite. O pedido espera a
+  // lojista aceitar (com o tempo de preparo) ou recusar.
+  const aceitar = aguardando_aceite === true;
   // Pix manual (10/09/2026): o pedido chega ANTES do dinheiro, e quem
   // confere e a lojista. Mesmo resumo, outro titulo e outra instrucao.
   const aguardando = aguardando_pagamento === true;
@@ -454,7 +457,7 @@ async function sendOwnerNewOrderEmail(to, opts) {
     `<tr><td class="a-ink2" style="padding:5px 0;color:${L.COR.tinta2};font-size:12.5px;width:100px;">${rot}</td>` +
     `<td class="a-ink" style="padding:5px 0;color:${L.COR.tinta};font-size:13.5px;font-weight:600;">${valHtml}</td></tr>`;
   const corpo = [
-    L.p(aguardando ? '📦 Pedido novo — confira o Pix' : '📦 Novo pedido confirmado!', 'font-weight:700;'),
+    L.p(aceitar ? '📦 Pedido novo esperando você aceitar' : (aguardando ? '📦 Pedido novo — confira o Pix' : '📦 Novo pedido confirmado!'), 'font-weight:700;'),
     L.pHtml(`Um novo pedido chegou na sua loja <strong>${L.esc(store_name)}</strong>.`),
     L.caixa(
       `<p class="a-ink" style="margin:0 0 10px;color:${L.COR.tinta};font-size:19px;font-weight:800;">Pedido #${L.esc(order_number)}</p>` +
@@ -462,16 +465,20 @@ async function sendOwnerNewOrderEmail(to, opts) {
       linha('Cliente', L.esc(customer_name)) +
       linha('Total', `<span style="color:${L.COR.violeta};">${fmtR(total)}</span>`) +
       linha('Modalidade', deliveryLabel) +
-      linha('Pagamento', `${paymentLabel} ${aguardando ? '· aguardando' : '✓'}`) +
+      linha('Pagamento', aceitar ? `${paymentLabel}${opts.forma_na_entrega ? ' · ' + L.esc(opts.forma_na_entrega) : ''}` : `${paymentLabel} ${aguardando ? '· aguardando' : '✓'}`) +
       linha('Contato', contato) +
       `</table>`
     ),
-    L.nota(aguardando
+    L.nota(aceitar
+      ? 'Abra os pedidos no app Aura para aceitar, com o tempo de preparo, ou recusar. A cliente está esperando a sua resposta.'
+      : aguardando
       ? 'Quando o Pix cair na sua conta, confirme o pagamento no app Aura para liberar o pedido.'
       : 'Acesse o app Aura para gerenciar o pedido e avançar o status conforme o andamento.'),
   ].join('\n');
 
-  const assunto = aguardando
+  const assunto = aceitar
+    ? `📦 Pedido #${order_number} esperando você aceitar — ${store_name}`
+    : aguardando
     ? `📦 Pedido #${order_number} recebido — confira o Pix — ${store_name}`
     : `📦 Pedido #${order_number} confirmado — ${store_name}`;
   const html = L.montarEmail({
@@ -485,7 +492,9 @@ async function sendOwnerNewOrderEmail(to, opts) {
   return sendMail({
     to,
     subject: assunto,
-    text: aguardando
+    text: aceitar
+      ? `Pedido #${order_number} chegou em ${store_name} e está esperando você aceitar. Cliente: ${customer_name}. Total: ${fmtR(total)}. Pagamento na entrega. Abra o app Aura para aceitar ou recusar.`
+      : aguardando
       ? `Pedido #${order_number} recebido em ${store_name}, aguardando o Pix. Cliente: ${customer_name}. Total: ${fmtR(total)}. Quando o Pix cair, confirme o pagamento no app Aura.`
       : `Novo pedido #${order_number} confirmado em ${store_name}. Cliente: ${customer_name}. Total: ${fmtR(total)}. Pagamento: ${paymentLabel}. Acesse o app Aura para gerenciar.`,
     html,

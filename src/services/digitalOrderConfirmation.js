@@ -42,34 +42,28 @@
 const db = require('../config/database');
 const { emitForDigitalOrder } = require('./nfceEmissionService');
 const lojaEvents = require('./lojaEvents');
+const { FORMA_NO_FINANCEIRO } = require('./pagarNaEntrega');
 
 function normalizePhone(phone) {
   return String(phone || '').replace(/\D/g, '');
 }
 
-async function onOrderConfirmed(orderId) {
-  const client = await db.connect();
-  try {
-    await client.query('BEGIN');
-
-    // ── 1. Carrega pedido + items ──────────────────────────────
-    const { rows: orders } = await client.query(
-      `SELECT * FROM digital_orders WHERE id = $1 FOR UPDATE`, [orderId]);
-    if (!orders.length) {
-      await client.query('ROLLBACK');
-      console.warn('[orderConfirmation] pedido nao encontrado:', orderId);
-      return null;
-    }
-    const order = orders[0];
-
-    if (order.status !== 'confirmed') {
-      // Defensive: so processa se de fato confirmado
-      await client.query('ROLLBACK');
-      console.warn('[orderConfirmation] pedido nao esta confirmed (status=' + order.status + '):', orderId);
-      return null;
-    }
-
-    const { rows: items } = await client.query(
+/**
+ * Os passos 2 a 5 (baixa, cliente, lancamento, NFC-e) com o pedido JA
+ * travado (FOR UPDATE) dentro da transacao de quem chama. Nao faz BEGIN
+ * nem COMMIT. Idempotente: cada passo confere o seu marcador.
+ *
+ * @param {object} client  client do pool dentro de uma transacao
+ * @param {object} order   linha de digital_orders lida com FOR UPDATE
+ * @param {object} [opts]
+ * @param {boolean} [opts.aReceber] tq-44 (29/10/2026): pagar na entrega
+ *   aceito pela lojista. O lancamento nasce 'pending' (a receber), sem
+ *   paid_at, na forma que a cliente escolheu; quem quita e o "entregue".
+ * @returns {Promise<object>} o que os avisos pos-COMMIT precisam
+ */
+async function aplicarConfirmacao(client, order, { aReceber = false } = {}) {
+  const orderId = order.id;
+  const { rows: items } = await client.query(
       `SELECT * FROM digital_order_items WHERE order_id = $1`, [orderId]);
 
     // ── 2. BAIXA DE ESTOQUE (idempotente via stock_deducted flag) ──
@@ -186,19 +180,24 @@ async function onOrderConfirmed(orderId) {
         transactionId = existing[0].id;
       } else {
         const description = 'Pedido digital #' + (order.order_number || order.id.slice(0, 8));
-        const paymentMethod = order.payment_method === 'pix' ? 'pix' :
+        const formaNaEntrega = aReceber ? FORMA_NO_FINANCEIRO[order.pay_on_delivery_method] : null;
+        const paymentMethod = formaNaEntrega ? formaNaEntrega :
+                              order.payment_method === 'pix' ? 'pix' :
                               order.payment_method === 'on_delivery' ? 'cash' :
                               order.payment_method || null;
 
+        // A receber (tq-44): status 'pending' e paid_at NULL. O resto do
+        // lancamento e igual ao do pedido pago, para o Financeiro achar os
+        // dois do mesmo jeito.
         const { rows: created } = await client.query(
           `INSERT INTO transactions (
               company_id, idempotency_key, type, status,
               amount, description, category,
               due_date, paid_at, payment_method
             ) VALUES (
-              $1, $2, 'income', 'confirmed',
+              $1, $2, 'income', ${aReceber ? "'pending'" : "'confirmed'"},
               $3, $4, 'Canal Digital',
-              CURRENT_DATE, NOW(), $5
+              CURRENT_DATE, ${aReceber ? 'NULL' : 'NOW()'}, $5
             ) RETURNING id`,
           [order.company_id, idempotencyKey, order.total, description, paymentMethod]
         );
@@ -235,8 +234,16 @@ async function onOrderConfirmed(orderId) {
       }
     }
 
-    await client.query('COMMIT');
+    return { customerId, transactionId, nfceResult, nfceFalhou, clienteNovo, crossedMinimum };
+}
 
+/**
+ * Avisos no sino depois do COMMIT (cliente novo, NFC-e que falhou, estoque
+ * que cruzou o minimo). Nunca dentro da transacao: ver cabecalho.
+ */
+function avisarDepoisDaConfirmacao(order, r) {
+    const orderId = order.id;
+    const { clienteNovo, nfceFalhou, crossedMinimum } = r;
     // Fire-and-forget, ja fora da transacao. Um aviso por PEDIDO listando o
     // que cruzou o minimo (dedupe_key 'loja:estoque_baixo:<order_id>'), e nao
     // um por produto: a lojista quer uma linha "reponha isto", nao tres sinos.
@@ -262,8 +269,40 @@ async function onOrderConfirmed(orderId) {
         { id: orderId, company_id: order.company_id },
         { body: `A venda online derrubou ${crossedMinimum.length === 1 ? 'um produto' : crossedMinimum.length + ' produtos'} até o estoque mínimo: ${lista}. Reponha antes de vender de novo.` });
     }
+}
 
-    return { customerId, transactionId, stockDeducted: true, nfce: nfceResult, crossedMinimum };
+async function onOrderConfirmed(orderId) {
+  const client = await db.connect();
+  try {
+    await client.query('BEGIN');
+
+    // ── 1. Carrega pedido + items ──────────────────────────────
+    const { rows: orders } = await client.query(
+      `SELECT * FROM digital_orders WHERE id = $1 FOR UPDATE`, [orderId]);
+    if (!orders.length) {
+      await client.query('ROLLBACK');
+      console.warn('[orderConfirmation] pedido nao encontrado:', orderId);
+      return null;
+    }
+    const order = orders[0];
+
+    if (order.status !== 'confirmed') {
+      // Defensive: so processa se de fato confirmado
+      await client.query('ROLLBACK');
+      console.warn('[orderConfirmation] pedido nao esta confirmed (status=' + order.status + '):', orderId);
+      return null;
+    }
+
+    const r = await aplicarConfirmacao(client, order);
+
+    await client.query('COMMIT');
+
+    avisarDepoisDaConfirmacao(order, r);
+
+    return {
+      customerId: r.customerId, transactionId: r.transactionId, stockDeducted: true,
+      nfce: r.nfceResult, crossedMinimum: r.crossedMinimum,
+    };
   } catch (err) {
     await client.query('ROLLBACK');
     console.error('[orderConfirmation] erro:', err.message);
@@ -273,4 +312,4 @@ async function onOrderConfirmed(orderId) {
   }
 }
 
-module.exports = { onOrderConfirmed };
+module.exports = { onOrderConfirmed, aplicarConfirmacao, avisarDepoisDaConfirmacao };
