@@ -18,6 +18,8 @@
 //   6. GET devolve o que foi salvo; PUT de outra chave nao apaga
 //   7. dobraMm (linha de dobra da tag): opcional, sem padrao; ausente/0 nao
 //      cria a chave; menor que alturaMm
+//   8. estilo "boutique": gravado so quando vale exatamente "boutique";
+//      ausente ou outro valor => sem a chave, sem 400
 //
 // Mock por CONTEUDO DO SQL, nunca fila posicional.
 // ============================================================
@@ -225,6 +227,53 @@ describe('pdv_settings -- label_custom_specs.dobraMm (linha de dobra da tag)', (
     expect(res.status).toBe(400);
     expect(JSON.stringify(res.body)).toMatch(msg);
     expect(updates()).toHaveLength(0);
+  });
+});
+
+describe('pdv_settings -- label_custom_specs.estilo (boutique)', () => {
+  const MEDIDA = {
+    id: 'm40x25', nome: '40x25 balcao', larguraMm: 40, alturaMm: 25, colunas: 1,
+    espacoLadoMm: 3, espacoLinhaMm: 2, ajusteXMm: 0, ajusteYMm: 0,
+  };
+
+  test('PUT: estilo "boutique" e gravado e o GET devolve', async () => {
+    mockSql({});
+    const res = await put({ label_custom_specs: [{ ...MEDIDA, estilo: 'boutique' }] });
+    expect(res.status).toBe(200);
+    expect(gravado().label_custom_specs).toEqual([{ ...MEDIDA, estilo: 'boutique' }]);
+
+    jest.resetAllMocks();
+    mockSql({ label_custom_specs: [{ ...MEDIDA, estilo: 'boutique' }] });
+    const get = await request(app).get(url).set(auth);
+    expect(get.status).toBe(200);
+    expect(get.body.settings.label_custom_specs).toEqual([{ ...MEDIDA, estilo: 'boutique' }]);
+  });
+
+  test('PUT: estilo e dobraMm convivem na mesma medida', async () => {
+    mockSql({});
+    const res = await put({ label_custom_specs: [{ ...MEDIDA, dobraMm: 12, estilo: 'boutique' }] });
+    expect(res.status).toBe(200);
+    expect(gravado().label_custom_specs).toEqual([{ ...MEDIDA, dobraMm: 12, estilo: 'boutique' }]);
+  });
+
+  test('PUT: medida sem estilo continua sem a chave', async () => {
+    mockSql({});
+    const res = await put({ label_custom_specs: [MEDIDA] });
+    expect(res.status).toBe(200);
+    const salvo = gravado().label_custom_specs[0];
+    expect(salvo).toEqual(MEDIDA);
+    expect(Object.prototype.hasOwnProperty.call(salvo, 'estilo')).toBe(false);
+  });
+
+  test.each([
+    ['classico'], ['Boutique'], [' boutique'], [''], [null], [true], [1], [['boutique']], [{ a: 1 }],
+  ])('PUT: estilo %p e ignorado (sem a chave, sem 400)', async (valor) => {
+    mockSql({});
+    const res = await put({ label_custom_specs: [{ ...MEDIDA, estilo: valor }] });
+    expect(res.status).toBe(200);
+    const salvo = gravado().label_custom_specs[0];
+    expect(salvo).toEqual(MEDIDA);
+    expect(Object.prototype.hasOwnProperty.call(salvo, 'estilo')).toBe(false);
   });
 });
 
