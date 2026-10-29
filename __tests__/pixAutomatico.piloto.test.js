@@ -42,8 +42,12 @@ beforeEach(() => {
   jest.spyOn(console, 'error').mockImplementation(() => {});
   asaasRequest.mockReset();
   db.query.mockReset();
+  process.env.PIX_AUTOMATIC_ENABLED = 'true';
 });
-afterEach(() => jest.restoreAllMocks());
+afterEach(() => {
+  delete process.env.PIX_AUTOMATIC_ENABLED;
+  jest.restoreAllMocks();
+});
 
 function banco({ empresa, autorizacoes = [], trava = true } = {}) {
   const estado = { empresa: { ...empresa }, autorizacoes: autorizacoes.map((a) => ({ ...a })), auditoria: [], updates: [] };
@@ -412,4 +416,38 @@ describe('somarMeses', () => {
     ['2099-02-28', 10, '2099-12-28'],
     ['2099-11-15', 2, '2100-01-15'],
   ])('%s + %i -> %s', (d, n, esperado) => expect(somarMeses(d, n)).toBe(esperado));
+});
+
+// ── tq-104 (29/10/2026): chave geral desligada ───────────────────
+describe('chave PIX_AUTOMATIC_ENABLED desligada (padrão)', () => {
+  test('autorizar: 409 pix_automatico_desligado, sem chamar a Asaas e sem mexer no banco', async () => {
+    delete process.env.PIX_AUTOMATIC_ENABLED;
+    const estado = banco({ empresa: loja() });
+    const r = await request(app).post(`/admin/painel/pix-automatico/${LOJA}/autorizar`).set(staff).send({ valor: 140.83 });
+    expect(r.status).toBe(409);
+    expect(r.body.code).toBe('pix_automatico_desligado');
+    expect(asaasRequest).not.toHaveBeenCalled();
+    expect(estado.empresa.pix_auto_status).toBeNull();
+    expect(db.query).not.toHaveBeenCalled();
+  });
+
+  test('trocar a assinatura: 409 pix_automatico_desligado, nada cancelado', async () => {
+    delete process.env.PIX_AUTOMATIC_ENABLED;
+    const estado = banco({ empresa: loja({ pix_auto_status: 'active', asaas_pix_auto_authorization_id: 'auth-1' }) });
+    const r = await request(app).post(`/admin/painel/pix-automatico/${LOJA}/trocar-assinatura`).set(staff).send({});
+    expect(r.status).toBe(409);
+    expect(r.body.code).toBe('pix_automatico_desligado');
+    expect(asaasRequest).not.toHaveBeenCalled();
+    expect(estado.empresa.asaas_subscription_id).toBe('sub_antiga');
+  });
+
+  test('leituras seguem com a chave desligada', async () => {
+    delete process.env.PIX_AUTOMATIC_ENABLED;
+    banco({ empresa: loja() });
+    const r = await request(app).get(`/admin/painel/pix-automatico/${LOJA}`).set(staff);
+    expect(r.status).toBe(200);
+    const e = await request(app).get('/admin/painel/pix-automatico/elegibilidade').set(staff);
+    expect(e.status).toBe(200);
+    expect(asaasRequest).not.toHaveBeenCalled();
+  });
 });

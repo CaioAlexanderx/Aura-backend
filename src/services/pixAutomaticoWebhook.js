@@ -35,8 +35,22 @@
 //   7. Sem ASAAS_WEBHOOK_SECRET o corpo não é confiável: a autorização é
 //      relida na Asaas (GET) e vale o status de lá; elegibilidade e
 //      instrução não têm releitura e só são logadas, sem gravar nada.
+//   8. Chave geral (tq-104, 29/10): com PIX_AUTOMATIC_ENABLED desligada (o
+//      padrão), autorização e instrução só são registradas — nada muda em
+//      companies, nenhum aviso sai e a Asaas não é chamada (sem o segredo,
+//      nem isso: o corpo não é confiável e não há releitura). A elegibilidade
+//      é da conta da Aura, não de uma loja, e segue gravada (regra 5).
+//   9. webhook_logs (tq-104, 29/10): todo evento processado (não o reenvio)
+//      que tem empresa ganha uma linha em webhook_logs, como os SUBSCRIPTION_*
+//      (payload com dedupe_key). Evento sem empresa (elegibilidade, autorização
+//      desconhecida) fica só em pix_automatico_eventos: a lista de
+//      "pagamentos sem loja" lê as linhas sem empresa de webhook_logs.
+//      Quem lê webhook_logs como pagamento filtra PAYMENT_* (ou exclui
+//      SUBSCRIPTION_* e PIX_AUTOMATIC_*, na linha do tempo da loja).
 // ============================================================
 'use strict';
+
+const chaveGeral = require('./pixAutomaticoChave');
 
 // Conta da equipe que recebe os avisos internos (a mesma do lembrete de
 // fatura, migration 367: empresa "Aura.").
@@ -331,6 +345,56 @@ async function aplicarInstrucao({ db, body, event }) {
   return { companyId, result: 'registrado' };
 }
 
+// Chave desligada: o evento fica registrado (com a empresa, se ela for
+// achada) e nada mais acontece.
+async function registrarDesligado({ db, body, auth, event }) {
+  const authId = (auth && auth.id)
+    || (body.paymentInstruction && body.paymentInstruction.authorization && body.paymentInstruction.authorization.id)
+    || null;
+  let companyId = null;
+  if (authId) {
+    const { empresa } = await acharEmpresa(db, authId);
+    companyId = empresa ? empresa.id : null;
+  }
+  console.log(`[pixAutomatico] ${event}: ${chaveGeral.VARIAVEL} desligada — só registrado, nada muda`);
+  return { companyId, result: 'desligado' };
+}
+
+// Uma linha em webhook_logs por evento processado com empresa (regra 9).
+// Best-effort, como o resto do webhook: nunca derruba o evento. Sem a
+// migration 406 não há reserva, então confere o dedupe_key antes de gravar.
+async function registrarEmWebhookLogs(db, { reserva, chave, body, event, r, fonte }) {
+  if (!r || !r.companyId) return;
+  try {
+    if (reserva.semTabela) {
+      const ja = await db.query(
+        `SELECT 1 FROM webhook_logs
+          WHERE provider = 'asaas' AND event LIKE 'PIX\\_AUTOMATIC\\_%'
+            AND payload->>'dedupe_key' = $1
+          LIMIT 1`,
+        [chave]
+      );
+      if (ja && ja.rows && ja.rows.length) return;
+    }
+    const payload = {
+      id: body.id || null,
+      event,
+      dateCreated: body.dateCreated || null,
+      dedupe_key: chave,
+      fonte,
+      resultado: r.result || null,
+    };
+    if (body.authorization) payload.authorization = body.authorization;
+    if (body.paymentInstruction) payload.paymentInstruction = body.paymentInstruction;
+    await db.query(
+      `INSERT INTO webhook_logs (company_id, provider, event, payload, processed_at) VALUES ($1, 'asaas', $2, $3, NOW())`,
+      [r.companyId, String(event).slice(0, 60), JSON.stringify(payload)]
+    );
+  } catch (err) {
+    console.error('[pixAutomatico] webhook_logs falhou (seguindo): ' + err.message);
+  }
+}
+
 /**
  * @returns {Promise<object>} corpo da resposta (sempre HTTP 200, como o
  *   resto do webhook: 5xx em série faz a Asaas pausar a fila inteira, e a
@@ -340,15 +404,24 @@ async function processarEventoPixAutomatico({ body, hasSecret, db, notifications
   const event = String((body && body.event) || '');
   const tipo = tipoDoEvento(event);
   const chave = chaveDoEvento(body);
+  const ligado = chaveGeral.ligado();
 
   let auth = null;
   let novo = null;
-  if (tipo === 'autorizacao') {
+  let fonte = 'body';
+  if (!ligado && tipo !== 'elegibilidade') {
+    if (!hasSecret) {
+      console.warn('[pixAutomatico] ' + chaveGeral.VARIAVEL + ' desligada e sem segredo — ' + event + ' só logado');
+      return { received: true, handled: false, reason: 'pix_automatico_desligado' };
+    }
+    auth = (tipo === 'autorizacao' && body.authorization && body.authorization.id) ? body.authorization : null;
+  } else if (tipo === 'autorizacao') {
     const v = await processarAutorizacao({ db, notifications, cliente, body, hasSecret, event });
     if (v.naoVerificado) return { received: true, handled: false, reason: 'no_secret_reverification_failed' };
     if (v.http) return v.http;
     auth = v.auth;
     novo = v.novo;
+    if (!hasSecret) fonte = 'asaas-api';
   } else if (!hasSecret) {
     // Elegibilidade e instrução não têm como ser relidas aqui: sem o token,
     // não gravamos nada vindo do corpo.
@@ -372,11 +445,13 @@ async function processarEventoPixAutomatico({ body, hasSecret, db, notifications
 
   try {
     let r;
-    if (tipo === 'autorizacao') r = await aplicarAutorizacao({ db, notifications, auth, novo, event });
-    else if (tipo === 'elegibilidade') r = await aplicarElegibilidade({ db, notifications, body, chave });
+    if (tipo === 'elegibilidade') r = await aplicarElegibilidade({ db, notifications, body, chave });
+    else if (!ligado) r = await registrarDesligado({ db, body, auth, event });
+    else if (tipo === 'autorizacao') r = await aplicarAutorizacao({ db, notifications, auth, novo, event });
     else if (tipo === 'instrucao') r = await aplicarInstrucao({ db, body, event });
     else r = { result: 'evento_sem_tratamento' };
     await concluir(db, reserva, chave, r);
+    await registrarEmWebhookLogs(db, { reserva, chave, body, event, r, fonte });
     return { received: true, handled: true, event, result: r.result, ...(r.http || {}) };
   } catch (err) {
     console.error('[pixAutomatico] erro processando ' + event + ': ' + err.message);
