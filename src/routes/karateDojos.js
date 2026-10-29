@@ -554,12 +554,17 @@ router.post('/', ...guards.staffWrite(), async (req, res) => {
 
     // companies.owner_id é NOT NULL. Dojô NÃO pode pertencer ao admin da federação
     // (faz o login do admin cair em "visão consolidada" por ter >1 empresa). Reusa
-    // o dono de um dojô já existente da federação (usuário de sistema); senão
-    // acha/cria um usuário de sistema dedicado com login travado.
+    // o dono de um dojô já existente da federação SE ele for usuário de sistema
+    // (senha travada); senão acha/cria um usuário de sistema dedicado com login
+    // travado. Sem o filtro de senha travada, um dojô que se cadastrou sozinho
+    // tem dono real (o sensei) e podia ser escolhido: o dojô novo da federação
+    // nascia na conta de outro sensei (tq-41c).
     let systemOwnerId = null;
     const ownerRes = await client.query(
-      `SELECT owner_id FROM companies
-       WHERE federation_id = $1 AND vertical = 'karate_dojo' AND owner_id IS NOT NULL
+      `SELECT c.owner_id FROM companies c
+         JOIN users u ON u.id = c.owner_id AND u.password_hash = '!locked-system-no-login'
+       WHERE c.federation_id = $1 AND c.vertical = 'karate_dojo' AND c.owner_id IS NOT NULL
+       ORDER BY c.created_at
        LIMIT 1`,
       [federationId]
     );
