@@ -24,6 +24,8 @@ const cart          = require('./parts/cart');
 const checkout      = require('./parts/checkout');
 const pix           = require('./parts/pix');
 const productDetail = require('./parts/product_detail');
+// tq-44: escolha da forma de pagar na entrega (so na loja que marcou as formas).
+const naEntrega     = require('./parts/na_entrega');
 const toast         = require('./parts/toast');
 const bootstrap     = require('./parts/bootstrap');
 // Regra da capa sem foto (iniciais + degrau do gradiente) — definida uma
@@ -59,7 +61,8 @@ function detalheDoProduto(textosDaFrente) {
   return productDetail.split(ROTULO_SOBRE_DE_ROUPA).join('<div class="sf-label">' + seguro + '</div>');
 }
 
-function buildScript(storeData, escapedSlug, apiBase, textosDaFrente) {
+function buildScript(storeData, escapedSlug, apiBase, textosDaFrente, opcoes) {
+  const comNaEntrega = !!(opcoes && opcoes.naEntrega);
   return prelude(storeData, escapedSlug, apiBase)
        + init
        + stateUtils
@@ -77,7 +80,7 @@ function buildScript(storeData, escapedSlug, apiBase, textosDaFrente) {
        + filtros
        + sacola
        + cart
-       + checkout
+       + (comNaEntrega ? naEntrega.aplicar(checkout) : checkout)
        + pix
        + detalheDoProduto(textosDaFrente)
        + toast

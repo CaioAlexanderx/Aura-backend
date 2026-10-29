@@ -77,6 +77,8 @@ const lojaEvents          = require('../services/lojaEvents');
 const { validateCpfCnpj } = require('../services/cpfCnpj');
 // Toque repetido no checkout nao vira pedido novo (migration 416, 27/10/2026).
 const pedidoIdem          = require('../services/pedidoOnlineIdempotente');
+// Pagar na entrega com forma e troco; pedido espera o aceite (tq-44).
+const pagarNaEntrega      = require('../services/pagarNaEntrega');
 // Sentinela: a chave ja tem pedido gravado — desfaz a transacao e responde
 // com o pedido que existe.
 const PEDIDO_REPETIDO     = Symbol('pedido-repetido');
@@ -543,6 +545,7 @@ router.post('/:slug/order', async (req, res) => {
     address_zip, address_street, address_number, address_complement,
     address_neighborhood, address_city, address_state,
     expected_delivery_fee,
+    pay_on_delivery_method, change_for,
   } = req.body;
 
   if (!customer_name || !customer_phone) {
@@ -678,6 +681,10 @@ router.post('/:slug/order', async (req, res) => {
 
     const hasPix = !!(config.pix_key && String(config.pix_key).trim()) || hasMpGateway;
     const hasOnDelivery = !!config.pay_on_delivery_enabled;
+    // tq-44: loja com as formas de pagar na entrega marcadas usa o fluxo
+    // com aceite. Lista vazia = fluxo de hoje, sem nenhuma mudanca.
+    const formasNaEntrega = pagarNaEntrega.formasDaLoja(config);
+    const comAceite = formasNaEntrega.length > 0;
     let pmethod = (payment_method || '').toLowerCase().trim();
     if (!pmethod) {
       pmethod = hasPix ? 'pix' : (hasCard ? 'card' : (hasOnDelivery ? 'on_delivery' : null));
@@ -834,7 +841,22 @@ router.post('/:slug/order', async (req, res) => {
       : 0;
     const total = subtotal - discount_amount + delivery_fee;
 
-    const initialStatus = pmethod === 'on_delivery' ? 'confirmed' : 'pending_payment';
+    // tq-44: forma e troco conferidos no servidor, contra o total que o
+    // SERVIDOR calculou. So no fluxo com aceite: no de hoje os campos sao
+    // ignorados.
+    let naEntrega = null;
+    if (pmethod === 'on_delivery' && comAceite) {
+      naEntrega = pagarNaEntrega.conferirPagamentoNaEntrega({
+        formas: formasNaEntrega, forma: pay_on_delivery_method, trocoPara: change_for, total,
+      });
+      if (naEntrega.erro) return res.status(400).json({ error: naEntrega.erro });
+    }
+
+    // Pagar na entrega com aceite nasce esperando a lojista: sem baixa de
+    // estoque e sem lancamento (quem faz os dois e o aceite).
+    const initialStatus = naEntrega
+      ? pagarNaEntrega.AGUARDANDO_ACEITE
+      : (pmethod === 'on_delivery' ? 'confirmed' : 'pending_payment');
     const initialPaymentStatus = 'pending';
 
     const client = await db.connect();
@@ -864,7 +886,7 @@ router.post('/:slug/order', async (req, res) => {
           customer_cpf_cnpj, nfce_requested,
           address_zip, address_street, address_number, address_complement,
           address_neighborhood, address_city, address_state,
-          courier_name, courier_plate${comDesconto ? ', discount_amount, discount_reason' : ''}${idemKey ? ', idempotency_key' : ''}
+          courier_name, courier_plate${comDesconto ? ', discount_amount, discount_reason' : ''}${idemKey ? ', idempotency_key' : ''}${naEntrega ? ', pay_on_delivery_method, change_for' : ''}
         ) VALUES (
           $1, next_digital_order_number($1), $2, $3, $4,
           $5, $6, $7, $8, $9,
@@ -873,7 +895,7 @@ router.post('/:slug/order', async (req, res) => {
           $14, $15,
           $16, $17, $18, $19,
           $20, $21, $22,
-          $23, $24${comDesconto ? ', $25, $26' : ''}${idemKey ? (comDesconto ? ', $27' : ', $25') : ''}
+          $23, $24${comDesconto ? ', $25, $26' : ''}${idemKey ? (comDesconto ? ', $27' : ', $25') : ''}${naEntrega ? colunasNaEntrega(comDesconto) : ''}
         ) RETURNING *
       `, [
         cid, customer_name, customer_phone, customer_email || null,
@@ -887,7 +909,13 @@ router.post('/:slug/order', async (req, res) => {
         courierData ? courierData.courier_name : null,
         courierData ? courierData.courier_plate : null,
       ].concat(comDesconto ? [discount_amount, discount_amount > 0 ? 'pix' : null] : [])
-        .concat(idemKey ? [idemKey] : []));
+        .concat(idemKey ? [idemKey] : [])
+        .concat(naEntrega ? [naEntrega.forma, naEntrega.trocoPara] : []));
+      // Os dois parametros do pagar na entrega vem depois dos opcionais.
+      function colunasNaEntrega(comDesc) {
+        const n = 24 + (comDesc ? 2 : 0) + (idemKey ? 1 : 0);
+        return `, $${n + 1}, $${n + 2}`;
+      }
       let newOrder;
       try {
         ({ rows: [newOrder] } = await insertPedido(true));
@@ -1003,6 +1031,12 @@ router.post('/:slug/order', async (req, res) => {
     // checkout pelo CLIENTE e por nenhum fluxo depois: o aviso é "confira nome
     // e placa antes de entregar", não "o pacote saiu".
     lojaEvents.emit('loja_pedido_novo', order);
+    // Pagar na entrega com aceite: ninguem confirma sozinho, e a lojista
+    // quem aceita. E-mail ao dono, como no Pix manual (pedido esperando).
+    if (naEntrega) {
+      notify.notifyPedidoAAceitar({ order })
+        .catch(err => console.error('[storefront] aviso do pedido a aceitar:', err.message));
+    }
     if (courierData) lojaEvents.emit('loja_pedido_saiu_entrega', order);
     // Pix MANUAL (chave da lojista, sem gateway): ninguém confirma sozinho —
     // é a lojista quem confere o extrato. Sem este e-mail o pedido só
@@ -1036,6 +1070,15 @@ router.post('/:slug/order', async (req, res) => {
         preference_id: cardData.preference_id,
       } : null,
     };
+    // tq-44: so no fluxo com aceite — a resposta das outras lojas nao muda.
+    if (naEntrega) {
+      corpo.na_entrega = {
+        forma:     naEntrega.forma,
+        rotulo:    pagarNaEntrega.ROTULOS[naEntrega.forma],
+        troco_para: naEntrega.trocoPara,
+        troco:     pagarNaEntrega.trocoALevar({ pay_on_delivery_method: naEntrega.forma, change_for: naEntrega.trocoPara, total }),
+      };
+    }
     // Guardado ANTES de responder: o toque repetido devolve este corpo
     // (com o Pix e o link do cartao), nao um pedido novo.
     if (idemKey) await pedidoIdem.guardarResposta({ companyId: cid, orderId: order.id, corpo });

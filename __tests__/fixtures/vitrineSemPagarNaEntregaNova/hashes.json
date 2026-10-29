@@ -1,0 +1,14 @@
+{
+  "so_pix": {
+    "bytes": 307464,
+    "sha256": "7228d6df74298d5858290fcffa05032a8cb6a6b4861ecabd7ead9250870ddb99"
+  },
+  "na_entrega_legado": {
+    "bytes": 307578,
+    "sha256": "cbf6367e40de9c4cd69ee87fe728b4940a72f87a4c0e1b344a516cf958931425"
+  },
+  "so_na_entrega": {
+    "bytes": 307481,
+    "sha256": "7b5ef82536133f41cd6623074e2b7168f60ff52edd8f11772c447d3bb9c423d1"
+  }
+}

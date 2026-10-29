@@ -19,6 +19,7 @@
 'use strict';
 
 const { rotuloDaCor } = require('./coresDaLoja');
+const { fraseDoPagamento, trocoALevar } = require('./pagarNaEntrega');
 
 const HEX = /#[0-9A-Fa-f]{6}\b/g;
 
@@ -42,11 +43,17 @@ const COLUNAS = `
   o.customer_id, o.transaction_id, o.stock_deducted, o.nfce_id,
   o.courier_name, o.courier_plate`;
 
+// tq-44 (migration 420): forma de pagar na entrega, troco e aceite. Em
+// separado porque a base sem a migration nao tem as colunas: a rota tenta
+// com elas e, no 42703, segue sem (comEntrega: false).
+const COLUNAS_DA_ENTREGA = `,
+  o.pay_on_delivery_method, o.change_for, o.accepted_at, o.prep_minutes`;
+
 /**
  * @param {{cid: string, status?: string, q?: string, limit: number, offset: number}} p
  * @returns {{sql: string, params: any[]}}
  */
-function montarConsultaDaFila({ cid, status, q, limit, offset }) {
+function montarConsultaDaFila({ cid, status, q, limit, offset, comEntrega = false }) {
   const params = [cid];
   const filtros = ['o.company_id = $1'];
 
@@ -81,7 +88,7 @@ function montarConsultaDaFila({ cid, status, q, limit, offset }) {
 
   params.push(limit, offset);
   const sql = `
-    SELECT ${COLUNAS},
+    SELECT ${COLUNAS}${comEntrega ? COLUNAS_DA_ENTREGA : ''},
       (SELECT COUNT(*)::int FROM digital_order_items ic WHERE ic.order_id = o.id) AS item_count,
       pi.product_name AS first_item_name,
       pi.imagem       AS first_item_image,
@@ -106,7 +113,14 @@ function montarConsultaDaFila({ cid, status, q, limit, offset }) {
 /** Linha do banco -> item da fila: nome legivel e sem a coluna tecnica. */
 function apresentarLinhaDaFila(linha) {
   const { total_filtrado, ...resto } = linha;
-  return { ...resto, first_item_name: nomeLegivelDoItem(resto.first_item_name) };
+  const saida = { ...resto, first_item_name: nomeLegivelDoItem(resto.first_item_name) };
+  // tq-44: a frase pronta do pagamento ("Dinheiro. Paga com R$ 100,00:
+  // levar R$ 22,00 de troco.") so no pedido de pagar na entrega com forma.
+  if (resto.pay_on_delivery_method) {
+    saida.pagamento_na_entrega = fraseDoPagamento(resto);
+    saida.troco_a_levar = trocoALevar(resto);
+  }
+  return saida;
 }
 
 module.exports = { nomeLegivelDoItem, escaparLike, montarConsultaDaFila, apresentarLinhaDaFila };

@@ -62,6 +62,7 @@ const { estaAberta, momentoNoFuso, parseHHMM } = require('./horarioDaLoja');
 const { montarRodape } = require('./rodapeInstitucional');
 const { rastreadoresDaLoja } = require('./rastreadores');
 const { montarRedes } = require('./redesSociais');
+const { formasDaLoja } = require('./pagarNaEntrega');
 // A tira de categorias da home: quem entra e regra unica das duas lojas.
 const { montarTira } = require('./tiraDeCategorias');
 // Redesign 09/2026: os blocos da home nascem do estoque e do Caixa. As
@@ -82,6 +83,15 @@ const { textosDaFrente } = require('./textosDaFrente');
  * aqui nasce de uma configuracao real; "Troca em 7 dias" nasce do CDC.
  * Ela pode reescrever tudo em service_cards.
  */
+/**
+ * tq-44: `{ pay_on_delivery_methods: [...] }` quando a loja usa pagar na
+ * entrega com formas; `{}` nas outras — a chave nem aparece no payload.
+ */
+function formasNaEntregaNoPayload(config) {
+  const formas = formasDaLoja(config);
+  return formas.length ? { pay_on_delivery_methods: formas } : {};
+}
+
 function selosPadrao(cfg) {
   const c = cfg || {};
   const selos = [];
@@ -1082,6 +1092,10 @@ async function buildStorefront(config) {
         ? (config.card_max_installments || null)
         : null,
       pay_on_delivery_enabled:  payOnDeliveryEnabled,
+      // tq-44: as formas de pagar na entrega (cash, card, pix) entram SO
+      // quando a loja marcou alguma. Sem a chave, a pagina e o checkout das
+      // outras lojas saem byte a byte iguais (ver formasNaEntregaNoPayload).
+      ...formasNaEntregaNoPayload(config),
       pickup_eta_text:   config.pickup_eta_text   || null,
       delivery_eta_text: config.delivery_eta_text || null,
       delivery_pricing_mode: config.delivery_pricing_mode || 'flat',
@@ -1154,6 +1168,7 @@ module.exports = {
   // computeOpenState ja saia daqui embaixo.
   parseHHMM,
   buildStorefront, parseFeaturedIds, parseHiddenIds, computeOpenState,
+  formasNaEntregaNoPayload,
   // URL propria do produto (08/09/2026).
   produtoPublicoPorId,
   // Previa do link na vitrine Studio (BE-1, 25/09/2026): a peca, a regra

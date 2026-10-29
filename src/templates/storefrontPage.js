@@ -182,7 +182,12 @@ function buildStorefrontPage(data, slug) {
     // builder (services/redesSociais.js).
     redes: (data.contact && data.contact.redes) || [],
   });
-  const script = buildScript(storeData, escJs(slug), enderecoDaApi(), data.textos_da_frente || null);
+  // tq-44: o checkout com a escolha da forma de pagar na entrega so entra
+  // na loja que marcou as formas (a chave so existe nela).
+  const formasNaEntrega = data.settings && data.settings.pay_on_delivery_methods;
+  const script = buildScript(storeData, escJs(slug), enderecoDaApi(), data.textos_da_frente || null, {
+    naEntrega: Array.isArray(formasNaEntrega) && formasNaEntrega.length > 0,
+  });
 
   const bodyClasses = [
     dark ? 'sf-dark' : 'sf-light',

@@ -430,7 +430,40 @@ async function notifyManualPixOrder({ order: input }) {
   ));
 }
 
+/**
+ * Pedido de pagar na entrega que espera o aceite da lojista (tq-44,
+ * 29/10/2026). So o e-mail ao dono, como no Pix manual: a cliente ainda nao
+ * tem nada confirmado, e o sino/navegador vem de 'loja_pedido_novo'.
+ */
+async function notifyPedidoAAceitar({ order: input }) {
+  const order = await loadOrderForNotify(input);
+  if (!order) return;
+
+  if (await ehLojaDeTeste(order.company_id)) {
+    anotarBloqueio(`pedido #${order.order_number} esperando aceite`, order.company_id);
+    return;
+  }
+
+  const { ROTULOS } = require('./pagarNaEntrega');
+  const store_name = await getStoreName(order.company_id);
+  const ownerEmails = await destinatariosDoPedido(order.company_id);
+  await Promise.all(ownerEmails.map(email =>
+    sendOwnerNewOrderEmail(email, {
+      order_number:      order.order_number,
+      customer_name:     order.customer_name,
+      customer_phone:    order.customer_phone,
+      total:             order.total,
+      delivery_type:     order.delivery_type,
+      store_name,
+      payment_method:    order.payment_method,
+      company_id:        order.company_id,
+      aguardando_aceite: true,
+      forma_na_entrega:  ROTULOS[input && input.pay_on_delivery_method] || null,
+    }).catch(err => console.error('[notify] pedido a aceitar owner email error:', err.message))
+  ));
+}
+
 module.exports = {
-  notifyNewOrder, notifyPaymentConfirmed, notifyStatusChange, notifyManualPixOrder,
+  notifyNewOrder, notifyPaymentConfirmed, notifyStatusChange, notifyManualPixOrder, notifyPedidoAAceitar,
   linkDoPedidoDaVitrine,
 };
