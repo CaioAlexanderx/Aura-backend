@@ -84,6 +84,16 @@
 //   o status REAL retornado por trocaDevolucao55 (autorizada/rejeitada/
 //   processando) + grava last_error; antes forcava 'autorizada' fixo e usava
 //   result.chave_acesso (inexistente -> era devolucao_chave).
+// 29/10/2026 (desconto na troca — Davi Calcados nao conseguia dar desconto
+//   nem mudar o preco do item novo): o item novo aceita item_discount (lapis
+//   do Caixa: unit_price = preco de tabela, item_discount = diferenca no total
+//   da linha) e o corpo aceita o desconto manual do POST /sale
+//   (discount_type/discount_value ou os legados discount_amount/discount_pct),
+//   com a MESMA regra (services/descontoManual.js) e o mesmo teto (subtotal).
+//   O desconto sai do valor dos itens novos: total da venda de troca,
+//   diferenca a pagar/devolver, financeiro ("Troca - Venda") e cupom ja
+//   refletem. sales.discount_amount = desconto manual; sale_items.discount =
+//   desconto do item (igual a venda comum). Sem desconto, tudo como antes.
 // 24/06/2026 (fix NaN -> receita zerada): um unit_price invalido no payload
 //   (parseFloat("") = NaN) era persistido como numeric 'NaN' em
 //   troca_returned_items e envenenava o SUM da receita no relatorio de Vendas
@@ -94,6 +104,7 @@
 const db = require('../config/database');
 const nuvemfiscal = require('./nuvemfiscal');
 const trocaDevolucao55 = require('./trocaDevolucao55');
+const { resolveManualDiscount } = require('./descontoManual');
 
 const SP_DATE_NOW = "(NOW() AT TIME ZONE 'America/Sao_Paulo')::date";
 
@@ -494,6 +505,17 @@ function balanceSplits(splits, target, fallbackMethod) {
   return list.filter((p) => p.amount > 0.005);
 }
 
+// Linha do item novo, mesma conta do POST /sale: total bruto da linha menos o
+// desconto do item (lapis), nunca negativo.
+function newItemLine(n) {
+  const qty = toFiniteNum(n && n.quantity);
+  const unitPrice = toFiniteNum(n && n.unit_price);
+  const gross = parseFloat((qty * unitPrice).toFixed(2));
+  const itemDiscount = parseFloat(Math.min(Math.max(toFiniteNum(n && n.item_discount), 0), Math.max(gross, 0)).toFixed(2));
+  const lineTotal = parseFloat((gross - itemDiscount).toFixed(2));
+  return { qty, unitPrice, gross, itemDiscount, lineTotal };
+}
+
 // Calcula os totais da troca e RECONCILIA os splits de pagamento/estorno.
 // IMPORTANTE: a divergencia entre splits e valor liquido NUNCA bloqueia a
 // troca. Quando os splits vem vazios (cliente v1/legado, que so manda o metodo
@@ -501,16 +523,22 @@ function balanceSplits(splits, target, fallbackMethod) {
 // O split serve apenas para registrar a forma de pagamento no caixa — uma
 // divergencia de UI/cliente legado nao pode impedir o lojista de concluir.
 // Retorna tambem paymentSplits/refundSplits ja normalizados e somando certo.
-function computeAndValidateTotals({ returned_items, new_items, payment_splits, refund_splits, legacyMethod }) {
+function computeAndValidateTotals({ returned_items, new_items, payment_splits, refund_splits, legacyMethod, discount }) {
   // 24/06/2026: toFiniteNum evita que um unit_price/quantity invalido (NaN)
   // contamine os totais (e, downstream, os numeric persistidos).
   const returnedValue = (returned_items || []).reduce((acc, r) => acc + toFiniteNum(r.quantity) * toFiniteNum(r.unit_price), 0);
-  const newValue = (new_items || []).reduce((acc, n) => acc + toFiniteNum(n.quantity) * toFiniteNum(n.unit_price), 0);
-  const netAmount = parseFloat((newValue - returnedValue).toFixed(2));
-
   if ((returned_items || []).length === 0 && (new_items || []).length === 0) {
     throw new TrocaV2Error(400, { error: 'Informe pelo menos um returned_item ou new_item' });
   }
+
+  // 29/10/2026: subtotal dos itens novos ja com o desconto do item (lapis) e,
+  // por cima, o desconto manual da troca — mesma regra e teto do POST /sale.
+  const newSubtotal = parseFloat((new_items || []).reduce((acc, n) => acc + newItemLine(n).lineTotal, 0).toFixed(2));
+  const manual = resolveManualDiscount(discount || {}, newSubtotal);
+  if (manual.error) throw new TrocaV2Error(400, { error: manual.error, code: 'INVALID_MANUAL_DISCOUNT' });
+  const discountAmount = parseFloat(Math.min(manual.amount || 0, Math.max(newSubtotal, 0)).toFixed(2));
+  const newValue = parseFloat((newSubtotal - discountAmount).toFixed(2));
+  const netAmount = parseFloat((newValue - returnedValue).toFixed(2));
 
   const fallbackMethod = legacyMethod || 'dinheiro';
   let paymentSplits = Array.isArray(payment_splits) ? payment_splits.filter((p) => p && parseFloat(p.amount) > 0) : [];
@@ -545,9 +573,11 @@ function computeAndValidateTotals({ returned_items, new_items, payment_splits, r
 
   return {
     returnedValue: parseFloat(returnedValue.toFixed(2)),
-    newValue: parseFloat(newValue.toFixed(2)),
+    newSubtotal,
+    discountAmount,
+    newValue,
     netAmount,
-    saleTotal: parseFloat(newValue.toFixed(2)),
+    saleTotal: newValue,
     paymentSplits,
     refundSplits,
   };
@@ -963,7 +993,7 @@ async function handle(req, res) {
     // auto-ajusta quando nao batem. Resolve o bug Davi (adapter v1 mandava
     // payment_method_legacy mas nenhum split -> 400 antes da derivacao).
     const legacyMethod = (req.body && (req.body.payment_method_legacy || req.body.payment_method)) || 'dinheiro';
-    const totals = computeAndValidateTotals({ returned_items, new_items, payment_splits, refund_splits, legacyMethod });
+    const totals = computeAndValidateTotals({ returned_items, new_items, payment_splits, refund_splits, legacyMethod, discount: req.body });
     const _paymentSplits = totals.paymentSplits;
     const _refundSplits = totals.refundSplits;
     const strategyMap = decideFiscalPerOrigin(originSales, returned_items, nfce_strategy);
@@ -1005,12 +1035,13 @@ async function handle(req, res) {
             exchange_seller_id, exchange_employee_id,
             total_amount, discount_amount, payment_method, notes,
             status, type, exchange_of_sale_id)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,0,$9,$10,'completed','troca',$11) RETURNING *`,
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,'completed','troca',$12) RETURNING *`,
         [
           saleCompanyId, effectiveCustomerId,
           trocaSellerId, trocaEmployeeId, seller_name || null,
           exchangeSellerId, exchangeEmployeeId,
           totals.saleTotal,
+          totals.discountAmount,
           trocaPaymentMethod,
           trocaNotes,
           saleIds[0] || null,
@@ -1023,11 +1054,12 @@ async function handle(req, res) {
            (company_id, customer_id, seller_id, employee_id, seller_name,
             total_amount, discount_amount, payment_method, notes,
             status, type, exchange_of_sale_id)
-         VALUES ($1,$2,$3,$4,$5,$6,0,$7,$8,'completed','troca',$9) RETURNING *`,
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,'completed','troca',$10) RETURNING *`,
         [
           saleCompanyId, effectiveCustomerId,
           trocaSellerId, trocaEmployeeId, seller_name || null,
           totals.saleTotal,
+          totals.discountAmount,
           trocaPaymentMethod,
           trocaNotes,
           saleIds[0] || null,
@@ -1037,9 +1069,7 @@ async function handle(req, res) {
     }
 
     for (const item of new_items) {
-      const qty = toFiniteNum(item.quantity);
-      const unitPrice = toFiniteNum(item.unit_price);
-      const lineTotal = parseFloat((qty * unitPrice).toFixed(2));
+      const { qty, unitPrice, itemDiscount, lineTotal } = newItemLine(item);
       let costPrice = 0;
       let productName = item.product_name_snapshot || '';
       if (item.product_id) {
@@ -1054,8 +1084,8 @@ async function handle(req, res) {
       await client.query(
         `INSERT INTO sale_items
            (sale_id, product_id, variant_id, quantity, unit_price, unit_cost, discount, total_price, product_name_snapshot)
-         VALUES ($1,$2,$3,$4,$5,$6,0,$7,$8)`,
-        [trocaSaleRow.id, item.product_id || null, item.variant_id || null, qty, unitPrice, costPrice, lineTotal, productName]
+         VALUES ($1,$2,$3,$4,$5,$6,$9,$7,$8)`,
+        [trocaSaleRow.id, item.product_id || null, item.variant_id || null, qty, unitPrice, costPrice, lineTotal, productName, itemDiscount]
       );
     }
 
@@ -1296,6 +1326,10 @@ async function handle(req, res) {
       net_amount: totals.netAmount,
       returned_value: totals.returnedValue,
       new_value: totals.newValue,
+      // 29/10/2026: subtotal dos itens novos (ja com o desconto do item) e o
+      // desconto manual da troca. new_value = subtotal - desconto.
+      new_subtotal: totals.newSubtotal,
+      discount_amount: totals.discountAmount,
       cross_filial: isCrossFilial,
       origin_company_id: saleCompanyId,
       origin_company_ids: Array.from(new Set([...originSales, ...originDigital].map((s) => s.company_id))),
@@ -1334,5 +1368,5 @@ module.exports = {
   handle,
   reemitirEmissao,
   TrocaV2Error,
-  _internal: { computeAndValidateTotals, balanceSplits, decideFiscalPerOrigin, normalizeMethodForSalePayments, bestEffort, toFiniteNum, lookupOriginDigitalOrders, validateDigitalReturnedItems, trocaSummary },
+  _internal: { computeAndValidateTotals, newItemLine, balanceSplits, decideFiscalPerOrigin, normalizeMethodForSalePayments, bestEffort, toFiniteNum, lookupOriginDigitalOrders, validateDigitalReturnedItems, trocaSummary },
 };

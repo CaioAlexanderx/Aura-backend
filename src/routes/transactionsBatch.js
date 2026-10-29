@@ -242,6 +242,7 @@ router.post('/batch', requireAuth, async (req, res) => {
   let saved = 0;
   let pendingSaved = 0;
   const dbErrors = [];
+  let reasons = {};
   const hoje = hojeSP();
 
   const client = await db.connect();
@@ -267,10 +268,14 @@ router.post('/batch', requireAuth, async (req, res) => {
         if (!partial) throw err;
       }
     }
+    // Mesma contagem vai para o app (reasons): errors[] vem cortado em 20, e
+    // "3.687 linhas sem entrada ou saida" diz mais que as 5 primeiras.
+    const meta = metaDoLote({ transactions, errorItems, dbErrors });
+    reasons = meta.motivos;
     await client.query(
       `INSERT INTO import_logs (company_id, module, format, total_rows, imported_rows, error_rows, batch_id, created_by, meta) VALUES ($1, 'transactions', 'batch', $2, $3, $4, $5, $6, $7)`,
       [companyId, transactions.length, saved, errorItems.length + dbErrors.length, batchId, req.user?.id || null,
-       JSON.stringify(metaDoLote({ transactions, errorItems, dbErrors }))]
+       JSON.stringify(meta)]
     );
     await client.query('COMMIT');
   } catch (err) {
@@ -279,7 +284,7 @@ router.post('/batch', requireAuth, async (req, res) => {
     return res.status(500).json({ error: 'Erro ao salvar lancamentos', detail: err.message });
   } finally { client.release(); }
 
-  res.status(201).json({ saved, pending: pendingSaved, total: transactions.length, error_count: errorItems.length + dbErrors.length, batch_id: batchId, employees_matched: Object.keys(employeeMap).length, errors: [...errorItems, ...dbErrors.map(({ code, ...e }) => e)].sort((a, b) => a.index - b.index).slice(0, 20) });
+  res.status(201).json({ saved, pending: pendingSaved, total: transactions.length, error_count: errorItems.length + dbErrors.length, batch_id: batchId, reasons, employees_matched: Object.keys(employeeMap).length, errors: [...errorItems, ...dbErrors.map(({ code, ...e }) => e)].sort((a, b) => a.index - b.index).slice(0, 20) });
 });
 
 // POST /companies/:id/transactions/import-ofx
