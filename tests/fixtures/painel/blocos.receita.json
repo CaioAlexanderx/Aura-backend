@@ -476,6 +476,27 @@
       "linhas": []
     },
     {
+      "titulo": "Autorizações do Pix Automático canceladas · 30 dias",
+      "colunas": [
+        {
+          "chave": "cancelado_em",
+          "rotulo": "Quando",
+          "tipo": "data_hora"
+        },
+        {
+          "chave": "nome",
+          "rotulo": "Loja",
+          "tipo": "loja"
+        },
+        {
+          "chave": "motivo",
+          "rotulo": "Motivo",
+          "tipo": "texto"
+        }
+      ],
+      "linhas": []
+    },
+    {
       "titulo": "Eventos da Asaas · 30 dias",
       "colunas": [
         {

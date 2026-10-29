@@ -18,6 +18,9 @@
 //                            duas execuções seguidas. O job também grava a
 //                            linha na hora; entrar aqui é o que a mantém de
 //                            pé quando o passo diário regrava o dia
+//   pix_auto_cancelado       autorização do Pix Automático cancelada sem ser
+//                            pela Aura nos últimos 7 dias: sinal de saída
+//                            (tq-105). Chave: id da autorização
 //
 // `chave` identifica o alerta dentro do (dia, tipo): o id da loja, no
 // pagamento sem loja o id do registro do webhook e, no contato, o id da
@@ -30,6 +33,7 @@ const { REJEITADA } = require('./painelBlocos/fiscal');
 const plantao = require('./plantao');
 const cw = require('./contatosWhatsapp');
 const canaryStatus = require('./canaryStatus');
+const pixCancelamentos = require('./pixAutomaticoCancelamentos');
 
 const DIAS_SEM_VENDA = 14;
 // Pagamento sem loja segue avisando por este tempo; depois vira histórico.
@@ -180,6 +184,26 @@ async function calcularAlertas({ hoje, db = b.pool, empresas, agora = new Date()
 
   // 5. Contato do WhatsApp da Aura sem resposta humana (mais antigo primeiro).
   alertas.push(...contatos);
+
+  // 5b. Pix Automático cancelado sem ser pela Aura (sinal de saída, tq-105).
+  //     Uma fonte a mais: se falhar, os outros alertas saem.
+  try {
+    for (const c of await pixCancelamentos.listarCanceladas({ db, hoje, dias: 7 })) {
+      alertas.push({
+        tipo: 'pix_auto_cancelado',
+        chave: String(c.authorization_id),
+        company_id: c.company_id,
+        titulo: c.pela_cliente
+          ? `${c.nome} cancelou o Pix Automático no banco`
+          : `${c.nome}: Pix Automático cancelado`,
+        detalhe: `Sinal de saída · ${c.motivo} · ${b.rotuloDia(b.diaDe(c.cancelado_em))}`,
+        verbo: 'Falar',
+        bloco: 'receita',
+      });
+    }
+  } catch (err) {
+    console.error('[painel] alerta do Pix Automático falhou:', err.message);
+  }
 
   // 6. Plataforma caída: o bipe sintético falhou duas vezes seguidas. Dormente
   //    (sem envs) não consulta nada. Uma fonte a mais: se falhar, os outros

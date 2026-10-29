@@ -24,7 +24,7 @@
 //   DELETE /pix/automatic/authorizations/:id        cancelar (desfazer)
 //   GET    /pix/automatic/paymentInstructions       instruções (por cobrança)
 //   PUT    /customers/:id                           notificationDisabled
-//   GET    /subscriptions/:id, GET /subscriptions/:id/payments,
+//   GET    /subscriptions/:id, GET /subscriptions/:id/payments (PENDING e OVERDUE),
 //   DELETE /subscriptions/:id, DELETE /payments/:id,
 //   POST   /payments/:id/receiveInCash              (troca e concessão)
 //
@@ -243,6 +243,13 @@ async function listarCobrancasPendentesDaAssinatura(subscriptionId) {
   return (r && Array.isArray(r.data)) ? r.data : [];
 }
 
+// Vencidas (OVERDUE) da assinatura antiga: a troca espera elas serem pagas.
+// Filtra pelo status de cada cobrança também, por segurança.
+async function listarCobrancasVencidasDaAssinatura(subscriptionId) {
+  const r = await chamar('GET', `/subscriptions/${enc(subscriptionId)}/payments?status=OVERDUE&limit=100`);
+  return ((r && Array.isArray(r.data)) ? r.data : []).filter((p) => p && p.status === 'OVERDUE');
+}
+
 async function cancelarAssinatura(subscriptionId) {
   return chamar('DELETE', `/subscriptions/${enc(subscriptionId)}`);
 }
@@ -267,6 +274,7 @@ module.exports = {
   cancelarInstrucaoDoCiclo,
   consultarAssinatura,
   listarCobrancasPendentesDaAssinatura,
+  listarCobrancasVencidasDaAssinatura,
   cancelarAssinatura,
   excluirCobranca,
 };

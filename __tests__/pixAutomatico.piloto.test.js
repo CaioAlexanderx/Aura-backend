@@ -350,6 +350,7 @@ describe('POST /:companyId/trocar-assinatura', () => {
     expect(r.status).toBe(200);
     expect(chamadas()).toEqual([
       'GET /pix/automatic/authorizations/auth-1',
+      'GET /subscriptions/sub_antiga/payments?status=OVERDUE&limit=100',
       'GET /subscriptions/sub_antiga/payments?status=PENDING&limit=100',
       'DELETE /subscriptions/sub_antiga',
       'DELETE /payments/pay_pend1',
@@ -449,5 +450,27 @@ describe('chave PIX_AUTOMATIC_ENABLED desligada (padrão)', () => {
     const e = await request(app).get('/admin/painel/pix-automatico/elegibilidade').set(staff);
     expect(e.status).toBe(200);
     expect(asaasRequest).not.toHaveBeenCalled();
+  });
+});
+
+// ── tq-105 (29/10/2026): cobrança vencida na assinatura antiga ───
+describe('trocar-assinatura com cobrança vencida na antiga', () => {
+  test('409 cobranca_vencida_na_antiga e nada é cancelado', async () => {
+    const estado = banco({
+      empresa: loja({ pix_auto_status: 'active', asaas_pix_auto_authorization_id: 'auth-1' }),
+      autorizacoes: [{ id: 'auth-1', company_id: LOJA, status: 'active', subscription_id: 'sub_nova' }],
+    });
+    asaasDeMentira({
+      'GET /pix/automatic/authorizations/auth-1': { id: 'auth-1', status: 'ACTIVE', subscriptionId: 'sub_nova' },
+      'GET /subscriptions/sub_antiga/payments?status=OVERDUE*': { data: [
+        { id: 'pay_venc', status: 'OVERDUE', dueDate: '2099-01-23', value: 140.83 },
+      ] },
+    });
+    const r = await request(app).post(`/admin/painel/pix-automatico/${LOJA}/trocar-assinatura`).set(staff).send({});
+    expect(r.status).toBe(409);
+    expect(r.body.code).toBe('cobranca_vencida_na_antiga');
+    expect(r.body.cobrancas_vencidas).toEqual([{ id: 'pay_venc', due_date: '2099-01-23', value: 140.83 }]);
+    expect(chamadas().some((c) => c.startsWith('DELETE'))).toBe(false);
+    expect(estado.empresa.asaas_subscription_id).toBe('sub_antiga');
   });
 });

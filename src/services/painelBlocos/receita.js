@@ -14,6 +14,7 @@
 const b = require('./_base');
 const { calcularMrr, ROTULO_FONTE } = require('../receita');
 const { conferenciaPorMes } = require('../conciliacaoOfx');
+const pixCancelamentos = require('../pixAutomaticoCancelamentos');
 
 const MESES = ['Jan', 'Fev', 'Mar', 'Abr', 'Mai', 'Jun', 'Jul', 'Ago', 'Set', 'Out', 'Nov', 'Dez'];
 const rotuloMes = (ym) => MESES[parseInt(String(ym).slice(5, 7), 10) - 1] || ym;
@@ -30,6 +31,11 @@ async function calcular({ hoje, periodo = 30, db = b.pool, empresas, mrr: mrrPro
   const emp = empresas || await b.carregarEmpresas(db);
   const mrr = mrrPronto || await calcularMrr({ db });
   const mesAtual = hoje.slice(0, 7);
+  // Pix Automático cancelado sem ser pela Aura (tq-105, critério 5 da Célia):
+  // com o período de 7 dias, é a linha 'autorizações canceladas' do board
+  // semanal. Fonte a mais: se falhar, o bloco sai sem ela.
+  const pixCanceladas = await pixCancelamentos.listarCanceladas({ db, hoje, dias: periodo })
+    .catch((err) => { console.error('[painel] Pix Automático cancelado falhou:', err.message); return []; });
 
   const [snapshots, porMes, eventos, recebidos] = await Promise.all([
     b.opcional(
@@ -216,6 +222,7 @@ async function calcular({ hoje, periodo = 30, db = b.pool, empresas, mrr: mrrPro
   for (const c of conferencia) {
     if (c.status === 'pendências') avisos.push(`Extrato de ${c.rotulo.toLowerCase()}: ${c.detalhe}`);
   }
+  if (pixCanceladas.length) avisos.push(`${b.plural(pixCanceladas.length, 'autorização do Pix Automático cancelada', 'autorizações do Pix Automático canceladas')} em ${periodo} dias`);
   if (semLoja) avisos.push(`${b.plural(semLoja, 'pagamento', 'pagamentos')} sem loja vinculada desde ${rotuloMes(mesAnterior).toLowerCase()}`);
 
   return b.montarBloco({
@@ -247,6 +254,7 @@ async function calcular({ hoje, periodo = 30, db = b.pool, empresas, mrr: mrrPro
       ),
       b.lista('Assinaturas na Asaas sem empresa', [b.col('assinatura', 'Assinatura'), b.col('cliente_asaas', 'Cliente na Asaas'), b.col('descricao', 'Descrição'), b.col('mrr', 'MRR', 'moeda'), b.col('proximo_vencimento', 'Próximo vencimento', 'data')], semEmpresa),
       b.lista('Assinaturas ativas fora do MRR', [b.col('motivo', 'Motivo'), b.colLoja(), b.col('mrr', 'MRR', 'moeda'), b.col('proximo_vencimento', 'Próximo vencimento', 'data')], foraDoMrr),
+      b.lista(`Autorizações do Pix Automático canceladas · ${periodo} dias`, [b.col('cancelado_em', 'Quando', 'data_hora'), b.colLoja(), b.col('motivo', 'Motivo')], pixCanceladas),
       b.lista(`Eventos da Asaas · ${periodo} dias`, [b.col('quando', 'Quando', 'data_hora'), b.colLoja(), b.col('evento', 'Evento'), b.col('valor', 'Valor', 'moeda')], linhasEventos),
     ],
     series: [

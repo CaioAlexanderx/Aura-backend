@@ -47,6 +47,14 @@
 //      "pagamentos sem loja" lê as linhas sem empresa de webhook_logs.
 //      Quem lê webhook_logs como pagamento filtra PAYMENT_* (ou exclui
 //      SUBSCRIPTION_* e PIX_AUTOMATIC_*, na linha do tempo da loja).
+//  10. Troca depois de ativar (tq-105, 29/10): ACTIVATED da autorização atual
+//      agenda, depois da resposta, a troca da assinatura Pix comum pela do
+//      Pix Automático (pixAutomaticoPiloto.trocarAssinatura: confere ACTIVE
+//      na Asaas, recusa com cobrança vencida na antiga, idempotente). Deu
+//      certo ou não, a equipe recebe no sininho. PIX_AUTOMATIC_TROCA_AUTOMATICA
+//      =false deixa a troca só pela rota de staff.
+//  11. Recusa (tq-105): REFUSED da autorização atual avisa no sininho (nada
+//      liga; conferir a cobrança da assinatura antiga se o QR foi pago).
 // ============================================================
 'use strict';
 
@@ -244,7 +252,7 @@ async function processarAutorizacao({ db, notifications, cliente, body, hasSecre
   return { auth, novo, verified: true };
 }
 
-async function aplicarAutorizacao({ db, notifications, auth, novo, event }) {
+async function aplicarAutorizacao({ db, notifications, cliente, auth, novo, event }) {
   const { empresa, atual } = await acharEmpresa(db, auth.id);
   if (!empresa) {
     console.warn(`[pixAutomatico] ${event}: autorização ${auth.id} não é de nenhuma empresa — só registrado`);
@@ -281,11 +289,98 @@ async function aplicarAutorizacao({ db, notifications, auth, novo, event }) {
   if (novo === 'cancelled' && (mudou || anterior === 'cancelled')) {
     avisou = !!(await avisarCancelamento({ notifications, empresa, auth }));
   }
+  // Recusada (QR vencido, cliente não concluiu, banco não confirmou — também
+  // depois do PAYMENT_RECEIVED): nada liga; a equipe confere a cobrança da
+  // assinatura antiga para a cliente não pagar o mesmo ciclo duas vezes.
+  if (mudou && proximo === 'refused') {
+    avisou = !!(await avisarRecusa({ notifications, empresa, auth })) || avisou;
+  }
+  // Ativa: a troca da assinatura Pix comum roda depois da resposta (regra 10).
+  let troca = null;
+  if (mudou && proximo === 'active' && cliente) {
+    if (trocaAutomaticaLigada()) {
+      agendar(() => trocarDepoisDeAtivar({ db, notifications, cliente, empresa, auth }));
+      troca = 'agendada';
+    } else {
+      troca = 'manual';
+    }
+  }
   return {
     companyId: empresa.id,
     result: mudou ? `status_${proximo}` : 'sem_mudanca',
-    http: { status_anterior: anterior, status: mudou ? proximo : anterior, alerta: avisou },
+    http: { status_anterior: anterior, status: mudou ? proximo : anterior, alerta: avisou, ...(troca ? { troca } : {}) },
   };
+}
+
+// ── tq-105 (29/10/2026): recusa e troca depois de ativar ─────────
+
+async function avisarRecusa({ notifications, empresa, auth }) {
+  const nome = empresa.nome || 'empresa sem nome';
+  return notifications.notifyCompany(empresaDaEquipe(), {
+    title: `Pix Automático não foi ativado: ${nome}`,
+    body: 'A autorização do Pix Automático foi recusada (o QR venceu, a cliente não concluiu ou o banco ' +
+      'não confirmou). Nada mudou na cobrança: a assinatura Pix comum continua como estava. Se a cliente ' +
+      'pagou o QR, confira na Asaas a cobrança pendente da assinatura antiga para ela não pagar o mesmo mês duas vezes.',
+    dedupeKey: `pix-auto-recusada:${auth.id}`,
+  });
+}
+
+// PIX_AUTOMATIC_TROCA_AUTOMATICA=false desliga só a troca automática (a
+// Cassie faz pela rota de staff). Qualquer outro valor, ou ausente, deixa
+// ligada — ela só roda com a chave geral ligada.
+function trocaAutomaticaLigada() {
+  return String(process.env.PIX_AUTOMATIC_TROCA_AUTOMATICA || '').trim().toLowerCase() !== 'false';
+}
+
+// Tarefas que rodam depois da resposta ao webhook (a Asaas espera resposta
+// rápida; a troca faz várias chamadas de até 15 s). Guardadas para os testes
+// esperarem por elas.
+const tarefas = new Set();
+function agendar(fn) {
+  const p = new Promise((resolve) => setImmediate(resolve))
+    .then(fn)
+    .catch((err) => console.error('[pixAutomatico] tarefa depois do webhook falhou: ' + err.message))
+    .finally(() => tarefas.delete(p));
+  tarefas.add(p);
+  return p;
+}
+function aguardarTarefas() {
+  return Promise.all([...tarefas]);
+}
+
+/**
+ * Autorização ACTIVE → troca a assinatura Pix comum pela do Pix Automático
+ * (pixAutomaticoPiloto.trocarAssinatura, que confere ACTIVE na Asaas na hora,
+ * recusa se a antiga tem cobrança vencida e é idempotente). Antes de ACTIVE
+ * nada é cancelado; com a troca recusada, nada é cancelado e a equipe recebe
+ * o motivo no sininho para fazer pela Gestão Aura. Nunca dois débitos.
+ */
+async function trocarDepoisDeAtivar({ db, notifications, cliente, empresa, auth }) {
+  const piloto = require('./pixAutomaticoPiloto');
+  const nome = empresa.nome || 'empresa sem nome';
+  let r;
+  try {
+    r = await piloto.trocarAssinatura({ db, cliente, companyId: empresa.id, userId: null });
+  } catch (err) {
+    console.error(`[pixAutomatico] troca automática da company ${empresa.id} não feita: ${err.code || ''} ${err.message}`);
+    await notifications.notifyCompany(empresaDaEquipe(), {
+      title: `Pix Automático ativo, falta trocar a assinatura: ${nome}`,
+      body: `A autorização do Pix Automático ficou ativa, mas a troca da assinatura não foi feita: ${err.message} ` +
+        'A assinatura Pix comum continua ativa. Resolva e faça a troca pela Gestão Aura (Pix Automático → trocar assinatura).',
+      dedupeKey: `pix-auto-troca-pendente:${auth.id}`,
+    });
+    return { trocada: false, erro: err.code || 'erro' };
+  }
+  if (r.ja_trocada) return { trocada: true, ja_trocada: true };
+  const removidas = (r.cobrancas_pendentes_removidas || []).length;
+  await notifications.notifyCompany(empresaDaEquipe(), {
+    title: `Pix Automático ativo: ${nome}`,
+    body: 'A autorização ficou ativa e a assinatura Pix comum foi encerrada' +
+      (removidas ? ` (${removidas === 1 ? '1 cobrança pendente removida' : removidas + ' cobranças pendentes removidas'})` : '') +
+      '. Os próximos meses saem pelo Pix Automático.' + (r.aviso ? ' Atenção: ' + r.aviso : ''),
+    dedupeKey: `pix-auto-trocada:${auth.id}`,
+  });
+  return { trocada: true };
 }
 
 async function aplicarElegibilidade({ db, notifications, body, chave }) {
@@ -447,7 +542,7 @@ async function processarEventoPixAutomatico({ body, hasSecret, db, notifications
     let r;
     if (tipo === 'elegibilidade') r = await aplicarElegibilidade({ db, notifications, body, chave });
     else if (!ligado) r = await registrarDesligado({ db, body, auth, event });
-    else if (tipo === 'autorizacao') r = await aplicarAutorizacao({ db, notifications, auth, novo, event });
+    else if (tipo === 'autorizacao') r = await aplicarAutorizacao({ db, notifications, cliente, auth, novo, event });
     else if (tipo === 'instrucao') r = await aplicarInstrucao({ db, body, event });
     else r = { result: 'evento_sem_tratamento' };
     await concluir(db, reserva, chave, r);
@@ -466,6 +561,9 @@ module.exports = {
   chaveDoEvento,
   tipoDoEvento,
   empresaDaEquipe,
+  trocarDepoisDeAtivar,
+  trocaAutomaticaLigada,
+  aguardarTarefas,
   STATUS_POR_EVENTO,
   STATUS_DA_ASAAS,
   EMPRESA_DA_EQUIPE_PADRAO,
