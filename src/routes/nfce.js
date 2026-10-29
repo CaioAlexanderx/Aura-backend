@@ -70,11 +70,22 @@ function consultaUrlByUf(uf) {
 // crediario → '05' (Credito Loja): correcao de 29/05/2026.
 // Anteriormente era '01' (Dinheiro) — incorreto fiscalmente pois
 // credito de loja tem tPag proprio definido pela tabela B17 NT 2015.002.
+//
+// 29/10/2026 (tq-39 — NFC-e da troca com valor a pagar):
+//   - credito_troca → '05' (Credito Loja) A VISTA (indPag 0): o credito da
+//     devolucao cobre parte dos itens novos. Antes a troca mandava so o
+//     liquido nos pagamentos, a soma nao batia com os itens e o /emit
+//     recusava com 400. Nao vira desconto (desconto reduz a base dos
+//     tributos; o credito e forma de pagamento).
+//   - cartao_credito/cartao_debito (nomes do wizard da troca) caiam no
+//     default '01' (Dinheiro). Agora '03'/'04'.
 function paymentCode(method) {
   const map = {
     dinheiro: '01', cheque: '02', credito: '03', debito: '04',
     cartao: '03', boleto: '15', pix: '17',
+    cartao_credito: '03', cartao_debito: '04',
     crediario: '05', // Credito Loja (tPag 05, a prazo -- indPag=1)
+    credito_troca: '05', // Credito Loja da devolucao (tPag 05, a vista -- indPag=0)
     outros: '99',
   };
   return map[method] || '01';
