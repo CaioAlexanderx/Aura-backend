@@ -1,4 +1,4 @@
--- Migration 417: Mercado Pago por OAuth (tq-94, 29/10/2026)
+-- Migration 419: Mercado Pago por OAuth (tq-94, 29/10/2026)
 --
 -- A lojista conecta o Mercado Pago por um botão (OAuth) em vez de colar
 -- token, chave pública e segredo. Mesma tabela companies_payment_gateways,

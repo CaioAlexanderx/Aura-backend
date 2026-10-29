@@ -65,7 +65,7 @@ async function checarConexoes({ db: banco = db, agora = Date.now() } = {}) {
       [LOTE]
     ));
   } catch (e) {
-    if (e.code === '42703' || e.code === '42P01') return null; // migration 417 pendente
+    if (e.code === '42703' || e.code === '42P01') return null; // migration 419 pendente
     throw e;
   }
 

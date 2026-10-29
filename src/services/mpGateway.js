@@ -13,7 +13,7 @@
 //   marcarCaiu(db, id, motivo) → true só na primeira vez (uma vez por queda)
 //
 // Registros manuais (token colado) continuam como sempre: texto puro, sem
-// renovação. Antes da migration 417 as colunas novas não existem; tudo aqui
+// renovação. Antes da migration 419 as colunas novas não existem; tudo aqui
 // cai no SELECT antigo (42703) e o comportamento é o de hoje.
 // ============================================================
 'use strict';
@@ -48,7 +48,7 @@ const COLS_OAUTH = `id, company_id, gateway, access_token, public_key, sandbox, 
   auth_method, refresh_token, token_expires_at, mp_user_id, mp_nickname,
   connection_status, connection_lost_at, last_checked_at, created_at, updated_at`;
 
-// Sem a migration 417 as colunas novas não existem: a primeira consulta que
+// Sem a migration 419 as colunas novas não existem: a primeira consulta que
 // der 42703 liga este marcador e as próximas vão direto no SELECT antigo.
 // (Sem consulta extra ao information_schema: o checkout faz uma consulta só,
 // como antes.)

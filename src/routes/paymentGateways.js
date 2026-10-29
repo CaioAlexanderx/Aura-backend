@@ -10,7 +10,7 @@
 // Migration 121 (21/05/2026): adiciona webhook_secret para validação
 // HMAC x-signature do webhook MP. Opcional (NULL = fallback legado).
 //
-// tq-94 (29/10/2026, migration 417): conexão por OAuth.
+// tq-94 (29/10/2026, migration 419): conexão por OAuth.
 // GET    /companies/:id/payment-gateways/mercadopago/oauth/start
 //        → { url } da tela de autorização do Mercado Pago (só o dono;
 //          ?sandbox=1 só para a equipe Aura; ?volta=<caminho do app>).
@@ -120,7 +120,7 @@ router.get('/', requireRole('client', 'analyst', 'admin'), async (req, res) => {
         // Migration 121: webhook_secret cadastrado? (não retorna o valor real)
         webhook_secret_masked: hasSecret && !oauth ? maskSecret(r.webhook_secret) : null,
         webhook_secret_configured: hasSecret ? !!r.webhook_secret : false,
-        // Migration 417 (tq-94)
+        // Migration 419 (tq-94)
         auth_method: r.auth_method || 'manual',
         account_name: oauth ? (r.mp_nickname || null) : null,
         connection_status: r.connection_status || 'ok',

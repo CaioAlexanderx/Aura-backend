@@ -187,7 +187,7 @@ function startServer() {
     const { initOticaReminderJob } = require('./jobs/oticaReminderJob');
     initOticaReminderJob();
 
-    // Mercado Pago por OAuth (417, tq-94): renova o token com 30 dias de
+    // Mercado Pago por OAuth (419, tq-94): renova o token com 30 dias de
     // folga e confere a conexão (GET /users/me) — diario 06h20 BRT. Conexão
     // que caiu sai do checkout. Dormente sem MP_CLIENT_ID/MP_CLIENT_SECRET;
     // kill switch MP_CONEXAO_DIARIA_ENABLED=false.

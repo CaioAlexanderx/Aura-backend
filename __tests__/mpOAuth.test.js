@@ -348,7 +348,7 @@ describe('mpGateway.tokenDoGateway', () => {
     expect(await mpGateway.tokenDoGateway(db, { auth_method: 'oauth', connection_status: 'caiu', access_token: enc('A') })).toBeNull();
   });
 
-  test('temGatewayAtivo filtra conexão caída e cai no SELECT antigo sem a 417', async () => {
+  test('temGatewayAtivo filtra conexão caída e cai no SELECT antigo sem a 419', async () => {
     db.query.mockResolvedValueOnce({ rows: [] });
     expect(await mpGateway.temGatewayAtivo(db, EMPRESA)).toBe(false);
     expect(db.query.mock.calls[0][0]).toMatch(/connection_status = 'ok'/);
