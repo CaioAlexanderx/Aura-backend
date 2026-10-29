@@ -2,53 +2,43 @@
 // AURA. — Webhook Mercado Pago
 // POST /webhooks/mp
 //
-// MP envia { action, data: { id } } quando um pagamento muda.
+// MP envia { action, type, user_id, data: { id } } quando um pagamento muda.
 // Respondemos 200 imediatamente (MP espera < 500ms) e processamos async.
 // Verificamos o status real via GET /v1/payments/:id antes de confirmar
 // (nunca confiar somente no payload do webhook).
 //
-// Fase 2 (21/05/2026): fallback por external_reference para pagamentos
-// CheckoutPro (cartão). Quando mp_payment_id não tem match (cartão nunca
-// armazenou o payment_id antes da confirmação), buscamos o pagamento no MP,
-// extraímos external_reference (= order.id) e fazemos o match pelo UUID.
+// ── DOIS JEITOS DE A LOJA ESTAR CONECTADA ───────────────────────────────
+// 1. OAuth (tq-94/tq-95, 29/10/2026): a loja autorizou a aplicação da Aura.
+//    O Mercado Pago avisa no webhook ÚNICO da aplicação, assinado com
+//    MP_WEBHOOK_SECRET, e diz de quem é o pagamento em `user_id` (o id do
+//    vendedor). A loja é resolvida por companies_payment_gateways.mp_user_id
+//    — não há mais segredo por loja. Se a mesma conta do Mercado Pago serve
+//    dois CNPJs do grupo, quem desempata é o pedido (mp_payment_id ou
+//    external_reference = digital_orders.id).
+// 2. Manual (token colado, como sempre foi): segredo por loja em
+//    companies_payment_gateways.webhook_secret, mesma regra de antes:
+//    se alguma loja manual tem segredo, a assinatura tem que bater com um
+//    deles; se nenhuma tem, segue sem HMAC e com WARN no log.
 //
-// Migration 121 (21/05/2026): validação HMAC x-signature.
-// MP envia headers: x-signature: ts=TS,v1=HASH + x-request-id: REQ.
-// Manifest: `id:DATA_ID;request-id:REQ;ts:TS;`
-// HMAC-SHA256(webhook_secret, manifest).hex() === v1 → autêntico.
+// Assinatura (as duas): x-signature: ts=TS,v1=HASH + x-request-id: REQ.
+// Manifest `id:DATA_ID;request-id:REQ;ts:TS;` e HMAC-SHA256(segredo).hex().
 //
-// Quando ALGUM gateway tem webhook_secret cadastrado, EXIGIMOS assinatura
-// válida (rejeita se nenhuma chave bate). Quando nenhum tem (fallback legado),
-// mantemos o comportamento original (consulta API antes de confirmar).
+// ── O QUE NÃO MUDA ─────────────────────────────────────────────────────
+// Nenhuma mutação confia no body. Todo caminho que confirma pedido chama
+// getMpPayment() com o token da PRÓPRIA loja (decifrado e renovado se for
+// OAuth — services/mpGateway) e só grava confirmed se o Mercado Pago
+// responder status=approved. Idempotente: o UPDATE exige
+// status='pending_payment' e só quem muda a linha dispara confirmação,
+// e-mail e sino. Notificação repetida não faz nada.
 //
-// Bonus: HMAC válido resolve qual gateway processou o pagamento, evitando
-// a varredura O(N) do fallback CheckoutPro.
+// Novidades de segurança (tq-95):
+//   - o pedido achado por external_reference tem que ser de uma empresa
+//     dona do token que achou o pagamento (antes, um pagamento de uma loja
+//     podia apontar para o pedido de outra);
+//   - valor aprovado menor que o total do pedido não confirma.
 //
-// fix (22/05/2026): chama notifyPaymentConfirmed após onOrderConfirmed
-// para enviar e-mail de confirmação ao cliente (Pix MP e Cartão).
-// SELECT de digital_orders inclui order_number, customer_name, customer_email.
-//
-// SEGURANÇA (11/07/2026 — auditoria dos 2 webhooks públicos sem auth, ver
-// PR #360 pro padrão fail-closed usado no webhook de pagamento do karatê):
-//   Diferente do webhook Asaas (fail-closed / reverificação — ver
-//   webhookAsaas.js), este webhook JÁ tinha, antes desta mudança, uma
-//   mitigação equivalente embutida: quando nenhum gateway tem webhook_secret
-//   cadastrado, a validação HMAC é pulada (linhas abaixo), mas NENHUM
-//   caminho de mutação confia no body — todos os 3 pontos que confirmam um
-//   pedido (fluxo Pix por mp_payment_id, fallback CheckoutPro por
-//   external_reference, e o próprio fallback) chamam getMpPayment() e só
-//   gravam status=confirmed se o PRÓPRIO Mercado Pago responder
-//   status==='approved'. Um evento forjado no body (action/data.id
-//   inventados) não muta nada: ou o paymentId não existe pra nenhum access
-//   token de gateway cadastrado (getMpPayment falha silenciosamente pra
-//   cada candidate), ou existe mas não está 'approved', ou não tem
-//   external_reference que bata com um pedido pending_payment real.
-//   MP também não permite consultar payment de outro merchant com um
-//   access_token que não é dono dele — a reverificação é por si só um
-//   controle de posse, não só de status.
-//   Único gap real (agora corrigido): quando nenhum gateway tinha secret,
-//   nada era logado — o "modo sem proteção HMAC" ficava invisível nos logs
-//   do Railway. Adicionado warn ruidoso abaixo (ver "sem HMAC" no log).
+// fix (22/05/2026): chama notifyPaymentConfirmed após onOrderConfirmed.
+// SEGURANÇA (11/07/2026): ver PR #361 (fail-closed e WARN sem HMAC).
 // ============================================================
 'use strict';
 
@@ -59,6 +49,10 @@ const { getMpPayment }     = require('../services/mpService');
 const { onOrderConfirmed } = require('../services/digitalOrderConfirmation');
 const notify                = require('../services/digitalOrderNotifications');
 const lojaEvents            = require('../services/lojaEvents');
+const mpOAuth               = require('../services/mpOAuth');
+const mpGateway             = require('../services/mpGateway');
+
+const ACOES_DE_PAGAMENTO = new Set(['payment.updated', 'payment.created']);
 
 // Parse "ts=1704908010,v1=618c85345248..." → { ts, v1 } ou null.
 function parseMpSignatureHeader(header) {
@@ -92,169 +86,227 @@ function timingSafeEqualHex(a, b) {
   }
 }
 
+function assinaturaBate(secret, paymentId, requestId, parsed) {
+  if (!secret || !parsed || !requestId) return false;
+  return timingSafeEqualHex(computeMpHmac(secret, paymentId, requestId, parsed.ts), parsed.v1);
+}
+
+// Todos os gateways MP. Antes da migration 417 as colunas do OAuth não
+// existem: cai no SELECT antigo e todo mundo é manual.
+async function carregarGateways() {
+  try {
+    const { rows } = await db.query(
+      `SELECT id, company_id, access_token, webhook_secret,
+              auth_method, refresh_token, token_expires_at, connection_status, mp_user_id
+         FROM companies_payment_gateways
+        WHERE gateway = 'mercadopago' LIMIT 500`
+    );
+    return rows;
+  } catch (e) {
+    if (e.code !== '42703') return []; // tabela pode não existir em deployment antigo
+  }
+  try {
+    const { rows } = await db.query(
+      `SELECT id, company_id, access_token, webhook_secret
+         FROM companies_payment_gateways
+        WHERE gateway = 'mercadopago' LIMIT 500`
+    );
+    return rows;
+  } catch (_) { return []; }
+}
+
+const ehOAuth = (g) => g.auth_method === 'oauth';
+
+/**
+ * Quais lojas podem ser donas desta notificação.
+ * @returns {{ candidatos: object[], origem: string } | null} null = rejeitar
+ */
+function resolverCandidatos({ gateways, paymentId, requestId, parsed, sellerId }) {
+  const appSecret = mpOAuth.webhookSecret();
+  const oauth  = gateways.filter(g => ehOAuth(g) && g.connection_status !== 'caiu');
+  const manual = gateways.filter(g => !ehOAuth(g));
+  const doVendedor = (lista) => (sellerId ? lista.filter(g => String(g.mp_user_id || '') === sellerId) : lista);
+
+  // 1. Webhook da aplicação da Aura (OAuth), assinado com MP_WEBHOOK_SECRET.
+  if (assinaturaBate(appSecret, paymentId, requestId, parsed)) {
+    return { candidatos: doVendedor(oauth), origem: 'aplicacao' };
+  }
+
+  const candidatos = [];
+  let origem = 'sem-assinatura';
+
+  // 2. Lojas manuais: regra de sempre (segredo por loja).
+  const manualComSegredo = manual.filter(g => g.webhook_secret);
+  if (manualComSegredo.length > 0) {
+    const g = manualComSegredo.find(m => assinaturaBate(m.webhook_secret, paymentId, requestId, parsed));
+    if (g) { candidatos.push(g); origem = 'loja'; }
+  } else if (manual.length > 0) {
+    console.warn('[webhookMp] NENHUM gateway manual com webhook_secret — pulando validação HMAC ' +
+      '(paymentId=' + paymentId + '). A confirmação só acontece se o próprio Mercado Pago ' +
+      '(getMpPayment) reportar status=approved para o token dono do pagamento.');
+    candidatos.push(...manual);
+  }
+
+  // 3. OAuth sem MP_WEBHOOK_SECRET configurado: só a reverificação protege.
+  //    Com o segredo configurado, notificação sem assinatura da aplicação
+  //    nunca chega às lojas OAuth.
+  if (!appSecret && oauth.length > 0) {
+    console.warn('[webhookMp] MP_WEBHOOK_SECRET ausente — lojas conectadas por OAuth sem validação ' +
+      'de assinatura (paymentId=' + paymentId + '); só a reconsulta no Mercado Pago protege.');
+    candidatos.push(...doVendedor(oauth));
+  }
+
+  if (!candidatos.length) return null;
+  return { candidatos, origem };
+}
+
+async function confirmarPedido(order, { tipo }) {
+  const { rowCount } = await db.query(
+    `UPDATE digital_orders
+     SET status         = 'confirmed',
+         payment_status = 'paid',
+         confirmed_at   = NOW(),
+         updated_at     = NOW()
+     WHERE id = $1 AND status = 'pending_payment'`,
+    [order.id]
+  );
+  if (rowCount === 0) return false; // outra notificação/instância já confirmou
+
+  await onOrderConfirmed(order.id);
+  notify.notifyPaymentConfirmed({ order })
+    .catch(err => console.error(`[webhookMp] notifyPaymentConfirmed (${tipo}) error:`, err.message));
+  lojaEvents.emit('loja_pedido_pago', order);
+  return true;
+}
+
+// Valor aprovado menor que o total do pedido não confirma (centavo de folga).
+function valorCobre(order, payment) {
+  if (order.total == null || payment.transaction_amount == null) return true;
+  return Number(payment.transaction_amount) + 0.01 >= Number(order.total);
+}
+
+async function tokenDe(gw) {
+  try { return await mpGateway.tokenDoGateway(db, gw); }
+  catch (e) {
+    console.error('[webhookMp] token da loja ilegível (gateway=' + gw.id + '):', e.message);
+    return null;
+  }
+}
+
+const COLS_PEDIDO = 'id, company_id, status, order_number, customer_name, customer_email, total';
+
+async function processar(req) {
+  const body      = req.body || {};
+  const action    = body.action;
+  // data.id pode vir no body OU na query (MP usa as duas formas)
+  const paymentId = String(body?.data?.id || req.query?.['data.id'] || req.query?.id || '');
+
+  if (!paymentId || paymentId.length > 64 || !ACOES_DE_PAGAMENTO.has(action)) return;
+
+  const gateways = await carregarGateways();
+  if (!gateways.length) return;
+
+  const sellerId  = body.user_id != null ? String(body.user_id) : '';
+  const requestId = String(req.headers['x-request-id'] || '');
+  const parsed    = parseMpSignatureHeader(req.headers['x-signature']);
+
+  const r = resolverCandidatos({ gateways, paymentId, requestId, parsed, sellerId });
+  if (!r) {
+    console.warn('[webhookMp] notificação sem assinatura válida e sem loja candidata — ignorada (paymentId=' + paymentId + ')');
+    return;
+  }
+  const { candidatos } = r;
+
+  // ===== 1. Pedido pelo mp_payment_id (Pix MP, ou cartão já visto) =====
+  const { rows: ordersByPaymentId } = await db.query(
+    `SELECT ${COLS_PEDIDO} FROM digital_orders WHERE mp_payment_id = $1 LIMIT 1`,
+    [paymentId]
+  );
+  let order = ordersByPaymentId[0] || null;
+
+  if (order) {
+    if (order.status !== 'pending_payment') return;
+    const gw = candidatos.find(g => g.company_id === order.company_id);
+    if (!gw) {
+      console.warn('[webhookMp] pedido de empresa fora das candidatas da notificação — ignorado (paymentId=' + paymentId + ')');
+      return;
+    }
+    const accessToken = await tokenDe(gw);
+    if (!accessToken) return;
+
+    // Verificação via API mesmo com HMAC válido — defesa em profundidade e
+    // o status pode mudar entre notificações.
+    const payment = await getMpPayment({ accessToken, paymentId });
+    if (payment?.status !== 'approved') return;
+    if (!valorCobre(order, payment)) {
+      console.warn('[webhookMp] valor aprovado menor que o total do pedido — não confirmado (order=' + order.id + ')');
+      return;
+    }
+    await confirmarPedido(order, { tipo: 'pix' });
+    return;
+  }
+
+  // ===== 2. Cartão (Checkout Pro): payment_id ainda não salvo. =====
+  // Busca o pagamento com o token de cada candidata (uma vez por conta do
+  // Mercado Pago) e casa pelo external_reference (= digital_orders.id).
+  let payment = null;
+  let dono = null;
+  const contasVistas = new Set();
+  for (const gw of candidatos) {
+    const conta = gw.mp_user_id ? 'u:' + gw.mp_user_id : 'g:' + gw.id;
+    if (contasVistas.has(conta)) continue;
+    contasVistas.add(conta);
+    const accessToken = await tokenDe(gw);
+    if (!accessToken) continue;
+    try {
+      const p = await getMpPayment({ accessToken, paymentId });
+      if (p && p.id) { payment = p; dono = gw; break; }
+    } catch (_) { /* tenta próximo */ }
+  }
+
+  if (!payment || !payment.external_reference) return;
+
+  const { rows: ordersByRef } = await db.query(
+    `SELECT ${COLS_PEDIDO} FROM digital_orders WHERE id::text = $1 LIMIT 1`,
+    [String(payment.external_reference)]
+  );
+  if (!ordersByRef.length) return;
+  order = ordersByRef[0];
+
+  // O pedido tem que ser de uma empresa dona da conta que achou o pagamento.
+  const empresasDaConta = new Set(
+    candidatos
+      .filter(g => g === dono || (dono.mp_user_id && g.mp_user_id === dono.mp_user_id))
+      .map(g => g.company_id)
+  );
+  if (!empresasDaConta.has(order.company_id)) {
+    console.warn('[webhookMp] external_reference aponta para pedido de outra empresa — ignorado (paymentId=' + paymentId + ')');
+    return;
+  }
+  if (order.status !== 'pending_payment') return;
+  if (payment.status !== 'approved') return;
+  if (!valorCobre(order, payment)) {
+    console.warn('[webhookMp] valor aprovado menor que o total do pedido — não confirmado (order=' + order.id + ')');
+    return;
+  }
+
+  // Persiste payment_id pra próximos webhooks resolverem direto (O(1))
+  await db.query(
+    `UPDATE digital_orders SET mp_payment_id = $1, updated_at = NOW() WHERE id = $2`,
+    [paymentId, order.id]
+  );
+  await confirmarPedido(order, { tipo: 'card' });
+}
+
 router.post('/', async (req, res) => {
   // Responde antes de processar para não esgotar o timeout do MP
   res.sendStatus(200);
-
   try {
-    const action    = req.body?.action;
-    // data.id pode vir no body OU na query (MP usa as duas formas)
-    const paymentId = String(req.body?.data?.id || req.query?.['data.id'] || req.query?.id || '');
-
-    if (!paymentId || action !== 'payment.updated') return;
-
-    // Carrega TODOS os gateways MP de uma vez. Usado pro HMAC, pro
-    // fallback de lookup e pra resolver access_token do pedido.
-    let allGateways = [];
-    try {
-      const { rows } = await db.query(
-        `SELECT id, company_id, access_token, webhook_secret
-         FROM companies_payment_gateways
-         WHERE gateway = 'mercadopago' LIMIT 100`
-      );
-      allGateways = rows;
-    } catch (_) { /* tabela ou coluna pode não existir em deployment antigo */ }
-
-    // ===== Validação HMAC x-signature =====
-    // Se algum gateway tem webhook_secret, exigimos x-signature válido.
-    // Se nenhum tem, pulamos (fallback legado consultando MP API) — mas
-    // NUNCA silenciosamente: loga WARN pra não ficar invisível no Railway
-    // que este webhook está aceitando notificações sem verificar HMAC
-    // (a proteção real, nesse modo, é a reverificação contra a API do MP
-    // mais abaixo — nenhuma mutação depende só disto aqui).
-    const sigHeader = req.headers['x-signature'];
-    const requestId = String(req.headers['x-request-id'] || '');
-    const parsed = parseMpSignatureHeader(sigHeader);
-
-    const gatewaysWithSecret = allGateways.filter(g => g.webhook_secret);
-    let trustedGateway = null;
-
-    if (gatewaysWithSecret.length > 0) {
-      if (!parsed || !requestId) {
-        console.warn('[webhookMp] x-signature/x-request-id ausentes mas há gateways com webhook_secret cadastrado — rejeitando notificação (paymentId=' + paymentId + ')');
-        return;
-      }
-      for (const g of gatewaysWithSecret) {
-        const expected = computeMpHmac(g.webhook_secret, paymentId, requestId, parsed.ts);
-        if (timingSafeEqualHex(expected, parsed.v1)) {
-          trustedGateway = g;
-          break;
-        }
-      }
-      if (!trustedGateway) {
-        console.warn('[webhookMp] x-signature inválido para todos os gateways com secret — possível spoofing (paymentId=' + paymentId + ')');
-        return;
-      }
-    } else {
-      console.warn('[webhookMp] NENHUM gateway com webhook_secret cadastrado — pulando validação HMAC ' +
-        '(paymentId=' + paymentId + '). Nenhuma mutação confia neste ponto: a confirmação abaixo só ' +
-        'acontece se o próprio Mercado Pago (getMpPayment) reportar status=approved pro access_token ' +
-        'dono do pagamento. Recomenda-se cadastrar webhook_secret por gateway assim que possível ' +
-        '(fecha a checagem de autenticidade sem depender só da reverificação).');
-    }
-
-    // ===== 1. Tenta encontrar pedido pelo mp_payment_id (Pix MP) =====
-    const { rows: ordersByPaymentId } = await db.query(
-      `SELECT id, company_id, status, order_number, customer_name, customer_email
-       FROM digital_orders
-       WHERE mp_payment_id = $1
-       LIMIT 1`,
-      [paymentId]
-    );
-    let order = ordersByPaymentId[0] || null;
-
-    // ===== 2. Fallback CheckoutPro (cartão): payment_id não está salvo. =====
-    // Resolve via external_reference (= order.id no MP).
-    // Se HMAC já resolveu o gateway, consulta apenas nele. Senão itera.
-    if (!order) {
-      const candidates = trustedGateway ? [trustedGateway] : allGateways;
-      let payment = null;
-      for (const gw of candidates) {
-        try {
-          const p = await getMpPayment({ accessToken: gw.access_token, paymentId });
-          if (p && p.id) { payment = p; trustedGateway = gw; break; }
-        } catch (_) { /* tenta próximo */ }
-      }
-
-      if (!payment || !payment.external_reference) return;
-
-      const { rows: ordersByRef } = await db.query(
-        `SELECT id, company_id, status, order_number, customer_name, customer_email
-         FROM digital_orders
-         WHERE id::text = $1
-         LIMIT 1`,
-        [String(payment.external_reference)]
-      );
-      if (!ordersByRef.length) return;
-
-      order = ordersByRef[0];
-      if (order.status !== 'pending_payment') return;
-      if (payment.status !== 'approved') return;
-
-      // Persiste payment_id pra próximos webhooks resolverem direto (O(1))
-      await db.query(
-        `UPDATE digital_orders SET mp_payment_id = $1, updated_at = NOW() WHERE id = $2`,
-        [paymentId, order.id]
-      );
-
-      const { rowCount } = await db.query(
-        `UPDATE digital_orders
-         SET status         = 'confirmed',
-             payment_status = 'paid',
-             confirmed_at   = NOW(),
-             updated_at     = NOW()
-         WHERE id = $1 AND status = 'pending_payment'`,
-        [order.id]
-      );
-      if (rowCount > 0) {
-        await onOrderConfirmed(order.id);
-        // Notifica cliente por e-mail que o pagamento (cartão) foi confirmado
-        notify.notifyPaymentConfirmed({ order })
-          .catch(err => console.error('[webhookMp] notifyPaymentConfirmed (card) error:', err.message));
-        lojaEvents.emit('loja_pedido_pago', order);
-      }
-      return;
-    }
-
-    // ===== Fluxo Pix MP (payment_id já salvo na criação) =====
-    if (order.status !== 'pending_payment') return;
-
-    // Resolve access_token. Preferir trustedGateway se HMAC já bateu
-    // E ele é da mesma empresa do pedido.
-    let accessToken = null;
-    if (trustedGateway && trustedGateway.company_id === order.company_id) {
-      accessToken = trustedGateway.access_token;
-    } else {
-      const gw = allGateways.find(g => g.company_id === order.company_id);
-      accessToken = gw?.access_token || null;
-    }
-    if (!accessToken) return;
-
-    // Verificação extra via API mesmo quando HMAC válido — defesa em
-    // profundidade. MP webhook pode chegar antes do payment estar
-    // efetivamente aprovado (status pode mudar entre v1 e v2 da notificação).
-    const payment = await getMpPayment({ accessToken, paymentId });
-    if (payment?.status !== 'approved') return;
-
-    const { rowCount } = await db.query(
-      `UPDATE digital_orders
-       SET status         = 'confirmed',
-           payment_status = 'paid',
-           confirmed_at   = NOW(),
-           updated_at     = NOW()
-       WHERE id = $1 AND status = 'pending_payment'`,
-      [order.id]
-    );
-    if (rowCount === 0) return; // outra instância já confirmou
-
-    await onOrderConfirmed(order.id);
-    // Notifica cliente por e-mail que o pagamento (Pix MP) foi confirmado
-    notify.notifyPaymentConfirmed({ order })
-      .catch(err => console.error('[webhookMp] notifyPaymentConfirmed (pix) error:', err.message));
-    lojaEvents.emit('loja_pedido_pago', order);
+    await processar(req);
   } catch (err) {
     console.error('[webhookMp] error:', err.message);
   }
 });
 
 module.exports = router;
+module.exports._resolverCandidatos = resolverCandidatos;
