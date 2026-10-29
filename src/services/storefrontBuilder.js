@@ -16,6 +16,13 @@
 //   hidden_product_ids fica DORMENTE — parseHiddenIds segue exportado para
 //   nao quebrar imports externos, mas e ignorado no storefront publico.
 //
+// tq-57 (29/10/2026): hidden_product_ids VOLTA a valer, como "ocultar".
+//   A regra mora no fragmento NA_VITRINE (catalogoPaginado.js), que toda
+//   consulta da vitrine ja usa: peca oculta some, peca nova entra sozinha.
+//   featured cheio continua lista de inclusao (nenhuma loja muda o que
+//   mostra); a conversao featured -> ocultos e por loja, com o script
+//   scripts/vitrine-featured-para-ocultos.js.
+//
 // fix (20/05/2026): variantes ordenadas por tamanho numérico ASC (menor → maior).
 //   Usa split_part(sku_suffix, '/', 1) para lidar com ranges tipo "25/26".
 //
