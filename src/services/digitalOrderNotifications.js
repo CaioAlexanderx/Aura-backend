@@ -363,7 +363,7 @@ async function notifyPaymentConfirmed({ order: input }) {
  * Notifica o cliente por e-mail para os status que fazem sentido notificar.
  */
 async function notifyStatusChange(order) {
-  const CUSTOMER_NOTIFY_STATUSES = ['preparing', 'ready', 'delivered', 'cancelled'];
+  const CUSTOMER_NOTIFY_STATUSES = ['preparing', 'ready', 'out_for_delivery', 'delivered', 'cancelled'];
   if (!CUSTOMER_NOTIFY_STATUSES.includes(order.status)) return;
   if (!order.customer_email) return;
   if (await ehLojaDeTeste(order.company_id)) {

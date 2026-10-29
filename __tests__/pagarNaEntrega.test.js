@@ -160,6 +160,12 @@ describe('loja sem as formas marcadas: igual a antes', () => {
     expect(notify.notifyPaymentConfirmed).toHaveBeenCalled();
     expect(notify.notifyPedidoAAceitar).not.toHaveBeenCalled();
   });
+
+  test('Pix pago em loja sem formas nao entra na fila de aceite', async () => {
+    const r = await pedir({ payment_method: 'pix' });
+    expect(r.status).toBe(201);
+    expect(db.query.mock.calls.some(([s]) => /aceite_na_fila/.test(String(s)))).toBe(false);
+  });
 });
 
 describe('loja com as formas marcadas: o pedido espera o aceite', () => {
@@ -198,11 +204,17 @@ describe('loja com as formas marcadas: o pedido espera o aceite', () => {
     expect(inserts).toHaveLength(0);
   });
 
-  test('Pix online da mesma loja segue como hoje', async () => {
+  test('Pix online da mesma loja segue como hoje e nasce marcado para a fila de aceite', async () => {
     const r = await pedir({ payment_method: 'pix' });
     expect(r.status).toBe(201);
     expect(r.body.status).toBe('pending_payment');
     expect(inserts[0].sql).not.toMatch(/pay_on_delivery_method/);
+    expect(db.query.mock.calls.some(([s]) => /SET aceite_na_fila = TRUE/.test(String(s)))).toBe(true);
+  });
+
+  test('pagar na entrega nao usa a marca (ja nasce aguardando aceite)', async () => {
+    await pedir({ pay_on_delivery_method: 'cash' });
+    expect(db.query.mock.calls.some(([s]) => /aceite_na_fila/.test(String(s)))).toBe(false);
   });
 });
 
