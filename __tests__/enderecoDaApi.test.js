@@ -93,7 +93,8 @@ describe('o nome do provedor saiu do caminho da vitrine', () => {
     const rota = fonte('src/routes/storefront.js');
     expect(rota).toContain('const STOREFRONT_API_BASE = enderecoDaApi();');
     expect(rota).toContain('"connect-src \'self\' https://cloudflareinsights.com https://viacep.com.br https://brasilapi.com.br " + STOREFRONT_API_BASE');
-    expect(fonte('src/templates/storefrontPage.js')).toContain('buildScript(storeData, escJs(slug), enderecoDaApi())');
+    // O terceiro argumento e o endereco; o quarto (tq-58) sao os textos da frente.
+    expect(fonte('src/templates/storefrontPage.js')).toContain('buildScript(storeData, escJs(slug), enderecoDaApi()');
   });
 
   test('o boot diz qual endereço está valendo', () => {
