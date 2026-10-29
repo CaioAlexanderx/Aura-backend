@@ -43,7 +43,7 @@ const COLUNAS = `
   o.customer_id, o.transaction_id, o.stock_deducted, o.nfce_id,
   o.courier_name, o.courier_plate`;
 
-// tq-44 (migration 417): forma de pagar na entrega, troco e aceite. Em
+// tq-44 (migration 420): forma de pagar na entrega, troco e aceite. Em
 // separado porque a base sem a migration nao tem as colunas: a rota tenta
 // com elas e, no 42703, segue sem (comEntrega: false).
 const COLUNAS_DA_ENTREGA = `,

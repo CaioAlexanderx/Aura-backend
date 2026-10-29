@@ -1,5 +1,5 @@
 -- ============================================================
--- 417 — Pagar na entrega com forma, troco e aceite da lojista (tq-44, 29/10/2026)
+-- 420 — Pagar na entrega com forma, troco e aceite da lojista (tq-44, 29/10/2026)
 --
 -- Desenho aprovado pela Nina (Produto) em 19/10, piloto numa adega.
 --

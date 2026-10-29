@@ -587,7 +587,7 @@ router.put('/', requireRole('client', 'analyst', 'admin'), async (req, res) => {
     delivery_radius_km, pickup_enabled, is_published,
     pix_key, pix_key_type, pix_holder_name, pix_holder_city,
     pay_on_delivery_enabled,
-    // tq-44 (migration 417): formas de pagar na entrega (cash, card, pix).
+    // tq-44 (migration 420): formas de pagar na entrega (cash, card, pix).
     pay_on_delivery_methods,
     card_enabled,
     card_max_installments,
@@ -1252,7 +1252,7 @@ router.put('/', requireRole('client', 'analyst', 'admin'), async (req, res) => {
       }
     }
 
-    // tq-44 (migration 417) — formas de pagar na entrega. Lista vazia grava
+    // tq-44 (migration 420) — formas de pagar na entrega. Lista vazia grava
     // NULL: a loja volta ao pagar na entrega de hoje (sem aceite). UPDATE
     // separado e 42703 tolerado, como os outros campos novos.
     const formasNaEntrega = formasParaGravar(pay_on_delivery_methods);

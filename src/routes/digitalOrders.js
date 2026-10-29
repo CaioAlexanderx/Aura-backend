@@ -31,7 +31,7 @@ const { AGUARDANDO_ACEITE, fraseDoPagamento, trocoALevar } = require('../service
 // Fila de pedidos (10/09/2026): consulta e apresentacao em um servico testavel.
 const { montarConsultaDaFila, apresentarLinhaDaFila, nomeLegivelDoItem } = require('../services/filaDePedidos');
 
-// Cache por processo: a base ja tem as colunas da migration 417?
+// Cache por processo: a base ja tem as colunas da migration 420?
 let filaComEntrega = true;
 
 router.get('/', async (req, res) => {
@@ -45,7 +45,7 @@ router.get('/', async (req, res) => {
     // 10/09/2026: a consulta mora em services/filaDePedidos.js — busca por
     // numero/telefone/texto e foto + nome do primeiro item. A lista antiga
     // so devolvia a contagem de itens e nao tinha busca.
-    // tq-44: com as colunas do pagar na entrega (migration 417) quando a
+    // tq-44: com as colunas do pagar na entrega (migration 420) quando a
     // base ja as tem; no 42703 segue sem, como antes, e lembra.
     let rows;
     try {

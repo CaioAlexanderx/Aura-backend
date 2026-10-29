@@ -7,7 +7,7 @@
 //
 // QUEM ENTRA NO FLUXO NOVO: so a loja com "pagar na entrega" ligado E pelo
 // menos uma forma marcada (digital_channel_config.pay_on_delivery_methods,
-// migration 417). Loja com a lista vazia ou nula continua no fluxo de hoje
+// migration 420). Loja com a lista vazia ou nula continua no fluxo de hoje
 // (um botao "Pagar na entrega", pedido nasce confirmado) — inclusive as que
 // ja tinham "pagar na entrega" ligado antes deste card. Elas so mudam se a
 // lojista marcar as formas no painel.
