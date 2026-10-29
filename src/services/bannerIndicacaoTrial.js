@@ -48,6 +48,31 @@ const BANNER = Object.freeze({
   ctaRoute: '/configuracoes?foco=indicacao',
 });
 
+// 28/10/2026 (Black Friday, aprovado pelo Caio e pelo Marketing): até o fim
+// de 30/11/2026 no horário de Brasília o banner leva o texto da campanha
+// BLACK50; depois desse instante volta sozinho ao BANNER acima, sem deploy.
+// Só o texto muda: público, rota, validade, dedupe e regras de desconto,
+// cupom e crédito continuam os mesmos.
+// Fim inclusivo: 30/11/2026 23:59:59 em Brasília (UTC-3).
+const FIM_BLACK_FRIDAY_INDICACAO = new Date('2026-12-01T02:59:59Z');
+
+const BANNER_BLACK_FRIDAY = Object.freeze({
+  ...BANNER,
+  title: 'Black Friday: você indica, vocês dois ganham.',
+  body: 'Seu indicado tem 50% na primeira mensalidade com o código BLACK50, até 30/11 ou enquanto houver cupons. '
+    + 'Quando ele pagar, você ganha 1 mensalidade grátis.',
+});
+
+/** Pura: true até FIM_BLACK_FRIDAY_INDICACAO, inclusive. Sem data de início. */
+function emBlackFridayDaIndicacao(agora) {
+  return new Date(agora).getTime() <= FIM_BLACK_FRIDAY_INDICACAO.getTime();
+}
+
+/** Pura: o texto do banner que vale no instante `agora`. */
+function bannerVigente(agora) {
+  return emBlackFridayDaIndicacao(agora) ? BANNER_BLACK_FRIDAY : BANNER;
+}
+
 const DIA_MS = 24 * 3600 * 1000;
 
 const norm = (v) => String(v == null ? '' : v).trim().toLowerCase();
@@ -147,12 +172,13 @@ async function buscarFatos(db, agora = new Date()) {
 
 /** Payload de createAppNotification para a empresa. Puro. */
 function montarBanner(companyId, { agora = new Date(), publicar = true } = {}) {
+  const texto = bannerVigente(agora);
   return {
-    type: BANNER.type,
-    title: BANNER.title,
-    body: BANNER.body,
-    ctaLabel: BANNER.ctaLabel,
-    ctaRoute: BANNER.ctaRoute,
+    type: texto.type,
+    title: texto.title,
+    body: texto.body,
+    ctaLabel: texto.ctaLabel,
+    ctaRoute: texto.ctaRoute,
     targetCompanyId: companyId,
     expiresAt: new Date(agora.getTime() + DIAS_NO_AR * DIA_MS).toISOString(),
     dedupeKey: dedupeKeyDe(companyId),
@@ -248,4 +274,8 @@ module.exports = {
   PREFIXO_DEDUPE,
   DIAS_NO_AR,
   BANNER,
+  BANNER_BLACK_FRIDAY,
+  FIM_BLACK_FRIDAY_INDICACAO,
+  emBlackFridayDaIndicacao,
+  bannerVigente,
 };

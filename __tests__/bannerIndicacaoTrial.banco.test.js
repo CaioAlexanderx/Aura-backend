@@ -114,9 +114,11 @@ describe('banner de indicacao so depois da 1a venda (Postgres real)', () => {
 
     const novo = await bannersDe(comVenda);
     expect(novo).toHaveLength(1);
+    // Texto do instante da volta: Black Friday até 30/11/2026, depois o de hoje.
+    const texto = svc.bannerVigente(new Date(agora));
     expect(novo[0]).toMatchObject({
-      title: 'Conhece outro lojista que ia gostar da Aura?',
-      body: 'Indique e ganhe um mês grátis quando ele assinar.',
+      title: texto.title,
+      body: texto.body,
       cta_label: 'Gerar meu código',
       cta_route: '/configuracoes?foco=indicacao',
     });
