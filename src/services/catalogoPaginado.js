@@ -90,18 +90,40 @@ const COM_FOTO = `(
  *
  * Le a config por $1 — o company da loja, o MESMO parametro que
  * visibilityWhere ja usa em todas essas consultas.
+ *
+ * OCULTAR (tq-57, 29/10/2026): `hidden_product_ids` volta a valer. A peca
+ * listada ali some da vitrine inteira, e a que NAO esta listada aparece
+ * sozinha — inclusive a cadastrada amanha. Era a armadilha da lista de
+ * inclusao: a Felic Adega escondeu 4 pecas gravando 149 em featured, e
+ * dali em diante produto novo nao entrava na loja sem alguem lembrar.
+ *
+ * As duas regras convivem, e o oculto ganha: lista de inclusao cheia segue
+ * valendo como hoje (nenhuma loja muda o que mostra por causa deste
+ * fragmento) e quem sai dela vai para os ocultos pelo script
+ * scripts/vitrine-featured-para-ocultos.js, loja a loja.
+ *
+ * Contencao de ARRAY (`@>`), nao `= ANY(...)`: hidden_product_ids e text[]
+ * (migration 119), e NULL ali nao esconde nada — o NOT EXISTS segue
+ * verdadeiro.
  */
 const NA_VITRINE = `(
-  NOT EXISTS (
-    SELECT 1 FROM digital_channel_config dcv
-     WHERE dcv.company_id = $1
-       AND jsonb_typeof(dcv.featured_product_ids) = 'array'
-       AND jsonb_array_length(dcv.featured_product_ids) > 0
+  (
+    NOT EXISTS (
+      SELECT 1 FROM digital_channel_config dcv
+       WHERE dcv.company_id = $1
+         AND jsonb_typeof(dcv.featured_product_ids) = 'array'
+         AND jsonb_array_length(dcv.featured_product_ids) > 0
+    )
+    OR EXISTS (
+      SELECT 1 FROM digital_channel_config dcv
+       WHERE dcv.company_id = $1
+         AND dcv.featured_product_ids @> to_jsonb(products.id::text)
+    )
   )
-  OR EXISTS (
-    SELECT 1 FROM digital_channel_config dcv
-     WHERE dcv.company_id = $1
-       AND dcv.featured_product_ids @> to_jsonb(products.id::text)
+  AND NOT EXISTS (
+    SELECT 1 FROM digital_channel_config dch
+     WHERE dch.company_id = $1
+       AND dch.hidden_product_ids @> ARRAY[products.id::text]
   )
 )`;
 

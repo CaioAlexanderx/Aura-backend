@@ -16,6 +16,13 @@
 //   hidden_product_ids fica DORMENTE — parseHiddenIds segue exportado para
 //   nao quebrar imports externos, mas e ignorado no storefront publico.
 //
+// tq-57 (29/10/2026): hidden_product_ids VOLTA a valer, como "ocultar".
+//   A regra mora no fragmento NA_VITRINE (catalogoPaginado.js), que toda
+//   consulta da vitrine ja usa: peca oculta some, peca nova entra sozinha.
+//   featured cheio continua lista de inclusao (nenhuma loja muda o que
+//   mostra); a conversao featured -> ocultos e por loja, com o script
+//   scripts/vitrine-featured-para-ocultos.js.
+//
 // fix (20/05/2026): variantes ordenadas por tamanho numérico ASC (menor → maior).
 //   Usa split_part(sku_suffix, '/', 1) para lidar com ranges tipo "25/26".
 //
@@ -62,6 +69,8 @@ const { montarTira } = require('./tiraDeCategorias');
 const { montarHome, capasDasCategorias, ehNovo } = require('./homeDaLoja');
 // Migration 323 — galeria por cor na peca aberta pela URL propria.
 const { agruparGaleria } = require('./productImageGallery');
+// Textos fixos da vitrine pela frente da conta (tq-58).
+const { textosDaFrente } = require('./textosDaFrente');
 
 /**
  * Os selos padrao, DERIVADOS do que a lojista ligou (decisao 7, 02/09/2026).
@@ -1113,6 +1122,12 @@ async function buildStorefront(config) {
       titulo: config.whats_bloco_titulo || null,
       texto: config.whats_bloco_texto || null,
     },
+    // tq-58 — "Sobre esta peça" e "Dúvida sobre tamanho ou modelo?" sao
+    // textos de loja de roupa. company_segment vem da rota da pagina
+    // (JOIN companies); sem ele, os textos de roupa de sempre. Fica FORA
+    // do storeData (o <script> copia campo a campo): a pagina recebe o
+    // texto ja resolvido no servidor.
+    textos_da_frente: textosDaFrente(config.company_segment),
     // Rodape institucional JA RESOLVIDO. A vitrine Studio nao remonta a
     // lista de formas nem repete o texto padrao: se repetisse, uma
     // correcao no texto valeria numa loja e nao na outra.

@@ -123,4 +123,21 @@ describe('import_logs.meta da planilha de lançamentos', () => {
       "Linha 1: data invalida 'ontem' (use YYYY-MM-DD ou DD/MM/YYYY)",
     ]);
   });
+
+  test('a resposta traz a contagem por motivo (reasons), mesmo com errors cortado em 20', async () => {
+    // Planilha de crediario: sem tipo, 30 linhas.
+    const linhas = Array.from({ length: 30 }, (_, i) => ({ parcela: `${i + 1}/3`, saldo: '120,00', vencimento: '10/11/2026' }));
+    const res = await importar(linhas);
+    expect(res.status).toBe(201);
+    expect(res.body.saved).toBe(0);
+    expect(res.body.error_count).toBe(30);
+    expect(res.body.errors).toHaveLength(20);
+    expect(res.body.reasons).toEqual(expect.objectContaining({ tipo_invalido: 30 }));
+    expect(res.body.reasons).toEqual(meta().motivos);
+  });
+
+  test('sem erro, reasons vem vazio', async () => {
+    const res = await importar([{ tipo: 'despesa', valor: '89,90', descricao: 'Luz', data: '05/09/2020' }]);
+    expect(res.body.reasons).toEqual({});
+  });
 });

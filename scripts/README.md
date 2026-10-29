@@ -25,3 +25,17 @@ em `audit_log` (`billing.next_due_corrected`). Idempotente. Precisa de
 
     node scripts/corrigirVencimentosAsaas.js            # so mostra antes/depois
     node scripts/corrigirVencimentosAsaas.js --aplicar  # grava
+
+## vitrine-featured-para-ocultos.js — lista de inclusao -> ocultos (tq-57, 29/10/2026)
+
+Troca a lista de inclusao da vitrine (`featured_product_ids` cheio) pelo
+inverso dela em `hidden_product_ids`, sem mudar o que a loja mostra hoje: o
+script compara o fragmento real `NA_VITRINE` antes e depois, produto a produto,
+e faz ROLLBACK na menor divergencia. Dry-run por padrao; `--apply` so com
+`--lojas` (um slug por vez ou separados por virgula). Antes de cada UPDATE grava
+o backup em JSON; `--desfazer <arquivo> --apply` volta. Precisa do ambiente do
+backend (SUPABASE_DB_URL e as variaveis que src/config/database.js exige).
+
+    node scripts/vitrine-featured-para-ocultos.js                                  # so mostra, todas
+    node scripts/vitrine-featured-para-ocultos.js --lojas felic-adega --apply      # converte
+    node scripts/vitrine-featured-para-ocultos.js --desfazer <backup.json> --apply # volta
