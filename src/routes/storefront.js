@@ -333,7 +333,8 @@ async function servirPaginaDaLoja(req, res, produtoId, { somenteStudio = false, 
     }
     const { rows } = await db.query(
       `SELECT dcc.*, COALESCE(c.pdv_settings, '{}'::jsonb) AS company_pdv_settings,
-              COALESCE(c.trade_name, c.legal_name) AS company_display_name
+              COALESCE(c.trade_name, c.legal_name) AS company_display_name,
+              c.segment AS company_segment
          FROM digital_channel_config dcc
          JOIN companies c ON c.id = dcc.company_id
         WHERE dcc.slug = $1 AND dcc.is_published = true`, [slug]);

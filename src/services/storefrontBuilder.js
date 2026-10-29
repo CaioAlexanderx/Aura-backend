@@ -68,6 +68,8 @@ const { montarTira } = require('./tiraDeCategorias');
 const { montarHome, capasDasCategorias, ehNovo } = require('./homeDaLoja');
 // Migration 323 — galeria por cor na peca aberta pela URL propria.
 const { agruparGaleria } = require('./productImageGallery');
+// Textos fixos da vitrine pela frente da conta (tq-58).
+const { textosDaFrente } = require('./textosDaFrente');
 
 /**
  * Os selos padrao, DERIVADOS do que a lojista ligou (decisao 7, 02/09/2026).
@@ -1125,6 +1127,12 @@ async function buildStorefront(config) {
       titulo: config.whats_bloco_titulo || null,
       texto: config.whats_bloco_texto || null,
     },
+    // tq-58 — "Sobre esta peça" e "Dúvida sobre tamanho ou modelo?" sao
+    // textos de loja de roupa. company_segment vem da rota da pagina
+    // (JOIN companies); sem ele, os textos de roupa de sempre. Fica FORA
+    // do storeData (o <script> copia campo a campo): a pagina recebe o
+    // texto ja resolvido no servidor.
+    textos_da_frente: textosDaFrente(config.company_segment),
     // Rodape institucional JA RESOLVIDO. A vitrine Studio nao remonta a
     // lista de formas nem repete o texto padrao: se repetisse, uma
     // correcao no texto valeria numa loja e nao na outra.
