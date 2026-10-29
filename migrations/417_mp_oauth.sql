@@ -18,6 +18,22 @@
 -- Registros manuais seguem em texto, como antes. Tabela vazia em 29/10/2026.
 -- Idempotente.
 
+-- A tabela foi criada à mão em 20/05/2026 (Fase 0) e nunca entrou em
+-- migrations/; o CI monta o banco do zero por esta pasta. Em produção este
+-- CREATE é no-op (mesma forma conferida em 29/10/2026).
+CREATE TABLE IF NOT EXISTS companies_payment_gateways (
+  id             UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  company_id     UUID NOT NULL REFERENCES companies(id) ON DELETE CASCADE,
+  gateway        TEXT NOT NULL CHECK (gateway = 'mercadopago'),
+  access_token   TEXT NOT NULL,
+  public_key     TEXT NOT NULL,
+  sandbox        BOOLEAN NOT NULL DEFAULT true,
+  created_at     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  webhook_secret TEXT,
+  UNIQUE (company_id, gateway)
+);
+
 ALTER TABLE companies_payment_gateways
   ADD COLUMN IF NOT EXISTS auth_method        TEXT NOT NULL DEFAULT 'manual',
   ADD COLUMN IF NOT EXISTS refresh_token      TEXT,
