@@ -168,6 +168,9 @@ function buildStorefrontPage(data, slug) {
     // (migration 401). Fora do storeData de proposito: o <script> das
     // lojas que nao escreveram nada nao muda.
     whatsBloco: data.whats_bloco || null,
+    // tq-58: titulo padrao do bloco pela frente da conta. Loja de roupa
+    // (ou payload sem o campo) recebe o texto de sempre, byte a byte.
+    textosDaFrente: data.textos_da_frente || null,
     // Formas de pagamento vem do que a lojista LIGOU, nao de lista fixa.
     pagamentos: {
       pix:  data.settings && data.settings.has_pix === true,
@@ -179,7 +182,7 @@ function buildStorefrontPage(data, slug) {
     // builder (services/redesSociais.js).
     redes: (data.contact && data.contact.redes) || [],
   });
-  const script = buildScript(storeData, escJs(slug), enderecoDaApi());
+  const script = buildScript(storeData, escJs(slug), enderecoDaApi(), data.textos_da_frente || null);
 
   const bodyClasses = [
     dark ? 'sf-dark' : 'sf-light',

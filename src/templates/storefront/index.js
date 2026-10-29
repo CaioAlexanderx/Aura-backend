@@ -47,7 +47,19 @@ const { FONTE: fonteDasFotos } = require('../../services/fotosDaVitrine');
 // chamam numeroDoWhatsapp() em vez de so tirar o que nao e digito.
 const { FONTE: fonteDoWhatsapp } = require('../../services/whatsappDaLoja');
 
-function buildScript(storeData, escapedSlug, apiBase) {
+// tq-58: o titulo da descricao na pagina do produto pela frente da conta.
+// O part e uma string fixa; a troca e feita aqui, no servidor, e SO quando
+// o texto e outro — loja de roupa recebe o part intacto, byte a byte.
+const ROTULO_SOBRE_DE_ROUPA = '<div class="sf-label">Sobre esta peça</div>';
+
+function detalheDoProduto(textosDaFrente) {
+  const rotulo = textosDaFrente && textosDaFrente.sobreProduto;
+  if (!rotulo || rotulo === 'Sobre esta peça') return productDetail;
+  const seguro = String(rotulo).replace(/[&<>"'\\]/g, '');
+  return productDetail.split(ROTULO_SOBRE_DE_ROUPA).join('<div class="sf-label">' + seguro + '</div>');
+}
+
+function buildScript(storeData, escapedSlug, apiBase, textosDaFrente) {
   return prelude(storeData, escapedSlug, apiBase)
        + init
        + stateUtils
@@ -67,9 +79,11 @@ function buildScript(storeData, escapedSlug, apiBase) {
        + cart
        + checkout
        + pix
-       + productDetail
+       + detalheDoProduto(textosDaFrente)
        + toast
        + bootstrap;
 }
 
 module.exports = buildScript;
+// So pra teste: o rotulo que a troca procura tem que existir no part.
+module.exports.ROTULO_SOBRE_DE_ROUPA = ROTULO_SOBRE_DE_ROUPA;
