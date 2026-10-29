@@ -66,6 +66,7 @@ const { generatePix }     = require('../services/pixService');
 const { uploadToR2 }      = require('../utils/r2Storage');
 const { onOrderConfirmed } = require('../services/digitalOrderConfirmation');
 const { createMpPixPayment, createMpPreference } = require('../services/mpService');
+const mpGatewaySvc = require('../services/mpGateway');
 const { calculateShippingQuote } = require('../services/shippingQuote');
 // A home da loja sai da memoria por 60 s (10/09/2026).
 const { paginaLembrada, lembrarPagina } = require('../services/cacheDaPaginaDaLoja');
@@ -574,14 +575,8 @@ router.post('/:slug/order', async (req, res) => {
     );
 
     // MP Fase 1 (20/05/2026): detecta gateway MP da empresa
-    let mpGateway = null;
-    try {
-      const { rows: gws } = await db.query(
-        `SELECT access_token, public_key FROM companies_payment_gateways WHERE company_id = $1 AND gateway = 'mercadopago' LIMIT 1`,
-        [cid]
-      );
-      mpGateway = gws[0] || null;
-    } catch (_) { /* tabela pode não existir em deployment antigo */ }
+    // tq-94: token decifrado/renovado e conexão caída fora (services/mpGateway).
+    const mpGateway = await mpGatewaySvc.gatewayAtivo(db, cid);
     const hasMpGateway = !!mpGateway;
     // Migration 121 (21/05/2026): hasCard respeita card_enabled toggle.
     // Default true quando coluna não existe (pré-migration) ou não foi setada.

@@ -48,6 +48,7 @@
 'use strict';
 
 const db = require('../config/database');
+const mpGatewaySvc = require('./mpGateway');
 // Aberta/fechada: uma regra so, compartilhada com o aviso do pedido feito com a loja fechada (19/10/2026).
 const { estaAberta, momentoNoFuso, parseHHMM } = require('./horarioDaLoja');
 // O rodape institucional e o MESMO nas duas lojas — ver o modulo.
@@ -979,14 +980,8 @@ async function buildStorefront(config) {
   const company = companies[0] || {};
 
   // Fase 2 (21/05/2026): detecta gateway MP para expor has_card e corrigir has_pix
-  let hasMpGateway = false;
-  try {
-    const { rows: gws } = await db.query(
-      `SELECT id FROM companies_payment_gateways WHERE company_id = $1 AND gateway = 'mercadopago' LIMIT 1`,
-      [cid]
-    );
-    hasMpGateway = gws.length > 0;
-  } catch (_) { /* tabela pode não existir em deployment antigo */ }
+  // tq-94: conexão por OAuth que caiu não conta (services/mpGateway).
+  const hasMpGateway = await mpGatewaySvc.temGatewayAtivo(db, cid);
 
   const hasStaticPix = !!(config.pix_key && String(config.pix_key).trim());
   const hasPix = hasStaticPix || hasMpGateway;
