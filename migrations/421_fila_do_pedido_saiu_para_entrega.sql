@@ -1,6 +1,6 @@
 -- ============================================================
--- 418 — Fila do pedido da loja online: "saiu para entrega" e devolucao
--- marcada (tq-47, 29/10/2026 — desenho da Nina, 19/10). Depende da 417.
+-- 421 — Fila do pedido da loja online: "saiu para entrega" e devolucao
+-- marcada (tq-47, 29/10/2026 — desenho da Nina, 19/10). Depende da 420.
 --
 --   digital_orders.out_for_delivery_at  quando a lojista marcou a saida.
 --   digital_orders.refund_marked_at     pedido pago online e recusado: a

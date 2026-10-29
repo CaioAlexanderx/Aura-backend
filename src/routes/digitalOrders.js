@@ -61,7 +61,7 @@ async function lojaComAceite(cid) {
       `SELECT pay_on_delivery_enabled, pay_on_delivery_methods FROM digital_channel_config WHERE company_id = $1`, [cid]);
     return usaFluxoComAceite(rows[0]);
   } catch (_) {
-    return false; // base sem a migration 417
+    return false; // base sem a migration 420
   }
 }
 
