@@ -41,6 +41,9 @@ let devolverEstoqueDoPedido;
 const userId = uuid();
 const companyId = uuid();
 const outraEmpresa = uuid();
+// Loja com "pagar na entrega" ligado e SEM formas marcadas (fluxo de hoje).
+const lojaSemFormas = uuid();
+const produtoSemFormas = uuid();
 const produto = uuid();
 const clienteId = uuid();
 let seq = 0;
@@ -61,27 +64,38 @@ async function lancamento(id) {
   return rows[0] ? { ...rows[0], amount: Number(rows[0].amount) } : null;
 }
 
-/** Pedido pago online (Pix confirmado, baixa ja feita) ainda sem aceite. */
-async function criarPedidoPago({ qtd = 1 } = {}) {
+/**
+ * Pedido pago online (Pix confirmado, baixa ja feita) ainda sem aceite.
+ * naFila = o checkout o marcou (loja ja usava a fila quando ele nasceu);
+ * false = pedido do historico, pago antes de a loja ligar as formas.
+ */
+async function criarPedidoPago({ qtd = 1, naFila = true, empresa = companyId, prod = produto } = {}) {
   const id = uuid();
   seq += 1;
   await pool.query(
     `INSERT INTO digital_orders
        (id, company_id, order_number, customer_name, customer_phone,
-        subtotal, total, status, payment_status, payment_method, customer_id, stock_deducted)
+        subtotal, total, status, payment_status, payment_method, stock_deducted, aceite_na_fila, customer_id)
      VALUES ($1, $2, $3, 'Cliente Fixture', '11999990000',
-             39, 39, 'confirmed', 'paid', 'pix', $4, TRUE)`,
-    [id, companyId, 'PX-' + String(seq).padStart(4, '0'), clienteId]
+             39, 39, 'confirmed', 'paid', 'pix', TRUE, $4, $5)`,
+    [id, empresa, 'PX-' + String(seq).padStart(4, '0'), naFila ? true : null,
+      empresa === companyId ? clienteId : null]
   );
   await pool.query(
     `INSERT INTO digital_order_items
        (order_id, product_id, product_name, unit_price, quantity, subtotal)
      VALUES ($1, $2, 'Cerveja', 39, $3, 39 * $3)`,
-    [id, produto, qtd]
+    [id, prod, qtd]
   );
   // A baixa do pagamento, como a confirmacao faria.
-  await pool.query('UPDATE products SET stock_qty = stock_qty - $1 WHERE id = $2', [qtd, produto]);
+  await pool.query('UPDATE products SET stock_qty = stock_qty - $1 WHERE id = $2', [qtd, prod]);
   return id;
+}
+
+async function pedidoCompleto(id) {
+  const { rows } = await pool.query(
+    'SELECT status, accepted_at, cancel_kind, stock_deducted FROM digital_orders WHERE id = $1', [id]);
+  return rows[0];
 }
 
 /** Pedido de pagar na entrega esperando aceite, com um item. */
@@ -127,8 +141,19 @@ beforeAll(async () => {
     [userId, `fixture-${userId}@example.test`]
   );
   await pool.query(
-    `INSERT INTO companies (id, owner_id, legal_name) VALUES ($1, $2, 'Fixture Entrega'), ($3, $2, 'Outra Fixture')`,
-    [companyId, userId, outraEmpresa]
+    `INSERT INTO companies (id, owner_id, legal_name) VALUES ($1, $2, 'Fixture Entrega'), ($3, $2, 'Outra Fixture'), ($4, $2, 'Loja Sem Formas')`,
+    [companyId, userId, outraEmpresa, lojaSemFormas]
+  );
+  // A loja do piloto com as formas marcadas; a outra so com o pagar na
+  // entrega de hoje (formas NULL).
+  await pool.query(
+    `INSERT INTO digital_channel_config (company_id, pay_on_delivery_enabled, pay_on_delivery_methods)
+     VALUES ($1, TRUE, ARRAY['cash','card']), ($2, TRUE, NULL)`,
+    [companyId, lojaSemFormas]
+  );
+  await pool.query(
+    `INSERT INTO products (id, company_id, name, price, stock_qty) VALUES ($1, $2, 'Cerveja', 39, 20)`,
+    [produtoSemFormas, lojaSemFormas]
   );
   await pool.query(
     `INSERT INTO customers (id, company_id, name) VALUES ($1, $2, 'Cliente Fixture')`,
@@ -149,8 +174,11 @@ afterAll(async () => {
     [`DELETE FROM digital_order_items WHERE order_id IN (SELECT id FROM digital_orders WHERE company_id = $1)`, [companyId]],
     [`DELETE FROM digital_orders WHERE company_id = $1`, [companyId]],
     [`DELETE FROM customers WHERE company_id = $1`, [companyId]],
-    [`DELETE FROM products WHERE company_id = $1`, [companyId]],
-    [`DELETE FROM companies WHERE id IN ($1, $2)`, [companyId, outraEmpresa]],
+    [`DELETE FROM digital_order_items WHERE order_id IN (SELECT id FROM digital_orders WHERE company_id = $1)`, [lojaSemFormas]],
+    [`DELETE FROM digital_orders WHERE company_id = $1`, [lojaSemFormas]],
+    [`DELETE FROM digital_channel_config WHERE company_id IN ($1, $2)`, [companyId, lojaSemFormas]],
+    [`DELETE FROM products WHERE company_id IN ($1, $2)`, [companyId, lojaSemFormas]],
+    [`DELETE FROM companies WHERE id IN ($1, $2, $3)`, [companyId, outraEmpresa, lojaSemFormas]],
     [`DELETE FROM users WHERE id = $1`, [userId]],
   ];
   for (const [sql, params] of limpar) {
@@ -337,5 +365,40 @@ describe('fila do pedido (tq-47)', () => {
   test('marcar devolvido em pedido em andamento: 409', async () => {
     const id = await criarPedido();
     await expect(aceite.marcarDevolvido({ orderId: id, companyId })).rejects.toMatchObject({ status: 409 });
+  });
+});
+
+// ── revisao do #930: o historico nao vira "pago esperando aceite" ──
+describe('pago sem aceite: so o que nasceu na fila, em loja que ainda usa a fila', () => {
+  test('(1) loja sem formas marcadas: pedido pago nao e aceito nem recusado pela fila', async () => {
+    const id = await criarPedidoPago({ empresa: lojaSemFormas, prod: produtoSemFormas, naFila: true });
+    await expect(aceite.aceitarPedido({ orderId: id, companyId: lojaSemFormas, prepMinutes: 30 }))
+      .rejects.toMatchObject({ status: 409 });
+    await expect(aceite.recusarPedido({ orderId: id, companyId: lojaSemFormas, motivo: 'x' }))
+      .rejects.toMatchObject({ status: 409 });
+    expect(await pedidoCompleto(id)).toMatchObject({ status: 'confirmed', accepted_at: null, cancel_kind: null, stock_deducted: true });
+  });
+
+  test('(2) loja com formas: pedido pago ANTES de ligar as formas fica como esta', async () => {
+    const antes = await saldo();
+    const id = await criarPedidoPago({ naFila: false });
+    const depoisDaBaixa = await saldo();
+    await expect(aceite.aceitarPedido({ orderId: id, companyId, prepMinutes: 30 }))
+      .rejects.toMatchObject({ status: 409 });
+    await expect(aceite.recusarPedido({ orderId: id, companyId, motivo: 'x' }))
+      .rejects.toMatchObject({ status: 409, message: expect.stringMatching(/não está esperando aceite/) });
+    expect(await pedidoCompleto(id)).toMatchObject({ status: 'confirmed', accepted_at: null, cancel_kind: null });
+    expect(await saldo()).toBe(depoisDaBaixa);
+    expect(depoisDaBaixa).toBe(antes - 1);
+  });
+
+  test('a marca do checkout: marcarNaFila grava aceite_na_fila', async () => {
+    const id = await criarPedidoPago({ naFila: false });
+    expect(await aceite.marcarNaFila(id)).toBe(true);
+    const { rows } = await pool.query('SELECT aceite_na_fila FROM digital_orders WHERE id = $1', [id]);
+    expect(rows[0].aceite_na_fila).toBe(true);
+    // Agora sim e "pago esperando aceite".
+    const r = await aceite.aceitarPedido({ orderId: id, companyId, prepMinutes: 30 });
+    expect(r.order.status).toBe('preparing');
   });
 });

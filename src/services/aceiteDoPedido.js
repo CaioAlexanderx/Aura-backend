@@ -31,12 +31,31 @@
 //     pagamento); recusar cancela, devolve o estoque (rota) e a lojista
 //     devolve o valor por fora e marca como devolvido (refund_marked_at).
 //   - SAIU PARA ENTREGA: em preparo/pronto -> 'out_for_delivery'.
+//
+// QUEM E "PAGO ESPERANDO ACEITE" (revisao do #930): accepted_at nasce NULL
+// em todo o historico, entao 'confirmed' sem accepted_at NAO basta. Precisa
+// de duas coisas: (1) o pedido nasceu numa loja que ja usava a fila
+// (digital_orders.aceite_na_fila, gravado no checkout — migration 421), e
+// (2) a loja continua com as formas de pagar na entrega marcadas. Pedido
+// pago antes de a loja ligar as formas, ou em loja que nunca ligou, segue
+// exatamente como hoje (sem Aceitar/Recusar).
 // ============================================================
 'use strict';
 
 const db = require('../config/database');
 const { aplicarConfirmacao, avisarDepoisDaConfirmacao } = require('./digitalOrderConfirmation');
 const { AGUARDANDO_ACEITE, pedidoComAceite } = require('./pagarNaEntrega');
+
+/** A loja do pedido usa a fila com aceite hoje (formas marcadas)? SQL. */
+const LOJA_COM_ACEITE_SQL = `EXISTS (
+  SELECT 1 FROM digital_channel_config dcc
+   WHERE dcc.company_id = digital_orders.company_id
+     AND dcc.pay_on_delivery_enabled IS TRUE
+     AND COALESCE(array_length(dcc.pay_on_delivery_methods, 1), 0) > 0)`;
+
+/** Pago online, nascido na fila e ainda sem aceite — com a loja ainda na fila. */
+const PAGO_NA_FILA_SQL = `(status = 'confirmed' AND accepted_at IS NULL
+  AND aceite_na_fila IS TRUE AND ${LOJA_COM_ACEITE_SQL})`;
 
 /** Tempo de preparo aceito: de 5 minutos a 6 horas. */
 const PREPARO_MIN = 5;
@@ -90,7 +109,13 @@ async function aceitarPedido({ orderId, companyId, prepMinutes }, { db: banco } 
     // aconteceram no pagamento (onOrderConfirmed); aceitar so poe o tempo
     // e passa para em preparo. aplicarConfirmacao abaixo e idempotente e
     // so completa o que faltar.
-    const pagoSemAceite = order.status === 'confirmed' && !order.accepted_at;
+    // So o que nasceu na fila (aceite_na_fila) e com a loja ainda na fila.
+    let pagoSemAceite = false;
+    if (order.status === 'confirmed' && !order.accepted_at && order.aceite_na_fila === true) {
+      const { rows: fila } = await client.query(
+        `SELECT ${LOJA_COM_ACEITE_SQL} AS ok FROM digital_orders WHERE id = $1`, [orderId]);
+      pagoSemAceite = !!(fila[0] && fila[0].ok);
+    }
 
     if (order.status !== AGUARDANDO_ACEITE && !pagoSemAceite) {
       await client.query('ROLLBACK');
@@ -155,7 +180,7 @@ async function recusarPedido({ orderId, companyId, motivo }, { db: banco } = {})
         cancel_reason = $3,
         updated_at    = NOW()
       WHERE id = $1 AND company_id = $2
-        AND (status = '${AGUARDANDO_ACEITE}' OR (status = 'confirmed' AND accepted_at IS NULL))
+        AND (status = '${AGUARDANDO_ACEITE}' OR ${PAGO_NA_FILA_SQL})
       RETURNING *`,
     [orderId, companyId, texto]
   );
@@ -168,6 +193,9 @@ async function recusarPedido({ orderId, companyId, motivo }, { db: banco } = {})
   if (!atual.length) throw erro(404, 'Pedido não encontrado.');
   if (atual[0].status === 'cancelled') {
     throw erro(409, 'Este pedido já foi recusado ou cancelado.', { statusAtual: 'cancelled' });
+  }
+  if (atual[0].status === 'confirmed') {
+    throw erro(409, 'Este pedido não está esperando aceite. Para desfazer, use "Cancelar pedido".', { statusAtual: 'confirmed' });
   }
   throw erro(409, 'Este pedido já foi aceito. Para desfazer, use "Cancelar pedido".', { statusAtual: atual[0].status });
 }
@@ -262,8 +290,25 @@ async function marcarDevolvido({ orderId, companyId }, { db: banco } = {}) {
   throw erro(409, 'Só dá para marcar como devolvido um pedido recusado ou cancelado.', { statusAtual: atual[0].status });
 }
 
+/**
+ * Checkout (tq-47): pedido pago online numa loja que usa a fila nasce
+ * marcado para entrar nela. Melhor esforco e fora da transacao do pedido:
+ * base sem a migration 421 (42703) segue sem a marca — o pedido continua
+ * no fluxo de hoje, nunca quebra.
+ */
+async function marcarNaFila(orderId, { db: banco } = {}) {
+  try {
+    await (banco || db).query(
+      `UPDATE digital_orders SET aceite_na_fila = TRUE WHERE id = $1`, [orderId]);
+    return true;
+  } catch (e) {
+    if (e.code !== '42703') console.error('[aceite] marcar pedido na fila falhou:', orderId, e.message);
+    return false;
+  }
+}
+
 module.exports = {
-  saiuParaEntrega, marcarDevolvido,
+  saiuParaEntrega, marcarDevolvido, marcarNaFila, LOJA_COM_ACEITE_SQL,
   aceitarPedido, recusarPedido, quitarNaEntrega, estornarAReceber,
   minutosDePreparo, PREPARO_MIN, PREPARO_MAX, DEPOIS_DO_ACEITE,
 };

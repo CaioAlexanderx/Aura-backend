@@ -48,7 +48,8 @@ const COLUNAS = `
 // com elas e, no 42703, segue sem (comEntrega: false).
 const COLUNAS_DA_ENTREGA = `,
   o.pay_on_delivery_method, o.change_for, o.accepted_at, o.prep_minutes,
-  o.out_for_delivery_at, o.refund_marked_at, o.cancel_kind, o.cancel_reason`;
+  o.out_for_delivery_at, o.refund_marked_at, o.cancel_kind, o.cancel_reason,
+  o.aceite_na_fila`;
 
 /**
  * @param {{cid: string, status?: string, q?: string, limit: number, offset: number}} p

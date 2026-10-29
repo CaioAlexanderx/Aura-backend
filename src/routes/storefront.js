@@ -78,6 +78,7 @@ const { validateCpfCnpj } = require('../services/cpfCnpj');
 const pedidoIdem          = require('../services/pedidoOnlineIdempotente');
 // Pagar na entrega com forma e troco; pedido espera o aceite (tq-44).
 const pagarNaEntrega      = require('../services/pagarNaEntrega');
+const aceiteDoPedido      = require('../services/aceiteDoPedido');
 // Sentinela: a chave ja tem pedido gravado — desfaz a transacao e responde
 // com o pedido que existe.
 const PEDIDO_REPETIDO     = Symbol('pedido-repetido');
@@ -964,6 +965,13 @@ router.post('/:slug/order', async (req, res) => {
     gravarAtribuicao(db, {
       orderId: order.id, companyId: cid, atribuicao: lerAtribuicao(req.body), rotulo: 'STOREFRONT',
     });
+
+    // tq-47: loja com a fila de aceite — o Pix/cartao pago entra na fila
+    // para a lojista aceitar com o tempo. So o pedido NASCIDO assim; os
+    // pagos antes de a loja ligar as formas ficam como sempre.
+    if (comAceite && pmethod !== 'on_delivery') {
+      await aceiteDoPedido.marcarNaFila(order.id);
+    }
 
     let pixData = null;
     if (pmethod === 'pix') {
