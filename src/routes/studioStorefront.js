@@ -56,6 +56,7 @@ const lojaEvents          = require('../services/lojaEvents');
 const { generatePix }     = require('../services/pixService');
 const { onOrderConfirmed } = require('../services/digitalOrderConfirmation');
 const { createMpPixPayment, createMpPreference } = require('../services/mpService');
+const mpGatewaySvc = require('../services/mpGateway');
 const { uploadToR2 }      = require('../utils/r2Storage');
 const { calculateShippingQuote } = require('../services/shippingQuote');
 const { COURIER, validateCourierPickup } = require('../services/courierPickup');
@@ -298,14 +299,7 @@ router.get('/:slug/studio/products', async (req, res) => {
     // institucional lista as formas de pagamento, e ele existe nos dois
     // retornos. Calcular a lista so no caminho com produto faria a loja
     // recem-aberta anunciar formas diferentes da mesma loja com produto.
-    let hasMpGateway = false;
-    try {
-      const { rows: gws } = await db.query(
-        `SELECT id FROM companies_payment_gateways WHERE company_id = $1 AND gateway = 'mercadopago' LIMIT 1`,
-        [cid]
-      );
-      hasMpGateway = gws.length > 0;
-    } catch (_) {}
+    const hasMpGateway = await mpGatewaySvc.temGatewayAtivo(db, cid);
     const hasStaticPix = !!(config.pix_key && String(config.pix_key).trim());
     const hasPix = hasStaticPix || hasMpGateway;
     const cardEnabled = config.card_enabled !== false;
@@ -916,14 +910,8 @@ router.post('/:slug/studio/order', async (req, res) => {
     }
 
     // MP gateway
-    let mpGateway = null;
-    try {
-      const { rows: gws } = await db.query(
-        `SELECT access_token, public_key FROM companies_payment_gateways WHERE company_id = $1 AND gateway = 'mercadopago' LIMIT 1`,
-        [cid]
-      );
-      mpGateway = gws[0] || null;
-    } catch (_) {}
+    // tq-94: token decifrado/renovado e conexão caída fora (services/mpGateway).
+    const mpGateway = await mpGatewaySvc.gatewayAtivo(db, cid);
     const hasMpGateway = !!mpGateway;
     const cardEnabled = config.card_enabled !== false;
     const hasCard = hasMpGateway && cardEnabled;
@@ -1440,13 +1428,7 @@ router.post('/:slug/studio/cotacao', async (req, res) => {
     // a mesma deteccao do pedido.
     let temPix = !!(config.pix_key && String(config.pix_key).trim());
     if (!temPix) {
-      try {
-        const { rows: gws } = await db.query(
-          `SELECT id FROM companies_payment_gateways WHERE company_id = $1 AND gateway = 'mercadopago' LIMIT 1`,
-          [cid]
-        );
-        temPix = gws.length > 0;
-      } catch (_) {}
+      temPix = await mpGatewaySvc.temGatewayAtivo(db, cid);
     }
 
     const forma = String(b.payment_method || '').toLowerCase().trim();
