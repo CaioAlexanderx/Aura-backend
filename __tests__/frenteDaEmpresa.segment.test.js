@@ -29,6 +29,8 @@ describe('suggestSegmentFromCnae', () => {
     ['1340-5/01', 'studio'],
     ['4781-4/00', 'varejo'],
     ['4782-2/01', 'varejo'],
+    ['5611-2/04', 'adega'],
+    ['4723-7/00', 'adega'],
   ])('%s -> %s', (cnae, esperado) => {
     expect(suggestSegmentFromCnae(cnae)).toBe(esperado);
   });
@@ -38,6 +40,16 @@ describe('suggestSegmentFromCnae', () => {
     expect(suggestSegmentFromCnae('47.74-1-00')).toBe('otica');
     expect(suggestSegmentFromCnae(4774100)).toBe('otica');
     expect(suggestSegmentFromCnae({ code: '4774100', description: 'x' })).toBe('otica');
+  });
+
+  test('outros CNAEs de alimentacao nao viram adega (so os dois conferidos)', () => {
+    expect(suggestSegmentFromCnae('5611-2/01')).toBeNull(); // restaurantes
+    expect(suggestSegmentFromCnae('5611-2/03')).toBeNull(); // lanchonetes
+  });
+
+  test('adega entra pelo secundario so quando o principal e desconhecido', () => {
+    expect(suggestSegmentFromCnae('6201-5/01', [{ code: '4723700' }])).toBe('adega');
+    expect(suggestSegmentFromCnae('4781-4/00', [{ code: '4723700' }])).toBe('varejo');
   });
 
   test('desconhecido, vazio ou malformado -> null', () => {
@@ -62,7 +74,7 @@ describe('suggestSegmentFromCnae', () => {
   });
 
   test('lista de frentes', () => {
-    expect(SEGMENTS).toEqual(['varejo', 'matcon', 'otica', 'assistencia', 'studio', 'outro']);
+    expect(SEGMENTS).toEqual(['varejo', 'matcon', 'otica', 'assistencia', 'studio', 'adega', 'outro']);
   });
 });
 
@@ -82,8 +94,8 @@ describe('applySegment', () => {
     expect(out.flags[flag]).toBe(true);
   });
 
-  test('varejo e outro nao ligam nada', async () => {
-    for (const segment of ['varejo', 'outro']) {
+  test('varejo, adega e outro nao ligam nada', async () => {
+    for (const segment of ['varejo', 'adega', 'outro']) {
       const db = fakeSegmentDb({ companies: { [C]: {} } });
       const out = await applySegment(db.client, C, { segment });
       expect(db.state.companies[C].pdv_settings).toEqual({});

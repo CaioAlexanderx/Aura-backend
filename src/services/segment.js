@@ -21,6 +21,8 @@
 //   studio       vertical_active = 'studio' + pdv_settings.studio_enabled = true
 //                (so nos planos negocio/expansao/personalizado: no Essencial a empresa
 //                ficaria presa em telas que o plano nao libera)
+//   adega        nada (29/10/2026, tq-50: adega e bar; sem modulo, plano ou menu
+//                novo; os primeiros passos sao os do varejo)
 //   outro        nada
 // Extras: so ['os'] -> os_enabled = true.
 //
@@ -35,13 +37,13 @@
 //     como esta.
 //
 // CNAEs conferidos na API oficial do IBGE (servicodados.ibge.gov.br/api/v2/
-// cnae/subclasses/<codigo>) em 05/10/2026. So entra codigo conferido.
+// cnae/subclasses/<codigo>) em 05/10/2026 (5611204 e 4723700, em 29/10/2026). So entra codigo conferido.
 // ============================================================
 'use strict';
 
 const AppError = require('../errors/AppError');
 
-const SEGMENTS = ['varejo', 'matcon', 'otica', 'assistencia', 'studio', 'outro'];
+const SEGMENTS = ['varejo', 'matcon', 'otica', 'assistencia', 'studio', 'adega', 'outro'];
 const SEGMENT_SOURCES = ['cnae', 'landing', 'user', 'staff'];
 const ALLOWED_EXTRAS = ['os'];
 const DISABLEABLE = ['matcon', 'otica', 'os'];
@@ -86,6 +88,9 @@ const CNAE_SUBCLASS_SEGMENT = {
   '1813001': 'studio',      // Impressao de material para uso publicitario
   '1813099': 'studio',      // Impressao de material para outros usos
   '1340501': 'studio',      // Estamparia e texturizacao em fios, tecidos, artefatos texteis e pecas do vestuario
+  // Adega e bar (sugestao so: a frente nao liga nada, os passos sao os do varejo)
+  '5611204': 'adega',       // Bares e outros estabelecimentos especializados em servir bebidas, sem entretenimento
+  '4723700': 'adega',       // Comercio varejista de bebidas
   // Varejo comum
   '4781400': 'varejo',      // Artigos do vestuario e acessorios
   '4782201': 'varejo',      // Calcados
