@@ -16,6 +16,8 @@ jest.mock('../src/services/aceiteDoPedido', () => ({
   recusarPedido: jest.fn(),
   quitarNaEntrega: jest.fn(async () => true),
   estornarAReceber: jest.fn(async () => true),
+  saiuParaEntrega: jest.fn(),
+  marcarDevolvido: jest.fn(),
 }));
 jest.mock('../src/services/devolucaoDoEstoqueDoPedido', () => ({
   devolverEstoqueDoPedido: jest.fn(async () => ({ devolvido: false, motivo: 'sem_baixa' })),
@@ -141,5 +143,66 @@ describe('PATCH /status com o pedido de pagar na entrega', () => {
     ]);
     expect((await patch('cancelled')).status).toBe(200);
     expect(aceite.estornarAReceber).toHaveBeenCalledWith(expect.objectContaining({ id: OID, status: 'cancelled' }));
+  });
+});
+
+// ── tq-47: fila do pedido ──────────────────────────────────
+describe('fila do pedido (tq-47)', () => {
+  const ACEITO = {
+    id: OID, status: 'preparing', accepted_at: '2026-10-29T21:10:00Z', prep_minutes: 45,
+    order_number: '0412', customer_name: 'Cliente Teste', customer_phone: '11900000000', delivery_type: 'delivery',
+  };
+
+  test('aceitar devolve o aviso pronto para a cliente, com o nome da loja', async () => {
+    banco([[/AS nome/, [{ nome: 'Adega Exemplo' }]]]);
+    aceite.aceitarPedido.mockResolvedValueOnce({ order: ACEITO, jaAceito: false });
+    const r = await request(app).post(`${base}/accept`).send({ prep_minutes: 45 });
+    expect(r.body.aviso_whatsapp.passo).toBe('aceito');
+    expect(r.body.aviso_whatsapp.texto).toContain('Aqui é da Adega Exemplo.');
+    expect(r.body.aviso_whatsapp.link).toMatch(/^https:\/\/wa\.me\/5511900000000\?text=/);
+  });
+
+  test('recusar Pix pago: devolver por fora', async () => {
+    aceite.recusarPedido.mockResolvedValueOnce({
+      ...ACEITO, status: 'cancelled', cancel_kind: 'recusado_pela_loja', cancel_reason: 'acabou',
+      payment_method: 'pix', payment_status: 'confirmed',
+    });
+    const r = await request(app).post(`${base}/refuse`).send({ reason: 'acabou' });
+    expect(r.body.devolver_por_fora).toBe(true);
+    expect(r.body.aviso_whatsapp.texto).toContain('Vamos devolver o valor que você pagou.');
+  });
+
+  test('saiu para entrega', async () => {
+    aceite.saiuParaEntrega.mockResolvedValueOnce({ order: { ...ACEITO, status: 'out_for_delivery' }, jaSaiu: false });
+    const r = await request(app).post(`${base}/out-for-delivery`).send({});
+    expect(r.status).toBe(200);
+    expect(r.body.aviso_whatsapp.passo).toBe('saiu');
+    expect(aceite.saiuParaEntrega).toHaveBeenCalledWith({ orderId: OID, companyId: CID });
+  });
+
+  test('saiu para entrega de pedido sem aceite: 409 com a mensagem', async () => {
+    aceite.saiuParaEntrega.mockRejectedValueOnce(Object.assign(new Error('Aceite o pedido antes de mandar para a entrega.'), { status: 409, statusAtual: 'aguardando_aceite' }));
+    const r = await request(app).post(`${base}/out-for-delivery`).send({});
+    expect(r.status).toBe(409);
+    expect(r.body.error).toBe('Aceite o pedido antes de mandar para a entrega.');
+  });
+
+  test('marcar como devolvido', async () => {
+    aceite.marcarDevolvido.mockResolvedValueOnce({ id: OID, status: 'cancelled', refund_marked_at: 'agora' });
+    const r = await request(app).post(`${base}/refund-marked`).send({});
+    expect(r.status).toBe(200);
+    expect(r.body.devolvido).toBe(true);
+  });
+
+  test('a lista diz se a loja usa a fila com aceite', async () => {
+    banco([[/pay_on_delivery_methods FROM digital_channel_config/, [{ pay_on_delivery_enabled: true, pay_on_delivery_methods: ['cash'] }]]]);
+    const r = await request(app).get(`/companies/${CID}/digital-channel/orders`);
+    expect(r.status).toBe(200);
+    expect(r.body.fila_com_aceite).toBe(true);
+  });
+
+  test('a lista de loja sem as formas: fila_com_aceite false', async () => {
+    const r = await request(app).get(`/companies/${CID}/digital-channel/orders`);
+    expect(r.body.fila_com_aceite).toBe(false);
   });
 });

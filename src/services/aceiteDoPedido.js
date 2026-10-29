@@ -24,6 +24,13 @@
 //
 // Pedido sem resposta NAO cancela sozinho (acrescimo da Nina, 19/10):
 // nenhum job olha 'aguardando_aceite'.
+//
+// tq-47 (29/10/2026) — a fila do pedido:
+//   - Pix/cartao pago online ('confirmed', ainda sem aceite) tambem entra
+//     na fila: aceitar poe o tempo de preparo (a baixa ja aconteceu no
+//     pagamento); recusar cancela, devolve o estoque (rota) e a lojista
+//     devolve o valor por fora e marca como devolvido (refund_marked_at).
+//   - SAIU PARA ENTREGA: em preparo/pronto -> 'out_for_delivery'.
 // ============================================================
 'use strict';
 
@@ -79,7 +86,13 @@ async function aceitarPedido({ orderId, companyId, prepMinutes }, { db: banco } 
     if (!rows.length) throw erro(404, 'Pedido não encontrado.');
     order = rows[0];
 
-    if (order.status !== AGUARDANDO_ACEITE) {
+    // tq-47: pago online e ainda sem aceite. A baixa e o lancamento ja
+    // aconteceram no pagamento (onOrderConfirmed); aceitar so poe o tempo
+    // e passa para em preparo. aplicarConfirmacao abaixo e idempotente e
+    // so completa o que faltar.
+    const pagoSemAceite = order.status === 'confirmed' && !order.accepted_at;
+
+    if (order.status !== AGUARDANDO_ACEITE && !pagoSemAceite) {
       await client.query('ROLLBACK');
       if (DEPOIS_DO_ACEITE.includes(order.status) && order.accepted_at) {
         return { order, jaAceito: true };
@@ -128,6 +141,9 @@ async function aceitarPedido({ orderId, companyId, prepMinutes }, { db: banco } 
  * @returns {Promise<object>} a linha cancelada
  */
 async function recusarPedido({ orderId, companyId, motivo }, { db: banco } = {}) {
+  // tq-47: tambem o pago online ainda sem aceite ('confirmed', accepted_at
+  // nulo). Esse baixou estoque no pagamento: quem chama devolve
+  // (devolverEstoqueDoPedido), como em todo cancelamento.
   const texto = motivo == null ? '' : String(motivo).trim().substring(0, 200);
   if (!texto) throw erro(400, 'Conte para a cliente por que o pedido foi recusado.');
 
@@ -138,7 +154,8 @@ async function recusarPedido({ orderId, companyId, motivo }, { db: banco } = {})
         cancel_kind   = 'recusado_pela_loja',
         cancel_reason = $3,
         updated_at    = NOW()
-      WHERE id = $1 AND company_id = $2 AND status = '${AGUARDANDO_ACEITE}'
+      WHERE id = $1 AND company_id = $2
+        AND (status = '${AGUARDANDO_ACEITE}' OR (status = 'confirmed' AND accepted_at IS NULL))
       RETURNING *`,
     [orderId, companyId, texto]
   );
@@ -201,7 +218,52 @@ async function estornarAReceber(order, { db: banco } = {}) {
   return rowCount > 0;
 }
 
+/**
+ * Saiu para entrega (tq-47): em preparo ou pronto -> 'out_for_delivery'.
+ * O status entra no WHERE: dois toques marcam uma vez; o segundo responde
+ * a linha como esta (jaSaiu).
+ */
+async function saiuParaEntrega({ orderId, companyId }, { db: banco } = {}) {
+  const { rows } = await (banco || db).query(
+    `UPDATE digital_orders SET
+        status              = 'out_for_delivery',
+        out_for_delivery_at = NOW(),
+        updated_at          = NOW()
+      WHERE id = $1 AND company_id = $2 AND status IN ('preparing', 'ready')
+      RETURNING *`,
+    [orderId, companyId]
+  );
+  if (rows.length) return { order: rows[0], jaSaiu: false };
+  const { rows: atual } = await (banco || db).query(
+    `SELECT * FROM digital_orders WHERE id = $1 AND company_id = $2`, [orderId, companyId]);
+  if (!atual.length) throw erro(404, 'Pedido não encontrado.');
+  if (atual[0].status === 'out_for_delivery') return { order: atual[0], jaSaiu: true };
+  if (atual[0].status === AGUARDANDO_ACEITE) {
+    throw erro(409, 'Aceite o pedido antes de mandar para a entrega.', { statusAtual: atual[0].status });
+  }
+  throw erro(409, 'Este pedido não está em preparo, então não dá para marcar a saída.', { statusAtual: atual[0].status });
+}
+
+/**
+ * A lojista devolveu por fora o valor de um pedido pago e recusado
+ * (tq-47; reembolso no gateway ainda nao existe — decisao do Caio).
+ */
+async function marcarDevolvido({ orderId, companyId }, { db: banco } = {}) {
+  const { rows } = await (banco || db).query(
+    `UPDATE digital_orders SET refund_marked_at = COALESCE(refund_marked_at, NOW()), updated_at = NOW()
+      WHERE id = $1 AND company_id = $2 AND status = 'cancelled'
+      RETURNING *`,
+    [orderId, companyId]
+  );
+  if (rows.length) return rows[0];
+  const { rows: atual } = await (banco || db).query(
+    `SELECT id, status FROM digital_orders WHERE id = $1 AND company_id = $2`, [orderId, companyId]);
+  if (!atual.length) throw erro(404, 'Pedido não encontrado.');
+  throw erro(409, 'Só dá para marcar como devolvido um pedido recusado ou cancelado.', { statusAtual: atual[0].status });
+}
+
 module.exports = {
+  saiuParaEntrega, marcarDevolvido,
   aceitarPedido, recusarPedido, quitarNaEntrega, estornarAReceber,
   minutosDePreparo, PREPARO_MIN, PREPARO_MAX, DEPOIS_DO_ACEITE,
 };

@@ -386,6 +386,8 @@ async function sendOrderStatusEmail(to, { order_number, customer_name, status, s
     confirmed: { emoji: '✅', label: 'Confirmado',    msg: 'Pagamento confirmado! Seu pedido está sendo preparado.' },
     preparing: { emoji: '👨‍🍳', label: 'Em preparo',    msg: 'Estamos preparando seu pedido agora.' },
     ready:     { emoji: '📦', label: 'Pronto!',       msg: 'Seu pedido está pronto! Pode retirar ou aguardar a entrega.' },
+    // tq-47 (29/10/2026): delivery da loja online.
+    out_for_delivery: { emoji: '🛵', label: 'Saiu para entrega', msg: 'Seu pedido saiu para entrega e já está a caminho.' },
     delivered: { emoji: '🚀', label: 'Entregue',      msg: 'Pedido entregue! Obrigado pela preferência.' },
     cancelled: { emoji: '❌', label: 'Cancelado',    msg: 'Seu pedido foi cancelado. Em caso de dúvidas, contate a loja.' },
   };

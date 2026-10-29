@@ -61,6 +61,29 @@ async function lancamento(id) {
   return rows[0] ? { ...rows[0], amount: Number(rows[0].amount) } : null;
 }
 
+/** Pedido pago online (Pix confirmado, baixa ja feita) ainda sem aceite. */
+async function criarPedidoPago({ qtd = 1 } = {}) {
+  const id = uuid();
+  seq += 1;
+  await pool.query(
+    `INSERT INTO digital_orders
+       (id, company_id, order_number, customer_name, customer_phone,
+        subtotal, total, status, payment_status, payment_method, customer_id, stock_deducted)
+     VALUES ($1, $2, $3, 'Cliente Fixture', '11999990000',
+             39, 39, 'confirmed', 'paid', 'pix', $4, TRUE)`,
+    [id, companyId, 'PX-' + String(seq).padStart(4, '0'), clienteId]
+  );
+  await pool.query(
+    `INSERT INTO digital_order_items
+       (order_id, product_id, product_name, unit_price, quantity, subtotal)
+     VALUES ($1, $2, 'Cerveja', 39, $3, 39 * $3)`,
+    [id, produto, qtd]
+  );
+  // A baixa do pagamento, como a confirmacao faria.
+  await pool.query('UPDATE products SET stock_qty = stock_qty - $1 WHERE id = $2', [qtd, produto]);
+  return id;
+}
+
 /** Pedido de pagar na entrega esperando aceite, com um item. */
 async function criarPedido({ qtd = 2, forma = 'cash', trocoPara = 100 } = {}) {
   const id = uuid();
@@ -276,5 +299,43 @@ describe('entregue e cancelado depois do aceite', () => {
 
     expect(await saldo()).toBe(antes);
     expect((await lancamento(order.transaction_id)).status).toBe('cancelled');
+  });
+});
+
+// ── tq-47: fila do pedido ──────────────────────────────────
+describe('fila do pedido (tq-47)', () => {
+  test('Pix pago entra na fila: aceitar poe o tempo e nao baixa de novo', async () => {
+    const id = await criarPedidoPago({ qtd: 2 });
+    const antes = await saldo();
+    const r = await aceite.aceitarPedido({ orderId: id, companyId, prepMinutes: 30 });
+    expect(r.jaAceito).toBe(false);
+    expect(await saldo()).toBe(antes);
+    expect(await pedido(id)).toMatchObject({ status: 'preparing', prep_minutes: 30, stock_deducted: true });
+  });
+
+  test('Pix pago recusado: cancela e devolve o estoque', async () => {
+    const id = await criarPedidoPago({ qtd: 2 });
+    const antes = await saldo();
+    await aceite.recusarPedido({ orderId: id, companyId, motivo: 'Acabou' });
+    expect(await devolverEstoqueDoPedido(id)).toEqual({ devolvido: true, itens: 1 });
+    expect(await saldo()).toBe(antes + 2);
+    const o = await aceite.marcarDevolvido({ orderId: id, companyId });
+    expect(o.refund_marked_at).toBeTruthy();
+  });
+
+  test('saiu para entrega: so depois do aceite, e duas vezes marca uma', async () => {
+    const id = await criarPedido();
+    await expect(aceite.saiuParaEntrega({ orderId: id, companyId })).rejects.toMatchObject({ status: 409 });
+    await aceite.aceitarPedido({ orderId: id, companyId, prepMinutes: 30 });
+    const r1 = await aceite.saiuParaEntrega({ orderId: id, companyId });
+    expect(r1).toMatchObject({ jaSaiu: false, order: { status: 'out_for_delivery' } });
+    expect(r1.order.out_for_delivery_at).toBeTruthy();
+    const r2 = await aceite.saiuParaEntrega({ orderId: id, companyId });
+    expect(r2.jaSaiu).toBe(true);
+  });
+
+  test('marcar devolvido em pedido em andamento: 409', async () => {
+    const id = await criarPedido();
+    await expect(aceite.marcarDevolvido({ orderId: id, companyId })).rejects.toMatchObject({ status: 409 });
   });
 });
