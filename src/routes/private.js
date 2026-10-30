@@ -1,5 +1,6 @@
 const express = require('express');
 const { requireAuth, requireCompanyAccess, requirePlan } = require('../middleware/auth');
+const { planoOuAssentoExtra } = require('../middleware/planoOuAssentoExtra');
 
 const router = express.Router({ mergeParams: true });
 
@@ -227,7 +228,8 @@ router.use('/digital-channel', requirePlan('negocio', 'expansao'), require('./di
 router.use('/digital-channel/orders', requirePlan('negocio', 'expansao'), require('./digitalOrders'));
 router.use('/digital-channel/asaas', requirePlan('negocio', 'expansao'), require('./asaasSubconta'));
 router.use('/payment-gateways', requirePlan('negocio', 'expansao'), require('./paymentGateways'));
-router.use('/members', requirePlan('negocio', 'expansao'), require('./members'));
+// 30/10/2026: Essencial com acesso extra pago tambem gerencia a Equipe.
+router.use('/members', planoOuAssentoExtra('negocio', 'expansao'), require('./members'));
 // SEM gate no prefixo: router.use('/whatsapp', requirePlan, ...) barrava
 // por PREFIXO — /whatsapp/status de um dojô essencial levava 403 aqui e
 // nunca chegava ao whatsappCloud montado depois (achado no QA de 27/08,
