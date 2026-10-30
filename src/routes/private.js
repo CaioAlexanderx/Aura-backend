@@ -83,6 +83,9 @@ router.use('/', require('./catalogHealth'));
 router.use('/products', require('./productDescriptions'));
 router.use('/products', require('./productsDuplicates'));
 router.use('/products', require('./productsBatch'));
+// p-51 (30/10/2026): reajuste de preco em lote. /price-adjustments e
+// estatico e precisa vir antes do GET /:pid curinga de ./products.
+router.use('/products', require('./productPriceAdjustments'));
 // p-74 (30/10/2026): POST /products/barcodes/generate -- gera EAN-13 da
 // serie interna 210, de um produto ou em lote, com previa (dry_run).
 // Caminho estatico, montado junto dos outros antes dos routers com /:pid.
