@@ -23,8 +23,10 @@ const LOJA = 'aaaaaaaa-0000-4000-8000-000000000001';
 const EQUIPE = '645c1325-8865-48be-af6f-430d93fb2b6c';
 const AUTH = 'a33047b1-fb19-4b68-9373-a7ba8a8162aa';
 
-function buildApp({ secret = SECRET } = {}) {
+function buildApp({ secret = SECRET, ligado = true } = {}) {
   jest.resetModules();
+  if (ligado) process.env.PIX_AUTOMATIC_ENABLED = 'true';
+  else delete process.env.PIX_AUTOMATIC_ENABLED;
   if (secret === null) delete process.env.ASAAS_WEBHOOK_SECRET;
   else process.env.ASAAS_WEBHOOK_SECRET = secret;
   jest.doMock('../src/config/database');
@@ -121,6 +123,9 @@ function bancoDeMentira(db, { empresa, autorizacoes = [], semTabela = false } = 
       return { rows: [{ id: estado.empresa.id, plan: 'negocio', billing_status: estado.empresa.billing_status,
         is_primary: false, asaas_subscription_id: estado.empresa.asaas_subscription_id }] };
     }
+    if (s.startsWith('SELECT 1 FROM webhook_logs') && s.includes('dedupe_key')) {
+      return { rows: estado.webhookLogs.filter((l) => l.payload && l.payload.dedupe_key === params[0]).map(() => ({ '?column?': 1 })) };
+    }
     if (s.startsWith('SELECT 1 FROM webhook_logs')) return { rows: [] };
     if (/SELECT last_payment_date::text/.test(s)) return { rows: [{ last_payment_text: null }] };
     if (/UPDATE companies SET billing_status = \$1,/.test(s)) {
@@ -129,7 +134,7 @@ function bancoDeMentira(db, { empresa, autorizacoes = [], semTabela = false } = 
       return { rows: [], rowCount: 1 };
     }
     if (s.startsWith('INSERT INTO webhook_logs')) {
-      estado.webhookLogs.push({ event: params[1] });
+      estado.webhookLogs.push({ company_id: params[0], event: params[1], payload: JSON.parse(params[2]) });
       return { rows: [], rowCount: 1 };
     }
     return { rows: [], rowCount: 0 };
@@ -161,6 +166,7 @@ beforeEach(() => {
 afterEach(() => {
   delete process.env.ASAAS_WEBHOOK_SECRET;
   delete process.env.PIX_AUTO_ALERT_COMPANY_ID;
+  delete process.env.PIX_AUTOMATIC_ENABLED;
   jest.restoreAllMocks();
   jest.resetModules();
 });
@@ -421,5 +427,130 @@ describe('proximoStatus', () => {
     ['creating', 'pending', 'pending'],
   ])('%s + %s -> %s', (atual, novo, esperado) => {
     expect(proximoStatus(atual, novo)).toBe(esperado);
+  });
+});
+
+// ── tq-104 (29/10/2026): chave geral e webhook_logs ─────────────
+describe('chave PIX_AUTOMATIC_ENABLED desligada (padrão)', () => {
+  test('ACTIVATED com token: só registra; companies não muda, sem aviso, sem Asaas', async () => {
+    const { app, db, asaasClient, notifications } = buildApp({ ligado: false });
+    const estado = bancoDeMentira(db, { empresa: loja() });
+    const r = await enviar(app, evento('PIX_AUTOMATIC_RECURRING_AUTHORIZATION_ACTIVATED', 'evt_off1', { status: 'ACTIVE' }));
+    expect(r.status).toBe(200);
+    expect(r.body).toMatchObject({ handled: true, result: 'desligado' });
+    expect(estado.empresa.pix_auto_status).toBe('pending');
+    expect(estado.pixUpdates).toBe(0);
+    expect(notifications.notifyCompany).not.toHaveBeenCalled();
+    expect(asaasClient.asaasRequest).not.toHaveBeenCalled();
+    expect(estado.eventos.get('evt_off1')).toMatchObject({ processed: true, company_id: LOJA, result: 'desligado' });
+    expect(estado.webhookLogs).toHaveLength(1);
+    expect(estado.webhookLogs[0]).toMatchObject({ company_id: LOJA, event: 'PIX_AUTOMATIC_RECURRING_AUTHORIZATION_ACTIVATED' });
+  });
+
+  test('cancelamento pela cliente com a chave desligada: nenhum aviso, status igual', async () => {
+    const { app, db, notifications } = buildApp({ ligado: false });
+    const estado = bancoDeMentira(db, { empresa: loja({ pix_auto_status: 'active' }) });
+    await enviar(app, evento('PIX_AUTOMATIC_RECURRING_AUTHORIZATION_CANCELLED', 'evt_off2',
+      { status: 'CANCELLED', cancellationReason: 'REQUESTED_BY_PAYER_USER' }));
+    expect(estado.empresa.pix_auto_status).toBe('active');
+    expect(notifications.notifyCompany).not.toHaveBeenCalled();
+  });
+
+  test('sem o segredo e desligada: não relê na Asaas e não grava nada', async () => {
+    const { app, db, asaasClient } = buildApp({ secret: null, ligado: false });
+    const estado = bancoDeMentira(db, { empresa: loja() });
+    const r = await enviar(app, evento('PIX_AUTOMATIC_RECURRING_AUTHORIZATION_ACTIVATED', 'evt_off3', { status: 'ACTIVE' }), false);
+    expect(r.body).toMatchObject({ handled: false, reason: 'pix_automatico_desligado' });
+    expect(asaasClient.asaasRequest).not.toHaveBeenCalled();
+    expect(estado.eventos.size).toBe(0);
+    expect(estado.webhookLogs).toHaveLength(0);
+  });
+
+  test('reenvio com a chave desligada também é reconhecido', async () => {
+    const { app, db } = buildApp({ ligado: false });
+    const estado = bancoDeMentira(db, { empresa: loja() });
+    const ev = evento('PIX_AUTOMATIC_RECURRING_AUTHORIZATION_CREATED', 'evt_off4');
+    await enviar(app, ev);
+    const r2 = await enviar(app, ev);
+    expect(r2.body).toMatchObject({ duplicate: true });
+    expect(estado.webhookLogs).toHaveLength(1);
+  });
+
+  test('elegibilidade continua gravada (é da conta da Aura, não de uma loja)', async () => {
+    const { app, db } = buildApp({ ligado: false });
+    const estado = bancoDeMentira(db, { empresa: loja() });
+    const r = await enviar(app, { id: 'evt_el_off', event: 'PIX_AUTOMATIC_RECURRING_ELIGIBILITY_UPDATED', dateCreated: '2099-03-05 08:00:00',
+      account: { id: 'acc_aura', ownerId: null }, eligibility: { status: 'ELIGIBLE', ineligibleReasons: [] } });
+    expect(r.body).toMatchObject({ handled: true, result: 'elegibilidade_eligible' });
+    expect(estado.elegibilidade).toMatchObject({ status: 'ELIGIBLE' });
+  });
+
+  test('chave com valor diferente de "true" conta como desligada', async () => {
+    const { app, db } = buildApp({ ligado: false });
+    process.env.PIX_AUTOMATIC_ENABLED = '1';
+    const estado = bancoDeMentira(db, { empresa: loja() });
+    const r = await enviar(app, evento('PIX_AUTOMATIC_RECURRING_AUTHORIZATION_ACTIVATED', 'evt_off5', { status: 'ACTIVE' }));
+    expect(r.body).toMatchObject({ result: 'desligado' });
+    expect(estado.empresa.pix_auto_status).toBe('pending');
+  });
+});
+
+describe('webhook_logs', () => {
+  test('evento processado com empresa ganha uma linha (com dedupe_key); o reenvio não', async () => {
+    const { app, db } = buildApp();
+    const estado = bancoDeMentira(db, { empresa: loja() });
+    const ev = evento('PIX_AUTOMATIC_RECURRING_AUTHORIZATION_ACTIVATED', 'evt_wl1', { status: 'ACTIVE', subscriptionId: 'sub_nova' });
+    await enviar(app, ev);
+    await enviar(app, ev);
+    expect(estado.webhookLogs).toHaveLength(1);
+    expect(estado.webhookLogs[0]).toMatchObject({
+      company_id: LOJA,
+      event: 'PIX_AUTOMATIC_RECURRING_AUTHORIZATION_ACTIVATED',
+      payload: { id: 'evt_wl1', dedupe_key: 'evt_wl1', fonte: 'body', resultado: 'status_active',
+        authorization: { id: AUTH, status: 'ACTIVE' } },
+    });
+  });
+
+  test('elegibilidade e autorização desconhecida não entram (sem empresa)', async () => {
+    const { app, db } = buildApp();
+    const estado = bancoDeMentira(db, { empresa: loja({ asaas_pix_auto_authorization_id: 'outra' }) });
+    await enviar(app, { id: 'evt_el', event: 'PIX_AUTOMATIC_RECURRING_ELIGIBILITY_UPDATED', dateCreated: '2099-03-05 08:00:00',
+      account: { id: 'acc_aura', ownerId: null }, eligibility: { status: 'ELIGIBLE', ineligibleReasons: [] } });
+    await enviar(app, evento('PIX_AUTOMATIC_RECURRING_AUTHORIZATION_ACTIVATED', 'evt_desc', { status: 'ACTIVE' }));
+    expect(estado.webhookLogs).toHaveLength(0);
+    expect(estado.eventos.size).toBe(2);
+  });
+
+  test('nome de evento com mais de 60 caracteres é cortado na coluna e fica inteiro no payload', async () => {
+    const { app, db } = buildApp();
+    const estado = bancoDeMentira(db, { empresa: loja({ pix_auto_status: 'active' }) });
+    const nome = 'PIX_AUTOMATIC_RECURRING_PAYMENT_INSTRUCTION_WAITING_PROCESSING_X';
+    await enviar(app, { id: 'evt_longo', event: nome,
+      paymentInstruction: { id: 'pi_9', status: 'X', authorization: { id: AUTH } } });
+    expect(estado.webhookLogs).toHaveLength(1);
+    expect(estado.webhookLogs[0].event).toBe(nome.slice(0, 60));
+    expect(estado.webhookLogs[0].payload.event).toBe(nome);
+  });
+
+  test('sem a migration 406 o reenvio não duplica a linha (confere o dedupe_key)', async () => {
+    const { app, db } = buildApp();
+    const estado = bancoDeMentira(db, { empresa: loja(), semTabela: true });
+    const ev = evento('PIX_AUTOMATIC_RECURRING_AUTHORIZATION_ACTIVATED', 'evt_st', { status: 'ACTIVE' });
+    await enviar(app, ev);
+    await enviar(app, ev);
+    expect(estado.webhookLogs).toHaveLength(1);
+  });
+
+  test('falha ao gravar em webhook_logs não derruba o evento', async () => {
+    const { app, db } = buildApp();
+    const estado = bancoDeMentira(db, { empresa: loja() });
+    const original = db.query.getMockImplementation();
+    db.query.mockImplementation(async (sql, params) => {
+      if (/^\s*INSERT INTO webhook_logs/.test(sql)) throw new Error('disco cheio');
+      return original(sql, params);
+    });
+    const r = await enviar(app, evento('PIX_AUTOMATIC_RECURRING_AUTHORIZATION_ACTIVATED', 'evt_wf', { status: 'ACTIVE' }));
+    expect(r.body).toMatchObject({ handled: true, status: 'active' });
+    expect(estado.eventos.get('evt_wf')).toMatchObject({ processed: true });
   });
 });

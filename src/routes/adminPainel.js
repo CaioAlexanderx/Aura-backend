@@ -265,6 +265,7 @@ router.get('/clientes/:cid/ficha', ...adminOnly, asyncHandler(async (req, res) =
               ${base.PAGAMENTO_ASAAS}->>'dueDate' AS vencimento
          FROM webhook_logs
         WHERE company_id = $1 AND provider = 'asaas' AND event NOT LIKE 'SUBSCRIPTION\\_%'
+          AND event NOT LIKE 'PIX\\_AUTOMATIC\\_%'
         ORDER BY processed_at DESC
         LIMIT 20`,
       [cid]
@@ -279,7 +280,7 @@ router.get('/clientes/:cid/ficha', ...adminOnly, asyncHandler(async (req, res) =
             FROM audit_log WHERE company_id = $1 AND action IN ${base.ACOES_ACESSO} ORDER BY created_at DESC LIMIT 10)
          UNION ALL
          (SELECT 'pagamento', processed_at, NULLIF(${base.PAGAMENTO_ASAAS}->>'value', '')::numeric, event::text
-            FROM webhook_logs WHERE company_id = $1 AND provider = 'asaas' AND event NOT LIKE 'SUBSCRIPTION\\_%' ORDER BY processed_at DESC LIMIT 10)
+            FROM webhook_logs WHERE company_id = $1 AND provider = 'asaas' AND event NOT LIKE 'SUBSCRIPTION\\_%' AND event NOT LIKE 'PIX\\_AUTOMATIC\\_%' ORDER BY processed_at DESC LIMIT 10)
          UNION ALL
          (SELECT 'nota', created_at, total_nfce, status::text
             FROM nfce_emissions WHERE company_id = $1 ORDER BY created_at DESC LIMIT 10)

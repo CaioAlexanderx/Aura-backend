@@ -28,10 +28,16 @@
 //   débitos: antes de active nada é cancelado; sem a assinatura nova, nada
 //   é cancelado.
 //
+// Chave geral: com PIX_AUTOMATIC_ENABLED desligada (padrão) as duas ações
+// respondem 409 pix_automatico_desligado antes de qualquer chamada à Asaas;
+// estado e elegibilidade (só leitura) seguem.
+//
 // MULTI-CNPJ: a cobrança é da empresa que paga (billing_owner_company_id
 // nulo ou ela mesma). Filial de grupo é recusada com o id da principal.
 // ============================================================
 'use strict';
+
+const chaveGeral = require('./pixAutomaticoChave');
 
 const VIVOS = new Set(['pending', 'active']);
 const FINAIS = new Set(['refused', 'cancelled', 'expired']);
@@ -170,6 +176,8 @@ async function resolverPlano({ cliente, empresa, body }) {
 }
 
 async function iniciarAutorizacao({ db, cliente, companyId, userId, body }) {
+  // Chave geral desligada (padrão): nada vai para a Asaas.
+  if (!chaveGeral.ligado()) throw chaveGeral.erroDesligado();
   const empresa = await carregarEmpresa(db, companyId);
   if (empresa.billing_owner_company_id && empresa.billing_owner_company_id !== empresa.id) {
     throw erro(409, 'cobranca_na_principal',
@@ -297,6 +305,7 @@ async function iniciarAutorizacao({ db, cliente, companyId, userId, body }) {
 const NAO_ENCONTRADO = (err) => err && err.asaasStatus === 404;
 
 async function trocarAssinatura({ db, cliente, companyId, userId }) {
+  if (!chaveGeral.ligado()) throw chaveGeral.erroDesligado();
   const empresa = await carregarEmpresa(db, companyId);
   if (empresa.pix_auto_status !== 'active' || !empresa.asaas_pix_auto_authorization_id) {
     throw erro(409, 'autorizacao_nao_ativa',
