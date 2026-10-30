@@ -83,6 +83,10 @@ router.use('/', require('./catalogHealth'));
 router.use('/products', require('./productDescriptions'));
 router.use('/products', require('./productsDuplicates'));
 router.use('/products', require('./productsBatch'));
+// p-74 (30/10/2026): POST /products/barcodes/generate -- gera EAN-13 da
+// serie interna 210, de um produto ou em lote, com previa (dry_run).
+// Caminho estatico, montado junto dos outros antes dos routers com /:pid.
+router.use('/products', require('./productsBarcodeGenerate'));
 router.use('/products', require('./productsVariations'));
 // F0 Bloco B1 (30/07/2026): productLinksRouter expoe /products/unclassified
 // e /products/categories/bulk (estaticas) -- tem que montar ANTES de
