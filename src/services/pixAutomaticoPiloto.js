@@ -22,7 +22,8 @@
 //   segunda trava. Se a Asaas falhar, o status volta ao que era.
 //
 // trocarAssinatura — só com a autorização active no banco E na Asaas (GET
-//   na hora). Cancela a assinatura Pix comum antiga e as cobranças pendentes
+//   na hora) e sem cobrança vencida na assinatura antiga (tq-105). Chamada
+//   pela rota de staff ou, sozinha, depois do ACTIVATED (webhook). Cancela a assinatura Pix comum antiga e as cobranças pendentes
 //   dela (o QR já pagou aquele ciclo) e aponta companies.asaas_subscription_id
 //   para a assinatura que a Asaas criou com a autorização. Nunca há dois
 //   débitos: antes de active nada é cancelado; sem a assinatura nova, nada
@@ -91,6 +92,12 @@ async function carregarEmpresa(db, companyId) {
 }
 
 async function auditar(db, { userId, companyId, action, payload }) {
+  // Troca automática (webhook, tq-105): não há staff, e admin_audit_log exige
+  // staff_user_id. O registro fica no log e em pix_automatico_autorizacoes.
+  if (!userId) {
+    console.log('[pixAutomatico] ' + action + ' automático na company ' + companyId + ': ' + JSON.stringify(payload || {}));
+    return;
+  }
   await db.query(
     `INSERT INTO admin_audit_log (staff_user_id, company_id, action, payload, reason)
      VALUES ($1, $2, $3, $4, $5)`,
@@ -345,6 +352,21 @@ async function trocarAssinatura({ db, cliente, companyId, userId }) {
   const excluidas = [];
   const naoExcluidas = [];
   if (antiga) {
+    // tq-105/tq-108: cobrança vencida na assinatura antiga precisa ser paga
+    // (ou resolvida) antes da troca — cancelar a assinatura poderia levar a
+    // dívida junto. Nada é cancelado.
+    let vencidas;
+    try {
+      vencidas = await cliente.listarCobrancasVencidasDaAssinatura(antiga);
+    } catch (err) {
+      throw erroDaAsaas(err, 'conferir as cobranças vencidas da assinatura antiga');
+    }
+    if (vencidas.length) {
+      throw erro(409, 'cobranca_vencida_na_antiga',
+        'A assinatura antiga tem ' + (vencidas.length === 1 ? '1 cobrança vencida' : vencidas.length + ' cobranças vencidas') +
+        ' (' + vencidas.map((v) => v.dueDate || v.id).join(', ') + '). Ela precisa estar paga antes da troca. Nada foi cancelado.',
+        { cobrancas_vencidas: vencidas.map((v) => ({ id: v.id, due_date: v.dueDate || null, value: v.value != null ? Number(v.value) : null })) });
+    }
     try {
       pendentes = await cliente.listarCobrancasPendentesDaAssinatura(antiga);
     } catch (err) {

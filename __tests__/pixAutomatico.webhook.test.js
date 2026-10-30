@@ -23,6 +23,8 @@ const LOJA = 'aaaaaaaa-0000-4000-8000-000000000001';
 const EQUIPE = '645c1325-8865-48be-af6f-430d93fb2b6c';
 const AUTH = 'a33047b1-fb19-4b68-9373-a7ba8a8162aa';
 
+let webhookSvc = null;
+
 function buildApp({ secret = SECRET, ligado = true } = {}) {
   jest.resetModules();
   if (ligado) process.env.PIX_AUTOMATIC_ENABLED = 'true';
@@ -48,7 +50,8 @@ function buildApp({ secret = SECRET, ligado = true } = {}) {
   const app = express();
   app.use(express.json());
   app.use('/webhooks/asaas', require('../src/routes/webhookAsaas'));
-  return { app, db, asaasClient, notifications };
+  webhookSvc = require('../src/services/pixAutomaticoWebhook');
+  return { app, db, asaasClient, notifications, svc: webhookSvc };
 }
 
 function bancoDeMentira(db, { empresa, autorizacoes = [], semTabela = false } = {}) {
@@ -118,6 +121,16 @@ function bancoDeMentira(db, { empresa, autorizacoes = [], semTabela = false } = 
       }
       return { rows: [], rowCount: 1 };
     }
+    // ── troca depois de ativar (tq-105): pixAutomaticoPiloto ──
+    if (/FROM companies WHERE id = \$1$/.test(s)) {
+      const e = estado.empresa;
+      return { rows: e.id === params[0] ? [{ ...e, nome: e.trade_name }] : [] };
+    }
+    if (s.startsWith('UPDATE companies SET asaas_subscription_id = $2')) {
+      const e = estado.empresa;
+      if ((e.asaas_subscription_id || null) === params[2]) e.asaas_subscription_id = params[1];
+      return { rows: [], rowCount: 1 };
+    }
     // ── fluxo de pagamento já existente ──
     if (/FROM companies WHERE asaas_customer_id/.test(s)) {
       return { rows: [{ id: estado.empresa.id, plan: 'negocio', billing_status: estado.empresa.billing_status,
@@ -163,7 +176,11 @@ beforeEach(() => {
   jest.spyOn(console, 'warn').mockImplementation(() => {});
   jest.spyOn(console, 'error').mockImplementation(() => {});
 });
-afterEach(() => {
+afterEach(async () => {
+  // A troca depois do ACTIVATED roda depois da resposta: espera antes de limpar.
+  if (webhookSvc) await webhookSvc.aguardarTarefas();
+  webhookSvc = null;
+  delete process.env.PIX_AUTOMATIC_TROCA_AUTOMATICA;
   delete process.env.ASAAS_WEBHOOK_SECRET;
   delete process.env.PIX_AUTO_ALERT_COMPANY_ID;
   delete process.env.PIX_AUTOMATIC_ENABLED;
@@ -552,5 +569,180 @@ describe('webhook_logs', () => {
     const r = await enviar(app, evento('PIX_AUTOMATIC_RECURRING_AUTHORIZATION_ACTIVATED', 'evt_wf', { status: 'ACTIVE' }));
     expect(r.body).toMatchObject({ handled: true, status: 'active' });
     expect(estado.eventos.get('evt_wf')).toMatchObject({ processed: true });
+  });
+});
+
+// ── tq-105 (29/10/2026): troca depois de ativar e recusa ─────────
+// Asaas de mentira: responde por "MÉTODO caminho" (prefixo com *).
+function asaasDeMentira(asaasClient, rotas) {
+  asaasClient.asaasRequest.mockImplementation(async (method, path) => {
+    const k = method + ' ' + path;
+    for (const [padrao, resp] of Object.entries(rotas)) {
+      if (k === padrao || (padrao.endsWith('*') && k.startsWith(padrao.slice(0, -1)))) {
+        if (resp instanceof Error) throw resp;
+        return typeof resp === 'function' ? resp() : resp;
+      }
+    }
+    throw new Error('chamada inesperada à Asaas: ' + k);
+  });
+}
+const chamadasAsaas = (asaasClient) => asaasClient.asaasRequest.mock.calls.map((c) => c[0] + ' ' + c[1]);
+const titulos = (notifications) => notifications.notifyCompany.mock.calls.map((c) => c[1].title);
+
+describe('troca da assinatura depois do ACTIVATED', () => {
+  test('ativa: troca agendada; depois da resposta cancela a antiga e a pendente, aponta para a nova e avisa', async () => {
+    const { app, db, asaasClient, notifications, svc } = buildApp();
+    const estado = bancoDeMentira(db, { empresa: loja() });
+    asaasDeMentira(asaasClient, {
+      ['GET /pix/automatic/authorizations/' + AUTH]: { id: AUTH, status: 'ACTIVE', subscriptionId: 'sub_nova' },
+      'GET /subscriptions/sub_antiga/payments?status=OVERDUE*': { data: [] },
+      'GET /subscriptions/sub_antiga/payments?status=PENDING*': { data: [{ id: 'pay_pend', status: 'PENDING', dueDate: '2099-04-05', value: 140.83 }] },
+      'DELETE /subscriptions/sub_antiga': { deleted: true },
+      'DELETE /payments/pay_pend': { deleted: true },
+    });
+
+    const r = await enviar(app, evento('PIX_AUTOMATIC_RECURRING_AUTHORIZATION_ACTIVATED', 'evt_at1', { status: 'ACTIVE', subscriptionId: 'sub_nova' }));
+    expect(r.body).toMatchObject({ handled: true, status: 'active', troca: 'agendada' });
+    await svc.aguardarTarefas();
+
+    expect(chamadasAsaas(asaasClient)).toEqual([
+      'GET /pix/automatic/authorizations/' + AUTH,
+      'GET /subscriptions/sub_antiga/payments?status=OVERDUE&limit=100',
+      'GET /subscriptions/sub_antiga/payments?status=PENDING&limit=100',
+      'DELETE /subscriptions/sub_antiga',
+      'DELETE /payments/pay_pend',
+    ]);
+    expect(estado.empresa.asaas_subscription_id).toBe('sub_nova');
+    expect(titulos(notifications)).toEqual(['Pix Automático ativo: Loja Piloto']);
+    expect(notifications.notifyCompany.mock.calls[0][0]).toBe(EQUIPE);
+    expect(notifications.notifyCompany.mock.calls[0][1].body).toContain('1 cobrança pendente removida');
+  });
+
+  test('reenvio do ACTIVATED não agenda segunda troca', async () => {
+    const { app, db, asaasClient, svc } = buildApp();
+    bancoDeMentira(db, { empresa: loja() });
+    asaasDeMentira(asaasClient, {
+      ['GET /pix/automatic/authorizations/' + AUTH]: { id: AUTH, status: 'ACTIVE', subscriptionId: 'sub_nova' },
+      'GET /subscriptions/sub_antiga/payments*': { data: [] },
+      'DELETE /subscriptions/sub_antiga': { deleted: true },
+    });
+    const ev = evento('PIX_AUTOMATIC_RECURRING_AUTHORIZATION_ACTIVATED', 'evt_at2', { status: 'ACTIVE' });
+    await enviar(app, ev);
+    const r2 = await enviar(app, ev);
+    await svc.aguardarTarefas();
+    expect(r2.body).toMatchObject({ duplicate: true });
+    expect(chamadasAsaas(asaasClient).filter((c) => c === 'DELETE /subscriptions/sub_antiga')).toHaveLength(1);
+  });
+
+  test('cobrança vencida na assinatura antiga: nada é cancelado e a equipe recebe o motivo', async () => {
+    const { app, db, asaasClient, notifications, svc } = buildApp();
+    const estado = bancoDeMentira(db, { empresa: loja() });
+    asaasDeMentira(asaasClient, {
+      ['GET /pix/automatic/authorizations/' + AUTH]: { id: AUTH, status: 'ACTIVE', subscriptionId: 'sub_nova' },
+      'GET /subscriptions/sub_antiga/payments?status=OVERDUE*': { data: [{ id: 'pay_venc', status: 'OVERDUE', dueDate: '2099-02-23', value: 140.83 }] },
+    });
+    await enviar(app, evento('PIX_AUTOMATIC_RECURRING_AUTHORIZATION_ACTIVATED', 'evt_at3', { status: 'ACTIVE' }));
+    await svc.aguardarTarefas();
+
+    expect(chamadasAsaas(asaasClient).some((c) => c.startsWith('DELETE'))).toBe(false);
+    expect(estado.empresa.asaas_subscription_id).toBe('sub_antiga');
+    expect(estado.empresa.pix_auto_status).toBe('active');
+    expect(titulos(notifications)).toEqual(['Pix Automático ativo, falta trocar a assinatura: Loja Piloto']);
+    expect(notifications.notifyCompany.mock.calls[0][1].body).toContain('2099-02-23');
+    expect(notifications.notifyCompany.mock.calls[0][1].dedupeKey).toBe('pix-auto-troca-pendente:' + AUTH);
+  });
+
+  test('na Asaas a autorização não está ACTIVE: nada é cancelado', async () => {
+    const { app, db, asaasClient, notifications, svc } = buildApp();
+    const estado = bancoDeMentira(db, { empresa: loja() });
+    asaasDeMentira(asaasClient, {
+      ['GET /pix/automatic/authorizations/' + AUTH]: { id: AUTH, status: 'CANCELLED' },
+    });
+    await enviar(app, evento('PIX_AUTOMATIC_RECURRING_AUTHORIZATION_ACTIVATED', 'evt_at4', { status: 'ACTIVE' }));
+    await svc.aguardarTarefas();
+    expect(chamadasAsaas(asaasClient)).toEqual(['GET /pix/automatic/authorizations/' + AUTH]);
+    expect(estado.empresa.asaas_subscription_id).toBe('sub_antiga');
+    expect(titulos(notifications)).toEqual(['Pix Automático ativo, falta trocar a assinatura: Loja Piloto']);
+  });
+
+  test('a Asaas falha no meio (cancelar a antiga): a empresa segue na antiga e a equipe é avisada', async () => {
+    const { app, db, asaasClient, notifications, svc } = buildApp();
+    const estado = bancoDeMentira(db, { empresa: loja() });
+    const falha = new Error('Asaas 500'); falha.asaasStatus = 500;
+    asaasDeMentira(asaasClient, {
+      ['GET /pix/automatic/authorizations/' + AUTH]: { id: AUTH, status: 'ACTIVE', subscriptionId: 'sub_nova' },
+      'GET /subscriptions/sub_antiga/payments*': { data: [] },
+      'DELETE /subscriptions/sub_antiga': falha,
+    });
+    await enviar(app, evento('PIX_AUTOMATIC_RECURRING_AUTHORIZATION_ACTIVATED', 'evt_at5', { status: 'ACTIVE' }));
+    await svc.aguardarTarefas();
+    expect(estado.empresa.asaas_subscription_id).toBe('sub_antiga');
+    expect(titulos(notifications)).toEqual(['Pix Automático ativo, falta trocar a assinatura: Loja Piloto']);
+  });
+
+  test('PIX_AUTOMATIC_TROCA_AUTOMATICA=false: status ativo, troca fica para a rota de staff', async () => {
+    process.env.PIX_AUTOMATIC_TROCA_AUTOMATICA = 'false';
+    const { app, db, asaasClient, notifications, svc } = buildApp();
+    const estado = bancoDeMentira(db, { empresa: loja() });
+    const r = await enviar(app, evento('PIX_AUTOMATIC_RECURRING_AUTHORIZATION_ACTIVATED', 'evt_at6', { status: 'ACTIVE' }));
+    await svc.aguardarTarefas();
+    expect(r.body).toMatchObject({ status: 'active', troca: 'manual' });
+    expect(asaasClient.asaasRequest).not.toHaveBeenCalled();
+    expect(notifications.notifyCompany).not.toHaveBeenCalled();
+    expect(estado.empresa.asaas_subscription_id).toBe('sub_antiga');
+  });
+
+  test('chave geral desligada: ACTIVATED não troca nada', async () => {
+    const { app, db, asaasClient, svc } = buildApp({ ligado: false });
+    const estado = bancoDeMentira(db, { empresa: loja() });
+    await enviar(app, evento('PIX_AUTOMATIC_RECURRING_AUTHORIZATION_ACTIVATED', 'evt_at7', { status: 'ACTIVE' }));
+    await svc.aguardarTarefas();
+    expect(asaasClient.asaasRequest).not.toHaveBeenCalled();
+    expect(estado.empresa.asaas_subscription_id).toBe('sub_antiga');
+  });
+
+  test('autorização antiga que fica ACTIVE não dispara troca', async () => {
+    const { app, db, asaasClient, svc } = buildApp();
+    bancoDeMentira(db, {
+      empresa: loja({ asaas_pix_auto_authorization_id: 'auth-nova' }),
+      autorizacoes: [{ id: AUTH, company_id: LOJA, status: 'pending' }],
+    });
+    await enviar(app, evento('PIX_AUTOMATIC_RECURRING_AUTHORIZATION_ACTIVATED', 'evt_at8', { status: 'ACTIVE' }));
+    await svc.aguardarTarefas();
+    expect(asaasClient.asaasRequest).not.toHaveBeenCalled();
+  });
+});
+
+describe('recusa (REFUSED)', () => {
+  test('REFUSED depois do RECEIVED: nada liga, nada é cancelado e a equipe confere a cobrança antiga', async () => {
+    const { app, db, asaasClient, notifications, svc } = buildApp();
+    const estado = bancoDeMentira(db, { empresa: loja() });
+    asaasClient.asaas.mockResolvedValue({ data: [] });
+    await enviar(app, evento('PIX_AUTOMATIC_RECURRING_AUTHORIZATION_CREATED', 'evt_r1'));
+    await enviar(app, {
+      id: 'evt_r2', event: 'PAYMENT_RECEIVED',
+      payment: { id: 'pay_qr', customer: 'cus_loja', value: 140.83, billingType: 'PIX', status: 'RECEIVED',
+        paymentDate: '2099-03-01', dueDate: '2099-03-01' },
+    });
+    const r = await enviar(app, evento('PIX_AUTOMATIC_RECURRING_AUTHORIZATION_REFUSED', 'evt_r3', { status: 'REFUSED' }));
+    await enviar(app, evento('PIX_AUTOMATIC_RECURRING_AUTHORIZATION_REFUSED', 'evt_r3', { status: 'REFUSED' }));
+    await svc.aguardarTarefas();
+
+    expect(r.body).toMatchObject({ status: 'refused', alerta: true });
+    expect(r.body.troca).toBeUndefined();
+    expect(estado.empresa.pix_auto_status).toBe('refused');
+    expect(estado.empresa.asaas_subscription_id).toBe('sub_antiga');
+    expect(asaasClient.asaasRequest).not.toHaveBeenCalled();
+    expect(titulos(notifications)).toEqual(['Pix Automático não foi ativado: Loja Piloto']);
+    expect(notifications.notifyCompany.mock.calls[0][1].body).toContain('não pagar o mesmo mês duas vezes');
+    expect(notifications.notifyCompany.mock.calls[0][1].dedupeKey).toBe('pix-auto-recusada:' + AUTH);
+  });
+
+  test('REFUSED de autorização já encerrada não muda nada nem avisa', async () => {
+    const { app, db, notifications } = buildApp();
+    const estado = bancoDeMentira(db, { empresa: loja({ pix_auto_status: 'cancelled' }) });
+    await enviar(app, evento('PIX_AUTOMATIC_RECURRING_AUTHORIZATION_REFUSED', 'evt_r4', { status: 'REFUSED' }));
+    expect(estado.empresa.pix_auto_status).toBe('cancelled');
+    expect(notifications.notifyCompany).not.toHaveBeenCalled();
   });
 });
