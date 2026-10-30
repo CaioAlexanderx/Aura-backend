@@ -190,7 +190,7 @@ async function listarMovimentosDaSessao(sessaoId) {
          FROM caixa_movimentos m
          LEFT JOIN users u ON u.id = m.created_by
         WHERE m.sessao_id = $1
-        ORDER BY m.created_at DESC`,
+        ORDER BY m.created_at DESC, m.id DESC`,
       [sessaoId]
     );
     movimentosDisponiveis = true;

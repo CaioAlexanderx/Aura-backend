@@ -116,7 +116,10 @@ describe('caixa — sangria e suprimento', () => {
 
     const lista = await request(app).get(`${base}/movimentos`);
     expect(lista.body.movimentos).toHaveLength(2);
-    expect(lista.body.movimentos[0]).toMatchObject({ tipo: 'sangria', valor: 30, created_by_name: 'Fixture Caixa' });
+    // Tudo roda numa transação só: os dois created_at são o mesmo NOW() e a
+    // ordem entre eles empata — acha pelo tipo, não pela posição.
+    const aSangria = lista.body.movimentos.find((m) => m.tipo === 'sangria');
+    expect(aSangria).toMatchObject({ tipo: 'sangria', valor: 30, motivo: 'motoboy', created_by_name: 'Fixture Caixa' });
   });
 
   test('3. desfazer devolve o dinheiro; movimentação de outra loja é 404', async () => {
