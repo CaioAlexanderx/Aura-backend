@@ -1,6 +1,7 @@
 const express = require('express');
 const { requireAuth, requireCompanyAccess, requirePlan } = require('../middleware/auth');
 const { planoOuAssentoExtra } = require('../middleware/planoOuAssentoExtra');
+const { estoqueSoConsulta, somenteLeituraEmConsulta, negarEmConsulta } = require('../middleware/estoqueSoConsulta');
 
 const router = express.Router({ mergeParams: true });
 
@@ -67,6 +68,14 @@ router.use('/matcon/professionals', require('./matconProfessionals'));
 // desenho da OS e da Otica). O router so responde /quotes e /deliveries:
 // outros routers do Matcon podem montar no mesmo /matcon.
 router.use('/matcon', require('./matconOrcamentosEntregas'));
+// 30/10/2026: permissao estoque_consulta (ver o middleware). Tem que vir ANTES
+// de todo router que responde /products: categoryMigration, importData e
+// productLinks montam na raiz com o caminho completo.
+router.use('/products', estoqueSoConsulta);
+router.use('/categories/migration', somenteLeituraEmConsulta);
+router.use('/product-categories', somenteLeituraEmConsulta);
+router.use('/imports', somenteLeituraEmConsulta);
+router.use('/estoque', negarEmConsulta);
 // F0 Bloco B2 (30/07/2026): categoryMigration atende /categories/migration/*
 // e /products/brand-candidates + /products/brand/apply, com os caminhos ja
 // completos dentro do proprio router -- por isso monta na RAIZ. Tem que vir
