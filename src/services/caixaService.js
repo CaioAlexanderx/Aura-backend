@@ -64,10 +64,26 @@
 //   total_vendas (SUM sales.total_amount, fonte única de "vendas" —
 //   ver fonte_unica_vendas_09mai2026) para o PDF separar "Vendas do
 //   período" de "Entradas no caixa" (total_geral).
+//
+// 30/10/2026 (sangria e suprimento, migration 422):
+// - caixa_movimentos: retirada (sangria) e reforço (suprimento) de dinheiro
+//   da gaveta com o caixa aberto. Não são vendas: ficam fora de
+//   totais.geral e só mexem no dinheiro esperado. getStatus devolve os dois
+//   totais e dinheiro_em_caixa; fechar() desconta sangrias e soma
+//   suprimentos no dinheiro_esperado e grava os totais no snapshot
+//   (total_sangrias/total_suprimentos). Tudo defensivo à migration ausente
+//   (42P01/42703, cache de módulo), como manda o CLAUDE.md.
 // ============================================================
 
 const pool = require('../config/database');
 const AppError = require('../errors/AppError');
+
+const TIPOS_DE_MOVIMENTO = ['sangria', 'suprimento'];
+const MOTIVO_MAX = 200;
+const MOVIMENTO_MAXIMO = 1000000;
+
+function r2(n) { return Math.round((Number(n) || 0) * 100) / 100; }
+function brl(n) { return 'R$ ' + r2(n).toFixed(2).replace('.', ','); }
 
 // ── Helpers ──────────────────────────────────────────────────────────────
 
@@ -105,6 +121,84 @@ async function getSessaoAberta(companyId) {
     [companyId]
   );
   return rows[0] || null;
+}
+
+// ── Movimentações da sessão (30/10/2026, migration 422) ─────────────────
+// null = ainda não sabemos se a migration 422 está no banco; false = não
+// está (tabela/colunas ausentes), e as leituras seguem com zeros; true =
+// está. O deploy roda a migration antes de subir o app, então o cache não
+// precisa expirar.
+let movimentosDisponiveis = null;
+
+/** Só para testes. */
+function _resetCache() { movimentosDisponiveis = null; }
+
+async function calcularMovimentos(sessaoId) {
+  const zero = { sangrias: 0, suprimentos: 0 };
+  if (movimentosDisponiveis === false) return zero;
+  try {
+    const { rows } = await pool.query(
+      `SELECT tipo, COALESCE(SUM(valor), 0)::numeric(12,2) AS total
+         FROM caixa_movimentos
+        WHERE sessao_id = $1
+        GROUP BY tipo`,
+      [sessaoId]
+    );
+    movimentosDisponiveis = true;
+    const out = { ...zero };
+    for (const row of rows) {
+      const v = parseFloat(row.total) || 0;
+      if (row.tipo === 'sangria') out.sangrias = r2(v);
+      else if (row.tipo === 'suprimento') out.suprimentos = r2(v);
+    }
+    return out;
+  } catch (err) {
+    if (err.code === '42P01') { movimentosDisponiveis = false; return zero; }
+    throw err;
+  }
+}
+
+/** Dinheiro que deve estar na gaveta agora: troco + vendas em dinheiro
+ *  (já líquidas de reembolso) + suprimentos − sangrias. */
+function dinheiroEmCaixa(trocoInicial, totais, mov) {
+  return r2(parseFloat(trocoInicial) + totais.dinheiro + mov.suprimentos - mov.sangrias);
+}
+
+/** Roda a consulta com as colunas da 422; se o banco ainda não as tem
+ *  (42703/42P01), roda de novo sem elas e lembra. */
+async function tentarComMovimentos(run) {
+  if (movimentosDisponiveis === false) return run(false);
+  try {
+    const r = await run(true);
+    movimentosDisponiveis = true;
+    return r;
+  } catch (err) {
+    if (err.code === '42703' || err.code === '42P01') {
+      movimentosDisponiveis = false;
+      return run(false);
+    }
+    throw err;
+  }
+}
+
+async function listarMovimentosDaSessao(sessaoId) {
+  if (movimentosDisponiveis === false) return [];
+  try {
+    const { rows } = await pool.query(
+      `SELECT m.id, m.tipo, m.valor, m.motivo, m.created_at,
+              COALESCE(u.full_name, '') AS created_by_name
+         FROM caixa_movimentos m
+         LEFT JOIN users u ON u.id = m.created_by
+        WHERE m.sessao_id = $1
+        ORDER BY m.created_at DESC`,
+      [sessaoId]
+    );
+    movimentosDisponiveis = true;
+    return rows.map((m) => ({ ...m, valor: parseFloat(m.valor) }));
+  } catch (err) {
+    if (err.code === '42P01') { movimentosDisponiveis = false; return []; }
+    throw err;
+  }
 }
 
 async function calcularTotais(companyId, sessaoId, openedAt, closedAt) {
@@ -399,6 +493,7 @@ async function getStatus(companyId) {
     sessao.opened_at,
     null
   );
+  const mov = await calcularMovimentos(sessao.id);
 
   return {
     sessao_ativa: {
@@ -410,6 +505,11 @@ async function getStatus(companyId) {
         name: sessao.operator_name,
       },
       totais_ao_vivo: totais,
+      // 30/10/2026 (422): o que saiu e entrou na gaveta fora das vendas, e
+      // quanto deve estar nela agora.
+      sangrias:         mov.sangrias,
+      suprimentos:      mov.suprimentos,
+      dinheiro_em_caixa: dinheiroEmCaixa(sessao.troco_inicial, totais, mov),
     },
   };
 }
@@ -438,8 +538,9 @@ async function fechar(companyId, userId, dinheiroContado, observacao = null) {
     closedAt
   );
 
-  const dinheiroEsperado =
-    Math.round((parseFloat(sessao.troco_inicial) + totais.dinheiro) * 100) / 100;
+  // 30/10/2026 (422): sangrias saem e suprimentos entram no esperado.
+  const mov = await calcularMovimentos(sessao.id);
+  const dinheiroEsperado = dinheiroEmCaixa(sessao.troco_inicial, totais, mov);
 
   const client = await pool.connect();
   let snapshot;
@@ -453,28 +554,37 @@ async function fechar(companyId, userId, dinheiroContado, observacao = null) {
       [closedAt, userId, sessao.id]
     );
 
+    // As colunas da 422 só entram quando a migration está no banco (a
+    // tabela e as colunas chegam juntas). Dentro da transação não dá para
+    // tentar e cair no fallback: um erro aborta a transação inteira.
+    const comMovimentos = movimentosDisponiveis === true;
+    const colunas = comMovimentos ? ', total_sangrias, total_suprimentos' : '';
+    const valores = comMovimentos ? ', $12, $13' : '';
+    const params = [
+      sessao.id,
+      dinheiroEsperado,
+      dinheiroContado,
+      totais.pix,
+      totais.cartao_debito,
+      totais.cartao_credito,
+      totais.fiado,
+      totais.dinheiro,
+      totais.outros,
+      totais.geral,
+      observacao,
+    ];
+    if (comMovimentos) params.push(mov.sangrias, mov.suprimentos);
+
     const { rows } = await client.query(
       `INSERT INTO caixa_fechamentos (
          sessao_id,
          dinheiro_esperado, dinheiro_contado,
          total_pix, total_cartao_debito, total_cartao_credito,
          total_fiado, total_dinheiro, total_outros, total_geral,
-         observacao
-       ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
+         observacao${colunas}
+       ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11${valores})
        RETURNING *, (dinheiro_contado - dinheiro_esperado) AS diferenca`,
-      [
-        sessao.id,
-        dinheiroEsperado,
-        dinheiroContado,
-        totais.pix,
-        totais.cartao_debito,
-        totais.cartao_credito,
-        totais.fiado,
-        totais.dinheiro,
-        totais.outros,
-        totais.geral,
-        observacao,
-      ]
+      params
     );
 
     await client.query('COMMIT');
@@ -513,7 +623,105 @@ async function fechar(companyId, userId, dinheiroContado, observacao = null) {
     new_customers_count: metricas.new_customers_count,
     total_vendas: metricas.total_vendas,
     total_devolucoes: totais.devolucoes,
+    total_sangrias: mov.sangrias,
+    total_suprimentos: mov.suprimentos,
   };
+}
+
+// ── Sangria e suprimento (30/10/2026, migration 422) ─────────────────────
+
+/**
+ * Registra uma retirada (sangria) ou um reforço (suprimento) na sessão
+ * aberta. A sangria não pode passar do dinheiro que o sistema diz estar na
+ * gaveta: acima disso é dedo errado ou venda que não foi lançada — e o
+ * esperado do fechamento ficaria negativo.
+ */
+async function registrarMovimento(companyId, userId, { tipo, valor, motivo = null }) {
+  if (!TIPOS_DE_MOVIMENTO.includes(tipo)) {
+    throw new AppError('tipo deve ser sangria ou suprimento', 400);
+  }
+  const v = r2(valor);
+  if (typeof valor !== 'number' || !Number.isFinite(valor) || v <= 0 || v > MOVIMENTO_MAXIMO) {
+    throw new AppError('valor deve ser um número maior que zero', 400);
+  }
+  if (motivo !== null && motivo !== undefined && typeof motivo !== 'string') {
+    throw new AppError('motivo deve ser texto', 400);
+  }
+  const motivoLimpo = motivo ? String(motivo).replace(/\s+/g, ' ').trim().slice(0, MOTIVO_MAX) : null;
+
+  await assertCaixaEnabled(companyId);
+  const sessao = await getSessaoAberta(companyId);
+  if (!sessao) throw new AppError('Nenhum caixa aberto para esta empresa.', 404);
+
+  const totais = await calcularTotais(companyId, sessao.id, sessao.opened_at, null);
+  const antes = await calcularMovimentos(sessao.id);
+  if (movimentosDisponiveis === false) {
+    throw new AppError('Retiradas do caixa ainda não estão disponíveis neste ambiente.', 422);
+  }
+  const emCaixa = dinheiroEmCaixa(sessao.troco_inicial, totais, antes);
+  if (tipo === 'sangria' && v > emCaixa + 0.004) {
+    throw new AppError(
+      `O caixa tem ${brl(emCaixa)} em dinheiro; não dá para retirar ${brl(v)}.`,
+      422
+    );
+  }
+
+  const { rows } = await pool.query(
+    `INSERT INTO caixa_movimentos (company_id, sessao_id, tipo, valor, motivo, created_by)
+     VALUES ($1, $2, $3, $4, $5, $6)
+     RETURNING id, tipo, valor, motivo, created_at`,
+    [companyId, sessao.id, tipo, v, motivoLimpo || null, userId]
+  );
+  const movimento = { ...rows[0], valor: parseFloat(rows[0].valor) };
+
+  const depois = {
+    sangrias:    r2(antes.sangrias + (tipo === 'sangria' ? v : 0)),
+    suprimentos: r2(antes.suprimentos + (tipo === 'suprimento' ? v : 0)),
+  };
+  return {
+    movimento,
+    sangrias:          depois.sangrias,
+    suprimentos:       depois.suprimentos,
+    dinheiro_em_caixa: dinheiroEmCaixa(sessao.troco_inicial, totais, depois),
+  };
+}
+
+/** As movimentações da sessão aberta (vazio sem caixa aberto). */
+async function listarMovimentos(companyId) {
+  await assertCaixaEnabled(companyId);
+  const sessao = await getSessaoAberta(companyId);
+  if (!sessao) return { sessao_id: null, movimentos: [], sangrias: 0, suprimentos: 0, dinheiro_em_caixa: 0 };
+  const totais = await calcularTotais(companyId, sessao.id, sessao.opened_at, null);
+  const mov = await calcularMovimentos(sessao.id);
+  const movimentos = await listarMovimentosDaSessao(sessao.id);
+  return {
+    sessao_id:         sessao.id,
+    movimentos,
+    sangrias:          mov.sangrias,
+    suprimentos:       mov.suprimentos,
+    dinheiro_em_caixa: dinheiroEmCaixa(sessao.troco_inicial, totais, mov),
+  };
+}
+
+/** Desfaz uma movimentação lançada errada — só enquanto a sessão dela
+ *  está aberta (o fechamento congela o snapshot). */
+async function removerMovimento(companyId, movimentoId) {
+  await assertCaixaEnabled(companyId);
+  const sessao = await getSessaoAberta(companyId);
+  if (!sessao) throw new AppError('Nenhum caixa aberto para esta empresa.', 404);
+  let rowCount = 0;
+  try {
+    const r = await pool.query(
+      `DELETE FROM caixa_movimentos WHERE id = $1 AND company_id = $2 AND sessao_id = $3`,
+      [movimentoId, companyId, sessao.id]
+    );
+    rowCount = r.rowCount;
+  } catch (err) {
+    if (err.code === '42P01' || err.code === '22P02') rowCount = 0;
+    else throw err;
+  }
+  if (!rowCount) throw new AppError('Movimentação não encontrada nesta sessão.', 404);
+  return listarMovimentos(companyId);
 }
 
 // LEITURA SEM GATE (07/10/2026): historico e detalhe mostram o que ja foi
@@ -539,7 +747,9 @@ async function getHistorico(companyId, { limit = 20, offset = 0, de, ate } = {})
     ? `AND ${dateFilter.join(' AND ')}`
     : '';
 
-  const { rows } = await pool.query(
+  // 30/10/2026 (422): os totais de sangria/suprimento do snapshot, quando
+  // o banco já os tem.
+  const { rows } = await tentarComMovimentos((com) => pool.query(
     `SELECT
        cs.id,
        cs.opened_at,
@@ -559,7 +769,7 @@ async function getHistorico(companyId, { limit = 20, offset = 0, de, ate } = {})
        cf.total_dinheiro,
        cf.total_outros,
        cf.total_geral,
-       cf.observacao AS obs_fechamento
+       cf.observacao AS obs_fechamento${com ? ',\n       cf.total_sangrias,\n       cf.total_suprimentos' : ''}
      FROM caixa_sessoes cs
      JOIN users u_open  ON u_open.id  = cs.opened_by
      LEFT JOIN users u_close ON u_close.id = cs.closed_by
@@ -571,7 +781,7 @@ async function getHistorico(companyId, { limit = 20, offset = 0, de, ate } = {})
      ORDER BY cs.opened_at DESC
      LIMIT $2 OFFSET $3`,
     params
-  );
+  ));
 
   const { rows: countRows } = await pool.query(
     `SELECT COUNT(*)::int AS total
@@ -584,7 +794,7 @@ async function getHistorico(companyId, { limit = 20, offset = 0, de, ate } = {})
 }
 
 async function getSessao(companyId, sessaoId) {
-  const { rows } = await pool.query(
+  const { rows } = await tentarComMovimentos((com) => pool.query(
     `SELECT
        cs.*,
        COALESCE(e.name, u_open.full_name) AS opened_by_name,
@@ -599,7 +809,7 @@ async function getSessao(companyId, sessaoId) {
        cf.total_dinheiro,
        cf.total_outros,
        cf.total_geral,
-       cf.observacao AS obs_fechamento
+       cf.observacao AS obs_fechamento${com ? ',\n       cf.total_sangrias,\n       cf.total_suprimentos' : ''}
      FROM caixa_sessoes cs
      JOIN users u_open  ON u_open.id  = cs.opened_by
      LEFT JOIN users u_close ON u_close.id = cs.closed_by
@@ -607,10 +817,16 @@ async function getSessao(companyId, sessaoId) {
      LEFT JOIN caixa_fechamentos cf ON cf.sessao_id = cs.id
      WHERE cs.id = $1 AND cs.company_id = $2`,
     [sessaoId, companyId]
-  );
+  ));
 
   if (!rows.length) throw new AppError('Sessão não encontrada', 404);
-  return rows[0];
+  // 30/10/2026 (422): as movimentações da sessão, para o detalhe e o PDF.
+  const movimentos = await listarMovimentosDaSessao(rows[0].id);
+  return { ...rows[0], movimentos };
 }
 
-module.exports = { abrir, getStatus, fechar, getHistorico, getSessao };
+module.exports = {
+  abrir, getStatus, fechar, getHistorico, getSessao,
+  registrarMovimento, listarMovimentos, removerMovimento,
+  _resetCache,
+};
