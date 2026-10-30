@@ -193,10 +193,12 @@ function visibilityWhere(idParam, cidParam) {
 }
 
 // Versão sem o `id =` para uso em listagens.
-function listVisibilityWhere(cidParam) {
-  return `(company_id = ${cidParam} OR (
-    is_group_shared = true
-    AND company_id IN (
+// `prefix` (ex.: 'p.') qualifica as colunas quando a consulta tem JOIN;
+// sem prefixo o texto sai idêntico ao de sempre.
+function listVisibilityWhere(cidParam, prefix = '') {
+  return `(${prefix}company_id = ${cidParam} OR (
+    ${prefix}is_group_shared = true
+    AND ${prefix}company_id IN (
       SELECT id FROM companies
       WHERE COALESCE(NULLIF(billing_owner_company_id, id), id) = (
         SELECT COALESCE(NULLIF(billing_owner_company_id, id), id)
@@ -344,6 +346,112 @@ router.get('/', async (req, res) => {
   } catch (err) { console.error('[products] list error:', err.message); res.status(500).json({ error: 'Erro ao listar produtos' }); }
 });
 
+// ─── Variante: colunas e serialização (um produto e lote) ─────
+// As duas rotas abaixo devolvem a variante com os MESMOS campos: o
+// GET /:pid/variants (um produto) e o GET /variants?product_ids= (lote,
+// p-73). As colunas vivem aqui para as duas nunca divergirem.
+const VARIANT_COLS = `pv.id, pv.sku_suffix, pv.price_override, pv.stock_qty, pv.barcode, pv.color_name,
+        COALESCE(json_agg(json_build_object('attribute', pvv.attribute_name, 'value', pvv.value) ORDER BY pvv.attribute_name) FILTER (WHERE pvv.id IS NOT NULL), '[]'::json) AS attributes`;
+
+// Mesma leitura de tamanho e cor que a tela de etiquetas faz em cima de
+// `attributes` (variantSizeColor, components/PrintLabels.tsx).
+const SIZE_ATTRS = new Set(['tamanho', 'size', 'tam', 'tam.', 'variacao', 'medida', 'numero', 'num', 'numeracao', 'n']);
+const COLOR_ATTRS = new Set(['cor', 'color', 'colour']);
+const HEX_RE = /^#[0-9a-fA-F]{6}$/;
+function variantSizeColor(attrs) {
+  let size = '';
+  let color = '';
+  const list = Array.isArray(attrs) ? attrs : [];
+  for (const a of list) {
+    const val = String((a && a.value) || '').trim();
+    if (!val) continue;
+    const attr = String((a && a.attribute) || '').toLowerCase().trim();
+    if (SIZE_ATTRS.has(attr) && !size) size = val;
+    else if ((COLOR_ATTRS.has(attr) || HEX_RE.test(val)) && !color) color = val;
+  }
+  if (!size) {
+    for (const b of list) {
+      const bval = String((b && b.value) || '').trim();
+      if (!bval) continue;
+      const battr = String((b && b.attribute) || '').toLowerCase().trim();
+      if (COLOR_ATTRS.has(battr) || HEX_RE.test(bval)) continue;
+      size = bval;
+      break;
+    }
+  }
+  return { size, color };
+}
+
+// Variante do lote: os campos do GET /:pid/variants, mais product_id,
+// is_active (sempre true: só sai variante ativa), color e size lidos de
+// `attributes` e price (o preço próprio em número, ou null).
+function serializeBatchVariant(row) {
+  const { size, color } = variantSizeColor(row.attributes);
+  const own = row.price_override === null || row.price_override === undefined
+    ? null : parseFloat(row.price_override);
+  return {
+    id: row.id,
+    product_id: row.product_id,
+    sku_suffix: row.sku_suffix,
+    price_override: row.price_override,
+    stock_qty: row.stock_qty,
+    barcode: row.barcode,
+    color_name: row.color_name,
+    attributes: row.attributes || [],
+    color: color || null,
+    size: size || null,
+    price: Number.isFinite(own) ? own : null,
+    is_active: true,
+  };
+}
+
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const VARIANTS_BATCH_MAX = 200;
+
+// ─── GET /variants?product_ids=a,b,c (p-73, 30/10/2026) ───────
+// A tela de etiquetas buscava as variantes de cada produto marcado com uma
+// chamada por produto; "Selecionar todos" disparava uma por produto. Aqui
+// sai tudo numa consulta só (ANY), sem N+1.
+//
+// Resposta: { variants_by_product: { "<pid>": [variante, ...] } }
+//   - só variante ativa; produto sem variante vem com [];
+//   - produto que a empresa não enxerga (outra empresa, ou do grupo sem
+//     is_group_shared) é OMITIDO, sem 403 — mesma regra de grupo da
+//     listagem (listVisibilityWhere). Id que não é uuid também é omitido.
+//   - mais de 200 ids distintos -> 400.
+// Estática ('/variants') e registrada antes de '/:pid/variants'.
+router.get('/variants', async (req, res) => {
+  const companyId = req.params.id;
+  const raw = req.query.product_ids;
+  const joined = Array.isArray(raw) ? raw.join(',') : String(raw || '');
+  const ids = [...new Set(joined.split(',').map((s) => s.trim()).filter(Boolean))];
+  if (!ids.length) {
+    return res.status(400).json({ error: 'Informe product_ids (lista de ids separados por vírgula)' });
+  }
+  if (ids.length > VARIANTS_BATCH_MAX) {
+    return res.status(400).json({ error: `No máximo ${VARIANTS_BATCH_MAX} produtos por vez` });
+  }
+  const validIds = ids.filter((id) => UUID_RE.test(id));
+  if (!validIds.length) return res.json({ variants_by_product: {} });
+  try {
+    const { rows } = await db.query(`
+      SELECT p.id AS visible_product_id, pv.product_id, ${VARIANT_COLS}
+      FROM products p
+      LEFT JOIN product_variants pv ON pv.product_id = p.id AND pv.is_active = true
+      LEFT JOIN product_variant_values pvv ON pvv.variant_id = pv.id
+      WHERE p.id = ANY($2::uuid[]) AND ${listVisibilityWhere('$1', 'p.')}
+      GROUP BY p.id, pv.id
+      ORDER BY pv.created_at ASC`, [companyId, validIds]);
+    const out = {};
+    for (const r of rows) {
+      const pid = r.visible_product_id;
+      if (!out[pid]) out[pid] = [];
+      if (r.id) out[pid].push(serializeBatchVariant(r));
+    }
+    res.json({ variants_by_product: out });
+  } catch (err) { console.error('[products] variants batch error:', err.message); res.status(500).json({ error: 'Erro ao buscar variantes' }); }
+});
+
 // ─── GET /:pid/variants ────────────────────────────
 // 26/10/2026 (tq-55b): color_name (migration 414), o nome da cor como a
 // lojista digitou; NULL em variante antiga ou sem cor.
@@ -356,8 +464,7 @@ router.get('/:pid/variants', async (req, res) => {
     );
     if (!check.length) return res.status(404).json({ error: 'Produto nao encontrado' });
     const { rows } = await db.query(`
-      SELECT pv.id, pv.sku_suffix, pv.price_override, pv.stock_qty, pv.barcode, pv.color_name,
-        COALESCE(json_agg(json_build_object('attribute', pvv.attribute_name, 'value', pvv.value) ORDER BY pvv.attribute_name) FILTER (WHERE pvv.id IS NOT NULL), '[]'::json) AS attributes
+      SELECT ${VARIANT_COLS}
       FROM product_variants pv LEFT JOIN product_variant_values pvv ON pvv.variant_id = pv.id
       WHERE pv.product_id = $1 AND pv.is_active = true
       GROUP BY pv.id, pv.sku_suffix, pv.price_override, pv.stock_qty, pv.barcode, pv.color_name ORDER BY pv.created_at ASC`, [productId]);
