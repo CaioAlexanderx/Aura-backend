@@ -1,7 +1,7 @@
 // ============================================================
 // AURA. — Reajuste de preco em lote: rota sem banco (p-51)
 // Aplicar antes da migration 422 = 503 MIGRATION_PENDING (nada gravado);
-// a previa nao depende da 422.
+// a previa nao depende da 422. PR 2: lista vazia e desfazer 503 sem ela.
 // ============================================================
 'use strict';
 
@@ -52,4 +52,24 @@ test('aplicar sem a 422 = 503 MIGRATION_PENDING com ROLLBACK', async () => {
   expect(chamadas).toContain('ROLLBACK');
   expect(chamadas).not.toContain('COMMIT');
   expect(chamadas).not.toContain('UPDATE');
+});
+
+// PR 2: lista sem a 422 nunca e erro; desfazer sem a 422 = 503.
+function tabelaAusente() { const e = new Error('relation does not exist'); e.code = '42P01'; throw e; }
+
+test('lista sem a 422 devolve vazio', async () => {
+  db.query.mockImplementation(async () => tabelaAusente());
+  const r = await request(app()).get(`/companies/${CID}/products/price-adjustments`);
+  expect(r.status).toBe(200);
+  expect(r.body).toEqual({ adjustments: [], total: 0 });
+});
+
+test('desfazer sem a 422 = 503 MIGRATION_PENDING', async () => {
+  db.connect.mockResolvedValue({
+    query: jest.fn(async (sql) => (/product_price_adjustments/.test(sql) ? tabelaAusente() : { rows: [] })),
+    release: jest.fn(),
+  });
+  const r = await request(app()).post(`/companies/${CID}/products/price-adjustments/${PID}/undo`).send();
+  expect(r.status).toBe(503);
+  expect(r.body.code).toBe('MIGRATION_PENDING');
 });

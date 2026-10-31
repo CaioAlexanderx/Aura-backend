@@ -10,6 +10,10 @@
 //   4. markup/margem: sem custo fica de fora
 //   5. grupo: produto compartilhado da filial e visivel e sinalizado;
 //      produto de outra loja e inativo voltam em not_found_ids
+//   6. (PR 2) desfazer parcial: volta so onde o preco ainda e o gravado;
+//      card mudado depois tambem conta como "mudou depois"; uma vez so;
+//      prazo de 7 dias; lote de outra empresa e 404
+//   7. (PR 2) lista e detalhe dos reajustes da empresa
 //
 // Mesmo padrao de produto.excluirNuncaNegado.banco.test.js: tudo dentro de
 // UMA transacao revertida no afterAll; BEGIN/COMMIT/ROLLBACK da rota viram
@@ -221,4 +225,114 @@ test('corpo invalido: 400 com code', async () => {
   const r = await request(app).post(url()).send({ product_ids: [], mode: 'percent', value: 10 });
   expect(r.status).toBe(400);
   expect(r.body.code).toBe('INVALID_INPUT');
+});
+
+// ─── PR 2: desfazer e lista ─────────────────────────────────
+
+async function aplicar(ids, extra = {}) {
+  const r = await request(app).post(url()).send({ product_ids: ids, mode: 'percent', direction: 'up', value: 10, dry_run: false, allow_below_cost: true, ...extra });
+  expect(r.status).toBe(200);
+  return r.body.adjustment_id;
+}
+
+test('desfazer parcial: so onde o preco ainda e o que o lote gravou', async () => {
+  const intacto = await produto('Desfazer intacto', { price: 100, card: 105 });
+  const mexido = await produto('Desfazer mexido', { price: 50 });
+  const cartaoMexido = await produto('Desfazer cartao mexido', { price: 80, card: 84 });
+  const comVar = await produto('Desfazer com variante', { price: 30 });
+  const { rows: [v] } = await q(
+    `INSERT INTO product_variants (product_id, sku_suffix, price_override, stock_qty) VALUES ($1, 'P', 40, 2) RETURNING id`, [comVar]);
+  const adj = await aplicar([intacto, mexido, cartaoMexido, comVar]);
+
+  // Depois do reajuste: alguem muda o preco de um, o cartao de outro, e vende (estoque) o intacto.
+  await q(`UPDATE products SET price = 59.9 WHERE id = $1`, [mexido]);
+  await q(`UPDATE products SET card_price = 99 WHERE id = $1`, [cartaoMexido]);
+  await q(`UPDATE products SET stock_qty = stock_qty - 1 WHERE id = $1`, [intacto]);
+
+  const r = await request(app).post(`${url()}/${adj}/undo`).send();
+  expect(r.status).toBe(200);
+  expect(r.body).toMatchObject({ adjustment_id: adj, restored_count: 3, changed_after_count: 2 });
+  expect(r.body.changed_after.map((c) => [c.product_id, c.reason]).sort()).toEqual([[cartaoMexido, 'changed'], [mexido, 'changed']].sort());
+  expect(r.body.changed_after.find((c) => c.product_id === mexido)).toMatchObject({ price_after: 55, price_now: 59.9 });
+
+  const i = await linha(intacto);
+  expect(Number(i.price)).toBe(100);
+  expect(Number(i.card_price)).toBe(105);
+  expect(Number(i.stock_qty)).toBe(6); // a venda depois do reajuste continua
+  expect(Number((await linha(mexido)).price)).toBe(59.9);
+  const cm = await linha(cartaoMexido);
+  expect(Number(cm.price)).toBe(88);
+  expect(Number(cm.card_price)).toBe(99);
+  expect(Number((await linha(comVar)).price)).toBe(30);
+  const { rows: [vv] } = await q(`SELECT price_override FROM product_variants WHERE id = $1`, [v.id]);
+  expect(Number(vv.price_override)).toBe(40);
+
+  const { rows: [lote] } = await q(`SELECT undone_at, undone_by, undo_restored_count, undo_changed_count FROM product_price_adjustments WHERE id = $1`, [adj]);
+  expect(lote).toMatchObject({ undone_by: userId, undo_restored_count: 3, undo_changed_count: 2 });
+  expect(lote.undone_at).toBeTruthy();
+  const { rows: st } = await q(`SELECT undo_status, COUNT(*)::int AS n FROM product_price_adjustment_items WHERE adjustment_id = $1 GROUP BY 1 ORDER BY 1`, [adj]);
+  expect(st).toEqual([{ undo_status: 'changed_after', n: 2 }, { undo_status: 'restored', n: 3 }]);
+
+  // Uma vez so.
+  const r2 = await request(app).post(`${url()}/${adj}/undo`).send();
+  expect(r2.status).toBe(409);
+  expect(r2.body.code).toBe('ALREADY_UNDONE');
+});
+
+test('desfazer: produto que deixou de ser visivel conta como not_found', async () => {
+  const daFilial = await produto('Desfazer da filial', { empresa: filial, shared: true, price: 20 });
+  const adj = await aplicar([daFilial]);
+  await q(`UPDATE products SET is_group_shared = false WHERE id = $1`, [daFilial]);
+  const r = await request(app).post(`${url()}/${adj}/undo`).send();
+  expect(r.status).toBe(200);
+  expect(r.body).toMatchObject({ restored_count: 0, changed_after_count: 1 });
+  expect(r.body.changed_after[0]).toMatchObject({ product_id: daFilial, reason: 'not_found', price_now: null });
+  expect(Number((await linha(daFilial)).price)).toBe(22);
+});
+
+test('desfazer: prazo de 7 dias e lote de outra empresa', async () => {
+  const pid = await produto('Desfazer vencido', { price: 10 });
+  const adj = await aplicar([pid]);
+  await q(`UPDATE product_price_adjustments SET created_at = NOW() - INTERVAL '8 days' WHERE id = $1`, [adj]);
+  const r = await request(app).post(`${url()}/${adj}/undo`).send();
+  expect(r.status).toBe(410);
+  expect(r.body).toMatchObject({ code: 'EXPIRED' });
+  expect(Number((await linha(pid)).price)).toBe(11);
+
+  const pid2 = await produto('Desfazer outra empresa', { price: 10 });
+  const adj2 = await aplicar([pid2]);
+  const r2 = await request(app).post(`${url(outraLoja)}/${adj2}/undo`).send();
+  expect(r2.status).toBe(404);
+  expect(r2.body.code).toBe('NOT_FOUND');
+  const r3 = await request(app).post(`${url()}/nao-e-uuid/undo`).send();
+  expect(r3.status).toBe(404);
+});
+
+test('lista e detalhe dos reajustes da empresa', async () => {
+  const pid = await produto('Lista', { price: 10, cost: 4 });
+  const adj = await aplicar([pid], { rounding: '90' });
+
+  // Tudo roda numa transacao so (NOW() igual em todos os lotes), entao o
+  // teste procura o lote pelo id em vez de confiar na posicao.
+  const pag = await request(app).get(url()).query({ limit: 2 });
+  expect(pag.status).toBe(200);
+  expect(pag.body.adjustments).toHaveLength(2);
+  const r = await request(app).get(url()).query({ limit: 100 });
+  expect(r.body.total).toBe(r.body.adjustments.length);
+  const meu = r.body.adjustments.find((a) => a.id === adj);
+  expect(r.body.adjustments.find((a) => a.undone_at)).toMatchObject({ can_undo: false });
+  expect(meu).toMatchObject({
+    id: adj, mode: 'percent', direction: 'up', value: 10, rounding: '90', items_count: 1, products_count: 1,
+    can_undo: true, undone_at: null, user: { id: userId, name: 'Fixture Reajuste' },
+  });
+  expect(meu.undo_deadline).toBeTruthy();
+
+  const outra = await request(app).get(url(outraLoja));
+  expect(outra.body).toEqual({ adjustments: [], total: 0 });
+
+  const d = await request(app).get(`${url()}/${adj}`);
+  expect(d.status).toBe(200);
+  expect(d.body).toMatchObject({ id: adj, can_undo: true });
+  expect(d.body.items).toEqual([expect.objectContaining({ product_id: pid, variant_id: null, price_before: 10, price_after: 11.9, cost_price: 4, undo_status: null })]);
+  expect((await request(app).get(`${url(outraLoja)}/${adj}`)).status).toBe(404);
 });
