@@ -1,5 +1,7 @@
 const express = require('express');
 const { requireAuth, requireCompanyAccess, requirePlan } = require('../middleware/auth');
+const { planoOuAssentoExtra } = require('../middleware/planoOuAssentoExtra');
+const { estoqueSoConsulta, somenteLeituraEmConsulta, negarEmConsulta } = require('../middleware/estoqueSoConsulta');
 
 const router = express.Router({ mergeParams: true });
 
@@ -66,6 +68,14 @@ router.use('/matcon/professionals', require('./matconProfessionals'));
 // desenho da OS e da Otica). O router so responde /quotes e /deliveries:
 // outros routers do Matcon podem montar no mesmo /matcon.
 router.use('/matcon', require('./matconOrcamentosEntregas'));
+// 30/10/2026: permissao estoque_consulta (ver o middleware). Tem que vir ANTES
+// de todo router que responde /products: categoryMigration, importData e
+// productLinks montam na raiz com o caminho completo.
+router.use('/products', estoqueSoConsulta);
+router.use('/categories/migration', somenteLeituraEmConsulta);
+router.use('/product-categories', somenteLeituraEmConsulta);
+router.use('/imports', somenteLeituraEmConsulta);
+router.use('/estoque', negarEmConsulta);
 // F0 Bloco B2 (30/07/2026): categoryMigration atende /categories/migration/*
 // e /products/brand-candidates + /products/brand/apply, com os caminhos ja
 // completos dentro do proprio router -- por isso monta na RAIZ. Tem que vir
@@ -83,13 +93,13 @@ router.use('/', require('./catalogHealth'));
 router.use('/products', require('./productDescriptions'));
 router.use('/products', require('./productsDuplicates'));
 router.use('/products', require('./productsBatch'));
-// p-51 (30/10/2026): reajuste de preco em lote. /price-adjustments e
-// estatico e precisa vir antes do GET /:pid curinga de ./products.
-router.use('/products', require('./productPriceAdjustments'));
 // p-74 (30/10/2026): POST /products/barcodes/generate -- gera EAN-13 da
 // serie interna 210, de um produto ou em lote, com previa (dry_run).
 // Caminho estatico, montado junto dos outros antes dos routers com /:pid.
 router.use('/products', require('./productsBarcodeGenerate'));
+// p-51 (30/10/2026): reajuste de preco em lote. /price-adjustments e
+// estatico e precisa vir antes do GET /:pid curinga de ./products.
+router.use('/products', require('./productPriceAdjustments'));
 router.use('/products', require('./productsVariations'));
 // F0 Bloco B1 (30/07/2026): productLinksRouter expoe /products/unclassified
 // e /products/categories/bulk (estaticas) -- tem que montar ANTES de
@@ -230,7 +240,8 @@ router.use('/digital-channel', requirePlan('negocio', 'expansao'), require('./di
 router.use('/digital-channel/orders', requirePlan('negocio', 'expansao'), require('./digitalOrders'));
 router.use('/digital-channel/asaas', requirePlan('negocio', 'expansao'), require('./asaasSubconta'));
 router.use('/payment-gateways', requirePlan('negocio', 'expansao'), require('./paymentGateways'));
-router.use('/members', requirePlan('negocio', 'expansao'), require('./members'));
+// 30/10/2026: Essencial com acesso extra pago tambem gerencia a Equipe.
+router.use('/members', planoOuAssentoExtra('negocio', 'expansao'), require('./members'));
 // SEM gate no prefixo: router.use('/whatsapp', requirePlan, ...) barrava
 // por PREFIXO — /whatsapp/status de um dojô essencial levava 403 aqui e
 // nunca chegava ao whatsappCloud montado depois (achado no QA de 27/08,

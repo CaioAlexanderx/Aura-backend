@@ -11,7 +11,8 @@
 //         studio_gallery_enabled, studio_approval_enabled, food_mode_enabled,
 //         food_nfce_manual_enabled, food_comanda_print_enabled,
 //         card_fee_enabled, os_enabled, otica_enabled, card_price_enabled,
-//         allow_sale_without_stock, comanda_enabled, vale_troca_enabled (true)
+//         allow_sale_without_stock, comanda_enabled, vale_troca_enabled (true),
+//         frete_enabled
 //   STRING (enum): studio_approval_mode (wa_me | whatsapp_business)
 //   NUMBER: service_fee_pct, food_service_fee_pct,
 //           card_fee_credit_pct, card_fee_debit_pct
@@ -78,6 +79,11 @@ const ALLOWED_BOOL_KEYS = [
   // padrao: era a unica preferencia do Caixa guardada so no navegador,
   // entao nao valia em outro aparelho da loja.
   'vale_troca_enabled',
+  // 30/10/2026 — Frete no Caixa (aura-app#1170): a loja cobra a entrega na
+  // propria venda; ligada, o carrinho ganha o atalho "Frete". Sem
+  // migration: pdv_settings e jsonb. Chegou no app antes desta linha e o
+  // PUT descartava a chave em silencio (a chave "nao arrastava").
+  'frete_enabled',
 ];
 
 // 22/09/2026 — Matcon: lista de unidades habilitadas ("Minha loja vende
@@ -327,6 +333,8 @@ const DEFAULT_SETTINGS = {
   // 06/10/2026 — desligado = a trava de "Estoque insuficiente" de sempre.
   allow_sale_without_stock:  false,
   comanda_enabled:           false,
+  // 30/10/2026 — desligado = carrinho de sempre, sem o atalho "Frete".
+  frete_enabled:             false,
   // 13/10/2026 — ligado = o cupom leva o QR do vale-troca (comportamento
   // que a loja ja tinha antes de a preferencia ter chave propria).
   vale_troca_enabled:        true,

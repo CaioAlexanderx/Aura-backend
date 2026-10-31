@@ -7,6 +7,9 @@
 // POST /companies/:id/caixa/fechar          — fechar sessão
 // GET  /companies/:id/caixa/historico       — sessões fechadas
 // GET  /companies/:id/caixa/sessao/:sessaoId — detalhe de uma sessão
+// GET    /companies/:id/caixa/movimentos        — sangrias/suprimentos da sessão aberta
+// POST   /companies/:id/caixa/movimentos        — registrar sangria ou suprimento
+// DELETE /companies/:id/caixa/movimentos/:movId — desfazer (só com a sessão aberta)
 //
 // Pré-requisito: caixa habilitado em pdv_settings.caixa_enabled = true
 //
@@ -233,6 +236,43 @@ router.post('/fechar', asyncHandler(async (req, res) => {
   );
 
   res.json({ fechamento });
+}));
+
+// ── Sangria e suprimento (30/10/2026, migration 422) ─────────────────────
+// A loja tira dinheiro da gaveta (depósito, motoboy) ou reforça o troco com
+// o caixa aberto. Não é venda: só mexe no dinheiro esperado do fechamento.
+
+// GET /caixa/movimentos → { sessao_id, movimentos[], sangrias, suprimentos, dinheiro_em_caixa }
+router.get('/movimentos', asyncHandler(async (req, res) => {
+  const result = await caixaService.listarMovimentos(req.params.id);
+  res.json(result);
+}));
+
+// POST /caixa/movimentos
+// Body: { tipo: 'sangria' | 'suprimento', valor: number, motivo?: string }
+// 201 → { movimento, sangrias, suprimentos, dinheiro_em_caixa }
+// 404 sem caixa aberto; 422 sangria maior que o dinheiro em caixa.
+router.post('/movimentos', asyncHandler(async (req, res) => {
+  const { tipo, valor, motivo } = req.body || {};
+  if (tipo !== 'sangria' && tipo !== 'suprimento') {
+    throw new AppError('tipo deve ser sangria ou suprimento', 400);
+  }
+  if (typeof valor !== 'number' || !Number.isFinite(valor) || valor <= 0) {
+    throw new AppError('valor deve ser um número maior que zero', 400);
+  }
+  if (motivo !== undefined && motivo !== null && typeof motivo !== 'string') {
+    throw new AppError('motivo deve ser uma string', 400);
+  }
+  const result = await caixaService.registrarMovimento(req.params.id, req.user.id, {
+    tipo, valor, motivo: motivo || null,
+  });
+  res.status(201).json(result);
+}));
+
+// DELETE /caixa/movimentos/:movId → o mesmo corpo do GET, já sem a linha.
+router.delete('/movimentos/:movId', asyncHandler(async (req, res) => {
+  const result = await caixaService.removerMovimento(req.params.id, req.params.movId);
+  res.json(result);
 }));
 
 // ── GET /caixa/historico ──────────────────────────────────────────────────
