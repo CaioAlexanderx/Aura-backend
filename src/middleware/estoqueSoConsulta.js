@@ -25,6 +25,20 @@
 //
 // Custo: 1 SELECT só para membro que não é dono/admin, e 1 vez por request.
 // Se a leitura falhar, nega (503): é a mesma trava que protege o custo.
+//
+// 03/11/2026 — CUSTO OCULTO (pedido do PO). Funcionário com Caixa e Estoque
+// mas sem Financeiro, Painel e o resto da retaguarda não vê custo, margem
+// nem valor do estoque — continua vendo preço e gravando produto. Em
+// produção já havia 2 membros assim ({pdv, estoque, clientes, painel:false})
+// recebendo o custo de tudo. Regra em podeVerCusto:
+//   - dono, admin, staff e permissions null: vê;
+//   - permissions.custos (boolean) decide quando o dono marcou na equipe;
+//   - sem a chave: vê quem tem financeiro, relatorios, configuracoes ou
+//     painel (painel AUSENTE conta como ligado, igual ao front —
+//     hooks/useVisibleModules.ts libera o Painel quando a chave falta).
+// Quem não vê: mesmos mounts do estoque_consulta, mas só o CUSTO sai (preço
+// fica) e nada é bloqueado; na escrita sob /products os campos de custo do
+// corpo são descartados, para quem não vê o custo não apagá-lo ao salvar.
 // ============================================================
 const db = require('../config/database');
 
@@ -66,6 +80,35 @@ function lerPermissoes(raw) {
   try { return JSON.parse(raw); } catch (_) { return null; }
 }
 
+// Chaves que mostram dinheiro da loja: quem tem uma delas já vê custo.
+const CHAVES_QUE_VEEM_CUSTO = ['financeiro', 'relatorios', 'configuracoes', 'painel'];
+
+// Regra pura, sem banco (ver o cabeçalho, 03/11/2026).
+function podeVerCusto({ isOwner, roleLabel, permissions }) {
+  if (isOwner === true || roleLabel === 'owner' || roleLabel === 'admin') return true;
+  if (!permissions) return true;
+  if (permissions.estoque_consulta === true) return false;
+  if (typeof permissions.custos === 'boolean') return permissions.custos;
+  if (permissions.painel === undefined) return true;
+  return CHAVES_QUE_VEEM_CUSTO.some((k) => permissions[k] === true);
+}
+
+// Campos de custo no CORPO da escrita: quem não vê custo não grava custo.
+const CUSTO_NA_ESCRITA = ['cost_price', 'cost', 'unit_cost', 'weighted_avg_cost', 'last_purchase_unit_cost'];
+
+function semCustoNaEscrita(body) {
+  if (Array.isArray(body)) return body.map(semCustoNaEscrita);
+  if (body === null || typeof body !== 'object') return body;
+  const proto = Object.getPrototypeOf(body);
+  if (proto !== Object.prototype && proto !== null) return body;
+  const out = {};
+  for (const [k, v] of Object.entries(body)) {
+    if (CUSTO_NA_ESCRITA.includes(k)) continue;
+    out[k] = semCustoNaEscrita(v);
+  }
+  return out;
+}
+
 // Regra pura, sem banco.
 function ehSoConsulta({ isOwner, roleLabel, permissions }) {
   if (isOwner === true || roleLabel === 'owner' || roleLabel === 'admin') return false;
@@ -92,11 +135,13 @@ function semValores(valor, removerPreco, extras) {
   return out;
 }
 
-// Devolve { ativo, podeVerPreco }. Guardado no request: o mesmo pedido pode
-// passar por mais de um mount.
+// Devolve { ativo, podeVerPreco, ocultarCusto }. Guardado no request: o
+// mesmo pedido pode passar por mais de um mount. `ativo` = estoque_consulta;
+// `ocultarCusto` = não vê custo (consulta sempre; os outros pela regra
+// podeVerCusto).
 async function lerConsulta(req) {
   if (req.estoqueConsulta) return req.estoqueConsulta;
-  const livre = { ativo: false, podeVerPreco: true };
+  const livre = { ativo: false, podeVerPreco: true, ocultarCusto: false };
   if (!req.user || req.user.role === 'admin' || req.companyRole === 'owner' || req.companyRole === 'admin') {
     req.estoqueConsulta = livre;
     return livre;
@@ -113,16 +158,27 @@ async function lerConsulta(req) {
   const { rows } = await (typeof db.queryRetry === 'function' ? db.queryRetry(sql, params) : db.query(sql, params));
   const r = rows[0];
   const permissions = r ? lerPermissoes(r.permissions) : null;
-  const ativo = !!r && ehSoConsulta({ isOwner: r.is_owner, roleLabel: r.role_label, permissions });
-  req.estoqueConsulta = ativo ? { ativo: true, podeVerPreco: permissions.pdv === true } : livre;
+  const quem = r ? { isOwner: r.is_owner, roleLabel: r.role_label, permissions } : null;
+  const ativo = !!quem && ehSoConsulta(quem);
+  if (ativo) {
+    req.estoqueConsulta = { ativo: true, podeVerPreco: permissions.pdv === true, ocultarCusto: true };
+  } else if (quem && !podeVerCusto(quem)) {
+    req.estoqueConsulta = { ativo: false, podeVerPreco: true, ocultarCusto: true };
+  } else {
+    req.estoqueConsulta = livre;
+  }
   return req.estoqueConsulta;
 }
+
+const ehLeitura = (req) => req.method === 'GET' || req.method === 'HEAD';
 
 function negar(res) {
   return res.status(403).json({ error: MENSAGEM, code: CODIGO });
 }
 
-function comConsulta(decidir) {
+// `semCusto(req, res, next)`: o que fazer com quem só não vê custo (sem ele,
+// passa direto, como sempre foi).
+function comConsulta(decidir, semCusto) {
   return async (req, res, next) => {
     let consulta;
     try {
@@ -134,12 +190,22 @@ function comConsulta(decidir) {
         code: 'DB_CONN_TRANSIENT',
       });
     }
-    if (!consulta.ativo) return next();
+    if (!consulta.ativo) {
+      if (consulta.ocultarCusto && semCusto) return semCusto(req, res, next);
+      return next();
+    }
     return decidir(req, res, next, consulta);
   };
 }
 
-const ehLeitura = (req) => req.method === 'GET' || req.method === 'HEAD';
+// Quem só não vê custo: a resposta sai sem custo (preço fica) e, na escrita,
+// o corpo perde os campos de custo.
+function tirarCusto(req, res, next, { escrita = false, extras = null } = {}) {
+  if (escrita && !ehLeitura(req) && req.body) req.body = semCustoNaEscrita(req.body);
+  const json = res.json.bind(res);
+  res.json = (body) => json(semValores(body, false, extras));
+  return next();
+}
 
 // Mount /products: fecha a escrita, abre só as leituras da tela e tira os
 // campos de dinheiro da resposta.
@@ -149,17 +215,29 @@ const estoqueSoConsulta = comConsulta((req, res, next, consulta) => {
   const json = res.json.bind(res);
   res.json = (body) => json(semValores(body, !consulta.podeVerPreco));
   return next();
-});
+}, (req, res, next) => tirarCusto(req, res, next, { escrita: true }));
 
 // Mounts sem dinheiro na resposta (categorias, desfazer importação): só
 // fecha a escrita.
 const somenteLeituraEmConsulta = comConsulta((req, res, next) => (
   ehLeitura(req) ? next() : negar(res)
 ));
+// (Quem só não vê custo passa direto aqui: categorias e importações não
+// trazem custo na resposta.)
 
 // Mounts que devolvem valor e não servem à tela (valor em risco de ruptura,
 // margem por produto).
 const negarEmConsulta = comConsulta((req, res) => negar(res));
+
+// /estoque (ruptura): consulta continua negada; quem só não vê custo recebe
+// a lista sem custo — a tela do "O que vai faltar" serve a quem repõe.
+const negarEmConsultaSemCustoNoResto = comConsulta(
+  (req, res) => negar(res),
+  (req, res, next) => tirarCusto(req, res, next),
+);
+
+// /margin: a tela inteira é margem — sem custo, não há o que mostrar.
+const negarSemCusto = comConsulta((req, res) => negar(res), (req, res) => negar(res));
 
 // 02/11/2026: mounts fora de /products que devolvem custo junto do que a
 // tela precisa (bipe e venda do Caixa, troca, fornecedor, Matcon compras,
@@ -178,9 +256,9 @@ function semCustoEmConsulta(extras = []) {
       console.error('[estoqueSoConsulta] error:', err.message);
       consulta = { ativo: true, podeVerPreco: true };
     }
-    if (!consulta.ativo) return next();
+    if (!consulta.ativo && !consulta.ocultarCusto) return next();
     const json = res.json.bind(res);
-    res.json = (body) => json(semValores(body, !consulta.podeVerPreco, chavesExtras));
+    res.json = (body) => json(semValores(body, consulta.ativo && !consulta.podeVerPreco, chavesExtras));
     return next();
   };
 }
@@ -190,8 +268,12 @@ module.exports = {
   somenteLeituraEmConsulta,
   negarEmConsulta,
   semCustoEmConsulta,
+  negarEmConsultaSemCustoNoResto,
+  negarSemCusto,
   lerConsulta,
   ehSoConsulta,
+  podeVerCusto,
+  semCustoNaEscrita,
   semValores,
   LEITURAS_LIBERADAS,
 };
