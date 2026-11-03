@@ -1,7 +1,7 @@
 // ============================================================
 // AURA. — Reajuste de preco em lote: rota sem banco (p-51)
-// Aplicar antes da migration 422 = 503 MIGRATION_PENDING (nada gravado);
-// a previa nao depende da 422. PR 2: lista vazia e desfazer 503 sem ela.
+// Aplicar antes da migration 423 = 503 MIGRATION_PENDING (nada gravado);
+// a previa nao depende da 423. PR 2: lista vazia e desfazer 503 sem ela.
 // ============================================================
 'use strict';
 
@@ -31,7 +31,7 @@ function responder(sql) {
 
 beforeEach(() => { db.query.mockReset(); db.connect.mockReset(); });
 
-test('previa funciona sem a 422', async () => {
+test('previa funciona sem a 423', async () => {
   db.query.mockImplementation(async (sql) => responder(sql));
   const r = await request(app()).post(`/companies/${CID}/products/price-adjustments`)
     .send({ product_ids: [PID], mode: 'percent', direction: 'up', value: 10 });
@@ -39,7 +39,7 @@ test('previa funciona sem a 422', async () => {
   expect(r.body.items[0].price_after).toBe(110);
 });
 
-test('aplicar sem a 422 = 503 MIGRATION_PENDING com ROLLBACK', async () => {
+test('aplicar sem a 423 = 503 MIGRATION_PENDING com ROLLBACK', async () => {
   const chamadas = [];
   db.connect.mockResolvedValue({
     query: jest.fn(async (sql) => { chamadas.push(String(sql).trim().split(/\s+/)[0]); return responder(sql); }),
@@ -54,17 +54,17 @@ test('aplicar sem a 422 = 503 MIGRATION_PENDING com ROLLBACK', async () => {
   expect(chamadas).not.toContain('UPDATE');
 });
 
-// PR 2: lista sem a 422 nunca e erro; desfazer sem a 422 = 503.
+// PR 2: lista sem a 423 nunca e erro; desfazer sem a 423 = 503.
 function tabelaAusente() { const e = new Error('relation does not exist'); e.code = '42P01'; throw e; }
 
-test('lista sem a 422 devolve vazio', async () => {
+test('lista sem a 423 devolve vazio', async () => {
   db.query.mockImplementation(async () => tabelaAusente());
   const r = await request(app()).get(`/companies/${CID}/products/price-adjustments`);
   expect(r.status).toBe(200);
   expect(r.body).toEqual({ adjustments: [], total: 0 });
 });
 
-test('desfazer sem a 422 = 503 MIGRATION_PENDING', async () => {
+test('desfazer sem a 423 = 503 MIGRATION_PENDING', async () => {
   db.connect.mockResolvedValue({
     query: jest.fn(async (sql) => (/product_price_adjustments/.test(sql) ? tabelaAusente() : { rows: [] })),
     release: jest.fn(),

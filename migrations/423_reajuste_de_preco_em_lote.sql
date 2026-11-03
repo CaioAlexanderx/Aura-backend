@@ -1,5 +1,5 @@
 -- ============================================================
--- 422 — Reajuste de preco em lote (p-51, 30/10/2026)
+-- 423 — Reajuste de preco em lote (p-51, 30/10/2026)
 --
 -- Estoque > Selecionar > Ajustar preco grava aqui cada lote aplicado e,
 -- por item, o preco antes e depois. Nao havia historico de preco nenhum

@@ -2,7 +2,7 @@
 // AURA. — Reajuste de preco em lote — Postgres real (p-51, 30/10/2026)
 //
 // POST /companies/:id/products/price-adjustments contra o schema das
-// migrations (inclui a 422). Cobre:
+// migrations (inclui a 423). Cobre:
 //   1. previa (padrao) nao grava nada
 //   2. aplicar grava preco, card_price manual na proporcao, variante com
 //      preco proprio; nunca muda estoque, custo nem codigo; lote + itens

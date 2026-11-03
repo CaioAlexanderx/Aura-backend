@@ -18,7 +18,7 @@
 //     product_variants.price_override (quando ja existe). Nunca estoque,
 //     custo nem codigo.
 //   - Aplicar: transacao, linhas travadas (FOR UPDATE) e a conta refeita
-//     com elas; lote e itens gravados na 422; audit_log depois do COMMIT.
+//     com elas; lote e itens gravados na 423; audit_log depois do COMMIT.
 //   - Abaixo do custo so grava com allow_below_cost: true (409 sem ele).
 // ============================================================
 'use strict';
@@ -103,7 +103,7 @@ router.post('/price-adjustments', async (req, res) => {
   if (lido.error) return res.status(400).json({ error: lido.error, code: lido.code });
   const input = lido.input;
 
-  // Previa: nada gravado, nao depende da migration 422.
+  // Previa: nada gravado, nao depende da migration 423.
   if (input.dryRun) {
     try {
       const q = (sql, p) => db.query(sql, p);
