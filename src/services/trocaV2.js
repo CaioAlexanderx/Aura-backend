@@ -105,6 +105,7 @@ const db = require('../config/database');
 const nuvemfiscal = require('./nuvemfiscal');
 const trocaDevolucao55 = require('./trocaDevolucao55');
 const { resolveManualDiscount } = require('./descontoManual');
+const { productVisibilityWhere } = require('../utils/companyGroup');
 
 const SP_DATE_NOW = "(NOW() AT TIME ZONE 'America/Sao_Paulo')::date";
 
@@ -700,21 +701,26 @@ async function adjustStock(client, returnedItems, newItems, currentCompanyId, tr
 
     if (item.variant_id) {
       // Busca stock_company_id sem decrementar ainda
+      // 02/11/2026: mesma regra de visibilidade do Estoque (bidirecional no
+      // grupo). Antes a variante nao checava empresa nenhuma.
       const { rows: vr } = await client.query(
         `SELECT p.company_id AS stock_company_id, pv.sku_suffix
            FROM product_variants pv JOIN products p ON p.id = pv.product_id
-          WHERE pv.id=$1 AND pv.product_id=$2`,
-        [item.variant_id, item.product_id]
+          WHERE pv.id=$1 AND pv.product_id=$2 AND ${productVisibilityWhere('$3', 'p.')}`,
+        [item.variant_id, item.product_id, currentCompanyId]
       );
       if (vr.length) {
         stockLabel += vr[0].sku_suffix ? ` (${vr[0].sku_suffix})` : ' (variante)';
         stockCompanyId = vr[0].stock_company_id || currentCompanyId;
       }
-      // Lock atomico
+      // Lock atomico. Produto fora do grupo nao baixa (cai no
+      // INSUFFICIENT_STOCK, como o produto sem variante).
       const { rows: stkRows } = await client.query(
         `UPDATE product_variants SET stock_qty = stock_qty - $1, updated_at = NOW()
-         WHERE id = $2 AND stock_qty >= $1 RETURNING stock_qty`,
-        [qty, item.variant_id]
+         WHERE id = $2 AND stock_qty >= $1
+           AND product_id IN (SELECT id FROM products WHERE id = $3 AND company_id = $4)
+         RETURNING stock_qty`,
+        [qty, item.variant_id, item.product_id, stockCompanyId]
       );
       if (!stkRows.length) {
         throw Object.assign(
@@ -726,8 +732,8 @@ async function adjustStock(client, returnedItems, newItems, currentCompanyId, tr
       // Busca stock_company_id
       const { rows: pr } = await client.query(
         `SELECT p.company_id AS stock_company_id
-           FROM products p JOIN companies c ON c.id = $2
-          WHERE p.id = $1 AND (p.company_id = $2 OR (p.company_id = c.billing_owner_company_id AND p.is_group_shared = true))`,
+           FROM products p
+          WHERE p.id = $1 AND ${productVisibilityWhere('$2', 'p.')}`,
         [item.product_id, currentCompanyId]
       );
       if (pr.length) stockCompanyId = pr[0].stock_company_id || currentCompanyId;
@@ -1075,8 +1081,8 @@ async function handle(req, res) {
       if (item.product_id) {
         const { rows: pr } = await client.query(
           `SELECT p.name, p.cost_price
-             FROM products p JOIN companies c ON c.id = $2
-            WHERE p.id = $1 AND (p.company_id = $2 OR (p.company_id = c.billing_owner_company_id AND p.is_group_shared = true))`,
+             FROM products p
+            WHERE p.id = $1 AND ${productVisibilityWhere('$2', 'p.')}`,
           [item.product_id, companyId]
         );
         if (pr.length) { productName = productName || pr[0].name; costPrice = parseFloat(pr[0].cost_price || 0); }
@@ -1368,5 +1374,5 @@ module.exports = {
   handle,
   reemitirEmissao,
   TrocaV2Error,
-  _internal: { computeAndValidateTotals, newItemLine, balanceSplits, decideFiscalPerOrigin, normalizeMethodForSalePayments, bestEffort, toFiniteNum, lookupOriginDigitalOrders, validateDigitalReturnedItems, trocaSummary },
+  _internal: { adjustStock, computeAndValidateTotals, newItemLine, balanceSplits, decideFiscalPerOrigin, normalizeMethodForSalePayments, bestEffort, toFiniteNum, lookupOriginDigitalOrders, validateDigitalReturnedItems, trocaSummary },
 };

@@ -50,7 +50,7 @@
 // ============================================================
 const router = require('express').Router({ mergeParams: true });
 const { normalizeGallery } = require('../services/productGallery');
-const { companyGroupWhere } = require('../utils/companyGroup');
+const { companyGroupWhere, productVisibilityWhere } = require('../utils/companyGroup');
 const db = require('../config/database');
 const { avancarSemEsperar } = require('../services/onboardingProgress');
 // t3-05 (18/10/2026): NCM fora da tabela da Receita so AVISA (ncm_aviso), nunca bloqueia.
@@ -180,33 +180,16 @@ function sanitizeDurationMinutes(raw) {
 // Pra empresa standalone (sem grupo), a lista de empresas-do-grupo
 // contém só ela mesma → visibilidade idêntica ao caso single-company.
 function visibilityWhere(idParam, cidParam) {
-  return `id = ${idParam} AND (company_id = ${cidParam} OR (
-    is_group_shared = true
-    AND company_id IN (
-      SELECT id FROM companies
-      WHERE COALESCE(NULLIF(billing_owner_company_id, id), id) = (
-        SELECT COALESCE(NULLIF(billing_owner_company_id, id), id)
-        FROM companies WHERE id = ${cidParam}
-      )
-    )
-  ))`;
+  return `id = ${idParam} AND ${listVisibilityWhere(cidParam)}`;
 }
 
 // Versão sem o `id =` para uso em listagens.
 // `prefix` (ex.: 'p.') qualifica as colunas quando a consulta tem JOIN;
 // sem prefixo o texto sai idêntico ao de sempre.
-function listVisibilityWhere(cidParam, prefix = '') {
-  return `(${prefix}company_id = ${cidParam} OR (
-    ${prefix}is_group_shared = true
-    AND ${prefix}company_id IN (
-      SELECT id FROM companies
-      WHERE COALESCE(NULLIF(billing_owner_company_id, id), id) = (
-        SELECT COALESCE(NULLIF(billing_owner_company_id, id), id)
-        FROM companies WHERE id = ${cidParam}
-      )
-    )
-  ))`;
-}
+// 02/11/2026: a regra mora em utils/companyGroup.js (productVisibilityWhere)
+// para o bipe, a venda e a troca do Caixa usarem a MESMA — antes elas só
+// enxergavam matriz → filial e a matriz não vendia o compartilhado da filial.
+const listVisibilityWhere = productVisibilityWhere;
 
 // ─── GET / ──────────────────────────────────
 router.get('/', async (req, res) => {
