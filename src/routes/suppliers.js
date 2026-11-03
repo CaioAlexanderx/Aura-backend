@@ -108,12 +108,76 @@ router.get('/cnpj/:cnpj', async (req, res) => {
 });
 
 // ─── POST /:sid/products — vincular produtos em lote ────────
-// Body: { product_ids: [...], unlink?: boolean }
+// Body: { product_ids: [...], unlink?: boolean, is_main?: boolean, cost?: number }
+//
+// 03/11/2026 (migration 424, mockup tela 9): o vínculo também grava em
+// product_suppliers (fornecedores do produto, cada um com o seu custo).
+//   - is_main (padrão true, o comportamento de sempre): vira o principal e
+//     products.supplier_id aponta para ele;
+//   - is_main false: entra como fornecedor a mais, sem tirar o principal
+//     (se o produto não tinha principal, este vira);
+//   - cost (opcional): o mesmo custo em todos — ignorado para quem não vê
+//     custo (req.estoqueConsulta.ocultarCusto, middleware do mount).
+//   - unlink: tira o fornecedor da lista do produto também.
 // Mesma visibilidade de produto de products.js (proprio OU compartilhado
 // no grupo) -- escrita espelha a leitura (CLAUDE.md armadilha 7). As
 // colunas soltas supplier_name/supplier_cnpj acompanham, como no POST de
 // produto, pra quem ainda le as duas.
 const MAX_VINCULO_LOTE = 1000;
+
+function custoDoCorpo(req) {
+  if (req.estoqueConsulta && (req.estoqueConsulta.ativo || req.estoqueConsulta.ocultarCusto)) return null;
+  const n = Number(req.body && req.body.cost);
+  return Number.isFinite(n) && n > 0 ? n : null;
+}
+
+// Base sem a 424 (42P01): o vínculo de sempre (products.supplier_id) já foi
+// feito; a lista por produto só passa a existir quando a migration subir.
+async function vincularEmProductSuppliers(ids, cid, sid, principal, custo) {
+  const visivelP = `(p.company_id = $2 OR (p.is_group_shared = true AND ${companyGroupWhere('$2', 'p.')}))`;
+  try {
+    if (principal) {
+      await db.query(
+        `UPDATE product_suppliers SET is_main = false, updated_at = NOW()
+          WHERE product_id = ANY($1::uuid[]) AND supplier_id <> $2 AND is_main`,
+        [ids, sid]
+      );
+    }
+    const { rowCount } = await db.query(
+      `INSERT INTO product_suppliers (company_id, product_id, supplier_id, cost, is_main)
+       SELECT p.company_id, p.id, $3, $4,
+              ($5::boolean OR NOT EXISTS (SELECT 1 FROM product_suppliers x WHERE x.product_id = p.id AND x.is_main))
+         FROM products p
+        WHERE p.id = ANY($1::uuid[]) AND ${visivelP}
+       ON CONFLICT (product_id, supplier_id) DO UPDATE
+         SET cost = COALESCE(EXCLUDED.cost, product_suppliers.cost),
+             is_main = product_suppliers.is_main OR EXCLUDED.is_main,
+             updated_at = NOW()`,
+      [ids, cid, sid, custo, principal]
+    );
+    if (!principal) {
+      // Produto que ganhou o primeiro fornecedor por aqui: espelha em products.
+      await db.query(
+        `UPDATE products p SET supplier_id = s.id, supplier_name = s.name, supplier_cnpj = s.cnpj, updated_at = NOW()
+           FROM product_suppliers ps JOIN suppliers s ON s.id = ps.supplier_id
+          WHERE p.id = ANY($1::uuid[]) AND ps.product_id = p.id AND ps.is_main AND p.supplier_id IS NULL`,
+        [ids]
+      );
+    }
+    return rowCount;
+  } catch (err) {
+    if (err.code === '42P01') return 0;
+    throw err;
+  }
+}
+
+async function desvincularEmProductSuppliers(ids, sid) {
+  try {
+    await db.query(`DELETE FROM product_suppliers WHERE product_id = ANY($1::uuid[]) AND supplier_id = $2`, [ids, sid]);
+  } catch (err) {
+    if (err.code !== '42P01') throw err;
+  }
+}
 
 router.post('/:sid/products', async (req, res) => {
   const cid = req.params.id;
@@ -131,6 +195,11 @@ router.post('/:sid/products', async (req, res) => {
     if (!sup.length) return res.status(404).json({ error: 'Fornecedor nao encontrado' });
 
     const visivel = `(company_id = $2 OR (is_group_shared = true AND ${companyGroupWhere('$2')}))`;
+    const principal = !(req.body && req.body.is_main === false);
+    if (!unlink && !principal) {
+      const n = await vincularEmProductSuppliers(ids, cid, sid, false, custoDoCorpo(req));
+      return res.json({ updated: n, unlink, is_main: false });
+    }
     const upd = unlink
       ? await db.query(
           `UPDATE products SET supplier_id = NULL, supplier_name = NULL, supplier_cnpj = NULL, updated_at = NOW()
@@ -142,6 +211,8 @@ router.post('/:sid/products', async (req, res) => {
             WHERE id = ANY($1::uuid[]) AND ${visivel}`,
           [ids, cid, sid, sup[0].name, sup[0].cnpj]
         );
+    if (unlink) await desvincularEmProductSuppliers(ids, sid);
+    else await vincularEmProductSuppliers(ids, cid, sid, true, custoDoCorpo(req));
     res.json({ updated: upd.rowCount, unlink });
   } catch (err) {
     if (err.code === '22P02') return res.status(400).json({ error: 'product_ids invalido' });
