@@ -4,6 +4,8 @@
 // produção — é montado antes do pdv.js) só procurava em p.company_id=$1.
 // Agora usa a mesma regra do pdv.js e da lista de produtos: produto da
 // própria loja OU da dona do grupo marcado como compartilhado.
+// 02/11/2026: a regra virou a do Estoque (bidirecional, utils/companyGroup.js):
+// a matriz também acha o compartilhado da filial.
 jest.mock('../src/config/database');
 const db = require('../src/config/database');
 const express = require('express');
@@ -23,7 +25,8 @@ app.use('/companies/:id/pdv', scannerRouter);
 
 const VILLA = 'villa-1';
 const CODIGO = '7900123206385';
-const REGRA_DO_GRUPO = 'p.company_id=c.billing_owner_company_id AND p.is_group_shared=TRUE';
+const { productVisibilityWhere } = require('../src/utils/companyGroup');
+const REGRA_DO_GRUPO = productVisibilityWhere('$1', 'p.').replace(/\s+/g, ' ');
 
 beforeEach(() => { db.query = jest.fn(); });
 
@@ -49,7 +52,6 @@ describe('GET /pdv/scan/:code · produto compartilhado pelo grupo', () => {
     const sqls = sqlDas(db.query.mock.calls);
     expect(sqls.length).toBeGreaterThanOrEqual(2);
     for (const sql of sqls) {
-      expect(sql).toContain('JOIN companies c ON c.id=$1');
       expect(sql).toContain(REGRA_DO_GRUPO);
       expect(sql).not.toMatch(/WHERE p\.company_id=\$1 AND/);
     }
