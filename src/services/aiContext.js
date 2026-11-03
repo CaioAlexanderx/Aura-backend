@@ -12,7 +12,11 @@
 // ============================================================
 const db = require('../config/database');
 
-async function getContextData(companyId, context) {
+// opts (02/11/2026, permissão estoque_consulta):
+//   semCusto: não calcula nem devolve o valor do estoque (custo × quantidade)
+//   semPreco: tira o preço de venda dos itens com estoque baixo
+// Sem opts, tudo igual a antes.
+async function getContextData(companyId, context, opts = {}) {
   const data = {};
   try {
     switch (context) {
@@ -53,14 +57,22 @@ async function getContextData(companyId, context) {
           `SELECT name, stock_qty, stock_min, price FROM products
            WHERE company_id=$1 AND stock_qty <= stock_min AND stock_min > 0
            ORDER BY stock_qty ASC LIMIT 10`, [companyId]);
-        data.estoque_baixo = low.map(r => ({
-          nome: r.name, atual: parseInt(r.stock_qty), min: parseInt(r.stock_min), preco: parseFloat(r.price),
-        }));
-        const { rows: [stats] } = await db.query(
-          `SELECT COUNT(*) AS total, COALESCE(SUM(stock_qty * cost_price), 0) AS valor_total
-           FROM products WHERE company_id=$1`, [companyId]);
-        data.total_produtos = parseInt(stats?.total || 0);
-        data.valor_estoque  = parseFloat(stats?.valor_total || 0);
+        data.estoque_baixo = low.map(r => {
+          const item = { nome: r.name, atual: parseInt(r.stock_qty), min: parseInt(r.stock_min), preco: parseFloat(r.price) };
+          if (opts.semPreco) delete item.preco;
+          return item;
+        });
+        if (opts.semCusto) {
+          const { rows: [stats] } = await db.query(
+            `SELECT COUNT(*) AS total FROM products WHERE company_id=$1`, [companyId]);
+          data.total_produtos = parseInt(stats?.total || 0);
+        } else {
+          const { rows: [stats] } = await db.query(
+            `SELECT COUNT(*) AS total, COALESCE(SUM(stock_qty * cost_price), 0) AS valor_total
+             FROM products WHERE company_id=$1`, [companyId]);
+          data.total_produtos = parseInt(stats?.total || 0);
+          data.valor_estoque  = parseFloat(stats?.valor_total || 0);
+        }
         const { rows: top } = await db.query(
           `SELECT p.name, COALESCE(SUM(si.quantity), 0) AS vendidos
            FROM sale_items si JOIN products p ON p.id=si.product_id

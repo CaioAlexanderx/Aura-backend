@@ -9,6 +9,7 @@ const router = require('express').Router({ mergeParams: true });
 const db     = require('../config/database');
 const { requireRole } = require('../middleware/auth');
 const { getContextData } = require('../services/aiContext');
+const { lerConsulta } = require('../middleware/estoqueSoConsulta');
 
 const CLAUDE_API_KEY = process.env.CLAUDE_API_KEY || null;
 const CLAUDE_MODEL = 'claude-sonnet-4-20250514';
@@ -138,8 +139,28 @@ router.post('/chat', requireRole('client', 'analyst', 'admin'), async (req, res)
     return res.status(429).json({ error: 'Limite de mensagens atingido. Tente novamente em 1 hora.' });
   }
 
+  // 02/11/2026: permissao estoque_consulta (src/middleware/estoqueSoConsulta.js).
+  // O chat nao recebe custo nem valor do estoque; sem pdv, nem preco. Dono e
+  // admin nao pagam a leitura. Se ela falhar, segue sem os valores.
+  let consulta;
+  try {
+    consulta = await lerConsulta(req);
+  } catch (err) {
+    console.error('[ai] estoque_consulta:', err.message);
+    consulta = { ativo: true, podeVerPreco: false };
+  }
+  const opcoesDoContexto = consulta.ativo
+    ? { semCusto: true, semPreco: !consulta.podeVerPreco }
+    : {};
+
   // Build enriched system prompt
-  const systemPrompt = SYSTEM_PROMPTS[context] || SYSTEM_PROMPTS.geral;
+  let systemPrompt = SYSTEM_PROMPTS[context] || SYSTEM_PROMPTS.geral;
+  if (consulta.ativo) {
+    systemPrompt += '\n\nACESSO DESTE USUARIO: so consulta de estoque. Nao informe custo, margem, lucro'
+      + (consulta.podeVerPreco ? '' : ', preco de venda')
+      + ' nem valor do estoque, e nao estime esses numeros. Se perguntarem, explique com gentileza que'
+      + ' este acesso mostra produtos e quantidades, e que o responsavel pela loja pode ajudar com valores.';
+  }
   let companyContext = '';
   try {
     const { rows } = await db.query(
@@ -154,7 +175,7 @@ router.post('/chat', requireRole('client', 'analyst', 'admin'), async (req, res)
   // Fetch REAL business data for this context
   let businessData = '';
   try {
-    const data = await getContextData(cid, context);
+    const data = await getContextData(cid, context, opcoesDoContexto);
     if (Object.keys(data).length > 0) {
       businessData = '\n\n=== DADOS REAIS DO NEGOCIO ===\n' + JSON.stringify(data, null, 2) + '\n=== FIM DOS DADOS ===';
     }
