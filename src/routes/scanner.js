@@ -7,6 +7,7 @@ const express = require('express');
 const router  = require('express').Router({ mergeParams: true });
 const db      = require('../config/database');
 const { requireAuth } = require('../middleware/auth');
+const { productVisibilityWhere } = require('../utils/companyGroup');
 
 // 22/09/2026 — preco no cartao (migration 351). O Caixa precisa de
 // products.card_price junto do preco pra decidir o unit_price quando a
@@ -26,10 +27,18 @@ async function comCardPrice(rodar) {
 // 10/10/2026 — produto compartilhado pelo grupo (is_group_shared). A Villa
 // Branca da Davi Calçados vende o catálogo da Matriz: o Estoque lista esses
 // produtos (products.js), mas o bipe no Caixa só procurava em
-// p.company_id=$1 e respondia "não achei" para TODOS eles. Mesma regra do
-// pdv.js: o produto é da própria loja OU da dona do grupo e compartilhado.
-const DA_LOJA_OU_DO_GRUPO =
-  `(p.company_id=$1 OR (p.company_id=c.billing_owner_company_id AND p.is_group_shared=TRUE))`;
+// p.company_id=$1 e respondia "não achei" para TODOS eles.
+//
+// 02/11/2026 — a regra de 10/10 só olhava a dona do grupo (matriz → filial).
+// O Estoque é bidirecional: a matriz também lista o compartilhado da filial,
+// e o bipe da matriz dizia "não achei" para ele. Agora é a MESMA função do
+// Estoque (utils/companyGroup.js). Empresa de fora do grupo nunca entra.
+const DA_LOJA_OU_DO_GRUPO = productVisibilityWhere('$1', 'p.');
+
+// O mesmo código pode existir no produto da loja e num compartilhado de
+// outra empresa do grupo: o da própria loja ganha (antes da regra
+// bidirecional só havia um candidato possível por grupo).
+const DA_LOJA_PRIMEIRO = '(p.company_id=$1) DESC';
 
 // O mesmo código de barras pode estar gravado como UPC-A (12 dígitos) e ser
 // lido como EAN-13 (com um zero na frente), ou o contrário. Vinha da cópia
@@ -67,10 +76,10 @@ router.get('/scan/:code', requireAuth, async (req, res) => {
                 )
               ) FILTER (WHERE pv.id IS NOT NULL), '[]') AS variants
        FROM products p
-       JOIN companies c ON c.id=$1
        LEFT JOIN product_variants pv ON pv.product_id=p.id AND pv.is_active=TRUE
        WHERE ${DA_LOJA_OU_DO_GRUPO} AND p.barcode=ANY($2::text[]) AND p.is_active=TRUE
        GROUP BY p.id
+       ORDER BY ${DA_LOJA_PRIMEIRO}
        LIMIT 1`,
       [company_id, alts]
     ));
@@ -84,8 +93,8 @@ router.get('/scan/:code', requireAuth, async (req, res) => {
               pv.stock_qty AS variant_stock
        FROM product_variants pv
        JOIN products p ON p.id=pv.product_id
-       JOIN companies c ON c.id=$1
        WHERE ${DA_LOJA_OU_DO_GRUPO} AND pv.barcode=ANY($2::text[]) AND pv.is_active=TRUE AND p.is_active=TRUE
+       ORDER BY ${DA_LOJA_PRIMEIRO}
        LIMIT 1`,
       [company_id, alts]
     ));
@@ -103,8 +112,8 @@ router.get('/scan/:code', requireAuth, async (req, res) => {
       `SELECT p.id, p.name, p.price, p.cost_price, p.stock_qty,
               p.barcode, p.category, p.sku, p.is_active, p.unit, p.company_id AS stock_company_id${cp}
        FROM products p
-       JOIN companies c ON c.id=$1
-       WHERE ${DA_LOJA_OU_DO_GRUPO} AND p.sku=$2 AND p.is_active=TRUE LIMIT 1`,
+       WHERE ${DA_LOJA_OU_DO_GRUPO} AND p.sku=$2 AND p.is_active=TRUE
+       ORDER BY ${DA_LOJA_PRIMEIRO} LIMIT 1`,
       [company_id, cleanCode]
     )));
     if (rows.length) return res.json({ match: 'exact', source: 'sku', product: rows[0] });
@@ -113,7 +122,6 @@ router.get('/scan/:code', requireAuth, async (req, res) => {
     ({ rows } = await comCardPrice((cp) => db.query(
       `SELECT p.id, p.name, p.price, p.stock_qty, p.barcode, p.sku, p.category, p.unit, p.company_id AS stock_company_id${cp}
        FROM products p
-       JOIN companies c ON c.id=$1
        WHERE ${DA_LOJA_OU_DO_GRUPO} AND p.is_active=TRUE
          AND (p.name ILIKE $2 OR p.sku ILIKE $2)
        ORDER BY p.name LIMIT 8`,
@@ -144,15 +152,19 @@ router.post('/scan/batch', requireAuth, async (req, res) => {
     const { rows } = await comCardPrice((cp) => db.query(
       `SELECT p.id, p.name, p.price, p.cost_price, p.stock_qty, p.barcode, p.sku, p.category, p.unit, p.company_id AS stock_company_id${cp}
        FROM products p
-       JOIN companies c ON c.id=$1
        WHERE ${DA_LOJA_OU_DO_GRUPO} AND p.is_active=TRUE
          AND (p.barcode=ANY($2) OR p.sku=ANY($2))`,
       [req.params.id, codes]
     ));
+    // Mesmo código na loja e num compartilhado do grupo: o da loja ganha.
     const byCode = {};
+    const guardar = (code, p) => {
+      const atual = byCode[code];
+      if (!atual || (atual.stock_company_id !== req.params.id && p.stock_company_id === req.params.id)) byCode[code] = p;
+    };
     rows.forEach(p => {
-      if (p.barcode) byCode[p.barcode] = p;
-      if (p.sku)     byCode[p.sku]     = p;
+      if (p.barcode) guardar(p.barcode, p);
+      if (p.sku)     guardar(p.sku, p);
     });
     res.json({ found: rows.length, products: byCode });
   } catch (err) { res.status(500).json({ error: err.message }); }

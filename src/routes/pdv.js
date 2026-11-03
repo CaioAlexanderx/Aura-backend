@@ -82,6 +82,7 @@ const matconSaleHooks = require('../services/matconSaleHooks');
 const comandaSaleHooks = require('../services/comandaSaleHooks');
 // 06/10/2026: chave "vender sem estoque" — ver cabecalho do util.
 const { vendaSemEstoqueLiberada } = require('../utils/vendaSemEstoque');
+const { productVisibilityWhere } = require('../utils/companyGroup');
 const { iniciarTrialPelaPrimeiraVenda } = require('../services/trialRegra');
 const { avancarSemEsperar } = require('../services/onboardingProgress');
 // 17/10/2026 (migration 390): Idempotency-Key — ver cabecalho do servico.
@@ -398,11 +399,16 @@ async function handleSale(req, res, opts = {}) {
       let costPrice = 0;
       let stockCompanyId = req.params.id;
       if (item.product_id) {
+        // 02/11/2026: mesma regra de visibilidade do Estoque (bidirecional no
+        // grupo, utils/companyGroup.js). Antes só matriz → filial: a matriz
+        // vendia o compartilhado da filial sem achar o produto aqui, e o
+        // stock_company_id caía na própria matriz (baixa no lugar errado).
+        // Produto compartilhado é UMA linha para o grupo: a baixa vai na
+        // linha da dona (stock_company_id), nos dois sentidos.
         const { rows: p } = await client.query(
           `SELECT p.name, p.cost_price, p.stock_qty, p.company_id AS stock_company_id
            FROM products p JOIN companies c ON c.id=$2
-           WHERE p.id=$1
-             AND (p.company_id=$2 OR (p.company_id=c.billing_owner_company_id AND p.is_group_shared=true))`,
+           WHERE p.id=$1 AND ${productVisibilityWhere('$2', 'p.')}`,
           [item.product_id, req.params.id]
         );
         if (p.length) {
@@ -561,7 +567,14 @@ async function handleSale(req, res, opts = {}) {
       );
       if (item.product_id) {
         if (item.variant_id) {
-          await client.query(`UPDATE product_variants SET stock_qty=GREATEST(0,stock_qty-$1),updated_at=NOW() WHERE id=$2`, [item.quantity, item.variant_id]);
+          // A variante só baixa se o produto dela é o validado acima, na
+          // empresa dona (mesma trava do produto sem variante): variante de
+          // produto fora do grupo não mexe em estoque.
+          await client.query(
+            `UPDATE product_variants SET stock_qty=GREATEST(0,stock_qty-$1),updated_at=NOW()
+             WHERE id=$2 AND product_id IN (SELECT id FROM products WHERE id=$3 AND company_id=$4)`,
+            [item.quantity, item.variant_id, item.product_id, item.stock_company_id]
+          );
         } else {
           await client.query(`UPDATE products SET stock_qty=GREATEST(0,stock_qty-$1),updated_at=NOW() WHERE id=$2 AND company_id=$3`, [item.quantity, item.product_id, item.stock_company_id]);
         }
