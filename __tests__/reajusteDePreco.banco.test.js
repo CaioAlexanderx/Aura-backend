@@ -71,6 +71,7 @@ beforeAll(async () => {
     await client.query(`SAVEPOINT ${sp}`);
     try {
       const r = await client.query(sql, params);
+      await new Promise((ok) => setTimeout(ok, 40)); // TEMP: estressa a corrida
       await client.query(`RELEASE SAVEPOINT ${sp}`);
       return r;
     } catch (err) {
