@@ -189,6 +189,14 @@ function blocoVendas(r, { modo, env }) {
 
 function blocoMaisVendidos(r, { modo, env }) {
   const m = r.mais_vendidos;
+  // 03/11/2026: grupo que vende com numeração ganha a tabela (somada por
+  // produto) e o "Acabando". A tela completa é por loja (como a curva ABC).
+  if (m.numeracao && m.numeracao.modelos && m.numeracao.modelos.length && B.blocoNumeracao) {
+    const partes = [B.blocoNumeracao(m.numeracao, { titulo: 'Mais vendidos do grupo' })];
+    const { visiveis } = lojasComDado(r, 'mais_vendidos', () => true, modo);
+    partes.push(botoes(visiveis.map((l) => botao(`Ver a tabela ${G.daLoja(l)}`, linkDoApp('/financeiro/vendas-por-numeracao?period=week', l.companyId, env)))));
+    return caixaDoBloco(partes.join(''));
+  }
   const top = modo === 'pagina' ? m.top : m.top.slice(0, 3);
   const itens = top.map((p) => {
     const onde = Array.isArray(p.lojas) && p.lojas.length

@@ -160,6 +160,9 @@ router.use('/onboarding/setup-call', require('./onboardingSetupCall'));
 router.use('/checkin', require('./checkin'));
 router.use('/onboarding', require('./onboarding'));
 router.use('/export', require('./exportReports'));
+// 03/11/2026 — Financeiro: vendas por produto e numeração (quantidade exata
+// por modelo/tipo/numeração, estoque de hoje, giro e reposição).
+router.use('/reports', require('./relatorioVendasPorNumeracao'));
 router.use('/', require('./importData'));
 router.use('/print', require('./print'));
 router.use('/sales/analytics', require('./salesAnalytics'));

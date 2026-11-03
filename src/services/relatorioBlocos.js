@@ -46,6 +46,9 @@ const P = require('./emailPreferencias');
 const { getSummary } = require('./salesAnalytics');
 const { getProductsRanking, classifyABC } = require('./productsRanking');
 const { crediarioDaSemana, somarCrediarios } = require('./relatorioCrediario');
+// 03/11/2026 — "Mais vendidos" com numeração (aura-app docs/mockups/
+// relatorio-vendas-por-numeracao.html, tela 5).
+const { vendasPorNumeracao, compararNumeracao, SEM_NUMERACAO } = require('./vendasPorNumeracao');
 
 const SP = "AT TIME ZONE 'America/Sao_Paulo'";
 
@@ -179,7 +182,68 @@ async function blocoMaisVendidos(companyId, { period }) {
     period: 'custom', start_date: period.startDate, end_date: period.endDate, limit: 1000,
   });
   const todos = (r.products || []).map((p) => ({ id: p.id, nome: p.name, qtd: p.qty_sold, receita: num(p.total_revenue) }));
-  return montarMaisVendidos(todos);
+  const out = montarMaisVendidos(todos);
+  // Numeração: só para loja que vende com numeração. Falhar aqui não tira o
+  // bloco do e-mail (segue o "O que mais saiu" de sempre).
+  if (out) {
+    try {
+      const dias = Math.round((new Date(period.endDate + 'T12:00:00Z') - new Date(period.startDate + 'T12:00:00Z')) / 86400000) + 1;
+      const rel = await vendasPorNumeracao(db, {
+        companyId, companyIds: [companyId],
+        periodo: { inicio: period.startDate, fim: period.endDate, dias, rotulo: '', anterior: { inicio: period.startDate, fim: period.startDate } },
+      });
+      const numeracao = montarNumeracaoDaSemana(rel, dias);
+      if (numeracao) out.numeracao = numeracao;
+    } catch (err) {
+      console.error('[relatorio] numeracao:', companyId, err.message);
+    }
+  }
+  return out;
+}
+
+// ── Mais vendidos com numeração (03/11/2026) ────────────────────
+// No e-mail: os 10 modelos que mais saíram (decisão do PO), as 3
+// numerações de cada um e "Acabando": numeração que vendeu no período e,
+// no mesmo ritmo, acaba em menos de 7 dias (ou já acabou).
+
+const MODELOS_NO_EMAIL = 10;
+const ACABANDO_NO_EMAIL = 5;
+
+function montarNumeracaoDaSemana(rel, dias) {
+  if (!rel || !Array.isArray(rel.modelos) || !rel.modelos.length) return null;
+  const comNumeracao = rel.modelos.some((m) => m.numeracoes.some((c) => c.numeracao !== SEM_NUMERACAO && c.vendidos > 0));
+  if (!comNumeracao) return null;
+  const modelos = rel.modelos.map((m) => ({
+    id: m.product_id, nome: m.nome, qtd: m.vendidos, estoque: m.estoque,
+    _numeros: Object.fromEntries(m.numeracoes.filter((c) => c.vendidos > 0 && c.numeracao !== SEM_NUMERACAO).map((c) => [c.numeracao, c.vendidos])),
+    _estoques: Object.fromEntries(m.numeracoes.map((c) => [c.numeracao, c.estoque])),
+  }));
+  return fecharNumeracao(modelos, rel.unidade, dias);
+}
+
+function fecharNumeracao(modelos, unidade, dias) {
+  const ord = [...modelos].sort((a, b) => b.qtd - a.qtd || a.nome.localeCompare(b.nome, 'pt-BR'));
+  const acabando = [];
+  for (const m of ord) {
+    for (const [n, q] of Object.entries(m._numeros)) {
+      const e = Math.max(Number(m._estoques[n]) || 0, 0);
+      if (e === 0 || Math.floor(e / (q / dias)) < 7) acabando.push({ nome: m.nome, numeracao: n, estoque: e, vendidos: q });
+    }
+  }
+  acabando.sort((a, b) => a.estoque - b.estoque || b.vendidos - a.vendidos);
+  return {
+    unidade,
+    modelos: ord.slice(0, MODELOS_NO_EMAIL).map((m) => ({
+      nome: m.nome, qtd: m.qtd, estoque: m.estoque,
+      numeros: Object.entries(m._numeros)
+        .sort((a, b) => b[1] - a[1] || compararNumeracao(a[0], b[0]))
+        .slice(0, 3).map(([n, q]) => ({ n, q })),
+    })),
+    acabando: acabando.slice(0, ACABANDO_NO_EMAIL),
+    totalAcabando: acabando.length,
+    dias,
+    _modelos: ord,
+  };
 }
 
 function montarMaisVendidos(todos) {
@@ -563,6 +627,26 @@ function consolidarBlocos(porEmpresa, agregado) {
       }
     }
     out.mais_vendidos = montarMaisVendidos([...porId.values()]);
+    // Numeração do grupo: o mesmo produto (id) soma vendidos e estoque.
+    const comNumeracao = de('mais_vendidos').filter((x) => x.d.numeracao);
+    if (out.mais_vendidos && comNumeracao.length) {
+      const porModelo = new Map();
+      const unidades = new Set();
+      let dias = 0;
+      for (const x of comNumeracao) {
+        unidades.add(x.d.numeracao.unidade);
+        dias = Math.max(dias, x.d.numeracao.dias || 0);
+        for (const m of x.d.numeracao._modelos || []) {
+          const k = String(m.id);
+          const a = porModelo.get(k) || { id: m.id, nome: m.nome, qtd: 0, estoque: 0, _numeros: {}, _estoques: {} };
+          a.qtd += m.qtd; a.estoque += m.estoque;
+          for (const [n, q] of Object.entries(m._numeros)) a._numeros[n] = (a._numeros[n] || 0) + q;
+          for (const [n, e] of Object.entries(m._estoques)) a._estoques[n] = (a._estoques[n] || 0) + e;
+          porModelo.set(k, a);
+        }
+      }
+      out.mais_vendidos.numeracao = fecharNumeracao([...porModelo.values()], unidades.size === 1 ? [...unidades][0] : 'itens', dias || 6);
+    }
   }
 
   if (de('pagamentos_estoque').length) {
@@ -667,5 +751,5 @@ module.exports = {
   margemDasSomas,
   proximosDiasMMDD,
   // para teste
-  _montar: { montarVendas, montarMaisVendidos, montarPagamentosEstoque, montarEquipeMargem, montarClientes },
+  _montar: { montarVendas, montarMaisVendidos, montarPagamentosEstoque, montarEquipeMargem, montarClientes, montarNumeracaoDaSemana, fecharNumeracao },
 };
