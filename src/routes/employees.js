@@ -39,6 +39,46 @@ function getPlanLimit(plan) {
   }
 }
 
+// ─── Quem grava na equipe (03/11/2026) ──────────────────────────
+// O Caixa passou a oferecer "Cadastrar vendedora" (app: utils/vendedoraNoCaixa.ts)
+// só para quem cuida da equipe. A trava antes era só de tela (o menu Folha):
+// qualquer membro com acesso à empresa gravava aqui chamando a API. Agora a
+// escrita exige dono, admin, staff, permissions null ou a chave folha /
+// configuracoes. Leitura (GET) segue aberta: o seletor de vendedora do Caixa
+// lista a equipe para todo mundo que vende.
+function podeMexerNaEquipe({ isOwner, roleLabel, permissions }) {
+  if (isOwner === true || roleLabel === 'owner' || roleLabel === 'admin') return true;
+  if (!permissions) return true;
+  return permissions.folha === true || permissions.configuracoes === true;
+}
+
+router.use(async (req, res, next) => {
+  if (req.method === 'GET' || req.method === 'HEAD') return next();
+  if (!req.user || req.user.role === 'admin' || req.companyRole === 'owner' || req.companyRole === 'admin') return next();
+  try {
+    const { rows } = await db.query(
+      `SELECT (c.owner_id = $2) AS is_owner, cm.role_label, cm.permissions
+         FROM companies c
+         LEFT JOIN company_members cm
+           ON cm.company_id = c.id AND cm.user_id = $2
+          AND cm.status = 'active' AND cm.is_active = true
+        WHERE c.id = $1
+        LIMIT 1`,
+      [req.params.id, req.user.id]
+    );
+    const r = rows[0];
+    let permissions = r ? r.permissions : null;
+    if (typeof permissions === 'string') { try { permissions = JSON.parse(permissions); } catch (_) { permissions = null; } }
+    if (r && !podeMexerNaEquipe({ isOwner: r.is_owner, roleLabel: r.role_label, permissions })) {
+      return res.status(403).json({ error: 'Só quem cuida da equipe pode cadastrar ou alterar pessoas.', code: 'SEM_PERMISSAO_EQUIPE' });
+    }
+    return next();
+  } catch (err) {
+    console.error('[employees] permissao:', err.message);
+    return res.status(503).json({ error: 'Instabilidade momentânea de conexão. Tente novamente.', code: 'DB_CONN_TRANSIENT' });
+  }
+});
+
 // GET / -- list employees
 router.get('/', async (req, res) => {
   const cid = req.params.id;
@@ -349,3 +389,4 @@ router.delete('/:eid', async (req, res) => {
 });
 
 module.exports = router;
+module.exports.podeMexerNaEquipe = podeMexerNaEquipe;
