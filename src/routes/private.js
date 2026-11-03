@@ -1,7 +1,9 @@
 const express = require('express');
 const { requireAuth, requireCompanyAccess, requirePlan } = require('../middleware/auth');
 const { planoOuAssentoExtra } = require('../middleware/planoOuAssentoExtra');
-const { estoqueSoConsulta, somenteLeituraEmConsulta, negarEmConsulta } = require('../middleware/estoqueSoConsulta');
+const {
+  estoqueSoConsulta, somenteLeituraEmConsulta, negarEmConsulta, semCustoEmConsulta,
+} = require('../middleware/estoqueSoConsulta');
 
 const router = express.Router({ mergeParams: true });
 
@@ -25,6 +27,10 @@ router.use('/financial/analysis', require('./financialAnalysis'));
 router.use('/bank', require('./bankReconciliation'));
 router.use('/financeiro', require('./financeiroInsights').companyRouter);
 router.use('/financeiro', require('./financeiroComparative').companyRouter);
+// 02/11/2026: estoque_consulta tambem nao recebe custo do bipe (scanner), da
+// venda (sale_items.unit_cost) nem da troca. Preco fica para quem tem pdv.
+// Antes de todo router de /pdv.
+router.use('/pdv', semCustoEmConsulta());
 router.use('/pdv', require('./pdv-summary-patch'));
 router.use('/pdv', require('./scanner'));
 router.use('/pdv', require('./pdv'));
@@ -53,6 +59,11 @@ router.use('/otica', require('./otica'));
 // pedidos ao fornecedor e entrada da nota. Gate por
 // pdv_settings.matcon_enabled dentro do router, so na escrita, sem
 // requirePlan no prefixo (modules.js: as rotas matcon dependem so do toggle).
+// 02/11/2026: estoque_consulta ve sugestao e pedidos sem custo. O "total" so
+// sai aqui: nos pedidos de compra ele e custo, num orcamento nao.
+router.use('/matcon/purchase-suggestions', semCustoEmConsulta());
+router.use('/matcon/purchase-orders', semCustoEmConsulta(['total']));
+router.use('/matcon/purchase-receipts', semCustoEmConsulta());
 router.use('/matcon', require('./matconPurchases'));
 // 09/10/2026 — Comandas do Caixa (migration 368): consumo pendurado num numero
 // e cobrado no fim. Gate por pdv_settings.comanda_enabled dentro do router,
@@ -76,6 +87,12 @@ router.use('/categories/migration', somenteLeituraEmConsulta);
 router.use('/product-categories', somenteLeituraEmConsulta);
 router.use('/imports', somenteLeituraEmConsulta);
 router.use('/estoque', negarEmConsulta);
+// 02/11/2026: o custo que ainda saia para esse perfil fora de /products.
+// A margem por produto nao tem o que mostrar sem custo: 403.
+router.use('/suppliers', semCustoEmConsulta());
+router.use('/food', semCustoEmConsulta());
+router.use('/dental/supplies', semCustoEmConsulta());
+router.use('/margin', negarEmConsulta);
 // F0 Bloco B2 (30/07/2026): categoryMigration atende /categories/migration/*
 // e /products/brand-candidates + /products/brand/apply, com os caminhos ja
 // completos dentro do proprio router -- por isso monta na RAIZ. Tem que vir

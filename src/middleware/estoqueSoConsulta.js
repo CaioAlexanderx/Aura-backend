@@ -46,6 +46,12 @@ const CAMPOS_DE_CUSTO = new Set([
   'cost_price', 'cost', 'avg_cost', 'unit_cost',
   'margin', 'margin_pct', 'margem', 'margem_pct', 'lucro', 'profit',
   'total_value', 'stock_value', 'valor_estoque', 'valor_total',
+  // 02/11/2026: os nomes com que o custo sai fora de /products (Matcon
+  // compras, ficha técnica do food, margem, fornecedor).
+  'last_purchase_unit_cost', 'unit_cost_est', 'est_cost', 'total_est',
+  'total_est_cost', 'stock_unit_cost', 'total_cost', 'custo_total',
+  'custo_medio', 'margin_alert', 'margem_catalogo', 'waste_cost',
+  'total_waste_cost',
 ]);
 
 // Saem só de quem não tem a permissão pdv (ver o cabeçalho).
@@ -68,17 +74,20 @@ function ehSoConsulta({ isOwner, roleLabel, permissions }) {
 }
 
 // Tira os campos de dinheiro em qualquer profundidade. Só entra em array e
-// objeto simples: Date e afins passam intactos.
-function semValores(valor, removerPreco) {
-  if (Array.isArray(valor)) return valor.map((v) => semValores(v, removerPreco));
+// objeto simples: Date e afins passam intactos. `extras`: chaves de custo
+// que só valem num mount (o "total" dos pedidos de compra é custo; o de uma
+// venda não é).
+function semValores(valor, removerPreco, extras) {
+  if (Array.isArray(valor)) return valor.map((v) => semValores(v, removerPreco, extras));
   if (valor === null || typeof valor !== 'object') return valor;
   const proto = Object.getPrototypeOf(valor);
   if (proto !== Object.prototype && proto !== null) return valor;
   const out = {};
   for (const [k, v] of Object.entries(valor)) {
     if (CAMPOS_DE_CUSTO.has(k)) continue;
+    if (extras && extras.has(k)) continue;
     if (removerPreco && CAMPOS_DE_PRECO.has(k)) continue;
-    out[k] = semValores(v, removerPreco);
+    out[k] = semValores(v, removerPreco, extras);
   }
   return out;
 }
@@ -148,13 +157,40 @@ const somenteLeituraEmConsulta = comConsulta((req, res, next) => (
   ehLeitura(req) ? next() : negar(res)
 ));
 
-// Mounts que devolvem valor e não servem à tela (valor em risco de ruptura).
+// Mounts que devolvem valor e não servem à tela (valor em risco de ruptura,
+// margem por produto).
 const negarEmConsulta = comConsulta((req, res) => negar(res));
+
+// 02/11/2026: mounts fora de /products que devolvem custo junto do que a
+// tela precisa (bipe e venda do Caixa, troca, fornecedor, Matcon compras,
+// food, materiais do Odonto). A resposta sai sem custo; o preço segue a
+// regra de cima (fica para quem tem pdv). Não fecha escrita: o Caixa grava
+// venda. Diferente de comConsulta, a falha ao ler a permissão não derruba
+// o pedido (seria uma venda perdida no balcão): segue tirando só o custo.
+// Dono e admin nunca chegam a essa leitura.
+function semCustoEmConsulta(extras = []) {
+  const chavesExtras = extras.length ? new Set(extras) : null;
+  return async (req, res, next) => {
+    let consulta;
+    try {
+      consulta = await lerConsulta(req);
+    } catch (err) {
+      console.error('[estoqueSoConsulta] error:', err.message);
+      consulta = { ativo: true, podeVerPreco: true };
+    }
+    if (!consulta.ativo) return next();
+    const json = res.json.bind(res);
+    res.json = (body) => json(semValores(body, !consulta.podeVerPreco, chavesExtras));
+    return next();
+  };
+}
 
 module.exports = {
   estoqueSoConsulta,
   somenteLeituraEmConsulta,
   negarEmConsulta,
+  semCustoEmConsulta,
+  lerConsulta,
   ehSoConsulta,
   semValores,
   LEITURAS_LIBERADAS,
