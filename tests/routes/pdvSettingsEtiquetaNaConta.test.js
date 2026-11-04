@@ -363,3 +363,26 @@ describe('pdv_settings -- as chaves de etiqueta convivem com as demais', () => {
     expect(gravado()).toMatchObject({ caixa_enabled: true, label_size: '58mm', label_offset_mm: -1.5, label_custom_specs: [MEDIDA], label_printer_prefs: null });
   });
 });
+
+// 04/11/2026: pagina em pe (varias linhas por pagina, para o driver que
+// imprime a pagina deitada — Lulume, LABEL-9X20 no Mac). So `true` e gravado.
+describe('pdv_settings -- label_custom_specs.paginaEmPe (pagina em pe)', () => {
+  test('PUT: true e gravado; GET devolve', async () => {
+    mockSql(null);
+    const res = await put({ label_custom_specs: [{ ...MEDIDA, paginaEmPe: true }] });
+    expect(res.status).toBe(200);
+    expect(gravado().label_custom_specs).toEqual([{ ...MEDIDA, paginaEmPe: true }]);
+    mockSql({ label_custom_specs: [{ ...MEDIDA, paginaEmPe: true }] });
+    const get = await request(app).get(url).set(auth);
+    expect(get.body.settings.label_custom_specs[0].paginaEmPe).toBe(true);
+  });
+
+  test.each([[false], ['true'], [1], [null], ['sim']])('PUT: paginaEmPe %p nao cria a chave (medida identica a de antes)', async (valor) => {
+    mockSql(null);
+    const res = await put({ label_custom_specs: [{ ...MEDIDA, paginaEmPe: valor }] });
+    expect(res.status).toBe(200);
+    const salvo = gravado().label_custom_specs[0];
+    expect(Object.prototype.hasOwnProperty.call(salvo, 'paginaEmPe')).toBe(false);
+    expect(salvo).toEqual(MEDIDA);
+  });
+});
