@@ -172,7 +172,7 @@ const ALLOWED_RANGED_KEYS = {
 //   - chave desconhecida dentro de uma medida ou de um modelo => descartada
 //     (campos de uma medida: id, nome, larguraMm, alturaMm, colunas,
 //     espacoLadoMm, espacoLinhaMm, ajusteXMm, ajusteYMm, dobraMm, estilo,
-//     paginaEmPe (so quando true); o
+//     paginaEmPe e barrasTermicas (so quando true); o
 //     estilo so existe quando vale exatamente "boutique", qualquer outro
 //     valor e ignorado sem erro);
 //   - numeros arredondados a decimos (o app trabalha em decimos de mm);
@@ -285,6 +285,9 @@ function validarMedidasDeEtiqueta(raw) {
     // imprime a pagina deitada). So `true` e gravado; ausente/false => sem a
     // chave, byte a byte como antes.
     if (m.paginaEmPe === true) spec.paginaEmPe = true;
+    // 04/11/2026: codigo de barras da termica (barra fina em pontos exatos
+    // de 203 dpi). So `true` e gravado.
+    if (m.barrasTermicas === true) spec.barrasTermicas = true;
     if (vistos.has(id)) return; // id repetido: fica a primeira
     vistos.add(id);
     out.push(spec);
