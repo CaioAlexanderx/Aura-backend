@@ -95,6 +95,7 @@ async function estado(companyId) {
       acompanhamento: tipo('acompanhamento'),
       novidades: tipo('novidades'),
       pedido_loja: tipo('pedido_loja'),
+      fechamento_mes: tipo('fechamento_mes'),
     },
     limites: { enderecos_extras: E.MAX_EXTRAS, relatorio_agora_por_dia: scheduler.MAX_AGORA_POR_DIA },
   };

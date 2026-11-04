@@ -40,6 +40,9 @@ const TIPOS = Object.freeze({
   acompanhamento: { rotulo: 'os e-mails de acompanhamento' },
   novidades:      { rotulo: 'as novidades da Aura' },
   pedido_loja:    { rotulo: 'o aviso de pedido novo da loja online' },
+  // 03/11/2026 — fechamento do mês com a planilha de vendas por numeração
+  // (services/fechamentoDoMes.js). Mesmo padrão do relatório: ligado.
+  fechamento_mes: { rotulo: 'o fechamento do mês' },
 });
 
 // Sem preferência: sempre saem.
@@ -47,7 +50,7 @@ const TIPOS_SEMPRE = Object.freeze(['cobranca', 'seguranca']);
 
 // Comerciais (tq-110): a conta marcada "Não quer" não recebe. pedido_loja é
 // o aviso de pedido novo da própria loja: segue.
-const TIPOS_COMERCIAIS = Object.freeze(['relatorio', 'ajuda', 'acompanhamento', 'novidades']);
+const TIPOS_COMERCIAIS = Object.freeze(['relatorio', 'ajuda', 'acompanhamento', 'novidades', 'fechamento_mes']);
 
 // Blocos do relatório (mock da Nina, 21/10). O relatório longo (tq-85) lê
 // blocosDoRelatorio(): o que o dono deixou ligado E o plano tem.
@@ -87,6 +90,11 @@ function padrao(tipo, env = process.env) {
         ligado: relatorioPadraoLigado(env),
         config: { dia: 1, hora: 8, versao: 'completa', blocos: [...BLOCOS], destinatarios: null },
       };
+    case 'fechamento_mes':
+      // Decisão do PO (03/11): ligado para todos, com opção de desligar —
+      // o mesmo interruptor geral do relatório (kill switch) vale aqui.
+      // destinatarios null = os mesmos do padrão (dono + confirmados).
+      return { ligado: relatorioPadraoLigado(env), config: { destinatarios: null } };
     case 'pedido_loja':
       // pedido_destino ausente = 'equipe', o comportamento de hoje (todos os
       // company_members). Só muda quando a loja escolhe na tela.
@@ -363,6 +371,9 @@ const CAMPOS = Object.freeze({
   ajuda: ['ligado'],
   acompanhamento: ['ligado'],
   novidades: ['ligado'],
+  // 03/11/2026: só liga/desliga na tela (vai para os mesmos destinatários
+  // do padrão: dono + endereços confirmados).
+  fechamento_mes: ['ligado'],
 });
 
 function erro(codigo, mensagem) {

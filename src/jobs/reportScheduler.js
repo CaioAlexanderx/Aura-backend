@@ -364,14 +364,12 @@ async function enviarRelatorioAgora({ companyId, userId, email, now = Date.now()
 // ── Tick ────────────────────────────────────────────────────────
 
 let _rodando = false;
-let _lastMonthlyDate = null;
+let _rodandoMensal = false;
 
 function tick() {
   const now = nowBRT();
   const dom = now.getUTCDate();
   const hour = now.getUTCHours();
-  const min = now.getUTCMinutes();
-  const dateStr = now.toISOString().slice(0, 10);
 
   // Toda volta (60 s) olha quem esta na janela. A reserva no email_log e a
   // trava de verdade; esta so evita duas voltas sobrepostas no processo.
@@ -382,9 +380,14 @@ function tick() {
       .finally(() => { _rodando = false; });
   }
 
-  if (dom === 1 && hour === 8 && min < 5 && _lastMonthlyDate !== dateStr) {
-    _lastMonthlyDate = dateStr;
-    console.log('[reportScheduler] mensal pendente de implementacao');
+  // 03/11/2026 — fechamento do mês (services/fechamentoDoMes.js): dia 1º a
+  // partir das 8h BRT. A reserva no email_log é a trava de verdade; esta só
+  // evita duas voltas sobrepostas no processo.
+  if (dom === 1 && hour >= 8 && !_rodandoMensal) {
+    _rodandoMensal = true;
+    require('../services/fechamentoDoMes').enviarFechamentos()
+      .catch((e) => console.error('[reportScheduler] fechamento crash:', e.message))
+      .finally(() => { _rodandoMensal = false; });
   }
 }
 
