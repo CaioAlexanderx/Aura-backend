@@ -2,7 +2,8 @@ const express = require('express');
 const { requireAuth, requireCompanyAccess, requirePlan } = require('../middleware/auth');
 const { planoOuAssentoExtra } = require('../middleware/planoOuAssentoExtra');
 const {
-  estoqueSoConsulta, somenteLeituraEmConsulta, negarEmConsulta, semCustoEmConsulta,
+  estoqueSoConsulta, somenteLeituraEmConsulta, semCustoEmConsulta,
+  negarEmConsultaSemCustoNoResto, negarSemCusto,
 } = require('../middleware/estoqueSoConsulta');
 
 const router = express.Router({ mergeParams: true });
@@ -86,13 +87,14 @@ router.use('/products', estoqueSoConsulta);
 router.use('/categories/migration', somenteLeituraEmConsulta);
 router.use('/product-categories', somenteLeituraEmConsulta);
 router.use('/imports', somenteLeituraEmConsulta);
-router.use('/estoque', negarEmConsulta);
+// 03/11/2026: quem só não vê custo (podeVerCusto) recebe a ruptura sem custo.
+router.use('/estoque', negarEmConsultaSemCustoNoResto);
 // 02/11/2026: o custo que ainda saia para esse perfil fora de /products.
 // A margem por produto nao tem o que mostrar sem custo: 403.
 router.use('/suppliers', semCustoEmConsulta());
 router.use('/food', semCustoEmConsulta());
 router.use('/dental/supplies', semCustoEmConsulta());
-router.use('/margin', negarEmConsulta);
+router.use('/margin', negarSemCusto);
 // F0 Bloco B2 (30/07/2026): categoryMigration atende /categories/migration/*
 // e /products/brand-candidates + /products/brand/apply, com os caminhos ja
 // completos dentro do proprio router -- por isso monta na RAIZ. Tem que vir

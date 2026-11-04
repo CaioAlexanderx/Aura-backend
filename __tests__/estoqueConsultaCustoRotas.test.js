@@ -159,6 +159,9 @@ const PERFIS_LIVRES = [
 ];
 const CONSULTA = { papel: 'Estoque', permissions: { estoque_consulta: true } };
 const CONSULTA_COM_CAIXA = { papel: 'Caixa', permissions: { estoque_consulta: true, pdv: true } };
+// 03/11/2026 — custo oculto: Caixa + Estoque sem retaguarda (o perfil visto em
+// produção). Vê preço, não vê custo.
+const BALCAO = { papel: 'Colaborador', permissions: { pdv: true, painel: false, estoque: true, clientes: true } };
 
 // Uma chamada de cada rota, com o plano que ela pede.
 const ROTAS = {
@@ -217,6 +220,15 @@ describe.each(Object.keys(ROTAS))('%s', (nome) => {
     const res = await chamar(nome, CONSULTA_COM_CAIXA);
     expect(res.status).toBe(antes.status);
     expect(JSON.stringify(res.body)).not.toMatch(CUSTO);
+  });
+
+  test('balcão sem retaguarda (custo oculto): perde só o custo, o preço fica', async () => {
+    const antes = await respostaDoDono(nome);
+    const res = await chamar(nome, BALCAO);
+    expect(res.status).toBe(antes.status);
+    const txt = JSON.stringify(res.body);
+    expect(txt).not.toMatch(CUSTO);
+    if (PRECO.test(JSON.stringify(antes.body))) expect(txt).toMatch(PRECO);
   });
 });
 

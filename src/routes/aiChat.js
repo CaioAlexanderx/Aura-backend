@@ -149,12 +149,19 @@ router.post('/chat', requireRole('client', 'analyst', 'admin'), async (req, res)
     console.error('[ai] estoque_consulta:', err.message);
     consulta = { ativo: true, podeVerPreco: false };
   }
+  // 03/11/2026: quem só não vê custo (podeVerCusto) também não recebe custo
+  // nem valor do estoque no contexto; o preço fica.
   const opcoesDoContexto = consulta.ativo
     ? { semCusto: true, semPreco: !consulta.podeVerPreco }
-    : {};
+    : (consulta.ocultarCusto ? { semCusto: true } : {});
 
   // Build enriched system prompt
   let systemPrompt = SYSTEM_PROMPTS[context] || SYSTEM_PROMPTS.geral;
+  if (!consulta.ativo && consulta.ocultarCusto) {
+    systemPrompt += '\n\nACESSO DESTE USUARIO: nao ve custo. Nao informe custo, margem, lucro nem valor do'
+      + ' estoque, e nao estime esses numeros. Preco de venda pode. Se perguntarem, explique com gentileza'
+      + ' que o responsavel pela loja pode ajudar com custos.';
+  }
   if (consulta.ativo) {
     systemPrompt += '\n\nACESSO DESTE USUARIO: so consulta de estoque. Nao informe custo, margem, lucro'
       + (consulta.podeVerPreco ? '' : ', preco de venda')
