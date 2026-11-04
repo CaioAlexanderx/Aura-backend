@@ -386,3 +386,23 @@ describe('pdv_settings -- label_custom_specs.paginaEmPe (pagina em pe)', () => {
     expect(salvo).toEqual(MEDIDA);
   });
 });
+
+// 04/11/2026: codigo de barras da termica (Lulume, LABEL-9X20 de 203 dpi).
+describe('pdv_settings -- label_custom_specs.barrasTermicas', () => {
+  test('PUT: true e gravado; GET devolve', async () => {
+    mockSql(null);
+    const res = await put({ label_custom_specs: [{ ...MEDIDA, barrasTermicas: true }] });
+    expect(res.status).toBe(200);
+    expect(gravado().label_custom_specs).toEqual([{ ...MEDIDA, barrasTermicas: true }]);
+    mockSql({ label_custom_specs: [{ ...MEDIDA, barrasTermicas: true }] });
+    const get = await request(app).get(url).set(auth);
+    expect(get.body.settings.label_custom_specs[0].barrasTermicas).toBe(true);
+  });
+
+  test.each([[false], ['true'], [1], [null]])('PUT: barrasTermicas %p nao cria a chave', async (valor) => {
+    mockSql(null);
+    const res = await put({ label_custom_specs: [{ ...MEDIDA, barrasTermicas: valor }] });
+    expect(res.status).toBe(200);
+    expect(gravado().label_custom_specs[0]).toEqual(MEDIDA);
+  });
+});
