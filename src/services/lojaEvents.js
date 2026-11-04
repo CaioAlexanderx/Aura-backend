@@ -48,6 +48,11 @@ const appNotifications = require('./appNotifications');
 // navegador da lojista, com a aba fechada. Mesmo ponto de costura (objeto
 // inteiro, nao desestruturado) do appNotifications acima.
 const webPush = require('./webPush');
+// 04/11/2026: venda, crediário e orçamento escolhem quem recebe o push
+// (dono, acesso total, Financeiro; nunca quem causou o evento) e a venda
+// agrupa em rajada. Os dois pelo módulo, pelo mesmo motivo acima.
+const destinatariosDoAviso = require('./destinatariosDoAviso');
+const rajadaDeVendas = require('./rajadaDeVendas');
 
 const PREFIX = 'loja_';
 
@@ -79,6 +84,142 @@ const fmt = (v) => {
 
 const num = (order) => `#${order.order_number || String(order.id || '').slice(0, 8)}`;
 
+// Com separador de milhar: "R$ 1.240,00". O fmt acima é o dos pedidos da
+// loja online e fica como está (11 snapshots de e-mail dependem dele).
+const fmtMilhar = (v) => {
+  const n = Number(v);
+  if (v === null || v === undefined || v === '' || Number.isNaN(n)) return 'R$ —';
+  const [inteiro, dec] = Math.abs(n).toFixed(2).split('.');
+  const comPonto = inteiro.replace(/\B(?=(\d{3})+(?!\d))/g, '.');
+  return `${n < 0 ? '-' : ''}R$ ${comPonto},${dec}`;
+};
+
+// ── Caixa e crediário (04/11/2026) ─────────────────────────────────────
+// Rótulo curto do meio de pagamento, como a lojista fala.
+const METODOS = {
+  dinheiro: 'Dinheiro', pix: 'Pix', credito: 'Cartão', debito: 'Cartão', cartao: 'Cartão',
+  cartao_credito: 'Cartão', cartao_debito: 'Cartão', crediario: 'Crediário', boleto: 'Boleto',
+  transferencia: 'Transferência', voucher: 'Voucher', multiplo: 'Vários',
+};
+function rotuloDoMetodo(m) {
+  const k = String(m || '').toLowerCase().trim();
+  if (!k) return '';
+  return METODOS[k] || (k.charAt(0).toUpperCase() + k.slice(1));
+}
+
+// "#1042 · Pix · Bianca vendeu para Maria." Cada pedaço só entra se existe.
+// Multi-CNPJ (CLAUDE.md, armadilha 2): a dona de duas lojas precisa saber
+// de qual veio — `loja` só vem preenchida quando a conta tem mais de uma.
+function corpoDaVenda(v) {
+  const partes = [];
+  if (v.sale_number) partes.push(`#${v.sale_number}`);
+  const metodo = rotuloDoMetodo(v.payment_method);
+  if (metodo) partes.push(metodo);
+  const vendedor = String(v.vendedor || '').trim();
+  const cliente = String(v.customer_name || '').trim();
+  if (vendedor && cliente) partes.push(`${vendedor} vendeu para ${cliente}`);
+  else if (vendedor) partes.push(vendedor);
+  else if (cliente) partes.push(`Cliente ${cliente}`);
+  if (v.loja) partes.push(v.loja);
+  return partes.length ? `${partes.join(' · ')}.` : 'Venda fechada no Caixa.';
+}
+
+const comLoja = (p, texto) => (p.loja ? `${p.loja}: ${texto}` : texto);
+
+// "Maria pagou R$ 150,00 no Pix. Ainda falta R$ 350,00."
+function corpoDoCrediario(p) {
+  const nome = String(p.customer_name || '').trim() || 'Cliente';
+  const metodo = rotuloDoMetodo(p.method);
+  const falta = Number(p.new_balance);
+  const resto = Number.isFinite(falta) && falta > 0.005
+    ? ` Ainda falta ${fmtMilhar(falta)}.`
+    : (Number.isFinite(falta) ? ' Carnê quitado.' : '');
+  return comLoja(p, `${nome} pagou ${fmtMilhar(p.amount)}${metodo ? ` no ${metodo}` : ''}.${resto}`);
+}
+
+const numDoOrcamento = (q) => `#${q.number || String(q.id || '').slice(0, 8)}`;
+function corpoDoOrcamento(q) {
+  const nome = String(q.customer_name || '').trim() || 'O cliente';
+  if (q.origem === 'link') return comLoja(q, `${nome} aceitou o orçamento ${numDoOrcamento(q)} pelo link. Combine pagamento e entrega.`);
+  return comLoja(q, `O orçamento ${numDoOrcamento(q)} de ${nome} virou venda.`);
+}
+
+// Nome da loja quando a conta tem mais de um CNPJ no grupo (senão null: a
+// dona de uma loja só não precisa ler o nome dela em cada aviso). Cache
+// de 60s por empresa, como as preferências.
+const lojaCache = new Map();
+async function nomeDaLojaSeGrupo(companyId) {
+  const hit = lojaCache.get(companyId);
+  if (hit && Date.now() - hit.at < PREFS_TTL_MS) return hit.nome;
+  let nome = null;
+  try {
+    const { rows } = await db.query(
+      `SELECT COALESCE(c.trade_name, c.legal_name) AS nome,
+              (SELECT COUNT(*) FROM companies g
+                WHERE COALESCE(NULLIF(g.billing_owner_company_id, g.id), g.id)
+                    = COALESCE(NULLIF(c.billing_owner_company_id, c.id), c.id)) AS n
+         FROM companies c WHERE c.id = $1`,
+      [companyId]
+    );
+    if (rows.length && Number(rows[0].n) > 1) nome = rows[0].nome || null;
+  } catch (err) {
+    if (err.code !== '42703') console.error('[lojaEvents] falha ao ler a loja do grupo:', err.message);
+  }
+  lojaCache.set(companyId, { at: Date.now(), nome });
+  return nome;
+}
+
+// Recargas: o caller passa o que tem (até só o id) e o módulo garante o que
+// o texto consome — a mesma lição do loadOrder, abaixo.
+async function loadSale(given) {
+  if (!given.id || (given.vendedor !== undefined && given.total !== undefined)) return given;
+  try {
+    const { rows } = await db.query(
+      `SELECT s.id, s.company_id, s.total_amount AS total, s.sale_number, s.payment_method,
+              s.customer_id, COALESCE(s.seller_name, e.name, u.full_name) AS vendedor,
+              c.name AS customer_name
+         FROM sales s
+         LEFT JOIN employees e ON e.id = s.employee_id
+         LEFT JOIN users u ON u.id = s.seller_id
+         LEFT JOIN customers c ON c.id = s.customer_id
+        WHERE s.id = $1`,
+      [given.id]
+    );
+    if (rows.length) return { ...given, ...rows[0] };
+  } catch (err) {
+    console.error('[lojaEvents] falha ao recarregar venda:', err.message);
+  }
+  return given;
+}
+
+async function loadCustomer(given) {
+  if (!given.customer_id || given.customer_name) return given;
+  try {
+    const { rows } = await db.query('SELECT name FROM customers WHERE id = $1', [given.customer_id]);
+    if (rows.length) return { ...given, customer_name: rows[0].name };
+  } catch (err) {
+    console.error('[lojaEvents] falha ao recarregar cliente:', err.message);
+  }
+  return given;
+}
+
+async function loadQuote(given) {
+  if (!given.id || (given.total !== undefined && given.customer_name !== undefined)) return given;
+  const studio = given.vertical === 'studio';
+  try {
+    const { rows } = await db.query(
+      studio
+        ? `SELECT id, company_id, customer_name, total, created_by FROM studio_quotes WHERE id = $1`
+        : `SELECT id, company_id, number, customer_name, total, created_by, seller_id FROM matcon_quotes WHERE id = $1`,
+      [given.id]
+    );
+    if (rows.length) return { ...given, ...rows[0] };
+  } catch (err) {
+    console.error('[lojaEvents] falha ao recarregar orçamento:', err.message);
+  }
+  return given;
+}
+
 // ── Entidade do evento (entity_ref / entity_label) ─────────────────────
 // O app agrupa os cards por entity_ref ("3 avisos do Pedido #1042"). O
 // PREFIXO é obrigatório e foi o ponto que o frontend levantou: sem ele, um
@@ -90,6 +231,7 @@ const num = (order) => `#${order.order_number || String(order.id || '').slice(0,
 // arbitrariamente. Se um dia virar um aviso por produto, o prefixo a usar é
 // 'produto:<id>'.
 function entityOf(spec, payload) {
+  if (spec.entity) return spec.entity(payload);
   if (spec.orderless || !payload.id) return { ref: null, label: null };
   return { ref: `pedido:${payload.id}`, label: `Pedido ${num(payload)}` };
 }
@@ -332,6 +474,82 @@ const EVENTS = Object.freeze({
     ctaLabel: 'Ver contas a pagar',
     ctaRoute: () => '/financeiro',
   },
+
+  // ── Caixa e crediário (04/11/2026) ─────────────────────────────────
+  // Pedido do PO: avisos no celular (PWA) de venda realizada, valor
+  // recebido no crediário e orçamento aprovado. Não são da loja online,
+  // mas moram nesta taxonomia pelo mesmo motivo de loja_conta_vencendo:
+  // herdam o sino, a preferência (interruptor próprio, ligado por padrão),
+  // a dedupe e o push. O que muda neles:
+  //   - `destinatarios`: quem recebe o push (services/destinatariosDoAviso),
+  //     e nunca quem causou o evento (opts.exceto no emit);
+  //   - `load`: recarga do que o texto consome (venda, cliente, orçamento);
+  //   - `tag`: a chave com que o celular SUBSTITUI o aviso anterior em vez
+  //     de empilhar.
+  //
+  // Venda realizada é SÓ push (`soPush`): 145 cards por dia enterrariam no
+  // sino tudo que pede ação. A idempotência dela é a do próprio POST /sale
+  // (chave Idempotency-Key, tq-15): a repetição devolve o corpo guardado e
+  // não passa por aqui. Em rajada, agrupa (services/rajadaDeVendas).
+  loja_venda_realizada: {
+    severity: 'info',
+    defaultOn: true,
+    push: true,
+    orderless: true,
+    soPush: true,
+    rajada: true,
+    label: 'Venda realizada',
+    hint: 'Cada venda fechada no Caixa. Só no celular, não entra no sino. Quem vendeu não recebe.',
+    title: (v) => `Venda realizada · ${fmtMilhar(v.total)}`,
+    body:  (v) => corpoDaVenda(v),
+    ctaLabel: 'Ver venda',
+    ctaRoute: (v) => `/vendas?sale_id=${v.id}`,
+    load: loadSale,
+    destinatarios: { chaves: ['financeiro'] },
+    tag: (v) => `venda:${v.company_id}`,
+    resumo: {
+      title: (r) => `${r.n} vendas nos últimos minutos · ${fmtMilhar(r.total)}`,
+      body:  () => 'Toque para ver as vendas.',
+      url:   () => '/vendas',
+    },
+  },
+  loja_crediario_recebido: {
+    severity: 'info',
+    defaultOn: true,
+    push: true,
+    orderless: true,
+    label: 'Recebido no crediário',
+    hint: 'Cliente pagou parcela ou abateu o carnê.',
+    title: (p) => `Recebido no crediário · ${fmtMilhar(p.amount)}`,
+    body:  (p) => corpoDoCrediario(p),
+    ctaLabel: 'Ver crediário',
+    ctaRoute: (p) => (p.customer_id ? `/crediario?customer_id=${p.customer_id}` : '/crediario'),
+    load: loadCustomer,
+    destinatarios: { chaves: ['financeiro'] },
+    entity: (p) => (p.customer_id
+      ? { ref: `cliente:${p.customer_id}`, label: p.customer_name || 'Cliente' }
+      : { ref: null, label: null }),
+  },
+  // Uma vez por orçamento: a dedupe é pelo id dele. Se o cliente aceitou
+  // pelo link (o aviso sai na hora, e a página que dizia "a loja já foi
+  // notificada" passa a ser verdade) e depois a venda é fechada, o segundo
+  // disparo cai na dedupe e não repete. Quem fez o orçamento (created_by /
+  // seller_id) recebe mesmo sem Financeiro — é a comissão dela.
+  loja_orcamento_aprovado: {
+    severity: 'info',
+    defaultOn: true,
+    push: true,
+    orderless: true,
+    label: 'Orçamento aprovado',
+    hint: 'O cliente aceitou pelo link ou o orçamento virou venda.',
+    title: (q) => `Orçamento aprovado · ${fmtMilhar(q.total)}`,
+    body:  (q) => corpoDoOrcamento(q),
+    ctaLabel: 'Ver orçamento',
+    ctaRoute: (q) => (q.vertical === 'studio' ? `/studio/gestao/orcamentos/${q.id}` : '/matcon/orcamentos'),
+    load: loadQuote,
+    destinatarios: { chaves: ['financeiro'], incluir: (q) => [q.created_by, q.seller_id] },
+    entity: (q) => ({ ref: `orcamento:${q.id}`, label: `Orçamento ${numDoOrcamento(q)}` }),
+  },
 });
 
 const TYPES = Object.freeze(Object.keys(EVENTS));
@@ -510,7 +728,11 @@ async function loadOrder(ref) {
  * @param {string} [opts.dedupeSuffix] substitui o order_id na dedupe_key.
  * @param {string} [opts.body]         sobrescreve o corpo montado.
  * @param {Date|string} [opts.expiresAt] o aviso some do sininho depois disso.
- * @returns {Promise<object|null>} a linha criada, ou null (desligado, dedup, falha)
+ * @param {string} [opts.exceto]       (tipos com `destinatarios`) quem causou o
+ *                                     evento: não recebe o push.
+ * @param {string[]} [opts.incluir]    (idem) quem recebe mesmo fora da regra.
+ * @returns {Promise<object|null>} a linha criada, ou null (desligado, dedup, falha).
+ *                                 Tipo `soPush` devolve { id: null, so_push: true }.
  */
 async function emitLojaEvent(type, order = {}, opts = {}) {
   try {
@@ -534,6 +756,8 @@ async function emitLojaEvent(type, order = {}, opts = {}) {
     if (!(await isEnabled(companyId, type))) return null;
 
     if (!spec.orderless) payload = await loadOrder(payload);
+    else if (spec.load) payload = await spec.load(payload);
+    if (spec.destinatarios) payload = { ...payload, loja: await nomeDaLojaSeGrupo(companyId) };
     if (opts.body) payload = { ...payload, body: opts.body };
 
     const key = opts.dedupeSuffix || payload.id;
@@ -542,37 +766,38 @@ async function emitLojaEvent(type, order = {}, opts = {}) {
       return null;
     }
 
-    const row = await appNotifications.notifyCompany(companyId, {
-      type,
-      title: spec.title(payload),
-      body: opts.body || spec.body(payload),
-      ctaLabel: spec.ctaLabel,
-      ctaRoute: spec.ctaRoute ? spec.ctaRoute(payload) : routeForOrder(payload),
-      dedupeKey: `loja:${type.slice(PREFIX.length)}:${key}`,
-      expiresAt: opts.expiresAt || null,
-    });
-
-    // entity_ref/entity_label num UPDATE separado, e não como dois campos a
-    // mais em createAppNotification, de propósito: aquele módulo serve TAMBÉM
-    // os banners da Gestão Aura e já carrega um cache de capacidade de schema
-    // (pré/pós-285). Enfiar uma terceira variação lá dentro faria uma coluna
-    // faltando nesta migration derrubar banner de vertical, que não tem nada a
-    // ver com isto. Aqui o pior caso é o card não agrupar. O UPDATE só roda
-    // quando a linha foi REALMENTE criada (dedupe devolve null).
-    if (row && row.id) await tagEntity(row, spec, payload);
+    // Só push (venda realizada): não vira linha no sino. A idempotência é
+    // a do caminho que dispara (ver o comentário do tipo).
+    let row = null;
+    if (spec.soPush) {
+      row = { id: null, type, so_push: true };
+    } else {
+      row = await appNotifications.notifyCompany(companyId, {
+        type,
+        title: spec.title(payload),
+        body: opts.body || spec.body(payload),
+        ctaLabel: spec.ctaLabel,
+        ctaRoute: spec.ctaRoute ? spec.ctaRoute(payload) : routeForOrder(payload),
+        dedupeKey: `loja:${type.slice(PREFIX.length)}:${key}`,
+        expiresAt: opts.expiresAt || null,
+      });
+      // entity_ref/entity_label num UPDATE separado, e não como dois campos a
+      // mais em createAppNotification, de propósito: aquele módulo serve TAMBÉM
+      // os banners da Gestão Aura e já carrega um cache de capacidade de schema
+      // (pré/pós-285). Enfiar uma terceira variação lá dentro faria uma coluna
+      // faltando nesta migration derrubar banner de vertical, que não tem nada a
+      // ver com isto. Aqui o pior caso é o card não agrupar. O UPDATE só roda
+      // quando a linha foi REALMENTE criada (dedupe devolve null).
+      if (row && row.id) await tagEntity(row, spec, payload);
+    }
     // Web Push so quando a linha foi REALMENTE criada: a dedupe_key e a
     // unica idempotencia, e ela vale para o navegador tambem (webhook
     // reenviado nao toca o computador duas vezes). A tag do pedido faz o
     // "pagamento confirmado" substituir o "pedido novo" na central do
     // sistema. Fire-and-forget: navegador lento nao segura o fluxo.
-    if (row && row.id && spec.push) {
-      webPush.notifyCompany(companyId, {
-        title: spec.title(payload),
-        body: opts.body || spec.body(payload),
-        url: spec.ctaRoute ? spec.ctaRoute(payload) : routeForOrder(payload),
-        tag: entityOf(spec, payload).ref || type,
-        type,
-      }).catch(() => {});
+    const criou = spec.soPush ? true : !!(row && row.id);
+    if (criou && spec.push) {
+      enviarPush(type, spec, payload, opts).catch(() => {});
     }
     return row;
   } catch (err) {
@@ -580,6 +805,49 @@ async function emitLojaEvent(type, order = {}, opts = {}) {
     console.error('[lojaEvents] erro ao disparar', type, '-', err.message);
     return null;
   }
+}
+
+// ── Push: quem recebe, e a rajada ──────────────────────────────────────
+// Tipo sem `destinatarios` segue como sempre: todos os navegadores da
+// empresa, chamada de dois argumentos (os testes antigos dependem disso).
+// Tipo com `destinatarios` mira os usuários da regra, menos quem causou o
+// evento (opts.exceto), mais quem o próprio evento quer (incluir).
+async function enviarPush(type, spec, payload, opts = {}) {
+  const companyId = payload.company_id;
+  const aviso = {
+    title: spec.title(payload),
+    body: opts.body || spec.body(payload),
+    url: spec.ctaRoute ? spec.ctaRoute(payload) : routeForOrder(payload),
+    tag: spec.tag ? spec.tag(payload) : (entityOf(spec, payload).ref || type),
+    type,
+  };
+  if (!spec.destinatarios) return webPush.notifyCompany(companyId, aviso);
+
+  const regra = spec.destinatarios;
+  const incluir = [
+    ...(typeof regra.incluir === 'function' ? regra.incluir(payload) : (regra.incluir || [])),
+    ...(opts.incluir || []),
+  ];
+  const mirar = (exceto) => destinatariosDoAviso.destinatarios(companyId, {
+    chaves: regra.chaves, incluir, exceto,
+  });
+
+  if (spec.rajada) {
+    // O resumo da janela vai para todo mundo da regra (as vendas são de
+    // vendedoras diferentes); a venda isolada poupa quem a fez.
+    const enviarResumo = (r) => mirar(null).then((userIds) => webPush.notifyCompany(companyId, {
+      title: spec.resumo.title(r),
+      body: spec.resumo.body(r),
+      url: spec.resumo.url(r),
+      tag: aviso.tag,
+      type,
+    }, { userIds }));
+    const modo = rajadaDeVendas.registrar(companyId, { total: payload.total, id: payload.id }, enviarResumo);
+    if (modo === 'agrupada') return { enviados: 0, removidos: 0, falhas: 0, agrupada: true };
+  }
+
+  const userIds = await mirar(opts.exceto || null);
+  return webPush.notifyCompany(companyId, aviso, { userIds });
 }
 
 // null = não sabemos; false = migration 315 ausente, para de tentar.
@@ -613,6 +881,7 @@ function emit(type, order, opts) {
 /** Só para teste: limpa cache de prefs e a decisão sobre o schema. */
 function _resetCaches() {
   prefsCache.clear();
+  lojaCache.clear();
   hasPrefsTable = null;
   hasEntityCols = null;
 }

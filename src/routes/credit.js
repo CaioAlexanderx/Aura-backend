@@ -40,6 +40,8 @@ const overdueRule  = require('../services/credit/overdue');  // .ymd: due_date d
 const { undoManualEntry } = require('../services/credit/undoManualEntry');
 const { undoPayment }     = require('../services/credit/undoPayment');
 const { editPayment }     = require('../services/credit/editPayment');
+// 04/11/2026: recebimento avisa o celular de quem cuida do dinheiro.
+const { avisarRecebimento } = require('../services/credit/avisoDeRecebimento');
 // 16/09/2026: cliente cadastrado em outra loja do mesmo dono tambem vale
 // (src/utils/customerScope.js -- incidente Davi / Mary Lucy).
 const { findOwnerScopedCustomer, CUSTOMER_NOT_FOUND_BODY } = require('../utils/customerScope');
@@ -758,6 +760,16 @@ router.post('/customer/:cid/payment', async (req, res) => {
       }
 
       await client.query('COMMIT');
+      // Um aviso para o recebimento inteiro (a soma), com a chave da
+      // primeira transação e o saldo depois da última.
+      if (allResults.length) {
+        const ultimo = allResults[allResults.length - 1].result;
+        avisarRecebimento({
+          companyId: req.params.id, customerId: req.params.cid,
+          result: { ...allResults[0].result, new_balance: ultimo.new_balance },
+          amount, method, userId: req.user?.id,
+        });
+      }
 
       // Retorna novo saldo consolidado
       const { rows: balRows } = await db.query(
@@ -803,6 +815,10 @@ router.post('/customer/:cid/payment', async (req, res) => {
     });
 
     await client.query('COMMIT');
+    avisarRecebimento({
+      companyId: req.params.id, customerId: req.params.cid, result,
+      amount, method, userId: req.user?.id,
+    });
 
     res.status(201).json({
       mode: accountId ? 'account' : 'global',
@@ -1502,6 +1518,7 @@ router.post('/customers/:cid/payments', async (req, res) => {
     }
 
     await client.query('COMMIT');
+    avisarRecebimento({ companyId, customerId, result, amount, method, userId: req.user?.id });
 
     const applied = [...allInstIds].map(instId => {
       const cd  = chargesMap[instId]  || {};

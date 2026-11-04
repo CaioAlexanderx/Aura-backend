@@ -87,6 +87,8 @@ const { iniciarTrialPelaPrimeiraVenda } = require('../services/trialRegra');
 const { avancarSemEsperar } = require('../services/onboardingProgress');
 // 17/10/2026 (migration 390): Idempotency-Key — ver cabecalho do servico.
 const vendaIdempotente = require('../services/vendaIdempotente');
+// 04/11/2026: venda realizada e orçamento que virou venda avisam o celular.
+const lojaEvents = require('../services/lojaEvents');
 
 const fmt = (v) => parseFloat(v || 0).toFixed(2);
 const SP_DATE_NOW = "(NOW() AT TIME ZONE 'America/Sao_Paulo')::date";
@@ -769,6 +771,27 @@ async function handleSale(req, res, opts = {}) {
     // 17/10/2026 (t2-04): a primeira venda avança o passo do cadastro
     // ('venda'). Mesmo molde: sem await, sem lançar, em memória depois da 1ª.
     avancarSemEsperar(req.params.id, 'venda');
+    // 04/11/2026: aviso no celular de quem cuida do dinheiro (dono, acesso
+    // total, Financeiro), nunca de quem passou a venda. Sai DEPOIS da
+    // resposta (setImmediate): o aviso faz as suas consultas e nunca entra
+    // entre a venda e o recibo. A repetição por Idempotency-Key não chega
+    // aqui. Venda que nasceu de orçamento do Matcon avisa também "orçamento
+    // aprovado", uma vez por orçamento (aceite pelo link cai na dedupe).
+    const avisoDaVenda = {
+      id: sale.id, company_id: req.params.id, total: sale.total_amount,
+      sale_number: sale.sale_number, payment_method: sale.payment_method,
+      customer_id: sale.customer_id,
+    };
+    const quoteDaVenda = matconResult && matconResult.quote_id ? matconResult.quote_id : null;
+    const quemVendeu = req.user?.id || null;
+    setImmediate(() => {
+      lojaEvents.emit('loja_venda_realizada', avisoDaVenda, { exceto: quemVendeu });
+      if (quoteDaVenda) {
+        lojaEvents.emit('loja_orcamento_aprovado', {
+          id: quoteDaVenda, company_id: req.params.id, vertical: 'matcon', origem: 'venda',
+        }, { exceto: quemVendeu });
+      }
+    });
 
     const { rows: saleItems } = await db.query(
       `SELECT si.*, p.name AS product_name FROM sale_items si

@@ -222,19 +222,35 @@ async function enviarParaInscricoes(inscricoes, conteudo, deps = {}) {
 }
 
 /**
- * Aviso para todos os navegadores inscritos da empresa.
+ * Aviso para os navegadores inscritos da empresa.
+ *
+ * Sem `opts.userIds`: todos os navegadores da empresa (o desenho original,
+ * do pedido da loja online). Com `opts.userIds`: só os navegadores desses
+ * usuários (04/11/2026 — venda, crediário e orçamento escolhem quem recebe
+ * em services/destinatariosDoAviso). Lista vazia = ninguém, de propósito:
+ * quem chama já decidiu que não há destinatário. Inscrição antiga sem
+ * user_id só entra no envio sem mira.
+ *
  * @param {{title, body, url, tag, type}} aviso
+ * @param {{ userIds?: string[] }} [opts]
  */
-async function notifyCompany(companyId, aviso = {}) {
+async function notifyCompany(companyId, aviso = {}, opts = {}) {
   const vazio = { enviados: 0, removidos: 0, falhas: 0 };
   if (!companyId) return vazio;
+  const userIds = Array.isArray(opts.userIds) ? opts.userIds.filter(Boolean).map(String) : null;
+  if (userIds && !userIds.length) return vazio;
   try {
     let rows;
     try {
-      ({ rows } = await db.query(
-        'SELECT id, endpoint, p256dh, auth FROM web_push_subscriptions WHERE company_id = $1',
-        [companyId]
-      ));
+      ({ rows } = userIds
+        ? await db.query(
+          'SELECT id, endpoint, p256dh, auth FROM web_push_subscriptions WHERE company_id = $1 AND user_id = ANY($2::uuid[])',
+          [companyId, userIds]
+        )
+        : await db.query(
+          'SELECT id, endpoint, p256dh, auth FROM web_push_subscriptions WHERE company_id = $1',
+          [companyId]
+        ));
     } catch (err) {
       if (err.code === '42P01') return vazio; // migration 336 ainda nao aplicada
       throw err;

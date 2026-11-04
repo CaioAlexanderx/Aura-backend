@@ -50,9 +50,12 @@ test('os tipos com push sao exatamente os que pedem acao imediata', () => {
   // libera a producao, ajuste e a cliente esperando arte nova.
   // 28/09/2026: "Ja paguei" sem comprovante trava o pedido como o
   // comprovante trava — mesmo aviso no navegador.
+  // 04/11/2026: venda realizada, recebido no crediário e orçamento
+  // aprovado — os avisos do Caixa no celular (__tests__/avisosNoCelular).
   expect(comPush).toEqual([
     'loja_ajuste_pedido', 'loja_arte_aprovada',
-    'loja_comprovante_enviado', 'loja_pagamento_a_conferir', 'loja_pedido_novo', 'loja_pedido_pago',
+    'loja_comprovante_enviado', 'loja_crediario_recebido', 'loja_orcamento_aprovado',
+    'loja_pagamento_a_conferir', 'loja_pedido_novo', 'loja_pedido_pago', 'loja_venda_realizada',
   ]);
 });
 
