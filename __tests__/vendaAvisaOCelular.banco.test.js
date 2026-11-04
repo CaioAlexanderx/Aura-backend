@@ -74,6 +74,9 @@ afterAll(async () => {
 beforeEach(() => jest.spyOn(lojaEvents, 'emit').mockImplementation(() => {}));
 afterEach(() => jest.restoreAllMocks());
 
+// O aviso sai num setImmediate depois da resposta: da a volta do loop.
+const depoisDaResposta = () => new Promise((r) => setImmediate(() => setImmediate(r)));
+
 const BODY = {
   items: [{ product_id: productId, quantity: 2, unit_price: 10, product_name_snapshot: 'Fixture Aviso' }],
   payment_method: 'pix',
@@ -84,6 +87,7 @@ test('a venda dispara o aviso depois do COMMIT, sem avisar quem vendeu', async (
   const res = await request(app).post(url).send(BODY);
   expect(res.status).toBe(201);
   const sale = res.body.sale;
+  await depoisDaResposta();
 
   const chamadas = lojaEvents.emit.mock.calls.filter(([t]) => t === 'loja_venda_realizada');
   expect(chamadas).toHaveLength(1);
@@ -103,5 +107,6 @@ test('repeticao por Idempotency-Key nao avisa duas vezes', async () => {
   expect(a.status).toBe(201);
   expect([200, 201]).toContain(b.status);
   expect(b.body.sale.id).toBe(a.body.sale.id);
+  await depoisDaResposta();
   expect(lojaEvents.emit.mock.calls.filter(([t]) => t === 'loja_venda_realizada')).toHaveLength(1);
 });

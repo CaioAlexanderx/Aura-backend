@@ -772,20 +772,26 @@ async function handleSale(req, res, opts = {}) {
     // ('venda'). Mesmo molde: sem await, sem lançar, em memória depois da 1ª.
     avancarSemEsperar(req.params.id, 'venda');
     // 04/11/2026: aviso no celular de quem cuida do dinheiro (dono, acesso
-    // total, Financeiro), nunca de quem passou a venda. Fire-and-forget,
-    // depois do COMMIT; a repetição por Idempotency-Key não chega aqui.
-    lojaEvents.emit('loja_venda_realizada', {
+    // total, Financeiro), nunca de quem passou a venda. Sai DEPOIS da
+    // resposta (setImmediate): o aviso faz as suas consultas e nunca entra
+    // entre a venda e o recibo. A repetição por Idempotency-Key não chega
+    // aqui. Venda que nasceu de orçamento do Matcon avisa também "orçamento
+    // aprovado", uma vez por orçamento (aceite pelo link cai na dedupe).
+    const avisoDaVenda = {
       id: sale.id, company_id: req.params.id, total: sale.total_amount,
       sale_number: sale.sale_number, payment_method: sale.payment_method,
       customer_id: sale.customer_id,
-    }, { exceto: req.user?.id || null });
-    // Venda que nasceu de um orçamento do Matcon: "orçamento aprovado" uma
-    // vez por orçamento (se o cliente já aceitou pelo link, cai na dedupe).
-    if (matconResult && matconResult.quote_id) {
-      lojaEvents.emit('loja_orcamento_aprovado', {
-        id: matconResult.quote_id, company_id: req.params.id, vertical: 'matcon', origem: 'venda',
-      }, { exceto: req.user?.id || null });
-    }
+    };
+    const quoteDaVenda = matconResult && matconResult.quote_id ? matconResult.quote_id : null;
+    const quemVendeu = req.user?.id || null;
+    setImmediate(() => {
+      lojaEvents.emit('loja_venda_realizada', avisoDaVenda, { exceto: quemVendeu });
+      if (quoteDaVenda) {
+        lojaEvents.emit('loja_orcamento_aprovado', {
+          id: quoteDaVenda, company_id: req.params.id, vertical: 'matcon', origem: 'venda',
+        }, { exceto: quemVendeu });
+      }
+    });
 
     const { rows: saleItems } = await db.query(
       `SELECT si.*, p.name AS product_name FROM sale_items si
