@@ -19,6 +19,8 @@
 const express = require('express');
 const router  = express.Router();
 const db      = require('../config/database');
+// 04/11/2026: aceite pelo link avisa a loja no celular e no sino.
+const lojaEvents = require('../services/lojaEvents');
 
 // ─── Matcon ─────────────────────────────────────────────────
 const SP_TODAY = "(NOW() AT TIME ZONE 'America/Sao_Paulo')::date";
@@ -115,7 +117,8 @@ async function responderMatcon(client, token, action, note) {
   let rows;
   try {
     ({ rows } = await client.query(
-      `SELECT id, status, (valid_until < ${SP_TODAY}) AS vencido
+      `SELECT id, company_id, number, customer_name, total, created_by, seller_id,
+              status, (valid_until < ${SP_TODAY}) AS vencido
          FROM matcon_quotes WHERE public_token = $1 LIMIT 1
          FOR UPDATE`,
       [token]
@@ -150,6 +153,16 @@ async function responderMatcon(client, token, action, note) {
     [aceitar ? 'approved' : 'lost', note ? String(note).slice(0, 1000) : null, q.id]
   );
   await client.query('COMMIT');
+  // 04/11/2026: o cliente aceitou pelo link — a loja é avisada no celular
+  // (dono, Financeiro e quem fez o orçamento). Antes a página prometia
+  // "a loja já foi notificada" e nada saía.
+  if (aceitar) {
+    lojaEvents.emit('loja_orcamento_aprovado', {
+      id: q.id, company_id: q.company_id, vertical: 'matcon', origem: 'link',
+      number: q.number, customer_name: q.customer_name, total: q.total,
+      created_by: q.created_by, seller_id: q.seller_id,
+    });
+  }
   return {
     status: 200,
     body: {
@@ -280,7 +293,7 @@ router.post('/:token/respond', async function(req, res) {
     await client.query('BEGIN');
 
     const qRes = await client.query(
-      `SELECT id, company_id, status, expires_at
+      `SELECT id, company_id, status, expires_at, customer_name, total, created_by
          FROM studio_quotes WHERE token = $1 LIMIT 1`,
       [req.params.token]
     );
@@ -320,6 +333,14 @@ router.post('/:token/respond', async function(req, res) {
     );
 
     await client.query('COMMIT');
+    // 04/11/2026: agora a loja É notificada (celular + sino), uma vez por
+    // orçamento. Quem fez o orçamento recebe mesmo sem Financeiro.
+    if (action === 'accept') {
+      lojaEvents.emit('loja_orcamento_aprovado', {
+        id: q.id, company_id: q.company_id, vertical: 'studio', origem: 'link',
+        customer_name: q.customer_name, total: q.total, created_by: q.created_by,
+      });
+    }
 
     res.json({
       ok:         true,

@@ -28,6 +28,8 @@ const db      = require('../config/database');
 const { notasDoPedidoAprovado } = require('../services/orcamentoEmVideo');
 const frequentes = require('../services/produtosFrequentesDoOrcamento');
 const { inserirPedidoStudio, inserirItemPedidoStudio } = require('../services/studioPedido');
+// 04/11/2026: orçamento que virou pedido avisa o celular.
+const lojaEvents = require('../services/lojaEvents');
 
 // ─── helpers ────────────────────────────────────────────────
 
@@ -589,6 +591,13 @@ async function converterOrcamento(req, res, { statusAceitos, msgStatus, exigeIte
     );
 
     await client.query('COMMIT'); aberta = false;
+    // 04/11/2026: "orçamento aprovado" no celular, uma vez por orçamento
+    // (se a cliente já aceitou pelo link, cai na dedupe). Quem fez o
+    // orçamento recebe; quem clicou aqui, não.
+    lojaEvents.emit('loja_orcamento_aprovado', {
+      id: qid, company_id: cid, vertical: 'studio', origem: 'venda',
+      customer_name: quote.customer_name, total: quote.total, created_by: quote.created_by,
+    }, { exceto: req.user?.id || null });
     return res.json({ order_id: orderId, quote: updRes.rows[0] });
   } catch (err) {
     if (aberta) { try { await client.query('ROLLBACK'); } catch (_) { /* conexao ja caiu */ } }

@@ -55,6 +55,8 @@ const pool = require('../config/database');
 const creditLedger = require('../services/creditLedger');
 const { buildStaticBrCode, validatePixKey, sanitizeTxid } = require('../services/staticPixService');
 const collectionNotice = require('../services/credit/collectionNotice');
+// 04/11/2026: recebimento avisa o celular de quem cuida do dinheiro.
+const { avisarRecebimento } = require('../services/credit/avisoDeRecebimento');
 // Fase 6: a régua do crediário passa a poder enfileirar na fila paga do
 // WhatsApp (wa_outbox). Ligar isso é o único botão desta tela que gasta
 // dinheiro por clique — daí o gate próprio no PUT de regras.
@@ -839,6 +841,10 @@ router.patch('/installments/:iid/pay', async (req, res) => {
     });
 
     await client.query('COMMIT');
+    avisarRecebimento({
+      companyId, customerId: ins.customer_id, result, amount: payAmount,
+      method: payment_method || 'dinheiro', userId: req.user?.id,
+    });
 
     const { rows: updated } = await pool.query(
       `SELECT * FROM credit_installments WHERE id=$1`, [installmentId]
