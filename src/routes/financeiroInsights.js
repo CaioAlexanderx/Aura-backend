@@ -87,8 +87,12 @@ function previousRange(period) {
       return { start: isoOf(s), end: isoOf(e) };
     }
     case 'year': {
+      // 04/11/2026: o periodo "ano" e 1/jan ate HOJE; o anterior tem que ser
+      // o MESMO trecho do ano passado (1/jan ate o mesmo dia), senao em
+      // novembro a tela compara 10 meses com 12 e inventa uma queda.
       const y = today.getFullYear() - 1;
-      return { start: y + '-01-01', end: y + '-12-31' };
+      const fim = new Date(y, today.getMonth(), Math.min(today.getDate(), new Date(y, today.getMonth() + 1, 0).getDate()));
+      return { start: y + '-01-01', end: isoOf(fim) };
     }
     case 'all':
       return null;
