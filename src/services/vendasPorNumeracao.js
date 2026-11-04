@@ -355,7 +355,10 @@ async function vendasPorNumeracao(db, { companyId, companyIds, periodo, porCor, 
   // Produtos: os ativos das lojas (+ compartilhados do grupo) e os vendidos,
   // mesmo que hoje inativos/apagados do catálogo.
   const { rows: produtos } = await db.query(
-    `SELECT p.id, p.name, p.sku, p.category, p.unit, p.size, p.stock_qty, p.is_active,
+    // products.size existe em produção (ALTER manual) mas nenhuma migration
+    // cria a coluna: no banco montado só pelas migrations (CI) ela falta.
+    // to_jsonb(p)->>'size' lê sem quebrar nos dois (CLAUDE.md, armadilha 1).
+    `SELECT p.id, p.name, p.sku, p.category, p.unit, to_jsonb(p) ->> 'size' AS size, p.stock_qty, p.is_active,
             s.id AS supplier_id, s.name AS supplier_name, s.phone AS supplier_phone
        FROM products p
        LEFT JOIN suppliers s ON s.id = p.supplier_id
