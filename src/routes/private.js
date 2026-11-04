@@ -122,6 +122,10 @@ router.use('/products', require('./productsVariations'));
 // e /products/categories/bulk (estaticas) -- tem que montar ANTES de
 // require('./products') por causa do GET/PATCH/DELETE /:pid dele.
 router.use('/products', require('./productCategories').productLinksRouter);
+// 03/11/2026 (migration 424): fornecedores do produto (cada um com o seu
+// custo) e entrada de mercadoria. Caminhos /:pid/suppliers e
+// /:pid/stock-entries; antes de ./products por causa do /:pid curinga.
+router.use('/products', require('./productSuppliers'));
 router.use('/products', require('./products'));
 router.use('/products', require('./productsRanking'));
 router.use('/products', require('./productImage'));
