@@ -171,7 +171,8 @@ const ALLOWED_RANGED_KEYS = {
 //     entao fora da faixa aqui e bug ou chamada manual);
 //   - chave desconhecida dentro de uma medida ou de um modelo => descartada
 //     (campos de uma medida: id, nome, larguraMm, alturaMm, colunas,
-//     espacoLadoMm, espacoLinhaMm, ajusteXMm, ajusteYMm, dobraMm, estilo; o
+//     espacoLadoMm, espacoLinhaMm, ajusteXMm, ajusteYMm, dobraMm, estilo,
+//     paginaEmPe (so quando true); o
 //     estilo so existe quando vale exatamente "boutique", qualquer outro
 //     valor e ignorado sem erro);
 //   - numeros arredondados a decimos (o app trabalha em decimos de mm);
@@ -280,6 +281,10 @@ function validarMedidasDeEtiqueta(raw) {
     // Estilo opcional da etiqueta: so "boutique" e gravado. Ausente ou outro
     // valor => sem a chave, sem 400 (app antigo/novo nao quebra).
     if (m.estilo === 'boutique') spec.estilo = 'boutique';
+    // 04/11/2026: pagina em pe (varias linhas por pagina, para o driver que
+    // imprime a pagina deitada). So `true` e gravado; ausente/false => sem a
+    // chave, byte a byte como antes.
+    if (m.paginaEmPe === true) spec.paginaEmPe = true;
     if (vistos.has(id)) return; // id repetido: fica a primeira
     vistos.add(id);
     out.push(spec);
