@@ -40,7 +40,23 @@ const filial = uuid();
 const outraLoja = uuid();
 const url = (cid = matriz) => `/companies/${cid}/products/price-adjustments`;
 
-const q = (sql, params) => client.query(sql, params);
+// Fila unica da conexao. Teste, db.query e a transacao da rota usam o MESMO
+// client, e savepoints sao uma pilha: RELEASE de um savepoint apaga os que
+// foram abertos depois dele. A rota chama logAuditAction sem await depois de
+// responder; se o SAVEPOINT q_N dessa auditoria abria e o pedido seguinte
+// abria o SAVEPOINT rota_N antes do RELEASE q_N, o RELEASE apagava o rota_N,
+// o COMMIT/ROLLBACK da rota falhava com 'savepoint "rota_N" does not exist'
+// e a transacao do teste abortava (falha intermitente no CI, 03/11/2026).
+// Agora nada usa a conexao fora da fila, e a rota segura a fila do BEGIN ate
+// o COMMIT/ROLLBACK (ou o release).
+let fila = Promise.resolve();
+function naFila(fn) {
+  const p = fila.then(fn);
+  fila = p.catch(() => {});
+  return p;
+}
+
+const q = (sql, params) => naFila(() => client.query(sql, params));
 
 beforeAll(async () => {
   pool = new Pool({ connectionString: CONN.replace('?family=4', '') });
@@ -49,7 +65,6 @@ beforeAll(async () => {
 
   const db = require('../src/config/database');
   let qn = 0;
-  let fila = Promise.resolve();
   async function noSavepoint(sql, params) {
     qn += 1;
     const sp = `q_${qn}`;
@@ -64,22 +79,35 @@ beforeAll(async () => {
       throw err;
     }
   }
-  db.query.mockImplementation((sql, params) => {
-    const p = fila.then(() => noSavepoint(sql, params));
-    fila = p.catch(() => {});
-    return p;
-  });
+  db.query.mockImplementation((sql, params) => naFila(() => noSavepoint(sql, params)));
   let sp = 0;
-  db.connect.mockImplementation(async () => ({
-    query: (sql, params) => {
-      const s = typeof sql === 'string' ? sql.trim().toUpperCase() : '';
-      if (s === 'BEGIN')    { sp += 1; return client.query(`SAVEPOINT rota_${sp}`); }
-      if (s === 'COMMIT')   { return client.query(`RELEASE SAVEPOINT rota_${sp}`); }
-      if (s === 'ROLLBACK') { return client.query(`ROLLBACK TO SAVEPOINT rota_${sp}`); }
-      return client.query(sql, params);
-    },
-    release: () => {},
-  }));
+  db.connect.mockImplementation(async () => {
+    // Do BEGIN ao fim da rota, a fila fica presa: db.query (auditoria) e q()
+    // so rodam depois. A rota nao chama db.query dentro da propria transacao;
+    // se um dia chamar, o teste trava (timeout claro) em vez de falhar ao acaso.
+    let liberar = null;
+    const soltar = () => { if (liberar) { const l = liberar; liberar = null; l(); } };
+    return {
+      query: async (sql, params) => {
+        const s = typeof sql === 'string' ? sql.trim().toUpperCase() : '';
+        if (s === 'BEGIN') {
+          const antes = fila;
+          fila = antes.then(() => new Promise((r) => { liberar = r; }));
+          await antes;
+          sp += 1;
+          return client.query(`SAVEPOINT rota_${sp}`);
+        }
+        if (s === 'COMMIT') {
+          try { return await client.query(`RELEASE SAVEPOINT rota_${sp}`); } finally { soltar(); }
+        }
+        if (s === 'ROLLBACK') {
+          try { return await client.query(`ROLLBACK TO SAVEPOINT rota_${sp}`); } finally { soltar(); }
+        }
+        return client.query(sql, params);
+      },
+      release: soltar,
+    };
+  });
 
   await q(`INSERT INTO users (id, email, password_hash, full_name) VALUES ($1, $2, 'x', 'Fixture Reajuste')`,
     [userId, `fixture-${userId}@example.test`]);
@@ -99,8 +127,8 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
-  // logAuditAction roda sem await depois da resposta; deixa a fila esvaziar.
-  await new Promise((r) => setTimeout(r, 50));
+  // logAuditAction roda sem await depois da resposta; espera a fila esvaziar.
+  await fila;
   if (client) {
     await client.query('ROLLBACK');
     client.release();
