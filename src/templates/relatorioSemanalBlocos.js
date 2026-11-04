@@ -195,6 +195,37 @@ function tabelaSimples(linhas) {
   return `<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin:0 0 8px;">${tr}</table>`;
 }
 
+// 03/11/2026 — "Mais vendidos" com numeração (aura-app docs/mockups/
+// relatorio-vendas-por-numeracao.html, tela 5): tabela de verdade
+// (modelo, pares, as 3 numerações que mais saíram, quanto tem) e o aviso
+// "Acabando". Só existe quando a loja vende com numeração (m.numeracao);
+// sem isso o bloco é o de sempre.
+const ROTULO_UNIDADE = { pares: 'Pares', 'peças': 'Peças', itens: 'Itens' };
+
+function tabelaNumeracao(nm) {
+  const th = (t, alinha = 'left') => `<th class="a-ink2 a-line" align="${alinha}" style="padding:6px 6px 6px 0;border-bottom:1px solid ${COR.linha};color:${COR.tinta2};font-size:11px;text-transform:uppercase;letter-spacing:.04em;text-align:${alinha};font-weight:700;">${t}</th>`;
+  const td = (t, { alinha = 'left', forte = false, borda = true } = {}) => `<td class="${forte ? 'a-ink' : 'a-ink2'} a-line" align="${alinha}" style="padding:7px 6px 7px 0;${borda ? `border-bottom:1px solid ${COR.linha};` : ''}color:${forte ? COR.tinta : COR.tinta2};font-size:13px;${forte ? 'font-weight:700;' : ''}text-align:${alinha};">${t}</td>`;
+  const linhas = nm.modelos.map((m, i, arr) => {
+    const borda = i < arr.length - 1;
+    const numeros = m.numeros.length ? m.numeros.map((x) => `${esc(x.n)} (${qtd(x.q)})`).join(' · ') : '—';
+    return `<tr>${td(esc(m.nome), { forte: true, borda })}${td(qtd(m.qtd), { alinha: 'right', forte: true, borda })}${td(numeros, { borda })}${td(qtd(m.estoque), { alinha: 'right', borda })}</tr>`;
+  }).join('');
+  return `<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin:0 0 8px;border-collapse:collapse;">` +
+    `<tr>${th('Modelo')}${th(ROTULO_UNIDADE[nm.unidade] || 'Qtd', 'right')}${th('Numerações que mais saíram')}${th('Tem', 'right')}</tr>${linhas}</table>`;
+}
+
+function avisoAcabando(nm, quando = 'da semana') {
+  if (!nm.acabando || !nm.acabando.length) return '';
+  const un = nm.unidade === 'pares' ? ['par', 'pares'] : ['un.', 'un.'];
+  const itens = nm.acabando.map((a) => `${esc(a.nome)} ${esc(a.numeracao)} (${a.estoque === 0 ? 'acabou' : `${qtd(a.estoque)} ${a.estoque === 1 ? un[0] : un[1]}`})`);
+  const mais = nm.totalAcabando > nm.acabando.length ? ` e mais ${nm.totalAcabando - nm.acabando.length}` : '';
+  return `<p style="margin:4px 0 10px;background:#fdf3e2;color:#7a3f06;border-radius:8px;padding:9px 11px;font-size:12.5px;line-height:1.5;"><b>Acabando:</b> ${itens.join(', ')}${mais}. No ritmo ${quando}, acaba em menos de 7 dias.</p>`;
+}
+
+function blocoNumeracao(nm, { titulo = 'Mais vendidos da semana', quando = 'da semana' } = {}) {
+  return [sub(titulo), tabelaNumeracao(nm), avisoAcabando(nm, quando)].join('');
+}
+
 // ── Blocos ──────────────────────────────────────────────────────
 
 function blocoVendas(v, { modo, companyId, env }) {
@@ -235,6 +266,18 @@ function blocoVendas(v, { modo, companyId, env }) {
 }
 
 function blocoMaisVendidos(m, { modo, companyId, env }) {
+  if (m.numeracao && m.numeracao.modelos && m.numeracao.modelos.length) {
+    const partes = [blocoNumeracao(m.numeracao)];
+    const a = m.curva && m.curva.A;
+    if (a && a.produtos > 0) {
+      partes.push(miuda(`${plural(a.produtos, 'produto faz', 'produtos fazem')} ${a.receitaPct}% do faturamento da semana (curva A).`));
+    }
+    partes.push(botoes([
+      botao('Ver a tabela completa', linkDoApp('/financeiro/vendas-por-numeracao?period=week', companyId, env)),
+      botao('Ver a curva ABC', linkDoApp('/financeiro/produtos', companyId, env)),
+    ]));
+    return caixaDoBloco(partes.join(''));
+  }
   const top = modo === 'pagina' ? m.top : m.top.slice(0, 3);
   const itens = top.map((p) => modo === 'pagina'
     ? `${esc(p.nome)} · ${qtd(p.qtd)} un. · ${brlH(p.receita)}`
@@ -503,4 +546,7 @@ module.exports = {
   frase,
   miuda,
   tabelaSimples,
+  tabelaNumeracao,
+  avisoAcabando,
+  blocoNumeracao,
 };
