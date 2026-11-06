@@ -49,6 +49,15 @@ function extractSaleId(idempotencyKey) {
 }
 
 var VALID_PAYMENTS = ['pix', 'cash', 'credit', 'debit', 'voucher', 'transfer', 'boleto'];
+
+// 06/11/2026 (Esquina da Make, venda 527): o Financeiro fala ingles
+// (cash/debit/credit) e o caixa fala portugues (dinheiro/debito/cartao) em
+// sales.payment_method e sale_payments.method. A edicao copiava o termo do
+// Financeiro para a venda, e a mesma forma virava duas linhas nos relatorios
+// do caixa. Na venda vai sempre o termo do caixa; o que nao tem par no caixa
+// (voucher, transfer, boleto) vai como veio.
+var FORMA_NO_CAIXA = { cash: 'dinheiro', debit: 'debito', credit: 'cartao', pix: 'pix' };
+function formaNoCaixa(pm) { return FORMA_NO_CAIXA[pm] || pm; }
 var RECURRENCE_DEFAULTS = { weekly: 4, monthly: 12, yearly: 3 };
 var RECURRENCE_MAX = { weekly: 52, monthly: 24, yearly: 10 };
 var RECURRENCE_LABELS = { weekly: 'semanal', monthly: 'mensal', yearly: 'anual' };
@@ -407,6 +416,20 @@ router.patch('/:txId', async function(req, res) {
     values.push(paidAmount); idx++;
   }
   if (updates.length === 0) return res.status(400).json({ error: 'Nenhum campo para atualizar' });
+  // 06/11/2026 (Esquina da Make, venda 527): o modal "Editar lancamento"
+  // manda due_date em todo Salvar, mesmo quando so a forma de pagamento
+  // mudou. O sync abaixo regravava sales.created_at para meia-noite desse
+  // dia: a venda perdia a hora (e saia do caixa do turno) e, com o fuso do
+  // modal errado, recuava um dia a cada Salvar ("a venda some"). A venda so
+  // muda de data quando o vencimento muda de fato.
+  var vencimentoAntes = null;
+  if (req.body.due_date !== undefined && req.body.due_date) {
+    try {
+      var antes = await db.query("SELECT to_char(due_date, 'YYYY-MM-DD') AS due_date FROM transactions WHERE id = $1 AND company_id = $2", [txId, cid]);
+      vencimentoAntes = antes.rows[0] ? antes.rows[0].due_date : null;
+    } catch (err) { console.error('[transactions] read due_date:', err.message); }
+  }
+  var vencimentoMudou = !!(req.body.due_date && String(req.body.due_date).slice(0, 10) !== vencimentoAntes);
   updates.push('updated_at = NOW()'); values.push(txId, cid);
   try {
     var result = await db.query('UPDATE transactions SET ' + updates.join(', ') + ' WHERE id = $' + idx + ' AND company_id = $' + (idx + 1) + ' RETURNING *', values);
@@ -415,7 +438,10 @@ router.patch('/:txId', async function(req, res) {
     var saleId = extractSaleId(updated.idempotency_key);
     if (saleId) {
       var saleUpdates = [], saleValues = []; var saleIdx = 1;
-      if (req.body.payment_method !== undefined) { saleUpdates.push('payment_method = $' + (saleIdx++)); saleValues.push(req.body.payment_method); }
+      // A venda sempre tem forma de pagamento: limpar no Financeiro (null)
+      // nao apaga a da venda.
+      var formaDaVenda = req.body.payment_method ? formaNoCaixa(req.body.payment_method) : null;
+      if (formaDaVenda) { saleUpdates.push('payment_method = $' + (saleIdx++)); saleValues.push(formaDaVenda); }
       if (req.body.employee_id !== undefined) {
         saleUpdates.push('seller_id = $' + (saleIdx++)); saleValues.push(req.body.employee_id);
         saleUpdates.push('employee_id = $' + (saleIdx++)); saleValues.push(req.body.employee_id);
@@ -424,7 +450,7 @@ router.patch('/:txId', async function(req, res) {
       // TIMEZONE FIX 13/05/2026: sincroniza due_date -> sales.created_at (meia-noite SP).
       // Permite corrigir a data de uma venda PDV pelo modal "Editar lancamento".
       // date::date + INTERVAL '3 hours' = 03:00 UTC = meia-noite America/Sao_Paulo (UTC-3 fixo).
-      if (req.body.due_date !== undefined && req.body.due_date) {
+      if (vencimentoMudou) {
         saleUpdates.push("created_at = ($" + saleIdx + "::date + INTERVAL '3 hours')");
         saleValues.push(req.body.due_date);
         saleIdx++;
@@ -432,6 +458,17 @@ router.patch('/:txId', async function(req, res) {
       if (saleUpdates.length > 0) {
         saleUpdates.push('updated_at = NOW()'); saleValues.push(saleId, cid);
         await db.query('UPDATE sales SET ' + saleUpdates.join(', ') + ' WHERE id = $' + saleIdx + ' AND company_id = $' + (saleIdx + 1), saleValues).catch(function(err) { console.error('[transactions] sync sale:', err.message); });
+      }
+      // O caixa (fechamento, sangria, relatorio por forma) le sale_payments,
+      // nao sales.payment_method. Pagamento unico: troca junto. Pagamento
+      // dividido fica como esta — o modal edita uma forma so e nao sabe qual
+      // parte mudou.
+      if (formaDaVenda) {
+        await db.query(
+          "UPDATE sale_payments SET method = $1 WHERE sale_id = $2 AND company_id = $3 AND method <> 'crediario'" +
+          ' AND (SELECT COUNT(*) FROM sale_payments x WHERE x.sale_id = $2) = 1',
+          [formaDaVenda, saleId, cid]
+        ).catch(function(err) { console.error('[transactions] sync sale_payments:', err.message); });
       }
     }
     res.json(updated);
