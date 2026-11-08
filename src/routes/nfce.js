@@ -263,13 +263,118 @@ router.get('/config', requireAuth, async (req, res) => {
         [req.params.id]
       ));
     }
-    res.json({ config: rows[0] || null, instrucoes: INSTRUCOES_NOTA });
+    // 08/11/2026: o regime mora em companies.tax_regime (é ele que decide o
+    // CRT na emissão). Vai junto da config e também no topo — empresa sem
+    // nfce_config ainda tem regime.
+    const regime = await regimeDaEmpresa(req.params.id);
+    const config = rows[0] ? { ...rows[0], ...(regime ? { regime } : {}) } : null;
+    res.json({ config, ...(regime ? { regime } : {}), instrucoes: INSTRUCOES_NOTA });
   } catch (err) { res.status(500).json({ error: 'Erro ao buscar config NFC-e' }); }
 });
 
+// ─── Regime fiscal (Matcon M2, RegimeFiscal no app) ──────────
+// 08/11/2026: o app manda { regime: 'simples'|'presumido'|'real' } para
+// POST /config, mas nfce_config nunca teve essa coluna. O regime de verdade
+// é companies.tax_regime (enum mei | simples_nacional | lucro_presumido |
+// lucro_real), o mesmo que vira o CRT na emissão (ver crtCompany em /emit).
+const REGIME_PARA_TAX_REGIME = {
+  simples: 'simples_nacional',
+  presumido: 'lucro_presumido',
+  real: 'lucro_real',
+};
+
+function regimeDoTaxRegime(taxRegime) {
+  if (taxRegime === 'lucro_presumido') return 'presumido';
+  if (taxRegime === 'lucro_real') return 'real';
+  return 'simples'; // mei, simples_nacional e vazio: CSOSN (família do Simples)
+}
+
+async function regimeDaEmpresa(companyId) {
+  try {
+    const { rows } = await db.query('SELECT tax_regime FROM companies WHERE id=$1', [companyId]);
+    return rows.length ? regimeDoTaxRegime(rows[0].tax_regime) : null;
+  } catch (_) {
+    return null; // nunca derrubar a leitura da config por causa do regime
+  }
+}
+
+// Grava SÓ companies.tax_regime. MEI que escolhe "Simples Nacional" continua
+// MEI (MEI já é do Simples; trocar mudaria o CRT de 4 para 1).
+async function salvarRegime(req, regime) {
+  const companyId = req.params.id;
+  const { rows } = await db.query('SELECT tax_regime FROM companies WHERE id=$1', [companyId]);
+  if (!rows.length) return null;
+  const atual = rows[0].tax_regime;
+  let novo = REGIME_PARA_TAX_REGIME[regime];
+  if (regime === 'simples' && atual === 'mei') novo = 'mei';
+  if (novo !== atual) {
+    await db.query(
+      'UPDATE companies SET tax_regime=$1, updated_at=NOW() WHERE id=$2',
+      [novo, companyId]
+    );
+    await logAuditAction(req.user?.id || null, companyId, 'tax_regime.changed',
+      `Regime fiscal: ${atual || '-'} -> ${novo}`,
+      { de: atual || null, para: novo, origem: 'nfe_regime_fiscal' });
+  }
+  return regimeDoTaxRegime(novo);
+}
+
+// ─── Upsert parcial da config ────────────────────────────────
+// 08/11/2026: antes o ON CONFLICT reescrevia serie/ambiente/uf/IE/CSC com os
+// defaults (homologacao, SP, null) sempre que o campo não vinha no corpo —
+// salvar só o regime voltava uma loja em produção para homologação e
+// apagava IE e CSC. Agora: campo ausente (undefined) = não mexe. Linha nova
+// nasce com os defaults de sempre e provider NULL (modo AUTO; 'nuvemfiscal'
+// não existe mais). is_active, csc_token_enc, contadores: nunca daqui.
+//
+// Devolve { insert: {col: valor}, update: [cols] } — o INSERT leva todas as
+// colunas (presentes ou default), o DO UPDATE só as presentes.
+function planoUpsertConfig(body, { legado = false } = {}) {
+  const presentes = {};
+  const { serie_nfce, ambiente, uf, inscricao_estadual, csc_id, csc_token,
+          auto_emit_nfce, provider, serie_sefaz_sp } = body;
+
+  // NOT NULL na prática: null/'' não apagam (mantém o atual).
+  if (serie_nfce !== undefined && serie_nfce !== null && serie_nfce !== '') presentes.serie_nfce = serie_nfce;
+  if (ambiente !== undefined && ambiente !== null && ambiente !== '') presentes.ambiente = ambiente;
+  if (uf !== undefined && uf !== null && uf !== '') presentes.uf = uf;
+  // Anuláveis: presente com null/'' = limpar de propósito (contrato do app).
+  if (inscricao_estadual !== undefined) presentes.inscricao_estadual = inscricao_estadual || null;
+  if (csc_id !== undefined) presentes.csc_id = csc_id || null;
+  if (csc_token !== undefined) presentes.csc_token = csc_token || null;
+  if (typeof auto_emit_nfce === 'boolean') presentes.auto_emit_nfce = auto_emit_nfce;
+  if (!legado) {
+    // null = não mexe (compat com o COALESCE de antes)
+    if (provider !== undefined && provider !== null) presentes.provider = provider;
+    if (serie_sefaz_sp !== undefined && serie_sefaz_sp !== null) presentes.serie_sefaz_sp = serie_sefaz_sp;
+  }
+
+  const defaults = legado
+    ? { serie_nfce: 1, ambiente: 'homologacao', uf: 'SP', inscricao_estadual: null,
+        csc_id: null, csc_token: null, auto_emit_nfce: false }
+    : { serie_nfce: 1, ambiente: 'homologacao', uf: 'SP', inscricao_estadual: null,
+        csc_id: null, csc_token: null, auto_emit_nfce: false, provider: null, serie_sefaz_sp: 2 };
+
+  return { insert: { ...defaults, ...presentes }, update: Object.keys(presentes) };
+}
+
+async function upsertConfig(companyId, plano) {
+  const cols = Object.keys(plano.insert);
+  const params = [companyId, ...cols.map((c) => plano.insert[c])];
+  const sets = plano.update.map((c) => `${c}=EXCLUDED.${c}`).concat('updated_at=NOW()');
+  const { rows } = await db.query(
+    `INSERT INTO nfce_config (company_id, ${cols.join(', ')})
+     VALUES ($1, ${cols.map((_, i) => `$${i + 2}`).join(', ')})
+     ON CONFLICT (company_id) DO UPDATE SET ${sets.join(', ')}
+     RETURNING *`,
+    params
+  );
+  return rows[0];
+}
+
 router.post('/config', requireAuth, requireRole('client','analyst','admin'), async (req, res) => {
-  const { serie_nfce, ambiente, uf, inscricao_estadual, csc_id, csc_token, auto_emit_nfce,
-          provider, serie_sefaz_sp } = req.body;
+  const body = req.body || {};
+  const { uf, provider, serie_sefaz_sp, regime } = body;
 
   // S4.4: seletor de provider por empresa. Whitelist restrita (focusnfe não
   // é ofertável ainda). undefined = não mexe no provider (compat).
@@ -278,22 +383,11 @@ router.post('/config', requireAuth, requireRole('client','analyst','admin'), asy
     return res.status(400).json({ error: 'provider inválido (use "nuvemfiscal" ou "sefaz_sp")' });
   }
 
-  // 06/08/2026 — Nuvem Fiscal não existe mais: forçar provider='sefaz_sp'
-  // (engine própria) pra uma UF sem endpoints configurados vai estourar só
-  // na hora de emitir (erro genérico no meio do fluxo do PDV). Bloqueia
-  // aqui, na config, com uma mensagem clara — antes era só SP; hoje
-  // inclui AP (via SVRS, ver services/sefazSp/endpoints.js).
-  if (provider === 'sefaz_sp') {
-    const ufKey = String(uf || 'SP').toUpperCase();
-    if (!SEFAZ_SP_ENDPOINTS_65[ufKey]) {
-      return res.status(400).json({
-        error: `UF ${ufKey} ainda não é suportada na emissão própria (engine SEFAZ). `
-          + `UFs disponíveis: ${Object.keys(SEFAZ_SP_ENDPOINTS_65).join(', ')}.`,
-      });
-    }
+  if (regime !== undefined && !REGIME_PARA_TAX_REGIME[regime]) {
+    return res.status(400).json({ error: 'regime inválido (use "simples", "presumido" ou "real")' });
   }
 
-  let serieSefazSp = null;
+  let serieSefazSp;
   if (serie_sefaz_sp !== undefined && serie_sefaz_sp !== null) {
     const s = parseInt(serie_sefaz_sp, 10);
     if (!Number.isInteger(s) || s < 1 || s > 999) {
@@ -301,41 +395,65 @@ router.post('/config', requireAuth, requireRole('client','analyst','admin'), asy
     }
     serieSefazSp = s;
   }
+
   try {
-    const providerVal = (provider === undefined) ? null : provider;
-    try {
-      // S4.4: caminho com colunas da migration 237
-      const { rows } = await db.query(
-        `INSERT INTO nfce_config (company_id, serie_nfce, ambiente, uf, inscricao_estadual, csc_id, csc_token, auto_emit_nfce, provider, serie_sefaz_sp)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,COALESCE($8,false),COALESCE($9,'nuvemfiscal'),COALESCE($10,2))
-         ON CONFLICT (company_id) DO UPDATE SET
-           serie_nfce=$2, ambiente=$3, uf=$4, inscricao_estadual=$5,
-           csc_id=$6, csc_token=$7, auto_emit_nfce=COALESCE($8,nfce_config.auto_emit_nfce),
-           provider=COALESCE($9,nfce_config.provider),
-           serie_sefaz_sp=COALESCE($10,nfce_config.serie_sefaz_sp), updated_at=NOW()
-         RETURNING *`,
-        [req.params.id, serie_nfce||1, ambiente||'homologacao', uf||'SP',
-         inscricao_estadual||null, csc_id||null, csc_token||null,
-         typeof auto_emit_nfce==='boolean' ? auto_emit_nfce : null,
-         providerVal, serieSefazSp]
-      );
-      return res.json({ config: rows[0] });
-    } catch (e) {
-      if (e.code !== '42703') throw e;
-      // Fallback legado (migration 237 não aplicada): sem provider/serie própria
-      const { rows } = await db.query(
-        `INSERT INTO nfce_config (company_id, serie_nfce, ambiente, uf, inscricao_estadual, csc_id, csc_token, auto_emit_nfce)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,COALESCE($8,false))
-         ON CONFLICT (company_id) DO UPDATE SET
-           serie_nfce=$2, ambiente=$3, uf=$4, inscricao_estadual=$5,
-           csc_id=$6, csc_token=$7, auto_emit_nfce=COALESCE($8,nfce_config.auto_emit_nfce), updated_at=NOW()
-         RETURNING *`,
-        [req.params.id, serie_nfce||1, ambiente||'homologacao', uf||'SP',
-         inscricao_estadual||null, csc_id||null, csc_token||null,
-         typeof auto_emit_nfce==='boolean' ? auto_emit_nfce : null]
-      );
-      return res.json({ config: rows[0] });
+    // 06/08/2026 — Nuvem Fiscal não existe mais: forçar provider='sefaz_sp'
+    // (engine própria) pra uma UF sem endpoints configurados vai estourar só
+    // na hora de emitir (erro genérico no meio do fluxo do PDV). Bloqueia
+    // aqui, na config, com uma mensagem clara — antes era só SP; hoje
+    // inclui AP (via SVRS, ver services/sefazSp/endpoints.js).
+    // 08/11/2026: sem uf no corpo, vale a UF já gravada (o update é parcial).
+    if (provider === 'sefaz_sp') {
+      let ufEfetiva = uf;
+      if (ufEfetiva === undefined || ufEfetiva === null || ufEfetiva === '') {
+        const { rows } = await db.query('SELECT uf FROM nfce_config WHERE company_id=$1', [req.params.id]);
+        ufEfetiva = rows[0]?.uf;
+      }
+      const ufKey = String(ufEfetiva || 'SP').toUpperCase();
+      if (!SEFAZ_SP_ENDPOINTS_65[ufKey]) {
+        return res.status(400).json({
+          error: `UF ${ufKey} ainda não é suportada na emissão própria (engine SEFAZ). `
+            + `UFs disponíveis: ${Object.keys(SEFAZ_SP_ENDPOINTS_65).join(', ')}.`,
+        });
+      }
     }
+
+    // Regime: só companies.tax_regime. Não toca em nenhum campo da nfce_config.
+    let regimeSalvo;
+    if (regime !== undefined) {
+      regimeSalvo = await salvarRegime(req, regime);
+      if (regimeSalvo === null) return res.status(404).json({ error: 'Empresa não encontrada' });
+    }
+
+    const campos = { ...body, serie_sefaz_sp: serieSefazSp };
+    let config;
+    if (planoUpsertConfig(campos).update.length === 0) {
+      // Nada da config fiscal no corpo (ex.: só o regime): não grava nada
+      // aqui — nem cria linha com defaults.
+      const { rows } = await db.query('SELECT * FROM nfce_config WHERE company_id=$1', [req.params.id]);
+      config = rows[0] || null;
+    } else {
+      try {
+        // S4.4: caminho com colunas da migration 237
+        config = await upsertConfig(req.params.id, planoUpsertConfig(campos));
+      } catch (e) {
+        if (e.code !== '42703') throw e;
+        // Fallback legado (migration 237 não aplicada): sem provider/serie própria
+        const legado = planoUpsertConfig(campos, { legado: true });
+        if (legado.update.length === 0) {
+          const { rows } = await db.query('SELECT * FROM nfce_config WHERE company_id=$1', [req.params.id]);
+          config = rows[0] || null;
+        } else {
+          config = await upsertConfig(req.params.id, legado);
+        }
+      }
+    }
+
+    const regimeAtual = regimeSalvo || (await regimeDaEmpresa(req.params.id));
+    return res.json({
+      config: config ? { ...config, ...(regimeAtual ? { regime: regimeAtual } : {}) } : null,
+      ...(regimeAtual ? { regime: regimeAtual } : {}),
+    });
   } catch (err) { res.status(500).json({ error: 'Erro ao salvar config' }); }
 });
 
