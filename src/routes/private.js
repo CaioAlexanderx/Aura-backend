@@ -28,6 +28,8 @@ router.use('/financial/analysis', require('./financialAnalysis'));
 router.use('/bank', require('./bankReconciliation'));
 router.use('/financeiro', require('./financeiroInsights').companyRouter);
 router.use('/financeiro', require('./financeiroComparative').companyRouter);
+// 08/11/2026 (p-81): Faturamento, Custos, Lucro bruto e Despesas da aba Receitas.
+router.use('/financeiro', require('./resultadoDoPeriodo').companyRouter);
 // 02/11/2026: estoque_consulta tambem nao recebe custo do bipe (scanner), da
 // venda (sale_items.unit_cost) nem da troca. Preco fica para quem tem pdv.
 // Antes de todo router de /pdv.
