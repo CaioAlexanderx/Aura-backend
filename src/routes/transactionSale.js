@@ -34,6 +34,34 @@ const pool = require('../config/database');
 const asyncHandler = require('../utils/asyncHandler');
 const AppError = require('../errors/AppError');
 const { refundCreditSale } = require('../services/credit/refund');
+// p-85 (08/11/2026, migration 427): preco efetivo (De/Por).
+const { precoEfetivoDoProduto, precoEfetivoDaVariante, colunasPromo } = require('../services/precoEfetivo');
+
+/**
+ * Promocao do produto (e da variante) para o item sem unit_price. Fora da
+ * transacao e sem trava: so leitura. Qualquer falha (base sem a 427
+ * inclusive) volta vazio = preco normal, como antes.
+ */
+async function lerPromocaoDoItem(productId, variantId) {
+  const vazio = { produto: {}, variante: {} };
+  try {
+    const r = await pool.query(
+      `SELECT ${colunasPromo('p')}, ${colunasPromo('pv', 'v_')}
+         FROM products p
+         LEFT JOIN product_variants pv ON pv.id = $2 AND pv.product_id = p.id
+        WHERE p.id = $1`,
+      [productId, variantId]
+    );
+    const row = r && r.rows && r.rows[0];
+    if (!row) return vazio;
+    return {
+      produto: { promo_price: row.promo_price, promo_starts_at: row.promo_starts_at, promo_ends_at: row.promo_ends_at },
+      variante: { promo_price: row.v_promo_price, promo_starts_at: row.v_promo_starts_at, promo_ends_at: row.v_promo_ends_at },
+    };
+  } catch (_) {
+    return vazio;
+  }
+}
 // Quais idempotency_key amarram um lancamento a uma venda — e de que origem
 // ('pdv' = recebeu na hora / 'credit' = A Receber do crediario).
 const { resolveSaleLink, extractSaleId } = require('../utils/saleLink');
@@ -276,6 +304,14 @@ router.post('/transactions/:tx_id/sale-items', asyncHandler(async (req, res) => 
     // 4. Se variant_id, valida pertence ao produto + tem estoque
     let variant = null;
     let effectivePrice = parseFloat(unit_price || product.price);
+    // p-85 (427): sem unit_price do cliente, vale o preco efetivo (De/Por).
+    // Lido fora da transacao (so leitura, sem trava): um 42703 da base sem
+    // a 427 nao pode abortar a transacao da venda.
+    let promo = null;
+    if (unit_price == null) {
+      promo = await lerPromocaoDoItem(product_id, variant_id || null);
+      effectivePrice = precoEfetivoDoProduto({ ...product, ...promo.produto });
+    }
     let displayName = product_name_snapshot || product.name;
 
     if (variant_id) {
@@ -292,9 +328,10 @@ router.post('/transactions/:tx_id/sale-items', asyncHandler(async (req, res) => 
       if (varStock < qty && !(await vendaSemEstoqueLiberada(client, companyId))) {
         throw new AppError('Estoque insuficiente. Disponivel: ' + varStock + ' un', 400);
       }
-      // Sobrescreve preco se cliente nao mandou e variant tem override
-      if (unit_price == null && variant.price_override != null) {
-        effectivePrice = parseFloat(variant.price_override);
+      // Sobrescreve preco se cliente nao mandou: preco proprio da variante,
+      // a promocao dela ou o efetivo do produto (427).
+      if (unit_price == null) {
+        effectivePrice = precoEfetivoDaVariante({ ...variant, ...(promo && promo.variante) }, { ...product, ...(promo && promo.produto) });
       }
     } else {
       // Validacao de estoque do produto (so se nao for variante, ja que produto pai pode ser ignorado)

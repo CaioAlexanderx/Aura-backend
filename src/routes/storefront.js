@@ -63,6 +63,10 @@ const { fotosPeloDominioProprio, fotosPeloDominioProprioNoJson } = require('../s
 const { paginaDoCatalogo, facetasDoCatalogo, faixaDePreco } = require('../services/catalogoPaginado');
 const { normalizarTamanho } = require('../services/tamanhosDaLoja');
 const { generatePix }     = require('../services/pixService');
+// p-85 (427): preco efetivo (De/Por) no pedido da loja online.
+const {
+  colunasPromo, colunasPromoNulas, comColunasPromo, precoEfetivoDoProduto, precoEfetivoDaVariante,
+} = require('../services/precoEfetivo');
 const { uploadToR2 }      = require('../utils/r2Storage');
 const { onOrderConfirmed } = require('../services/digitalOrderConfirmation');
 const { createMpPixPayment, createMpPreference } = require('../services/mpService');
@@ -720,25 +724,30 @@ router.post('/:slug/order', async (req, res) => {
     }
 
     const productIds = items.map(i => i.product_id);
-    const { rows: products } = await db.query(
-      `SELECT id, name, price, stock_qty, image_url, is_active
+    // p-85 (08/11/2026, migration 427): o preco do pedido e o PRECO EFETIVO
+    // (De/Por), pela regra unica de services/precoEfetivo.js — o mesmo que
+    // a vitrine mostra. Base sem a 427: promo nulo, preco normal.
+    const { rows: products } = await comColunasPromo((com) => db.query(
+      `SELECT id, name, price, stock_qty, image_url, is_active,
+              ${com ? colunasPromo() : colunasPromoNulas()}
        FROM products
        WHERE id::text = ANY($1) AND ${listVisibilityWhere('$2')}`,
       [productIds.map(String), cid]
-    );
+    ));
     const productMap = Object.fromEntries(products.map(p => [p.id, p]));
 
     const variantIds = items.map(i => i.variant_id).filter(Boolean);
     let variantMap = {};
     if (variantIds.length > 0) {
-      const { rows: varRows } = await db.query(`
+      const { rows: varRows } = await comColunasPromo((com) => db.query(`
         SELECT pv.id, pv.product_id, pv.price_override, pv.stock_qty, pv.is_active,
+               ${com ? colunasPromo('pv') : colunasPromoNulas()},
                COALESCE(string_agg(pvv.attribute_name || ': ' || pvv.value, ' / ' ORDER BY pvv.attribute_name), '') AS label
         FROM product_variants pv
         LEFT JOIN product_variant_values pvv ON pvv.variant_id = pv.id
         WHERE pv.id = ANY($1::uuid[])
         GROUP BY pv.id
-      `, [variantIds]);
+      `, [variantIds]));
       variantMap = Object.fromEntries(varRows.map(v => [v.id, v]));
     }
 
@@ -760,7 +769,8 @@ router.post('/:slug/order', async (req, res) => {
       if (!p) return res.status(400).json({ error: `Produto ${item.product_id} nao encontrado` });
       if (p.is_active === false) return res.status(400).json({ error: `Produto "${p.name}" nao esta disponivel` });
 
-      let effectivePrice = parseFloat(p.price);
+      const agora = new Date();
+      let effectivePrice = precoEfetivoDoProduto(p, agora);
       let variantId      = item.variant_id || null;
       let variantLabel   = null;
 
@@ -780,7 +790,9 @@ router.post('/:slug/order', async (req, res) => {
             error: `Estoque insuficiente para "${p.name}" (${variant.label}). Disponivel: ${variant.stock_qty}`,
           });
         }
-        if (variant.price_override !== null) effectivePrice = parseFloat(variant.price_override);
+        // Preco proprio da variante, a promocao dela, ou o efetivo do
+        // produto (variante sem preco proprio segue o produto).
+        effectivePrice = precoEfetivoDaVariante(variant, p, agora);
         variantLabel = variant.label;
       } else {
         variantId = null;

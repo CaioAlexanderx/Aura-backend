@@ -22,6 +22,18 @@
 
 const db = require('../config/database');
 const { callClaude } = require('./claudeClient');
+// p-85 (08/11/2026, migration 427): a Aurinha diz o preco que vale agora
+// (De/Por). Em promocao: preco = o de promocao, preco_de = o normal e
+// promocao_ate = o fim. Sem promocao, a resposta e a de antes.
+const {
+  camposDoProduto, camposDaVariante, colunasPromo, colunasPromoNulas, comColunasPromo,
+} = require('./precoEfetivo');
+
+function precoDaAurinha(row, campos) {
+  if (row.price == null && !campos.em_promocao) return { preco: null };
+  if (!campos.em_promocao) return { preco: Number(row.price) };
+  return { preco: campos.preco_efetivo, preco_de: Number(row.price), promocao_ate: campos.promo_ends_at };
+}
 const { buildSystemPrompt, CATEGORIES } = require('./aurinhaPrompt');
 const igOutbox = require('./igOutbox');
 
@@ -89,52 +101,55 @@ const TOOLS = [
 async function execTool(companyId, channelConfig, name, input, ctx = {}) {
   if (name === 'buscar_produtos') {
     const termo = `%${String(input.termo || '').trim()}%`;
-    const { rows } = await db.query(
+    const { rows } = await comColunasPromo((com) => db.query(
       `-- aurinha:buscar-produtos
-       SELECT id, name, price, stock_qty FROM products
+       SELECT id, name, price, stock_qty, ${com ? colunasPromo() : colunasPromoNulas()} FROM products
         WHERE company_id = $1 AND name ILIKE $2
           -- 24/10/2026: produto excluido e arquivado (is_active=false) nao e oferecido.
           AND is_active IS NOT FALSE
         ORDER BY stock_qty DESC, name ASC LIMIT 8`,
       [companyId, termo]
-    );
+    ));
     if (!rows.length) return { encontrados: 0, produtos: [] };
     return {
       encontrados: rows.length,
       produtos: rows.map(r => ({
         id: r.id, nome: r.name,
-        preco: r.price != null ? Number(r.price) : null,
+        ...precoDaAurinha(r, camposDoProduto(r)),
         estoque_total: r.stock_qty != null ? Number(r.stock_qty) : null,
       })),
     };
   }
 
   if (name === 'detalhe_produto') {
-    const { rows } = await db.query(
-      `SELECT id, name, price, stock_qty FROM products
+    const { rows } = await comColunasPromo((com) => db.query(
+      `SELECT id, name, price, stock_qty, ${com ? colunasPromo() : colunasPromoNulas()} FROM products
         WHERE company_id = $1 AND id = $2 AND is_active IS NOT FALSE LIMIT 1`,
       [companyId, input.produto_id]
-    );
+    ));
     if (!rows.length) return { erro: 'produto não encontrado' };
     const p = rows[0];
     let variacoes = [];
     try {
-      const { rows: vars } = await db.query(
-        `SELECT sku_suffix, price_override, stock_qty FROM product_variants
+      const { rows: vars } = await comColunasPromo((com) => db.query(
+        `SELECT sku_suffix, price_override, stock_qty, ${com ? colunasPromo() : colunasPromoNulas()} FROM product_variants
           WHERE product_id = $1 AND is_active IS NOT FALSE ORDER BY sku_suffix ASC LIMIT 40`,
         [p.id]
-      );
-      variacoes = vars.map(v => ({
-        variacao: v.sku_suffix,
-        preco: v.price_override != null ? Number(v.price_override) : (p.price != null ? Number(p.price) : null),
-        estoque: v.stock_qty != null ? Number(v.stock_qty) : null,
-      }));
+      ));
+      variacoes = vars.map(v => {
+        const base = v.price_override != null ? v.price_override : p.price;
+        return {
+          variacao: v.sku_suffix,
+          ...precoDaAurinha({ price: base }, camposDaVariante(v, p)),
+          estoque: v.stock_qty != null ? Number(v.stock_qty) : null,
+        };
+      });
     } catch (e) {
       if (e.code !== '42P01') throw e; // tabela pode não existir em ambiente parcial
     }
     return {
       id: p.id, nome: p.name,
-      preco: p.price != null ? Number(p.price) : null,
+      ...precoDaAurinha(p, camposDoProduto(p)),
       estoque_total: p.stock_qty != null ? Number(p.stock_qty) : null,
       variacoes,
     };
@@ -463,4 +478,4 @@ async function handleInbound(companyId, conversationId) {
   }
 }
 
-module.exports = { handleInbound, responderSuporte, runToolLoop, loadHubHistory, TOOLS, AURINHA_MODEL };
+module.exports = { handleInbound, responderSuporte, runToolLoop, loadHubHistory, TOOLS, AURINHA_MODEL, execTool };
