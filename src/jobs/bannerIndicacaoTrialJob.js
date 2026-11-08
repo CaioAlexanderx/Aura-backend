@@ -1,5 +1,6 @@
 'use strict';
-// Banner de indicação para trials (services/bannerIndicacaoTrial.js).
+// Banner de indicação (services/bannerIndicacaoTrial.js). Desde 08/11/2026
+// (b-mk-30): toda conta real, um banner novo a cada 14 dias, sem data final.
 // Mesmo padrão dos outros agendadores: setInterval + init/stop.
 //
 // Uma avaliação por dia, a partir das 06h30 de Brasília. A cada 5 min o job só confere duas coisas: já passou das 06h30 e

@@ -6,6 +6,7 @@
 // DELETE /admin/notifications/banners/:nid          — remove banner
 // GET    /admin/notifications/recipients?company_id — destinatários de e-mail
 // POST   /admin/notifications/banners/:nid/email    — manda o banner por e-mail
+// GET    /admin/notifications/indicacao/contadores?desde&ate — banner de indicação
 //
 // 18/09/2026 — e-mail de notificação de empresa específica (migration 347,
 //   src/services/notificationEmail.js). Só banner com target_company_id;
@@ -29,6 +30,7 @@ const { requireAuth, requireRole } = require('../middleware/auth');
 const { SHELLS, isValidShell, createAppNotification } = require('../services/appNotifications');
 
 const { listRecipients, sendBannerEmail } = require('../services/notificationEmail');
+const bannerIndicacao = require('../services/bannerIndicacaoTrial');
 
 const adminOnly = [requireAuth, requireRole('admin')];
 
@@ -77,6 +79,32 @@ router.get('/notifications/banners', ...adminOnly, async (req, res) => {
 // Gestão Aura sem hardcode do outro lado).
 router.get('/notifications/verticals', ...adminOnly, (req, res) => {
   res.json({ verticals: SHELLS });
+});
+
+// GET — contadores do banner de indicação (08/11/2026, card b-mk-30), para o
+// Marketing: banners criados e dispensados, vistas, cliques em "Gerar meu
+// código", cadastros por /r/CODIGO atribuídos ao banner e o BLACK50.
+// desde/ate: data (aaaa-mm-dd, meia-noite de Brasília) ou ISO; ate exclusivo.
+// Padrão: de 30/10/2026 (início da campanha) até amanhã.
+const DATA_RE = /^\d{4}-\d{2}-\d{2}$/;
+function instanteDoParametro(v) {
+  if (v == null || v === '') return null;
+  const s = String(v).trim();
+  const d = new Date(DATA_RE.test(s) ? s + 'T03:00:00Z' : s);
+  return Number.isNaN(d.getTime()) ? undefined : d.toISOString();
+}
+router.get('/notifications/indicacao/contadores', ...adminOnly, async (req, res) => {
+  const desde = instanteDoParametro(req.query.desde);
+  const ate = instanteDoParametro(req.query.ate);
+  if (desde === undefined || ate === undefined) {
+    return res.status(400).json({ error: 'desde/ate: use aaaa-mm-dd' });
+  }
+  try {
+    res.json(await bannerIndicacao.contadores(db, { desde, ate }));
+  } catch (err) {
+    console.error('[adminNotifications] contadores indicacao error:', err.message);
+    res.status(500).json({ error: 'Erro ao ler os contadores' });
+  }
 });
 
 // POST — cria novo banner

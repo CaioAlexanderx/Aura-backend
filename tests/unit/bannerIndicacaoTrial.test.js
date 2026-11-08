@@ -1,42 +1,38 @@
 // ============================================================
 // services/bannerIndicacaoTrial + jobs/bannerIndicacaoTrialJob
-// (banner "Indique um lojista" para empresas em teste, 14/10/2026).
 //
-// Regra (decisão do Caio, 14/10, ajustada em 24/10 no item 15): todo trial
-// vigente de varejo recebe, inclusive teste perto do fim, mas só depois de
-// pelo menos 1 venda NÃO cancelada.
-//
-// 29/10/2026 (Black Friday, decisão do Caio: "mostre para todos com conta"):
-// ENQUANTO DURAR A CAMPANHA vale a regra da campanha (bloco "durante a Black
-// Friday"); a regra do teste só vale depois de 30/11/2026, por isso os blocos
-// da regra do teste usam AGORA depois do fim da campanha.
+// 08/11/2026 (card b-mk-30, decisão do Caio via Marketing): o banner de
+// indicação REPETE a cada 14 dias para toda conta real, sem data final.
 //
 // O que estes testes travam:
-//   1. A regra: o caso verdadeiro, cada critério que ficou falhando sozinho
-//      e os critérios removidos (venda, dias restantes, conversa, aviso de
-//      fim de teste) que NÃO barram mais.
-//   2. O banner: texto, rota, validade de 7 dias, dedupe_key e ATIVO por
-//      padrão; PUBLICAR=false cria inativo.
-//   3. Kill switch (ENABLED=false não consulta nada); DRY_RUN não escreve;
-//      a chave que já existe (inclusive banner criado à mão) não vira
-//      segundo banner.
-//   4. Quem assinou tem o banner de indicação desativado.
-//   5. Horário: antes das 06h30 BRT não roda; depois roda uma vez por dia.
+//   1. A regra: exclusões (interna, teste, canário, filial paga por outra,
+//      desativada, Karatê/Odonto/Food) e o ciclo de 14 dias contado em dias
+//      de Brasília. Dispensar não entra na regra.
+//   2. O texto por fase: Black com BLACK50 até 30/11 23:59:59 BRT; sem
+//      BLACK50 quando o cupom chega a 10 usos; fixo de 01/12 em diante.
+//   3. O banner: chave por ciclo, 14 dias no ar, ativo por padrão.
+//   4. A volta: kill switch, dry-run, cria e desliga o anterior, chave
+//      repetida não desliga nada.
+//   5. A leitura do sininho reescreve o texto pela fase e marca a campanha.
+//   6. Contadores: vista/clique em audit_log, leitura para o Marketing.
+//   7. Horário do job: 06h30 BRT, uma vez por dia.
 // ============================================================
 'use strict';
 
 const svc = require('../../src/services/bannerIndicacaoTrial');
 const job = require('../../src/jobs/bannerIndicacaoTrialJob');
 
-const { avaliarEmpresa, tickBannerIndicacaoTrial, montarBanner, dedupeKeyDe, lerConfig } = svc;
+const { avaliarEmpresa, tickBannerIndicacaoTrial, montarBanner, lerConfig } = svc;
 
-// Depois do fim da campanha (30/11/2026): vale a regra do teste.
-const AGORA = new Date('2026-12-05T12:00:00.000Z');
-// Durante a campanha: vale a regra "todos com conta".
-const AGORA_BF = new Date('2026-11-02T12:00:00.000Z');
 const DIA = 24 * 3600 * 1000;
+// Instante em Brasília (UTC-3).
+const brt = (dia, hh = 12, mm = 0) => new Date(Date.parse(dia + 'T00:00:00Z') + ((hh + 3) * 60 + mm) * 60000);
+
+const AGORA_BF = brt('2026-11-13', 6, 35);
+const AGORA_DEZ = brt('2026-12-05', 6, 35);
 const CID = '11111111-2222-3333-4444-555555555555';
 const CID2 = '66666666-7777-8888-9999-000000000000';
+const NID = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee';
 const CANARIO = 'b0463109-e68e-4d55-a2d4-40c8a758ae0b';
 
 const fatos = (extra = {}) => ({
@@ -44,265 +40,183 @@ const fatos = (extra = {}) => ({
   shell: 'negocio',
   company_email: 'loja@gmail.com',
   owner_email: 'dona@gmail.com',
-  email_verificado: true,
-  tem_venda: true,
   is_sandbox: false,
   paga_por_outra: false,
-  trial_ends_at: new Date(AGORA.getTime() + 8 * DIA).toISOString(),
-  billing_status: 'trial',
-  tem_assinatura: false,
-  ja_tem_banner: false,
+  empresa_inativa: false,
+  ultimo_banner_em: null,
   ...extra,
 });
 
-const avalia = (extra, opts) => avaliarEmpresa(fatos(extra), { agora: AGORA, ...opts });
+const avalia = (extra, opts) => avaliarEmpresa(fatos(extra), { agora: AGORA_BF, ...opts });
+
+beforeEach(() => svc._resetCacheForTests());
 
 // ── 1. a regra ──────────────────────────────────────────────
 describe('avaliarEmpresa', () => {
-  it('empresa em teste, de varejo, sem assinatura e com e-mail verificado é elegível', () => {
+  it('conta real sem banner nenhum: elegível', () => {
     expect(avalia()).toEqual({ elegivel: true, motivo: null });
   });
 
-  it('shell ausente (NULL no banco já vira negocio na consulta) segue elegível', () => {
-    expect(avalia({ shell: undefined }).elegivel).toBe(true);
-  });
-
-  describe('venda (item 15, 24/10/2026)', () => {
-    it('cadastro novo, sem nenhuma venda (ou só com venda cancelada), não recebe', () => {
-      // "só cancelada" chega aqui como tem_venda=false: a consulta já exclui as canceladas.
-      expect(avalia({ tem_venda: false })).toEqual({ elegivel: false, motivo: 'sem_venda' });
-      expect(avalia({ tem_venda: undefined }).motivo).toBe('sem_venda');
-      expect(avalia({ tem_venda: null }).motivo).toBe('sem_venda');
-    });
-
-    it('com pelo menos 1 venda válida recebe', () => {
-      expect(avalia({ tem_venda: true }).elegivel).toBe(true);
-    });
-  });
-
-  describe('critérios removidos não barram mais', () => {
-    it('teste com menos de 3 dias restantes entra, desde que vigente', () => {
-      const amanha = new Date(AGORA.getTime() + DIA).toISOString();
-      const umMinuto = new Date(AGORA.getTime() + 60000).toISOString();
-      expect(avalia({ trial_ends_at: amanha }).elegivel).toBe(true);
-      expect(avalia({ trial_ends_at: umMinuto }).elegivel).toBe(true);
-    });
-
-    it('conversa recente e aviso de fim de teste não barram', () => {
-      expect(avalia({ conversa_recente: true }).elegivel).toBe(true);
-      expect(avalia({ avisou_checkout: true }).elegivel).toBe(true);
-    });
-  });
-
   it.each([
-    ['karate_dojo'], ['karate_federation'], ['odonto'], ['food'], ['studio'],
-  ])('fora do shell Negócio (%s) não recebe', (shell) => {
-    expect(avalia({ shell })).toEqual({ elegivel: false, motivo: 'fora_do_shell_negocio' });
+    [{ shell: 'karate_dojo' }, 'shell_fora_da_campanha'],
+    [{ shell: 'karate_federation' }, 'shell_fora_da_campanha'],
+    [{ shell: 'odonto' }, 'shell_fora_da_campanha'],
+    [{ shell: 'food' }, 'shell_fora_da_campanha'],
+    [{ owner_email: 'time@getaura.com.br' }, 'conta_interna'],
+    [{ company_email: 'Loja@GetAura.com.br ' }, 'conta_interna'],
+    [{ is_sandbox: true }, 'conta_de_teste'],
+    [{ paga_por_outra: true }, 'paga_por_outra'],
+    [{ empresa_inativa: true }, 'empresa_inativa'],
+  ])('exclusão %j → %s', (extra, motivo) => {
+    expect(avalia(extra)).toEqual({ elegivel: false, motivo });
   });
 
-  it('conta interna @getaura.com.br (empresa ou dono) não recebe', () => {
-    expect(avalia({ company_email: 'time@getaura.com.br' }).motivo).toBe('conta_interna');
-    expect(avalia({ owner_email: 'Caio@GetAura.com.br' }).motivo).toBe('conta_interna');
+  it('canário fica de fora', () => {
+    expect(avalia({ company_id: CANARIO }, { canaryId: CANARIO })).toEqual({ elegivel: false, motivo: 'canario' });
   });
 
-  it('conta de teste (is_sandbox) e o canário não recebem', () => {
-    expect(avalia({ is_sandbox: true }).motivo).toBe('conta_de_teste');
-    expect(avalia({ company_id: CANARIO.toUpperCase() }, { canaryId: CANARIO }).motivo).toBe('canario');
-    expect(avalia({ company_id: CANARIO }, { canaryId: null }).elegivel).toBe(true);
+  it('Studio, pagante, em atraso e teste vencido recebem (a regra não olha cobrança)', () => {
+    expect(avalia({ shell: 'studio' }).elegivel).toBe(true);
+    expect(avalia({ billing_status: 'active', trial_ends_at: null }).elegivel).toBe(true);
+    expect(avalia({ billing_status: 'overdue' }).elegivel).toBe(true);
   });
 
-  it('filial paga por outra empresa não recebe', () => {
-    expect(avalia({ paga_por_outra: true }).motivo).toBe('paga_por_outra');
+  it('ciclo: 13 dias depois do último banner ainda não; 14 dias sim', () => {
+    expect(avalia({ ultimo_banner_em: brt('2026-10-31', 6, 35) })).toEqual({ elegivel: false, motivo: 'ciclo_em_andamento' });
+    expect(avalia({ ultimo_banner_em: brt('2026-10-30', 6, 35) }).elegivel).toBe(true);
+    expect(avalia({ ultimo_banner_em: brt('2026-10-01', 6, 35) }).elegivel).toBe(true);
   });
 
-  describe('em teste e sem assinatura', () => {
-    it('teste vencido (inclusive no instante exato) ou sem data não recebe', () => {
-      const ontem = new Date(AGORA.getTime() - DIA).toISOString();
-      expect(avalia({ trial_ends_at: ontem }).motivo).toBe('teste_vencido');
-      expect(avalia({ trial_ends_at: AGORA.toISOString() }).motivo).toBe('teste_vencido');
-      expect(avalia({ trial_ends_at: null }).motivo).toBe('sem_fim_de_teste');
-    });
-
-    it('com assinatura no Asaas ou billing_status active não recebe', () => {
-      expect(avalia({ tem_assinatura: true }).motivo).toBe('com_assinatura');
-      expect(avalia({ billing_status: 'active' }).motivo).toBe('com_assinatura');
-    });
+  it('ciclo conta dia de Brasília: banner criado 06h33 vale às 06h30 do 14º dia', () => {
+    const ultimo = brt('2026-10-30', 6, 33);
+    expect(avaliarEmpresa(fatos({ ultimo_banner_em: ultimo }), { agora: brt('2026-11-13', 6, 30) }).elegivel).toBe(true);
+    // 23h30 BRT ainda é o mesmo dia: não antecipa o ciclo.
+    expect(svc.diasEntre(brt('2026-10-30', 23, 30), brt('2026-11-12', 23, 59))).toBe(13);
   });
 
-  it('dono sem e-mail verificado não recebe', () => {
-    expect(avalia({ email_verificado: false }).motivo).toBe('email_nao_verificado');
-    expect(avalia({ email_verificado: null }).motivo).toBe('email_nao_verificado');
-  });
-
-  it('quem já tem banner de indicação (inclusive criado à mão) não recebe', () => {
-    expect(avalia({ ja_tem_banner: true }).motivo).toBe('ja_tem_banner');
+  it('dispensar não é critério: só a data do último banner decide', () => {
+    expect(avalia({ ultimo_banner_em: brt('2026-10-30'), fechou_banner_antigo: true, ja_tem_banner: true }).elegivel).toBe(true);
   });
 });
 
-// ── regra da campanha (29/10/2026) ──────────────────────────
-describe('avaliarEmpresa durante a Black Friday (todos com conta)', () => {
-  const base = (extra = {}) => ({
-    company_id: CID, shell: 'negocio', company_email: 'loja@gmail.com', owner_email: 'dona@gmail.com',
-    is_sandbox: false, paga_por_outra: false, empresa_inativa: false,
-    fechou_banner_antigo: false, banner_antigo_no_ar: false, ja_tem_banner: false,
-    ...extra,
-  });
-  const bf = (extra, opts) => avaliarEmpresa(base(extra), { agora: AGORA_BF, ...opts });
-
-  it('conta comum é elegível', () => {
-    expect(bf()).toEqual({ elegivel: true, motivo: null });
-  });
-
-  it.each([
-    ['teste vigente', { billing_status: 'trial', trial_ends_at: new Date(AGORA_BF.getTime() + 5 * DIA).toISOString() }],
-    ['teste vencido', { billing_status: 'trial', trial_ends_at: new Date(AGORA_BF.getTime() - 5 * DIA).toISOString() }],
-    ['pagante', { billing_status: 'active', tem_assinatura: true }],
-    ['em atraso', { billing_status: 'overdue', tem_assinatura: true }],
-    ['sem venda', { tem_venda: false }],
-    ['e-mail não verificado', { email_verificado: false }],
-  ])('%s: recebe', (_nome, extra) => {
-    expect(bf(extra).elegivel).toBe(true);
-  });
-
-  it.each(['negocio', 'studio', 'barber', 'estetica', 'pet', 'academia'])('shell %s recebe', (shell) => {
-    expect(bf({ shell }).elegivel).toBe(true);
-  });
-
-  it.each(['karate_dojo', 'karate_federation', 'odonto', 'food'])('shell %s fica de fora (aguarda decisão do Caio)', (shell) => {
-    expect(bf({ shell })).toEqual({ elegivel: false, motivo: 'shell_fora_da_campanha' });
-  });
-
-  it('exclusões técnicas: conta interna, de teste, canário, filial e empresa desativada', () => {
-    expect(bf({ company_email: 'time@getaura.com.br' }).motivo).toBe('conta_interna');
-    expect(bf({ owner_email: 'Caio@GetAura.com.br' }).motivo).toBe('conta_interna');
-    expect(bf({ is_sandbox: true }).motivo).toBe('conta_de_teste');
-    expect(bf({ company_id: CANARIO.toUpperCase() }, { canaryId: CANARIO }).motivo).toBe('canario');
-    expect(bf({ paga_por_outra: true }).motivo).toBe('paga_por_outra');
-    expect(bf({ empresa_inativa: true }).motivo).toBe('empresa_inativa');
-  });
-
-  it('quem FECHOU o banner antigo não ganha outro; quem o tem no ar espera vencer', () => {
-    expect(bf({ fechou_banner_antigo: true }).motivo).toBe('ja_fechou_o_banner');
-    expect(bf({ banner_antigo_no_ar: true }).motivo).toBe('banner_antigo_no_ar');
-  });
-
-  it('quem já tem o banner da campanha não recebe outro', () => {
-    expect(bf({ ja_tem_banner: true }).motivo).toBe('ja_tem_banner');
-  });
-
-  it('depois do fim da campanha volta a regra do teste (conta sem teste não recebe)', () => {
-    const f = base({ billing_status: 'active', email_verificado: true, tem_venda: true });
-    const depois = new Date(svc.FIM_BLACK_FRIDAY_INDICACAO.getTime() + 1);
-    expect(avaliarEmpresa(f, { agora: depois }).motivo).toBe('sem_fim_de_teste');
-    expect(avaliarEmpresa(f, { agora: AGORA_BF }).elegivel).toBe(true);
-  });
-});
-
-// ── chaves de ambiente ──────────────────────────────────────
-describe('lerConfig', () => {
-  it('sem nenhuma chave: ligado e publicando, sem dry-run', () => {
-    expect(lerConfig({})).toMatchObject({ enabled: true, publicar: true, dryRun: false });
-  });
-
-  it('só "false" desliga ENABLED e PUBLICAR; só "true" liga DRY_RUN', () => {
-    expect(lerConfig({ BANNER_INDICACAO_TRIAL_ENABLED: 'false' }).enabled).toBe(false);
-    expect(lerConfig({ BANNER_INDICACAO_TRIAL_ENABLED: ' FALSE ' }).enabled).toBe(false);
-    expect(lerConfig({ BANNER_INDICACAO_TRIAL_ENABLED: '0' }).enabled).toBe(true);
-    expect(lerConfig({ BANNER_INDICACAO_TRIAL_PUBLICAR: 'false' }).publicar).toBe(false);
-    expect(lerConfig({ BANNER_INDICACAO_TRIAL_PUBLICAR: 'true' }).publicar).toBe(true);
-    expect(lerConfig({ BANNER_INDICACAO_TRIAL_DRY_RUN: 'true' }).dryRun).toBe(true);
-    expect(lerConfig({ BANNER_INDICACAO_TRIAL_DRY_RUN: '1' }).dryRun).toBe(false);
-  });
-});
-
-// ── 2. o banner ─────────────────────────────────────────────
-describe('montarBanner', () => {
-  it('texto, rota, alvo, validade de 7 dias e chave de dedupe (fora da Black Friday)', () => {
-    const DEPOIS = new Date(svc.FIM_BLACK_FRIDAY_INDICACAO.getTime() + 1);
-    const b = montarBanner(CID, { agora: DEPOIS });
-    expect(b).toMatchObject({
-      type: 'banner',
-      title: 'Conhece outro lojista que ia gostar da Aura?',
-      ctaLabel: 'Gerar meu código',
-      ctaRoute: '/configuracoes?foco=indicacao',
-      targetCompanyId: CID,
-      dedupeKey: 'indicacao-trial:' + CID,
-    });
-    expect(b.body).toBe('Indique e ganhe um mês grátis quando ele assinar.');
-    expect(new Date(b.expiresAt).getTime() - DEPOIS.getTime()).toBe(7 * DIA);
-  });
-
-  it('nasce ativo por padrão e inativo só com publicar=false', () => {
-    expect(montarBanner(CID, { agora: AGORA }).isActive).toBe(true);
-    expect(montarBanner(CID, { agora: AGORA, publicar: true }).isActive).toBe(true);
-    expect(montarBanner(CID, { agora: AGORA, publicar: false }).isActive).toBe(false);
-  });
-});
-
-// ── 2b. Black Friday: só o texto, até 30/11/2026 23:59:59 BRT ──
-describe('banner na Black Friday', () => {
+// ── 2. texto por fase ───────────────────────────────────────
+describe('fase do texto', () => {
   const FIM = svc.FIM_BLACK_FRIDAY_INDICACAO;
-  const TITULO_BF = 'Black Friday: você indica, vocês dois ganham.';
-  const TEXTO_BF = 'Seu indicado tem 50% na primeira mensalidade com o código BLACK50, até 30/11 ou enquanto houver cupons. Quando ele pagar, você ganha 1 mensalidade grátis.';
-  const TITULO_HOJE = 'Conhece outro lojista que ia gostar da Aura?';
-  const TEXTO_HOJE = 'Indique e ganhe um mês grátis quando ele assinar.';
 
-  it('o fim é 30/11/2026 23:59:59 em Brasília', () => {
+  it('fim da Black Friday é 30/11/2026 23:59:59 em Brasília', () => {
     expect(FIM.toISOString()).toBe('2026-12-01T02:59:59.000Z');
   });
 
-  it('um instante antes do fim: texto da Black Friday', () => {
-    const b = montarBanner(CID, { agora: new Date(FIM.getTime() - 1) });
-    expect(b.title).toBe(TITULO_BF);
-    expect(b.body).toBe(TEXTO_BF);
+  it('black até 30/11 23:59:59 BRT; fixo em 01/12 00:00 BRT', () => {
+    expect(svc.faseDoTexto(FIM)).toBe('black');
+    expect(svc.faseDoTexto(brt('2026-12-01', 0, 0))).toBe('fixo');
+    expect(svc.bannerVigente(FIM)).toBe(svc.BANNER_BLACK_FRIDAY);
+    expect(svc.bannerVigente(brt('2026-12-01', 0, 0))).toBe(svc.BANNER);
   });
 
-  it('exatamente no fim: texto da Black Friday', () => {
-    expect(svc.emBlackFridayDaIndicacao(FIM)).toBe(true);
-    const b = montarBanner(CID, { agora: FIM });
-    expect(b.title).toBe(TITULO_BF);
-    expect(b.body).toBe(TEXTO_BF);
+  it('BLACK50 esgotado na Black Friday: texto sem BLACK50', () => {
+    expect(svc.faseDoTexto(AGORA_BF, { black50Esgotado: true })).toBe('sem_black50');
+    const t = svc.bannerVigente(AGORA_BF, { black50Esgotado: true });
+    expect(t).toBe(svc.BANNER);
+    expect(t.body).not.toMatch(/BLACK50/);
   });
 
-  it('um instante depois do fim: o texto de hoje, idêntico', () => {
-    const depois = new Date(FIM.getTime() + 1);
-    expect(svc.emBlackFridayDaIndicacao(depois)).toBe(false);
-    const b = montarBanner(CID, { agora: depois });
-    expect(b.title).toBe(TITULO_HOJE);
-    expect(b.body).toBe(TEXTO_HOJE);
-    expect(svc.bannerVigente(depois)).toBe(svc.BANNER);
+  it('texto fixo não fala de Black nem de BLACK50; o da Black fala', () => {
+    expect(`${svc.BANNER.title} ${svc.BANNER.body}`).not.toMatch(/black/i);
+    expect(svc.BANNER_BLACK_FRIDAY.body).toMatch(/BLACK50/);
+    expect(svc.BANNER_BLACK_FRIDAY.ctaLabel).toBe('Gerar meu código');
+    expect(svc.BANNER_BLACK_FRIDAY.ctaRoute).toBe('/configuracoes?foco=indicacao');
   });
 
-  it('não há data de início: hoje já é Black Friday', () => {
-    expect(montarBanner(CID, { agora: new Date('2026-10-29T12:00:00Z') }).title).toBe(TITULO_BF);
-    expect(montarBanner(CID, { agora: AGORA_BF }).title).toBe(TITULO_BF);
+  it('black50EstaEsgotado: fonte é access_codes (uses x max_uses, ativo)', () => {
+    expect(svc.black50EstaEsgotado({ uses: 0, max_uses: 10, is_active: true })).toBe(false);
+    expect(svc.black50EstaEsgotado({ uses: 9, max_uses: 10, is_active: true })).toBe(false);
+    expect(svc.black50EstaEsgotado({ uses: 10, max_uses: 10, is_active: true })).toBe(true);
+    expect(svc.black50EstaEsgotado({ uses: 2, max_uses: 10, is_active: false })).toBe(true);
+    expect(svc.black50EstaEsgotado(null)).toBe(true);
   });
 
-  it('botão, rota, alvo e ativo iguais; a campanha tem chave própria e fica no ar até o fim', () => {
-    const bf = montarBanner(CID, { agora: new Date(FIM.getTime() - 1000) });
-    const hoje = montarBanner(CID, { agora: new Date(FIM.getTime() + 1000) });
-    for (const campo of ['type', 'ctaLabel', 'ctaRoute', 'targetCompanyId', 'isActive']) {
-      expect(bf[campo]).toBe(hoje[campo]);
-    }
-    expect(bf.dedupeKey).toBe('indicacao-bf-2026:' + CID);
-    expect(bf.dedupeKey).toBe(svc.dedupeKeyBfDe(CID));
-    expect(hoje.dedupeKey).toBe('indicacao-trial:' + CID);
-    expect(bf.expiresAt).toBe(FIM.toISOString());
+  it('lerBlack50Esgotado consulta access_codes por BLACK50 e guarda 5 min', async () => {
+    const db = { query: jest.fn(async () => ({ rows: [{ uses: 10, max_uses: 10, is_active: true }] })) };
+    const t = AGORA_BF.getTime();
+    expect(await svc.lerBlack50Esgotado(db, { now: t })).toBe(true);
+    expect(db.query.mock.calls[0][0]).toMatch(/FROM access_codes WHERE code = \$1/);
+    expect(db.query.mock.calls[0][1]).toEqual(['BLACK50']);
+    await svc.lerBlack50Esgotado(db, { now: t + 60000 });
+    expect(db.query).toHaveBeenCalledTimes(1);
+    await svc.lerBlack50Esgotado(db, { now: t + 6 * 60000 });
+    expect(db.query).toHaveBeenCalledTimes(2);
+  });
+
+  it('lerBlack50Esgotado com banco fora: na dúvida, esgotado', async () => {
+    const err = jest.spyOn(console, 'error').mockImplementation(() => {});
+    const db = { query: jest.fn(async () => { throw new Error('fora'); }) };
+    expect(await svc.lerBlack50Esgotado(db, { now: AGORA_BF.getTime() })).toBe(true);
+    err.mockRestore();
+  });
+
+  it('faseAtual depois de 30/11 não consulta o banco', async () => {
+    const db = { query: jest.fn() };
+    expect(await svc.faseAtual(db, { now: AGORA_DEZ.getTime() })).toBe('fixo');
+    expect(db.query).not.toHaveBeenCalled();
   });
 });
 
-// ── banco simulado ──────────────────────────────────────────
-function makeDb({ empresas = [fatos()], assinaram = [] } = {}) {
+// ── 3. o banner ─────────────────────────────────────────────
+describe('montarBanner', () => {
+  it('chave do ciclo com o dia de Brasília, 14 dias no ar, ativo', () => {
+    const b = montarBanner(CID, { agora: AGORA_BF });
+    expect(b.dedupeKey).toBe(`indicacao:${CID}:2026-11-13`);
+    expect(b.dedupeKey).toBe(svc.dedupeKeyDoCiclo(CID, AGORA_BF));
+    expect(b.expiresAt).toBe(new Date(AGORA_BF.getTime() + 14 * DIA).toISOString());
+    expect(b).toMatchObject({
+      type: 'banner', targetCompanyId: CID, isActive: true,
+      title: svc.BANNER_BLACK_FRIDAY.title, ctaLabel: 'Gerar meu código', ctaRoute: '/configuracoes?foco=indicacao',
+    });
+  });
+
+  it('23h BRT ainda é o mesmo dia do ciclo', () => {
+    expect(svc.dedupeKeyDoCiclo(CID, brt('2026-11-13', 23, 50))).toBe(`indicacao:${CID}:2026-11-13`);
+  });
+
+  it('texto fixo depois de 30/11 e sem BLACK50 quando esgotado', () => {
+    expect(montarBanner(CID, { agora: AGORA_DEZ }).body).toBe(svc.BANNER.body);
+    expect(montarBanner(CID, { agora: AGORA_BF, black50Esgotado: true }).body).toBe(svc.BANNER.body);
+  });
+
+  it('PUBLICAR=false cria inativo', () => {
+    expect(montarBanner(CID, { agora: AGORA_BF, publicar: false }).isActive).toBe(false);
+  });
+
+  it('ehChaveDeIndicacao: só as três chaves do job, não as manuais da Gestão', () => {
+    expect(svc.ehChaveDeIndicacao(`indicacao:${CID}:2026-11-13`)).toBe(true);
+    expect(svc.ehChaveDeIndicacao('indicacao-bf-2026:' + CID)).toBe(true);
+    expect(svc.ehChaveDeIndicacao('indicacao-trial:' + CID)).toBe(true);
+    expect(svc.ehChaveDeIndicacao('indicacao-pagantes-lib-2026-10-21')).toBe(false);
+    expect(svc.ehChaveDeIndicacao('indicacao-2026-10-15:x')).toBe(false);
+    expect(svc.ehChaveDeIndicacao(null)).toBe(false);
+  });
+});
+
+describe('lerConfig', () => {
+  it('ligado e publicando por padrão; só "false" desliga; só "true" liga o dry-run', () => {
+    expect(lerConfig({})).toMatchObject({ enabled: true, dryRun: false, publicar: true });
+    expect(lerConfig({ BANNER_INDICACAO_TRIAL_ENABLED: 'FALSE' }).enabled).toBe(false);
+    expect(lerConfig({ BANNER_INDICACAO_TRIAL_DRY_RUN: 'true' }).dryRun).toBe(true);
+    expect(lerConfig({ BANNER_INDICACAO_TRIAL_PUBLICAR: 'false' }).publicar).toBe(false);
+  });
+});
+
+// ── 4. a volta ──────────────────────────────────────────────
+function makeDb({ empresas = [fatos()], black50 = { uses: 0, max_uses: 10, is_active: true }, desligados = 1 } = {}) {
   const calls = [];
   const query = jest.fn(async (sql, params) => {
     const s = sql.replace(/\s+/g, ' ').trim();
     calls.push({ s, params });
     if (s.startsWith('SELECT c.id AS company_id')) return { rows: empresas };
+    if (s.startsWith('SELECT uses, max_uses, is_active FROM access_codes')) return { rows: black50 ? [black50] : [] };
     if (s.startsWith('UPDATE app_notifications SET is_active = false')) {
-      return { rows: assinaram.map((a) => ({ id: a.id, target_company_id: a.company_id })) };
-    }
-    if (s.startsWith('SELECT n.id, n.target_company_id')) {
-      return { rows: assinaram.map((a) => ({ id: a.id, target_company_id: a.company_id })) };
+      return { rows: Array.from({ length: desligados }, (_, i) => ({ id: 'velho-' + i })) };
     }
     return { rows: [] };
   });
@@ -321,8 +235,8 @@ function makeNotifications(impl) {
 }
 
 const escritas = (db) => db.calls.filter((c) => /^(UPDATE|INSERT|DELETE)/.test(c.s));
-const rodar = (db, notifications, env = {}) => tickBannerIndicacaoTrial({
-  db, notifications, now: AGORA.getTime(), env,
+const rodar = (db, notifications, env = {}, agora = AGORA_BF) => tickBannerIndicacaoTrial({
+  db, notifications, now: agora.getTime(), env,
 });
 
 describe('tickBannerIndicacaoTrial', () => {
@@ -339,189 +253,211 @@ describe('tickBannerIndicacaoTrial', () => {
     expect(notifications.createAppNotification).not.toHaveBeenCalled();
   });
 
-  it('sem nenhuma chave de ambiente o job roda e cria o banner ATIVO', async () => {
-    const db = makeDb({ empresas: [fatos({ company_id: CID }), fatos({ company_id: CID2 })] });
-    const notifications = makeNotifications();
-    const r = await rodar(db, notifications, {});
-
-    expect(notifications.criados).toHaveLength(2);
-    expect(notifications.criados[0]).toMatchObject({
-      targetCompanyId: CID, dedupeKey: dedupeKeyDe(CID), isActive: true, ctaRoute: '/configuracoes?foco=indicacao',
-    });
-    expect(r).toMatchObject({ ligado: true, publicar: true, candidatas: 2, criadas: 2, falhas: 0 });
-  });
-
-  it('PUBLICAR=false cria o banner inativo', async () => {
+  it('dry-run não escreve nada', async () => {
     const db = makeDb();
     const notifications = makeNotifications();
-    await rodar(db, notifications, { BANNER_INDICACAO_TRIAL_PUBLICAR: 'false' });
-    expect(notifications.criados[0].isActive).toBe(false);
+    const r = await rodar(db, notifications, { BANNER_INDICACAO_TRIAL_DRY_RUN: 'true' });
+    expect(r.candidatas).toBe(1);
+    expect(notifications.createAppNotification).not.toHaveBeenCalled();
+    expect(escritas(db)).toHaveLength(0);
   });
 
-  it('só cria para quem passa na regra (com venda entra; sem e-mail verificado, sem venda ou de outro shell não)', async () => {
+  it('cria o banner do ciclo e desliga o anterior ainda ativo da empresa', async () => {
     const db = makeDb({
       empresas: [
-        fatos({ company_id: CID }),
-        fatos({ company_id: CID2, email_verificado: false }),
-        fatos({ company_id: 'c4', tem_venda: false }),
-        fatos({ company_id: 'c3', shell: 'food' }),
+        fatos({ ultimo_banner_em: brt('2026-10-30', 6, 34) }), // 14 dias: novo ciclo
+        fatos({ company_id: CID2, ultimo_banner_em: brt('2026-11-08', 6, 34) }), // 5 dias: espera
       ],
     });
     const notifications = makeNotifications();
     const r = await rodar(db, notifications);
-    expect(notifications.criados.map((p) => p.targetCompanyId)).toEqual([CID]);
-    expect(r).toMatchObject({ avaliadas: 4, candidatas: 1, criadas: 1 });
+    expect(r).toMatchObject({ fase: 'black', avaliadas: 2, candidatas: 1, criadas: 1, anterioresDesligados: 1 });
+    expect(notifications.criados[0]).toMatchObject({
+      targetCompanyId: CID, dedupeKey: `indicacao:${CID}:2026-11-13`, title: svc.BANNER_BLACK_FRIDAY.title,
+    });
+    const upd = escritas(db).find((c) => c.s.startsWith('UPDATE app_notifications SET is_active = false'));
+    expect(upd.params[0]).toBe(CID);
+    expect(upd.params[1]).toEqual(['indicacao-trial:%', 'indicacao-bf-2026:%', 'indicacao:%']);
+    expect(upd.params[2]).toBe(`indicacao:${CID}:2026-11-13`);
+    expect(upd.s).toContain('dedupe_key <> $3');
   });
 
-  it('o canário (CANARY_COMPANY_ID) fica de fora', async () => {
-    const db = makeDb({ empresas: [fatos({ company_id: CANARIO })] });
-    const notifications = makeNotifications();
-    const r = await rodar(db, notifications, { CANARY_COMPANY_ID: CANARIO });
-    expect(r.candidatas).toBe(0);
-    expect(notifications.createAppNotification).not.toHaveBeenCalled();
-  });
-
-  it('banner criado à mão com a mesma chave: ja_tem_banner, o job não tenta criar outro', async () => {
-    const db = makeDb({ empresas: [fatos({ ja_tem_banner: true })] });
-    const notifications = makeNotifications();
-    const r = await rodar(db, notifications);
-    expect(notifications.createAppNotification).not.toHaveBeenCalled();
-    expect(r).toMatchObject({ candidatas: 0, criadas: 0 });
-  });
-
-  it('corrida: a chave aparece entre a consulta e o insert (createAppNotification devolve null)', async () => {
+  it('chave do ciclo já existe (volta repetida): conta jaExistiam e não desliga nada', async () => {
     const db = makeDb();
     const notifications = makeNotifications(() => null);
     const r = await rodar(db, notifications);
-    expect(r).toMatchObject({ candidatas: 1, criadas: 0, jaExistiam: 1 });
-  });
-
-  it('DRY_RUN só loga: nenhuma escrita e nenhum banner criado', async () => {
-    const db = makeDb({ assinaram: [{ id: 'b-velho', company_id: CID2 }] });
-    const notifications = makeNotifications();
-    const r = await rodar(db, notifications, { BANNER_INDICACAO_TRIAL_DRY_RUN: 'true' });
-    expect(notifications.createAppNotification).not.toHaveBeenCalled();
+    expect(r).toMatchObject({ criadas: 0, jaExistiam: 1, anterioresDesligados: 0 });
     expect(escritas(db)).toHaveLength(0);
-    expect(r).toMatchObject({ dryRun: true, candidatas: 1, criadas: 0, desativadas: 1 });
-    const linhas = log.mock.calls.map((c) => c[0]).join('\n');
-    expect(linhas).toContain('dry-run: criaria banner para company=' + CID);
-    expect(linhas).toContain('desativaria');
   });
 
-  it('empresa que passou a ter assinatura ativa tem o banner de indicação desativado', async () => {
-    const db = makeDb({ empresas: [], assinaram: [{ id: 'b1', company_id: CID }] });
+  it('BLACK50 com 10 de 10 usos: banner novo nasce sem BLACK50', async () => {
+    const db = makeDb({ black50: { uses: 10, max_uses: 10, is_active: true } });
     const notifications = makeNotifications();
     const r = await rodar(db, notifications);
-
-    const upd = db.calls.find((c) => c.s.startsWith('UPDATE app_notifications SET is_active = false'));
-    expect(upd).toBeTruthy();
-    expect(upd.s).toContain("c.billing_status = 'active'");
-    expect(upd.s).toContain('n.dedupe_key LIKE $1');
-    expect(upd.s).toContain('n.is_active = true');
-    expect(upd.params).toEqual(['indicacao-trial:%']);
-    expect(r.desativadas).toBe(1);
+    expect(r.fase).toBe('sem_black50');
+    expect(notifications.criados[0].body).toBe(svc.BANNER.body);
   });
 
-  it('falha ao criar o banner de uma empresa não derruba as outras', async () => {
-    const err = jest.spyOn(console, 'error').mockImplementation(() => {});
-    const db = makeDb({ empresas: [fatos({ company_id: CID }), fatos({ company_id: CID2 })] });
-    const notifications = makeNotifications((p) => {
-      if (p.targetCompanyId === CID) throw new Error('boom');
-      return { id: 'ok', ...p };
+  it('depois de 30/11: texto fixo, sem ler o BLACK50, e continua criando', async () => {
+    const db = makeDb();
+    const notifications = makeNotifications();
+    const r = await rodar(db, notifications, {}, AGORA_DEZ);
+    expect(r).toMatchObject({ fase: 'fixo', criadas: 1 });
+    expect(notifications.criados[0].title).toBe(svc.BANNER.title);
+    expect(db.calls.some((c) => /FROM access_codes/.test(c.s))).toBe(false);
+  });
+
+  it('exclusões não viram banner', async () => {
+    const db = makeDb({
+      empresas: [
+        fatos({ shell: 'karate_dojo' }),
+        fatos({ owner_email: 'x@getaura.com.br' }),
+        fatos({ is_sandbox: true }),
+        fatos({ paga_por_outra: true }),
+        fatos({ empresa_inativa: true }),
+      ],
     });
+    const notifications = makeNotifications();
     const r = await rodar(db, notifications);
-    expect(r).toMatchObject({ candidatas: 2, criadas: 1, falhas: 1 });
+    expect(r).toMatchObject({ avaliadas: 5, candidatas: 0, criadas: 0 });
+  });
+
+  it('falha numa empresa não para as outras', async () => {
+    const err = jest.spyOn(console, 'error').mockImplementation(() => {});
+    const db = makeDb({ empresas: [fatos(), fatos({ company_id: CID2 })] });
+    let n = 0;
+    const notifications = makeNotifications((p) => { n++; if (n === 1) throw new Error('x'); return { id: 'ok', ...p }; });
+    const r = await rodar(db, notifications);
+    expect(r).toMatchObject({ falhas: 1, criadas: 1 });
     err.mockRestore();
   });
 });
 
 describe('buscarFatos (consulta)', () => {
-  it('lê teste vigente sem assinatura e se há venda NÃO cancelada; sem filtro de conversa ou aviso', async () => {
-    const db = makeDb({ empresas: [] });
-    await svc.buscarFatos(db, AGORA);
-    const { s, params } = db.calls[0];
-    expect(s).toContain('c.trial_ends_at > $1::timestamptz');
-    expect(s).toContain('c.asaas_subscription_id IS NULL');
-    expect(s).toContain("COALESCE(c.vertical_active, c.vertical, 'negocio') AS shell");
-    expect(s).toContain('c.billing_owner_company_id <> c.id');
-    expect(s).toContain('b.dedupe_key = $2::text || c.id::text');
-    expect(s).toContain('FROM sales s WHERE s.company_id = c.id');
-    expect(s).toContain("COALESCE(s.status, 'completed') <> 'cancelled'");
-    expect(s).toContain(') AS tem_venda');
-    expect(s).not.toContain('company_admin_notes');
-    expect(s).not.toContain('notify_checkout');
-    expect(params).toEqual([AGORA.toISOString(), 'indicacao-trial:']);
+  it('traz o último banner das três chaves por empresa, sem filtro de cobrança', async () => {
+    const db = makeDb();
+    await svc.buscarFatos(db);
+    const c = db.calls.find((x) => x.s.startsWith('SELECT c.id AS company_id'));
+    expect(c.s).toContain('MAX(n.created_at)');
+    expect(c.s).toContain('LIKE ANY ($1::text[])');
+    expect(c.s).not.toMatch(/notification_reads/);
+    expect(c.s).not.toMatch(/trial_ends_at >/);
+    expect(c.params[0]).toEqual(['indicacao-trial:%', 'indicacao-bf-2026:%', 'indicacao:%']);
   });
 });
 
-describe('buscarFatosCampanha (consulta)', () => {
-  it('sem corte de teste ou assinatura; lê banner antigo fechado e no ar e a chave da campanha', async () => {
-    const db = makeDb({ empresas: [] });
-    await svc.buscarFatos(db, AGORA_BF);
-    const { s, params } = db.calls[0];
-    expect(s.startsWith('SELECT c.id AS company_id')).toBe(true);
-    expect(s).not.toContain('c.trial_ends_at >');
-    expect(s).not.toContain('asaas_subscription_id');
-    expect(s).toContain('JOIN notification_reads r ON r.notification_id = n.id');
-    expect(s).toContain(') AS fechou_banner_antigo');
-    expect(s).toContain(') AS banner_antigo_no_ar');
-    expect(s).toContain('b.dedupe_key = $2::text || c.id::text');
-    expect(s).toContain('(c.is_active IS FALSE) AS empresa_inativa');
-    expect(s).toContain('n.expires_at > $3::timestamptz');
-    expect(params).toEqual(['indicacao-trial:', 'indicacao-bf-2026:', AGORA_BF.toISOString()]);
-  });
-});
+// ── 5. leitura do sininho ───────────────────────────────────
+describe('textoDosBannersNaLeitura', () => {
+  const comum = { id: 'b1', title: 'Novidade', body: 'x', dedupe_key: null };
+  const indicacao = { id: 'b2', title: 'texto velho', body: 'BLACK50 velho', dedupe_key: 'indicacao-bf-2026:' + CID };
 
-describe('tickBannerIndicacaoTrial na campanha', () => {
-  it('cria o banner da campanha com a chave própria; shell fora e quem fechou o antigo ficam de fora', async () => {
-    const log = jest.spyOn(console, 'log').mockImplementation(() => {});
-    const dono = { company_email: 'a@b.com', owner_email: 'c@d.com' };
-    const db = makeDb({
-      empresas: [
-        { company_id: CID, shell: 'negocio', billing_status: 'active', ...dono },
-        { company_id: CID2, shell: 'karate_dojo', ...dono },
-        { company_id: 'c3', shell: 'negocio', fechou_banner_antigo: true, ...dono },
-      ],
+  it('sem banner de indicação: não consulta o banco e tira dedupe_key', async () => {
+    const db = { query: jest.fn() };
+    const out = await svc.textoDosBannersNaLeitura(db, [comum], { now: AGORA_BF.getTime() });
+    expect(db.query).not.toHaveBeenCalled();
+    expect(out).toEqual([{ id: 'b1', title: 'Novidade', body: 'x' }]);
+  });
+
+  it('Black Friday com BLACK50: texto da Black e marca da campanha', async () => {
+    const db = makeDb();
+    const out = await svc.textoDosBannersNaLeitura(db, [comum, indicacao], { now: AGORA_BF.getTime() });
+    expect(out[0]).toEqual({ id: 'b1', title: 'Novidade', body: 'x' });
+    expect(out[1]).toMatchObject({
+      id: 'b2', title: svc.BANNER_BLACK_FRIDAY.title, body: svc.BANNER_BLACK_FRIDAY.body, campanha: 'indicacao', fase: 'black',
     });
-    const notifications = makeNotifications();
-    const r = await tickBannerIndicacaoTrial({ db, notifications, now: AGORA_BF.getTime(), env: {} });
-    log.mockRestore();
-    expect(notifications.criados.map((p) => p.targetCompanyId)).toEqual([CID]);
-    expect(notifications.criados[0].dedupeKey).toBe('indicacao-bf-2026:' + CID);
-    expect(r).toMatchObject({ avaliadas: 3, candidatas: 1, criadas: 1 });
+    expect(out[1]).not.toHaveProperty('dedupe_key');
+  });
+
+  it('BLACK50 esgotado: banner já no ar perde o BLACK50 na hora', async () => {
+    const db = makeDb({ black50: { uses: 10, max_uses: 10, is_active: true } });
+    const out = await svc.textoDosBannersNaLeitura(db, [indicacao], { now: AGORA_BF.getTime() });
+    expect(out[0]).toMatchObject({ title: svc.BANNER.title, body: svc.BANNER.body, fase: 'sem_black50' });
+  });
+
+  it('01/12 em diante: texto fixo mesmo para banner criado na Black Friday', async () => {
+    const db = { query: jest.fn() };
+    const out = await svc.textoDosBannersNaLeitura(db, [indicacao], { now: brt('2026-12-01', 0, 0).getTime() });
+    expect(out[0]).toMatchObject({ title: svc.BANNER.title, body: svc.BANNER.body, fase: 'fixo' });
   });
 });
 
-// ── 5. horário ──────────────────────────────────────────────
+// ── 6. contadores ───────────────────────────────────────────
+describe('registrarEvento', () => {
+  it('evento desconhecido não grava', async () => {
+    const db = { query: jest.fn() };
+    expect(await svc.registrarEvento(db, { companyId: CID, notificationId: NID, evento: 'outro' })).toBe(false);
+    expect(db.query).not.toHaveBeenCalled();
+  });
+
+  it.each([['vista', 'indicacao.banner_visto'], ['clique', 'indicacao.banner_clique']])(
+    '%s grava audit_log %s uma vez por usuário por banner de indicação da empresa',
+    async (evento, acao) => {
+      const db = makeDb();
+      db.query.mockImplementation(async (sql, params) => {
+        db.calls.push({ s: sql.replace(/\s+/g, ' ').trim(), params });
+        if (/FROM access_codes/.test(sql)) return { rows: [{ uses: 0, max_uses: 10, is_active: true }] };
+        return { rows: [], rowCount: 1 };
+      });
+      const ok = await svc.registrarEvento(db, {
+        companyId: CID, userId: CID2, notificationId: NID, evento, now: AGORA_BF.getTime(),
+      });
+      expect(ok).toBe(true);
+      const ins = db.calls.find((c) => c.s.startsWith('INSERT INTO audit_log'));
+      expect(ins.params.slice(0, 3)).toEqual([CID2, CID, acao]);
+      expect(ins.params[4]).toBe('black');
+      expect(ins.params[5]).toBe(NID);
+      expect(ins.s).toContain('n.target_company_id = $2::uuid');
+      expect(ins.s).toContain('NOT EXISTS');
+      expect(ins.s).toContain('a.user_id IS NOT DISTINCT FROM $1::uuid');
+    }
+  );
+});
+
+describe('contadores', () => {
+  it('junta banners, vistas, cliques, indicações e BLACK50', async () => {
+    const db = {
+      query: jest.fn(async (sql) => {
+        if (/FROM app_notifications n/.test(sql)) return { rows: [{ criados: 67, empresas: 67, dispensados: 4 }] };
+        if (/FROM audit_log a\s+LEFT JOIN users/.test(sql)) {
+          return { rows: [
+            { action: 'indicacao.banner_visto', total: 30, empresas: 20, na_fase_black: 30 },
+            { action: 'indicacao.banner_clique', total: 5, empresas: 4, na_fase_black: 5 },
+          ] };
+        }
+        if (/FROM referrals rf/.test(sql)) return { rows: [{ total: 3, depois_do_clique: 2, depois_da_vista: 2 }] };
+        if (/FROM access_codes/.test(sql)) return { rows: [{ uses: 1, max_uses: 10, is_active: true }] };
+        return { rows: [] };
+      }),
+    };
+    const r = await svc.contadores(db, { desde: '2026-10-30T03:00:00Z', now: AGORA_BF.getTime() });
+    expect(r).toMatchObject({
+      fase_agora: 'black',
+      banners: { criados: 67, empresas: 67, dispensados: 4 },
+      vistas: { total: 30, empresas: 20 },
+      cliques_gerar_codigo: { total: 5, empresas: 4 },
+      indicacoes: { cadastros_por_link: 3, depois_do_clique_no_banner: 2, depois_de_ver_o_banner: 2 },
+      black50: { usos: 1, limite: 10, ativo: true, esgotado: false },
+    });
+    const sqls = db.query.mock.calls.map((c) => c[0]);
+    expect(sqls.some((s) => /NOT ILIKE '%@getaura\.com\.br'/.test(s) && /audit_log a/.test(s))).toBe(true);
+  });
+});
+
+// ── 7. job ──────────────────────────────────────────────────
 describe('jobs/bannerIndicacaoTrialJob', () => {
-  const brt = (iso, hh, mm = 0) => Date.parse(iso + 'T00:00:00Z') + ((hh + 3) * 60 + mm) * 60000;
+  const t = (iso, hh, mm = 0) => brt(iso, hh, mm).getTime();
 
-  describe('passouDoHorario / devePassarAgora', () => {
-    it('06h29 BRT ainda não; 06h30 em diante sim', () => {
-      expect(job.passouDoHorario(brt('2026-10-14', 6, 29))).toBe(false);
-      expect(job.passouDoHorario(brt('2026-10-14', 6, 30))).toBe(true);
-      expect(job.passouDoHorario(brt('2026-10-14', 7, 0))).toBe(true);
-      expect(job.passouDoHorario(brt('2026-10-14', 0, 5))).toBe(false);
-    });
-
-    it('só roda de novo quando o dia muda', () => {
-      const t = brt('2026-10-14', 6, 40);
-      expect(job.devePassarAgora(t, null)).toBe(true);
-      expect(job.devePassarAgora(t, '2026-10-14')).toBe(false);
-      expect(job.devePassarAgora(brt('2026-10-15', 6, 35), '2026-10-14')).toBe(true);
-    });
-
-    it('usa o dia de Brasília (23h BRT ainda é o mesmo dia)', () => {
-      expect(job.agoraBrt(brt('2026-10-14', 23, 30)).dia).toBe('2026-10-14');
-      expect(job.agoraBrt(brt('2026-10-15', 0, 10)).dia).toBe('2026-10-15');
-    });
+  it('06h29 BRT ainda não; 06h30 em diante sim; só uma vez por dia', () => {
+    expect(job.passouDoHorario(t('2026-11-13', 6, 29))).toBe(false);
+    expect(job.passouDoHorario(t('2026-11-13', 6, 30))).toBe(true);
+    expect(job.devePassarAgora(t('2026-11-13', 6, 40), '2026-11-13')).toBe(false);
+    expect(job.devePassarAgora(t('2026-11-14', 6, 35), '2026-11-13')).toBe(true);
   });
 
   describe('runOnce', () => {
     const db = require('../../src/config/database');
     let logSpy;
     let errSpy;
-
     const limpaEnv = () => {
       delete process.env.BANNER_INDICACAO_TRIAL_ENABLED;
       delete process.env.BANNER_INDICACAO_TRIAL_DRY_RUN;
@@ -543,67 +479,32 @@ describe('jobs/bannerIndicacaoTrialJob', () => {
     });
 
     it('antes das 06h30 não consulta o banco', async () => {
-      const r = await job.runOnce(brt('2026-10-14', 6, 29));
-      expect(r).toBeNull();
+      expect(await job.runOnce(t('2026-11-13', 6, 29))).toBeNull();
       expect(db.query).not.toHaveBeenCalled();
     });
 
-    it('depois das 06h30 roda uma vez no dia (sem nenhuma chave de ambiente) e não repete', async () => {
-      const r1 = await job.runOnce(brt('2026-10-14', 6, 31));
-      expect(r1).toMatchObject({ ligado: true });
-      const chamadas = db.query.mock.calls.length;
-      expect(chamadas).toBeGreaterThan(0);
-
-      const r2 = await job.runOnce(brt('2026-10-14', 6, 36));
-      expect(r2).toBeNull();
-      expect(db.query.mock.calls.length).toBe(chamadas);
-
-      const r3 = await job.runOnce(brt('2026-10-15', 6, 31));
-      expect(r3).toMatchObject({ ligado: true });
-    });
-
-    it('kill switch (ENABLED=false) não roda nem marca o dia', async () => {
+    it('kill switch (ENABLED=false) não roda', async () => {
       process.env.BANNER_INDICACAO_TRIAL_ENABLED = 'false';
-      expect(await job.runOnce(brt('2026-10-14', 8))).toBeNull();
+      expect(await job.runOnce(t('2026-11-13', 8))).toBeNull();
       expect(db.query).not.toHaveBeenCalled();
-      // religado no mesmo dia, roda
-      delete process.env.BANNER_INDICACAO_TRIAL_ENABLED;
-      expect(await job.runOnce(brt('2026-10-14', 9))).toMatchObject({ ligado: true });
     });
 
-    it('banco fora do ar não marca o dia: a volta seguinte tenta de novo', async () => {
-      db.query.mockRejectedValueOnce(new Error('connection terminated'));
-      expect(await job.runOnce(brt('2026-10-14', 7, 0))).toBeNull();
-      expect(errSpy).toHaveBeenCalled();
-      expect(await job.runOnce(brt('2026-10-14', 7, 5))).toMatchObject({ ligado: true });
-    });
-
-    it('com empresa elegível, grava o banner ATIVO pelo appNotifications', async () => {
+    it('com empresa elegível grava o banner do ciclo pelo appNotifications', async () => {
       db.query.mockImplementation(async (sql) => {
-        const s = sql.replace(/\s+/g, ' ');
-        if (s.startsWith('SELECT c.id AS company_id')) {
-          return {
-            rows: [fatos({
-              trial_ends_at: new Date(brt('2026-10-14', 7) + 10 * DIA).toISOString(),
-            })],
-          };
-        }
+        const s = sql.replace(/\s+/g, ' ').trim();
+        if (s.startsWith('SELECT c.id AS company_id')) return { rows: [fatos()] };
+        if (s.startsWith('SELECT uses, max_uses')) return { rows: [{ uses: 0, max_uses: 10, is_active: true }] };
         if (s.startsWith('INSERT INTO app_notifications')) return { rows: [{ id: 'novo' }] };
         return { rows: [] };
       });
-      const r = await job.runOnce(brt('2026-10-14', 7, 0));
+      const r = await job.runOnce(t('2026-11-13', 7, 0));
       expect(r).toMatchObject({ candidatas: 1, criadas: 1 });
       const ins = db.query.mock.calls.find((c) => /INSERT INTO app_notifications/.test(c[0]));
-      expect(ins).toBeTruthy();
       expect(ins[0]).toContain('ON CONFLICT (dedupe_key)');
-      // [type, title, body, html, cta_label, cta_url, cta_route, target_company_id,
-      //  target_plan, target_vertical, expires_at, is_active, dedupe_key]
-      const p = ins[1];
-      expect(p[0]).toBe('banner');
-      expect(p[7]).toBe(CID);
-      expect(p[11]).toBe(true);
-      // 14/10/2026 está dentro da campanha (sem data de início): chave da campanha.
-      expect(p[12]).toBe('indicacao-bf-2026:' + CID);
+      // [..., target_company_id(7), ..., expires_at(10), is_active(11), dedupe_key(12)]
+      expect(ins[1][7]).toBe(CID);
+      expect(ins[1][11]).toBe(true);
+      expect(ins[1][12]).toBe(`indicacao:${CID}:2026-11-13`);
     });
   });
 

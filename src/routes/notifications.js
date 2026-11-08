@@ -4,6 +4,7 @@
 // POST /companies/:id/notifications/banners/:nid/read     — marca banner como lido
 // POST /companies/:id/notifications/:nid/read             — idem, forma curta (app)
 // POST /companies/:id/notifications/events/:nid/read      — idem, alias para evento
+// POST /companies/:id/notifications/:nid/indicacao         — vista/clique do banner de indicação
 // POST /companies/:id/notifications/read-all-banners      — marca todos como lidos
 // POST /companies/:id/notifications/read-all              — idem, nome que o app usa
 // GET  /companies/:id/notifications/preferences           — quais eventos a empresa recebe
@@ -51,6 +52,13 @@
 //   linhas em app_notifications com type 'loja_<evento>' — duráveis, com
 //   lido/não lido via notification_reads e dedupe por pedido.
 //
+// 08/11/2026 — BANNER DE INDICAÇÃO (card b-mk-30).
+//   O banner de indicação que o job cria (services/bannerIndicacaoTrial) tem
+//   o texto decidido NA LEITURA: Black Friday com BLACK50, sem BLACK50
+//   quando o cupom esgota, texto fixo de 01/12 em diante. Esse banner vem
+//   com `campanha: 'indicacao'` e `fase`; o app registra vista e clique em
+//   POST /:nid/indicacao (audit_log). dedupe_key não sai na resposta.
+//
 //   O contrato antigo NÃO muda: `banners` continua sendo só o que a Gestão
 //   Aura publica, porque as duas leituras se separam por type. Sem esse
 //   corte, todo evento novo cairia dentro de `banners` e o app tentaria
@@ -65,6 +73,7 @@ const router = require('express').Router({ mergeParams: true });
 const db     = require('../config/database');
 const lojaEvents = require('../services/lojaEvents');
 const eventoResolvido = require('../services/eventoResolvido');
+const bannerIndicacao = require('../services/bannerIndicacaoTrial');
 
 // Corte entre as duas famílias de linha em app_notifications. ESCAPE '/'
 // em vez de barra invertida: o '_' de 'loja_' é curinga em LIKE e o
@@ -74,6 +83,8 @@ const NOT_LOJA_EVENT = `n.type NOT LIKE 'loja/_%' ESCAPE '/'`;
 
 // null = ainda não sabemos; true/false = decidido para o resto do processo.
 let hasTargetVertical = null;
+
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 // Filtro de alvo compartilhado pelo GET e pelo read-all — o write path tem
 // que enxergar exatamente os mesmos banners que o read path (CLAUDE.md,
@@ -96,7 +107,7 @@ function bannersSql(withVertical) {
   return `
       SELECT n.id, n.type, n.title, n.body, n.html_content,
              n.cta_label, n.cta_url, n.cta_route, n.created_at
-             ${withVertical ? ', n.target_vertical' : ''}
+             ${withVertical ? ', n.target_vertical, n.dedupe_key' : ''}
       FROM app_notifications n
       WHERE n.is_active = true
         AND ${NOT_LOJA_EVENT}
@@ -212,6 +223,10 @@ router.get('/', async (req, res) => {
     // banner não é criado por empresa, é publicado para muitas de uma vez —
     // não há INSERT nosso para não fazer.
     if (!(await lojaEvents.isBannerEnabled(cid))) banners = [];
+
+    // Banner de indicação: texto da fase de agora (BLACK50 só enquanto há
+    // cupom e até 30/11) e marca para o app contar vista e clique.
+    banners = await bannerIndicacao.textoDosBannersNaLeitura(db, banners);
 
     // 1b. Eventos duráveis da loja online (migration 315). Mesma tabela,
     // mesmo filtro de alvo — separados por type. Ficam até serem lidos:
@@ -394,6 +409,32 @@ router.post('/:nid/read', async (req, res) => {
   } catch (err) {
     console.error('[notifications] read error:', err.message);
     res.status(500).json({ error: 'Erro ao marcar como lida' });
+  }
+});
+
+// POST /:nid/indicacao — body { evento: 'vista' | 'clique' }. O app avisa que
+// mostrou o banner de indicação ou que clicaram em "Gerar meu código".
+// Uma linha em audit_log por usuário por banner e por evento; só conta
+// banner de indicação desta empresa. Staff em modo admin não conta.
+// Resposta: { registrado }. Nunca 500 por causa do contador.
+router.post('/:nid/indicacao', async (req, res) => {
+  const evento = req.body && req.body.evento;
+  if (evento !== 'vista' && evento !== 'clique') {
+    return res.status(400).json({ error: "evento deve ser 'vista' ou 'clique'" });
+  }
+  if (!UUID_RE.test(String(req.params.nid || ''))) return res.status(400).json({ error: 'id inválido' });
+  if (req.user && req.user.role === 'admin') return res.json({ registrado: false });
+  try {
+    const registrado = await bannerIndicacao.registrarEvento(db, {
+      companyId: req.params.id,
+      userId: (req.user && req.user.id) || null,
+      notificationId: req.params.nid,
+      evento,
+    });
+    res.json({ registrado });
+  } catch (err) {
+    console.error('[notifications] indicacao evento error:', err.message);
+    res.json({ registrado: false });
   }
 });
 
