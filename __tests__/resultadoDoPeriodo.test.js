@@ -163,7 +163,7 @@ describe('resultadoDoPeriodo (consultas)', () => {
     expect(sql).toMatch(/NOT \(cat = ANY\(\$6::text\[\]\)\)/);
     expect(sql).toMatch(/status = 'confirmed'/);
     expect(R.CAT_FORNECEDORES).toEqual(['fornecedores']);
-    expect(R.CAT_TROCA_DEVOLUCAO).toContain('troca - devolucao');
+    expect(R.CAT_TROCA_DEVOLUCAO).toEqual(expect.arrayContaining(['troca - devolucao', 'troca - devolução', 'devolucao', 'devolução']));
   });
 });
 

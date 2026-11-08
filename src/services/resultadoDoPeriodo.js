@@ -9,8 +9,8 @@
 // Regras (decisões do Caio, 07–08/11/2026):
 //   Faturamento  vendas concluídas do período (sales type 'sale', não
 //                canceladas; total_amount já tem o desconto) + 'Troca - Venda'
-//                − 'Troca - Devolucao' (os dois lançamentos confirmados que a
-//                trocaV2 grava). A troca não entra pela sales: total_amount
+//                − 'Troca - Devolucao' e 'devolucao' (os lançamentos
+//                confirmados que a trocaV2 e a devolução manual gravam). A troca não entra pela sales: total_amount
 //                da troca é o valor do produto novo (CLAUDE.md, armadilha 5).
 //   Custos       CMV: Σ sale_items.unit_cost × quantity dos itens COM custo
 //                dessas vendas. Custo 0 e custo vazio contam como "sem custo"
@@ -23,7 +23,8 @@
 //                fica fora do lucro bruto: não tem par de custo confiável.
 //   Despesas     lançamentos expense confirmados, menos 'Fornecedores'
 //                (compra de mercadoria vira estoque, não gasto do mês) e menos
-//                'Troca - Devolucao' (venda desfeita, já sai do faturamento).
+//                'Troca - Devolucao' e 'devolucao' (venda desfeita, já sai do
+//                faturamento).
 //                'Taxas de cartão' e todo o resto entram.
 //   Compras      expense confirmado em 'Fornecedores': só informativo.
 //
@@ -41,7 +42,9 @@ const db = require('../config/database');
 // Categorias comparadas em minúsculas e sem espaço nas pontas.
 const CAT_FORNECEDORES = ['fornecedores'];
 const CAT_TROCA_VENDA = ['troca - venda'];
-const CAT_TROCA_DEVOLUCAO = ['troca - devolucao', 'troca - devolução'];
+// 08/11/2026: 'devolucao' (devolução manual, sem troca) conta como a
+// 'Troca - Devolucao': abate o faturamento e sai de Despesas.
+const CAT_TROCA_DEVOLUCAO = ['troca - devolucao', 'troca - devolução', 'devolucao', 'devolução'];
 
 // Abaixo disso a loja aparece como "falta custo na maior parte" no consolidado.
 const COBERTURA_BAIXA_PCT = 50;
