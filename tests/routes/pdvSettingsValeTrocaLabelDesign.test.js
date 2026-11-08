@@ -4,7 +4,7 @@
 //
 // Duas preferencias que o app guardava so no navegador (ou ainda nao
 // guardava) passam a viver na loja, valendo em qualquer aparelho:
-//   - vale_troca_enabled: boolean, default true (vale-troca por QR no cupom)
+//   - vale_troca_enabled: boolean, default false (vale-troca por QR no cupom)
 //   - label_design: 'classico' | 'editorial' | null, default null
 //     (18/10/2026, card f1-16: null = desenho padrao do modelo de etiqueta)
 //
@@ -45,18 +45,18 @@ const updates = () => db.query.mock.calls.filter((c) => /UPDATE companies SET pd
 const gravado = () => JSON.parse(updates()[0][1][0]);
 
 describe('pdv_settings -- vale_troca_enabled', () => {
-  test('GET: true para a loja que nunca gravou a chave', async () => {
+  test('GET: false para a loja que nunca gravou a chave', async () => {
     mockSql({ caixa_enabled: true });
     const res = await request(app).get(url).set(auth);
     expect(res.status).toBe(200);
-    expect(res.body.settings.vale_troca_enabled).toBe(true);
+    expect(res.body.settings.vale_troca_enabled).toBe(false);
   });
 
-  test('GET: devolve false quando a loja desligou', async () => {
-    mockSql({ vale_troca_enabled: false });
+  test('GET: devolve true quando a loja ligou', async () => {
+    mockSql({ vale_troca_enabled: true });
     const res = await request(app).get(url).set(auth);
     expect(res.status).toBe(200);
-    expect(res.body.settings.vale_troca_enabled).toBe(false);
+    expect(res.body.settings.vale_troca_enabled).toBe(true);
   });
 
   test.each([true, false])('PUT: %s e gravado', async (valor) => {
