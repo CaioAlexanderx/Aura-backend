@@ -11,7 +11,7 @@
 //         studio_gallery_enabled, studio_approval_enabled, food_mode_enabled,
 //         food_nfce_manual_enabled, food_comanda_print_enabled,
 //         card_fee_enabled, os_enabled, otica_enabled, card_price_enabled,
-//         allow_sale_without_stock, comanda_enabled, vale_troca_enabled (true),
+//         allow_sale_without_stock, comanda_enabled, vale_troca_enabled (false),
 //         frete_enabled
 //   STRING (enum): studio_approval_mode (wa_me | whatsapp_business)
 //   NUMBER: service_fee_pct, food_service_fee_pct,
@@ -343,9 +343,9 @@ const DEFAULT_SETTINGS = {
   comanda_enabled:           false,
   // 30/10/2026 — desligado = carrinho de sempre, sem o atalho "Frete".
   frete_enabled:             false,
-  // 13/10/2026 — ligado = o cupom leva o QR do vale-troca (comportamento
-  // que a loja ja tinha antes de a preferencia ter chave propria).
-  vale_troca_enabled:        true,
+  // 08/11/2026 — desligado por padrao: o vale-troca deixa de sair sozinho no
+  // cupom; a lojista liga em Configuracoes se quiser. (Era true desde 13/10.)
+  vale_troca_enabled:        false,
   studio_enabled:            false,
   studio_kds_enabled:        false,
   studio_gallery_enabled:    false,
