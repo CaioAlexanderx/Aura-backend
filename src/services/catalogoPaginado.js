@@ -21,6 +21,7 @@
 function bd() { return require('../config/database'); }
 
 const { agruparPorFamilia } = require('./coresDaLoja');
+const { colunasPromo, colunasPromoNulas, comColunasPromo } = require('./precoEfetivo');
 const { agruparTamanhos } = require('./tamanhosDaLoja');
 
 /** Quantos produtos por página. */
@@ -320,15 +321,16 @@ async function paginaDoCatalogo({
   }
 
   paramsDaPagina.push(lim, off);
-  const { rows: produtos } = await bd().query(
+  // p-85 (427): promo_* para o De/Por da vitrine (montarProdutoPublico).
+  const { rows: produtos } = await comColunasPromo((com) => bd().query(
     `SELECT id, name, description, price, image_url, image_thumb_url, gallery_urls, category, stock_qty, created_at,
-            material, medidas, cuidados, duration_minutes
+            material, medidas, cuidados, duration_minutes, ${com ? colunasPromo() : colunasPromoNulas()}
      FROM products
      WHERE ${where}
      ORDER BY ${ordenacao}
      LIMIT $${paramsDaPagina.length - 1} OFFSET $${paramsDaPagina.length}`,
     paramsDaPagina,
-  );
+  ));
 
   return { produtos, total, offset: off, limit: lim };
 }

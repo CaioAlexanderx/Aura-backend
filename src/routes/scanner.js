@@ -8,6 +8,33 @@ const router  = require('express').Router({ mergeParams: true });
 const db      = require('../config/database');
 const { requireAuth } = require('../middleware/auth');
 const { productVisibilityWhere } = require('../utils/companyGroup');
+// p-85 (08/11/2026, migration 427): De/Por. Toda resposta do bipe traz
+// promo_price, promo_starts_at, promo_ends_at, em_promocao e preco_efetivo
+// (a regra unica de services/precoEfetivo.js). `price`, `price_override` e
+// `effective_price` continuam sendo o preco NORMAL, como antes: o Caixa
+// novo (app p-87) vende pelo preco_efetivo.
+const {
+  camposDoProduto, camposDaVariante, colunasPromo, colunasPromoNulas, comColunasPromo,
+} = require('../services/precoEfetivo');
+
+// Colunas promo_* no SELECT (ou nulas, na base sem a 427).
+const promoDe = (com, alias, prefixo = '') => `, ${com ? colunasPromo(alias, prefixo) : colunasPromoNulas(prefixo)}`;
+// As mesmas, dentro do json_build_object das variantes.
+const promoNoJson = (com) => (com
+  ? `,
+                  'promo_price', pv.promo_price, 'promo_starts_at', pv.promo_starts_at,
+                  'promo_ends_at', pv.promo_ends_at`
+  : `,
+                  'promo_price', NULL, 'promo_starts_at', NULL, 'promo_ends_at', NULL`);
+
+/** Produto do bipe com os campos De/Por (e as variantes, quando vierem). */
+function comPromo(row, agora) {
+  const out = { ...row, ...camposDoProduto(row, agora) };
+  if (Array.isArray(row.variants)) {
+    out.variants = row.variants.map((v) => ({ ...v, ...camposDaVariante(v, row, agora) }));
+  }
+  return out;
+}
 
 // 22/09/2026 — preco no cartao (migration 351). O Caixa precisa de
 // products.card_price junto do preco pra decidir o unit_price quando a
@@ -59,11 +86,12 @@ router.get('/scan/:code', requireAuth, async (req, res) => {
   const alts = variacoesDoCodigo(cleanCode);
 
   try {
+    const agora = new Date();
     // 1. Match exato por barcode
-    let { rows } = await comCardPrice((cp) => db.query(
+    let { rows } = await comColunasPromo((com) => comCardPrice((cp) => db.query(
       `SELECT p.id, p.name, p.description, p.price, p.cost_price,
               p.stock_qty, p.barcode, p.barcode_format, p.category,
-              p.sku, p.is_active, p.unit, p.company_id AS stock_company_id${cp},
+              p.sku, p.is_active, p.unit, p.company_id AS stock_company_id${cp}${promoDe(com, 'p')},
               COALESCE(json_agg(
                 json_build_object(
                   'id', pv.id, 'sku_suffix', pv.sku_suffix,
@@ -72,7 +100,7 @@ router.get('/scan/:code', requireAuth, async (req, res) => {
                   'attributes', (
                     SELECT json_agg(json_build_object('attr', pvval.attribute_name, 'val', pvval.value))
                     FROM product_variant_values pvval WHERE pvval.variant_id=pv.id
-                  )
+                  )${promoNoJson(com)}
                 )
               ) FILTER (WHERE pv.id IS NOT NULL), '[]') AS variants
        FROM products p
@@ -82,56 +110,64 @@ router.get('/scan/:code', requireAuth, async (req, res) => {
        ORDER BY ${DA_LOJA_PRIMEIRO}
        LIMIT 1`,
       [company_id, alts]
-    ));
-    if (rows.length) return res.json({ match: 'exact', source: 'barcode', product: rows[0] });
+    )));
+    if (rows.length) return res.json({ match: 'exact', source: 'barcode', product: comPromo(rows[0], agora) });
 
     // 2. Match por barcode de variante
-    const { rows: varRows } = await comCardPrice((cp) => db.query(
+    const { rows: varRows } = await comColunasPromo((com) => comCardPrice((cp) => db.query(
       `SELECT p.id, p.name, p.price, p.cost_price, p.stock_qty,
-              p.barcode, p.category, p.sku, p.is_active, p.unit, p.company_id AS stock_company_id${cp},
+              p.barcode, p.category, p.sku, p.is_active, p.unit, p.company_id AS stock_company_id${cp}${promoDe(com, 'p')},
               pv.id AS variant_id, pv.sku_suffix, pv.price_override,
-              pv.stock_qty AS variant_stock
+              pv.stock_qty AS variant_stock${promoDe(com, 'pv', 'variant_')}
        FROM product_variants pv
        JOIN products p ON p.id=pv.product_id
        WHERE ${DA_LOJA_OU_DO_GRUPO} AND pv.barcode=ANY($2::text[]) AND pv.is_active=TRUE AND p.is_active=TRUE
        ORDER BY ${DA_LOJA_PRIMEIRO}
        LIMIT 1`,
       [company_id, alts]
-    ));
+    )));
     if (varRows.length) {
+      const { variant_promo_price, variant_promo_starts_at, variant_promo_ends_at, ...linha } = varRows[0];
+      const daVariante = camposDaVariante({
+        price_override: linha.price_override,
+        promo_price: variant_promo_price, promo_starts_at: variant_promo_starts_at, promo_ends_at: variant_promo_ends_at,
+      }, linha, agora);
       return res.json({
         match: 'exact', source: 'variant_barcode',
-        product: varRows[0],
-        variant_id: varRows[0].variant_id,
-        effective_price: varRows[0].price_override || varRows[0].price,
+        product: comPromo(linha, agora),
+        variant_id: linha.variant_id,
+        effective_price: linha.price_override || linha.price,
+        // 427: o preco que vale agora PARA A VARIANTE bipada (o do produto
+        // esta em product.preco_efetivo).
+        ...daVariante,
       });
     }
 
     // 3. Match por SKU
-    ({ rows } = await comCardPrice((cp) => db.query(
+    ({ rows } = await comColunasPromo((com) => comCardPrice((cp) => db.query(
       `SELECT p.id, p.name, p.price, p.cost_price, p.stock_qty,
-              p.barcode, p.category, p.sku, p.is_active, p.unit, p.company_id AS stock_company_id${cp}
+              p.barcode, p.category, p.sku, p.is_active, p.unit, p.company_id AS stock_company_id${cp}${promoDe(com, 'p')}
        FROM products p
        WHERE ${DA_LOJA_OU_DO_GRUPO} AND p.sku=$2 AND p.is_active=TRUE
        ORDER BY ${DA_LOJA_PRIMEIRO} LIMIT 1`,
       [company_id, cleanCode]
-    )));
-    if (rows.length) return res.json({ match: 'exact', source: 'sku', product: rows[0] });
+    ))));
+    if (rows.length) return res.json({ match: 'exact', source: 'sku', product: comPromo(rows[0], agora) });
 
     // 4. Busca textual por nome/SKU (retorna até 8 sugestões)
-    ({ rows } = await comCardPrice((cp) => db.query(
-      `SELECT p.id, p.name, p.price, p.stock_qty, p.barcode, p.sku, p.category, p.unit, p.company_id AS stock_company_id${cp}
+    ({ rows } = await comColunasPromo((com) => comCardPrice((cp) => db.query(
+      `SELECT p.id, p.name, p.price, p.stock_qty, p.barcode, p.sku, p.category, p.unit, p.company_id AS stock_company_id${cp}${promoDe(com, 'p')}
        FROM products p
        WHERE ${DA_LOJA_OU_DO_GRUPO} AND p.is_active=TRUE
          AND (p.name ILIKE $2 OR p.sku ILIKE $2)
        ORDER BY p.name LIMIT 8`,
       [company_id, `%${cleanCode}%`]
-    )));
+    ))));
     if (rows.length) {
       return res.status(207).json({
         match: 'partial',
         message: 'Nenhum código exato encontrado. Sugestões:',
-        suggestions: rows,
+        suggestions: rows.map((r) => comPromo(r, agora)),
       });
     }
 
@@ -149,13 +185,15 @@ router.post('/scan/batch', requireAuth, async (req, res) => {
   const { codes } = req.body;
   if (!codes?.length) return res.status(400).json({ error: 'codes obrigatório' });
   try {
-    const { rows } = await comCardPrice((cp) => db.query(
-      `SELECT p.id, p.name, p.price, p.cost_price, p.stock_qty, p.barcode, p.sku, p.category, p.unit, p.company_id AS stock_company_id${cp}
+    const { rows: linhas } = await comColunasPromo((com) => comCardPrice((cp) => db.query(
+      `SELECT p.id, p.name, p.price, p.cost_price, p.stock_qty, p.barcode, p.sku, p.category, p.unit, p.company_id AS stock_company_id${cp}${promoDe(com, 'p')}
        FROM products p
        WHERE ${DA_LOJA_OU_DO_GRUPO} AND p.is_active=TRUE
          AND (p.barcode=ANY($2) OR p.sku=ANY($2))`,
       [req.params.id, codes]
-    ));
+    )));
+    const agora = new Date();
+    const rows = linhas.map((r) => comPromo(r, agora));
     // Mesmo código na loja e num compartilhado do grupo: o da loja ganha.
     const byCode = {};
     const guardar = (code, p) => {

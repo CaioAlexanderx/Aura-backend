@@ -20,6 +20,7 @@
 function bd() { return require('../config/database'); }
 
 const { EM_ESTOQUE, COM_FOTO, NA_VITRINE, filtroDeFoto, VENDIDOS_RECENTES } = require('./catalogoPaginado');
+const { colunasPromo, colunasPromoNulas, comColunasPromo } = require('./precoEfetivo');
 
 /** Abaixo disto o bloco não aparece: um cartão sozinho lê como defeito. */
 const MINIMO_PARA_O_BLOCO = 2;
@@ -34,6 +35,8 @@ const DIAS_DE_NOVO = 14;
 /** As mesmas colunas do builder — o cartão da home é o cartão da grade. */
 const COLUNAS = `id, name, description, price, image_url, image_thumb_url, gallery_urls, category,
   stock_qty, stock_min, created_at, material, medidas, cuidados, duration_minutes`;
+// p-85 (427): + promo_* para o De/Por da vitrine (montarProdutoPublico).
+const colunas = (com) => `${COLUNAS}, ${com ? colunasPromo() : colunasPromoNulas()}`;
 
 /**
  * Saldo total da peça, na mesma regra de EM_ESTOQUE: com variante ativa,
@@ -84,16 +87,16 @@ function filtrosBase(visibilityWhere, exigeFoto) {
 async function maisVendidos({ cid, visibilityWhere, exigeFoto }) {
   // A subconsulta de vendas roda UMA vez por peca (no SELECT interno);
   // filtrar e ordenar pelo apelido evita computa-la de novo no WHERE.
-  const sql = `
+  const sql = (com) => `
     SELECT * FROM (
-      SELECT ${COLUNAS}, ${VENDIDOS_RECENTES} AS vendidos
+      SELECT ${colunas(com)}, ${VENDIDOS_RECENTES} AS vendidos
         FROM products
        WHERE ${filtrosBase(visibilityWhere, exigeFoto)}
     ) pecas
      WHERE vendidos > 0
      ORDER BY vendidos DESC, created_at DESC
      LIMIT ${LIMITE_MAIS_VENDIDOS}`;
-  const { rows } = await bd().query(sql, [cid]);
+  const { rows } = await comColunasPromo((com) => bd().query(sql(com), [cid]));
   return rows;
 }
 
@@ -103,26 +106,26 @@ async function maisVendidos({ cid, visibilityWhere, exigeFoto }) {
  * falta dela.
  */
 async function ultimasUnidades({ cid, visibilityWhere, exigeFoto }) {
-  const sql = `
-    SELECT ${COLUNAS}, ${ESTOQUE_TOTAL} AS restam, ${VENDIDOS_RECENTES} AS vendidos
+  const sql = (com) => `
+    SELECT ${colunas(com)}, ${ESTOQUE_TOTAL} AS restam, ${VENDIDOS_RECENTES} AS vendidos
       FROM products
      WHERE ${filtrosBase(visibilityWhere, exigeFoto)}
        AND ${NO_LIMITE}
      ORDER BY vendidos DESC, restam ASC, created_at DESC
      LIMIT ${LIMITE_ULTIMAS_UNIDADES}`;
-  const { rows } = await bd().query(sql, [cid]);
+  const { rows } = await comColunasPromo((com) => bd().query(sql(com), [cid]));
   return rows;
 }
 
 /** Os últimos cadastros. O selo NOVO é decidido por peça, em ehNovo. */
 async function novidades({ cid, visibilityWhere, exigeFoto }) {
-  const sql = `
-    SELECT ${COLUNAS}
+  const sql = (com) => `
+    SELECT ${colunas(com)}
       FROM products
      WHERE ${filtrosBase(visibilityWhere, exigeFoto)}
      ORDER BY created_at DESC
      LIMIT ${LIMITE_NOVIDADES}`;
-  const { rows } = await bd().query(sql, [cid]);
+  const { rows } = await comColunasPromo((com) => bd().query(sql(com), [cid]));
   return rows;
 }
 

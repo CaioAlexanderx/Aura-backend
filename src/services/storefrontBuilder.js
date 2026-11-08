@@ -56,6 +56,10 @@
 
 const db = require('../config/database');
 const mpGatewaySvc = require('./mpGateway');
+// p-85 (08/11/2026, migration 427): De/Por na vitrine.
+const {
+  camposDoProduto, camposDaVariante, colunasPromo, colunasPromoNulas, comColunasPromo,
+} = require('./precoEfetivo');
 // Aberta/fechada: uma regra so, compartilhada com o aviso do pedido feito com a loja fechada (19/10/2026).
 const { estaAberta, momentoNoFuso, parseHHMM } = require('./horarioDaLoja');
 // O rodape institucional e o MESMO nas duas lojas — ver o modulo.
@@ -525,9 +529,13 @@ async function fetchVariantesPorProduto(productIds) {
   if (!productIds || productIds.length === 0) return porProduto;
 
   // 23/05/2026: inclui pv.image_url no SELECT (Migration 129).
-  const { rows: variantRows } = await db.query(`
+  // p-85 (427): promocao da variante + preco do produto (base da variante
+  // sem preco proprio). Ver promoNaVitrine abaixo.
+  const { rows: variantRows } = await comColunasPromo((com) => db.query(`
     SELECT pv.id, pv.product_id, pv.sku_suffix,
            pv.price_override, pv.stock_qty, pv.is_active, pv.image_url, pv.image_thumb_url,
+           ${com ? colunasPromo('pv') : colunasPromoNulas()},
+           (SELECT p.price FROM products p WHERE p.id = pv.product_id) AS produto_price,
            COALESCE(
              json_agg(
                json_build_object('attribute', pvv.attribute_name, 'value', pvv.value)
@@ -542,20 +550,47 @@ async function fetchVariantesPorProduto(productIds) {
     ORDER BY
       CAST(NULLIF(regexp_replace(split_part(pv.sku_suffix, '/', 1), '[^0-9]', '', 'g'), '') AS numeric) NULLS LAST,
       pv.sku_suffix ASC
-  `, [productIds]);
+  `, [productIds]));
 
+  const agora = new Date();
   for (const v of variantRows) {
     if (!porProduto[v.product_id]) porProduto[v.product_id] = [];
+    // So a promocao PROPRIA da variante muda o preco dela aqui; a que ela
+    // herda do produto ja chega pelo `price` do produto (variante sem
+    // preco proprio segue p.price no template).
+    const promo = camposDaVariante(v, { price: v.produto_price }, agora);
+    const propria = promo.em_promocao && v.promo_price !== null && v.promo_price !== undefined;
+    const base = v.price_override !== null && v.price_override !== undefined
+      ? parseFloat(v.price_override) : parseFloat(v.produto_price);
     porProduto[v.product_id].push({
       id: v.id, sku_suffix: v.sku_suffix,
-      price_override: v.price_override !== null ? parseFloat(v.price_override) : null,
+      price_override: propria ? promo.preco_efetivo : (v.price_override !== null ? parseFloat(v.price_override) : null),
       stock_qty: parseFloat(v.stock_qty),
       image_url: v.image_url || null,
       thumb_url: v.image_thumb_url || null,
       values: v.values || [],
+      ...(propria ? { preco_de: base, em_promocao: true, promo_ends_at: promo.promo_ends_at } : {}),
     });
   }
   return porProduto;
+}
+
+/**
+ * De/Por na vitrine (p-85, 08/11/2026, migration 427).
+ *
+ * O payload publico e lido so pelo template da loja (src/templates/
+ * storefront), que soma o carrinho com `price` / `price_override`. Por
+ * isso, na vitrine, PECA EM PROMOCAO sai com `price` = preco efetivo (o
+ * que a cliente paga, o mesmo que o pedido cobra no servidor) e ganha
+ * preco_de, em_promocao e promo_ends_at. Sem promocao o payload e
+ * IDENTICO ao de antes (nenhuma chave nova), e o template nao mudou: as
+ * fixtures byte a byte da vitrine seguem iguais. O "De" riscado no
+ * cartao fica para um card proprio (muda o HTML de todas as lojas).
+ */
+function promoNaVitrine(p, mostrarPrecos) {
+  if (!mostrarPrecos) return null;
+  const promo = camposDoProduto(p);
+  return promo.em_promocao ? promo : null;
 }
 
 /** Uma linha de produto no formato do payload publico. */
@@ -564,9 +599,10 @@ function montarProdutoPublico(p, { variantsByProduct, categoryById, primaryLinkB
   const hasVariants = pvariants.length > 0;
   const inStock = hasVariants ? pvariants.some(v => v.stock_qty > 0) : p.stock_qty > 0;
   const cat = categoryById[primaryLinkByProduct[p.id]] || null;
+  const promo = promoNaVitrine(p, mostrarPrecos);
   return {
     id: p.id, name: p.name, description: p.description,
-    price: mostrarPrecos ? parseFloat(p.price) : null,
+    price: promo ? promo.preco_efetivo : (mostrarPrecos ? parseFloat(p.price) : null),
     image_url: p.image_url,
     // Migration 317 — miniatura (ate 640px) pra grade, home e sacola.
     // NULL enquanto o job 001 nao passou; o template cai em image_url.
@@ -598,6 +634,7 @@ function montarProdutoPublico(p, { variantsByProduct, categoryById, primaryLinkB
     // mesma funcao.
     is_new: ehNovo(p.created_at),
     stock_qty: p.stock_qty, in_stock: inStock, variants: pvariants,
+    ...(promo ? { preco_de: parseFloat(p.price), em_promocao: true, promo_ends_at: promo.promo_ends_at } : {}),
   };
 }
 
@@ -610,9 +647,9 @@ function montarProdutoPublico(p, { variantsByProduct, categoryById, primaryLinkB
  */
 async function produtoPublicoPorId({ cid, id, exigeFoto, mostrarPrecos }) {
   if (!/^[0-9a-f-]{36}$/i.test(String(id || ''))) return null;
-  const sql = `
+  const sql = (com) => `
     SELECT id, name, description, price, image_url, image_thumb_url, gallery_urls, category, stock_qty, created_at,
-           material, medidas, cuidados, duration_minutes
+           material, medidas, cuidados, duration_minutes, ${com ? colunasPromo() : colunasPromoNulas()}
     FROM products
     WHERE ${listVisibilityWhere('$1')}
       AND id = $2
@@ -622,7 +659,7 @@ async function produtoPublicoPorId({ cid, id, exigeFoto, mostrarPrecos }) {
       AND ${NA_VITRINE}
     LIMIT 1
   `;
-  const { rows } = await db.query(sql, [cid, id]);
+  const { rows } = await comColunasPromo((com) => db.query(sql(com), [cid, id]));
   if (!rows.length) return null;
   const p = rows[0];
   const [variantsByProduct, primaryLinkByProduct, categorias] = await Promise.all([
@@ -781,9 +818,9 @@ async function fetchStorefrontProducts(cid, featuredIds, _hiddenIds, exigeFoto) 
   if (featuredIds && featuredIds.length > 0) {
     // NA_VITRINE ja diz QUEM aparece; o ANY aqui seria a mesma regra
     // escrita duas vezes. O array segue como ORDEM da curadoria.
-    const sql = `
+    const sql = (com) => `
       SELECT id, name, description, price, image_url, image_thumb_url, gallery_urls, category, stock_qty, created_at,
-             material, medidas, cuidados, duration_minutes
+             material, medidas, cuidados, duration_minutes, ${com ? colunasPromo() : colunasPromoNulas()}
       FROM products
       WHERE ${visibility}
         AND is_active IS NOT FALSE
@@ -793,13 +830,13 @@ async function fetchStorefrontProducts(cid, featuredIds, _hiddenIds, exigeFoto) 
       ORDER BY array_position($2, id::text)
       LIMIT ${LIMITE_DO_PAYLOAD}
     `;
-    const { rows } = await db.query(sql, [cid, featuredIds]);
+    const { rows } = await comColunasPromo((com) => db.query(sql(com), [cid, featuredIds]));
     return rows;
   }
 
-  const sql = `
+  const sql = (com) => `
     SELECT id, name, description, price, image_url, image_thumb_url, gallery_urls, category, stock_qty, created_at,
-           material, medidas, cuidados, duration_minutes
+           material, medidas, cuidados, duration_minutes, ${com ? colunasPromo() : colunasPromoNulas()}
     FROM products
     WHERE ${visibility}
       AND is_active IS NOT FALSE
@@ -809,7 +846,7 @@ async function fetchStorefrontProducts(cid, featuredIds, _hiddenIds, exigeFoto) 
     ORDER BY created_at DESC
     LIMIT ${LIMITE_DO_PAYLOAD}
   `;
-  const { rows } = await db.query(sql, [cid]);
+  const { rows } = await comColunasPromo((com) => db.query(sql(com), [cid]));
   return rows;
 }
 
