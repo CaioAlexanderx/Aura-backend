@@ -72,6 +72,8 @@ const CAMPOS_DE_CUSTO = new Set([
 const CAMPOS_DE_PRECO = new Set([
   'price', 'price_override', 'base_price', 'card_price',
   'avg_price', 'sale_price', 'effective_price',
+  // 08/11/2026 (De/Por, migration 427): o preco de promocao e o que vale agora.
+  'promo_price', 'preco_efetivo', 'preco_de', 'preco_por',
 ]);
 
 function lerPermissoes(raw) {
