@@ -8,6 +8,7 @@ const router = require('express').Router();
 const db     = require('../config/database');
 const { requireAuth } = require('../middleware/auth');
 const crypto = require('crypto');
+const bannerIndicacao = require('../services/bannerIndicacaoTrial');
 
 // 13/10/2026 (decisao do Caio): quem entra por indicacao recebe o mesmo teste
 // do cadastro self-service (Negocio, 7 dias corridos, trial_mode fixo) e 20%
@@ -123,6 +124,15 @@ router.get('/mine', requireAuth, async (req, res) => {
 
     const completed = referrals.filter(r => r.status === 'completed').length;
 
+    // 08/11/2026 (b-mk-30): fase do texto de indicação, a mesma do banner do
+    // sininho. O app troca o texto do cartão (BLACK50 só enquanto há cupom e
+    // até 30/11). Falha aqui não derruba a rota: fica sem o campo.
+    let campanha = null;
+    try {
+      const fase = await bannerIndicacao.faseAtual(db);
+      campanha = { fase };
+    } catch (_) { /* app cai na regra só por data */ }
+
     res.json({
       code: codes[0] || null,
       referrals,
@@ -132,6 +142,7 @@ router.get('/mine', requireAuth, async (req, res) => {
         pending: referrals.filter(r => r.status === 'pending').length,
         savings_count: completed,
       },
+      campanha,
     });
   } catch (err) {
     console.error('my referrals error:', err);
