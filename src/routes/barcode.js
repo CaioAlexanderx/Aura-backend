@@ -15,6 +15,10 @@ const router  = express.Router({ mergeParams: true });
 const pool    = require('../config/database');
 const { requireAuth, requireCompanyAccess, requireRole } = require('../middleware/auth');
 const { validateBarcode } = require('../services/barcode');
+// p-85 (08/11/2026, migration 427): De/Por no lookup por codigo.
+const {
+  camposDoProduto, camposDaVariante, colunasPromo, colunasPromoNulas, comColunasPromo,
+} = require('../services/precoEfetivo');
 
 // POST /companies/:id/products/:pid/barcode
 // Vincula ou atualiza o código de barras/QR de um produto
@@ -114,12 +118,15 @@ router.get(
   async (req, res) => {
     const { id: company_id, code } = req.params;
     try {
-      const result = await pool.query(
+      const result = await comColunasPromo((com) => pool.query(
         `SELECT p.id, p.name, p.description, p.price, p.cost_price,
                 p.stock_qty, p.barcode, p.barcode_format, p.category,
                 p.sku, p.is_active,
                 pv.id         AS matched_variant_id,
-                pv.sku_suffix AS matched_variant_sku
+                pv.sku_suffix AS matched_variant_sku,
+                pv.price_override AS mv_price_override,
+                ${com ? colunasPromo('p') : colunasPromoNulas()},
+                ${com ? colunasPromo('pv', 'mv_') : colunasPromoNulas('mv_')}
          FROM products p
          LEFT JOIN product_variants pv
                 ON pv.product_id = p.id
@@ -131,13 +138,26 @@ router.get(
          ORDER BY (p.barcode = $2) DESC NULLS LAST
          LIMIT 1`,
         [company_id, code]
-      );
+      ));
 
       if (result.rows.length === 0) {
         return res.status(404).json({ error: 'Produto não encontrado para este código' });
       }
 
-      res.json({ product: result.rows[0] });
+      // 427: os campos De/Por do produto e, quando o codigo e de uma
+      // variante, o preco que vale agora para ela (matched_variant_*).
+      const { mv_price_override, mv_promo_price, mv_promo_starts_at, mv_promo_ends_at, ...row } = result.rows[0];
+      const agora = new Date();
+      const product = { ...row, ...camposDoProduto(row, agora) };
+      if (row.matched_variant_id) {
+        const v = camposDaVariante({
+          price_override: mv_price_override,
+          promo_price: mv_promo_price, promo_starts_at: mv_promo_starts_at, promo_ends_at: mv_promo_ends_at,
+        }, row, agora);
+        product.matched_variant_em_promocao = v.em_promocao;
+        product.matched_variant_preco_efetivo = v.preco_efetivo;
+      }
+      res.json({ product });
     } catch (err) {
       console.error('barcode lookup error:', err);
       res.status(500).json({ error: 'Erro na busca' });

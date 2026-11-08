@@ -51,6 +51,9 @@ describe('GET /products/variants (lote)', () => {
       barcode: '2100000000015', color_name: 'Azul',
       attributes: [{ attribute: 'Cor', value: '#3B82F6' }, { attribute: 'Tamanho', value: 'M' }],
       color: '#3B82F6', size: 'M', price: 59.9, is_active: true,
+      // 08/11/2026 (De/Por, 427): os unicos campos novos; sem promocao,
+      // preco_efetivo e o preco proprio da variante.
+      promo_price: null, promo_starts_at: null, promo_ends_at: null, em_promocao: false, preco_efetivo: 59.9,
     }]);
   });
 

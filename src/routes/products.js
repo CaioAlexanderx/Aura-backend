@@ -57,6 +57,12 @@ const { avancarSemEsperar } = require('../services/onboardingProgress');
 const { avisoDeNcm } = require('../services/ncmTable');
 // 24/10/2026: exclusao confirmada nunca e negada (anula historico ou arquiva).
 const { excluirProdutoComHistorico } = require('../services/excluirProduto');
+// p-84 (08/11/2026, migration 427): De/Por. Campos novos em toda resposta de
+// produto e variante: promo_price, promo_starts_at, promo_ends_at,
+// em_promocao, preco_efetivo. `price` segue sendo o preco normal ("De").
+const {
+  camposDoProduto, camposDaVariante, colunasPromo, colunasPromoNulas, comColunasPromo,
+} = require('../services/precoEfetivo');
 
 // ─── Fase 1 fornecedores (16/09/2026) ────────────────────────
 //
@@ -241,7 +247,9 @@ router.get('/', async (req, res) => {
     // Migration 305 — ficha tecnica. Tentar-e-cair em vez de consultar o
     // information_schema: uma query a mais desloca a sequencia de mocks
     // dos testes de integracao, e no caminho feliz ela e pura perda.
-    const dataP = comFallbackDeFicha((colsFicha, colDuracao, colsMatcon, colCartao) => db.query(
+    // 427 (De/Por): as colunas promo_* entram por fora da escada da ficha;
+    // base sem a 427 cai para NULL e memoriza por 5 min (precoEfetivo.js).
+    const dataP = comColunasPromo((comPromo) => comFallbackDeFicha((colsFicha, colDuracao, colsMatcon, colCartao) => db.query(
       `SELECT id, name, sku, barcode, category, description, price, cost_price,
               stock_qty, stock_min, stock_max, unit, color, size, image_url, ncm,
               -- brand (migration 261) e mais antiga que a 305/342/350 acima,
@@ -251,6 +259,7 @@ router.get('/', async (req, res) => {
               ${colCartao}
               ${colsFicha}
               ${colDuracao}
+              ${comPromo ? colunasPromo() : colunasPromoNulas()},
               is_active, is_group_shared, company_id, created_at,
               supplier_id,
               -- Fase 1 fornecedores: objeto pronto em vez de 3 colunas soltas --
@@ -278,8 +287,9 @@ router.get('/', async (req, res) => {
               ) AS variant_barcodes
        FROM products ${where} ORDER BY name ASC LIMIT $${params.length + 1} OFFSET $${params.length + 2}`,
       [...params, limit, offset]
-    ));
+    )));
     const [countRes, dataRes] = await Promise.all([countP, dataP]);
+    const agora = new Date();
 
     const products = dataRes.rows.map(r => ({
       id: r.id, name: r.name || '', sku: r.sku || '', barcode: r.barcode || '',
@@ -323,6 +333,8 @@ router.get('/', async (req, res) => {
       // 19/05/2026: novos campos pra UI lidar com variants
       variants_stock_total: parseInt(r.variants_stock_total) || 0,
       variant_barcodes: Array.isArray(r.variant_barcodes) ? r.variant_barcodes : [],
+      // 427 (De/Por): sem promocao, promo_* nulos e preco_efetivo = price.
+      ...camposDoProduto(r, agora),
     }));
 
     res.json({ products, total: parseInt(countRes.rows[0]?.total) || 0, limit, offset, plan_limit: planLimit });
@@ -335,6 +347,22 @@ router.get('/', async (req, res) => {
 // p-73). As colunas vivem aqui para as duas nunca divergirem.
 const VARIANT_COLS = `pv.id, pv.sku_suffix, pv.price_override, pv.stock_qty, pv.barcode, pv.color_name,
         COALESCE(json_agg(json_build_object('attribute', pvv.attribute_name, 'value', pvv.value) ORDER BY pvv.attribute_name) FILTER (WHERE pvv.id IS NOT NULL), '[]'::json) AS attributes`;
+// 427 (De/Por): promocao da variante e, para herdar, preco e promocao do
+// produto (prefixo produto_). Saem da resposta por promoDaVarianteDaLinha.
+const variantPromoCols = (comPromo) => (comPromo
+  ? `${colunasPromo('pv')}, p.price AS produto_price, ${colunasPromo('p', 'produto_')}`
+  : `${colunasPromoNulas()}, p.price AS produto_price, ${colunasPromoNulas('produto_')}`);
+
+/** Campos De/Por da variante a partir da linha (com as colunas produto_*). */
+function promoDaVarianteDaLinha(row, agora) {
+  const produto = {
+    price: row.produto_price,
+    promo_price: row.produto_promo_price,
+    promo_starts_at: row.produto_promo_starts_at,
+    promo_ends_at: row.produto_promo_ends_at,
+  };
+  return camposDaVariante(row, produto, agora);
+}
 
 // Mesma leitura de tamanho e cor que a tela de etiquetas faz em cima de
 // `attributes` (variantSizeColor, components/PrintLabels.tsx).
@@ -368,7 +396,7 @@ function variantSizeColor(attrs) {
 // Variante do lote: os campos do GET /:pid/variants, mais product_id,
 // is_active (sempre true: só sai variante ativa), color e size lidos de
 // `attributes` e price (o preço próprio em número, ou null).
-function serializeBatchVariant(row) {
+function serializeBatchVariant(row, agora = new Date()) {
   const { size, color } = variantSizeColor(row.attributes);
   const own = row.price_override === null || row.price_override === undefined
     ? null : parseFloat(row.price_override);
@@ -385,6 +413,7 @@ function serializeBatchVariant(row) {
     size: size || null,
     price: Number.isFinite(own) ? own : null,
     is_active: true,
+    ...promoDaVarianteDaLinha(row, agora),
   };
 }
 
@@ -417,19 +446,20 @@ router.get('/variants', async (req, res) => {
   const validIds = ids.filter((id) => UUID_RE.test(id));
   if (!validIds.length) return res.json({ variants_by_product: {} });
   try {
-    const { rows } = await db.query(`
-      SELECT p.id AS visible_product_id, pv.product_id, ${VARIANT_COLS}
+    const { rows } = await comColunasPromo((comPromo) => db.query(`
+      SELECT p.id AS visible_product_id, pv.product_id, ${VARIANT_COLS}, ${variantPromoCols(comPromo)}
       FROM products p
       LEFT JOIN product_variants pv ON pv.product_id = p.id AND pv.is_active = true
       LEFT JOIN product_variant_values pvv ON pvv.variant_id = pv.id
       WHERE p.id = ANY($2::uuid[]) AND ${listVisibilityWhere('$1', 'p.')}
       GROUP BY p.id, pv.id
-      ORDER BY pv.created_at ASC`, [companyId, validIds]);
+      ORDER BY pv.created_at ASC`, [companyId, validIds]));
+    const agora = new Date();
     const out = {};
     for (const r of rows) {
       const pid = r.visible_product_id;
       if (!out[pid]) out[pid] = [];
-      if (r.id) out[pid].push(serializeBatchVariant(r));
+      if (r.id) out[pid].push(serializeBatchVariant(r, agora));
     }
     res.json({ variants_by_product: out });
   } catch (err) { console.error('[products] variants batch error:', err.message); res.status(500).json({ error: 'Erro ao buscar variantes' }); }
@@ -446,12 +476,19 @@ router.get('/:pid/variants', async (req, res) => {
       [productId, companyId]
     );
     if (!check.length) return res.status(404).json({ error: 'Produto nao encontrado' });
-    const { rows } = await db.query(`
-      SELECT ${VARIANT_COLS}
+    const { rows } = await comColunasPromo((comPromo) => db.query(`
+      SELECT ${VARIANT_COLS}, ${variantPromoCols(comPromo)}
       FROM product_variants pv LEFT JOIN product_variant_values pvv ON pvv.variant_id = pv.id
+      JOIN products p ON p.id = pv.product_id
       WHERE pv.product_id = $1 AND pv.is_active = true
-      GROUP BY pv.id, pv.sku_suffix, pv.price_override, pv.stock_qty, pv.barcode, pv.color_name ORDER BY pv.created_at ASC`, [productId]);
-    res.json({ variants: rows });
+      GROUP BY pv.id, pv.sku_suffix, pv.price_override, pv.stock_qty, pv.barcode, pv.color_name, p.id ORDER BY pv.created_at ASC`, [productId]));
+    // 427 (De/Por): os campos de sempre, como vinham, mais os da promocao.
+    const agora = new Date();
+    const variants = rows.map((r) => {
+      const { produto_price, produto_promo_price, produto_promo_starts_at, produto_promo_ends_at, ...v } = r;
+      return { ...v, ...promoDaVarianteDaLinha(r, agora) };
+    });
+    res.json({ variants });
   } catch (err) { console.error('[products] variants error:', err.message); res.status(500).json({ error: 'Erro ao buscar variantes' }); }
 });
 
@@ -704,7 +741,7 @@ router.post('/', async (req, res) => {
     avancarSemEsperar(cid, 'produto');
     // t3-05: aviso de NCM (sem bloquear). O campo so aparece quando ha o que avisar.
     const ncmAviso = avisoDeNcm(ncm);
-    res.status(201).json({ ...result.rows[0], card_price: cardPriceOut(result.rows[0].card_price), supplier: supplierOut, merge_suggestion, ...(ncmAviso ? { ncm_aviso: ncmAviso } : {}) });
+    res.status(201).json({ ...result.rows[0], card_price: cardPriceOut(result.rows[0].card_price), supplier: supplierOut, merge_suggestion, ...camposDoProduto(result.rows[0]), ...(ncmAviso ? { ncm_aviso: ncmAviso } : {}) });
   } catch (err) { console.error('[products] create error:', err.message); res.status(500).json({ error: 'Erro ao criar produto' }); }
 });
 
@@ -917,7 +954,9 @@ router.patch('/:pid', async (req, res) => {
       : null;
     // t3-05: so quando o PATCH mexeu no NCM; sem o campo no body a resposta e a mesma de antes.
     const ncmAviso = req.body.ncm !== undefined ? avisoDeNcm(req.body.ncm) : null;
-    res.json({ ...row, card_price: cardPriceOut(row.card_price), supplier: supplierOut, ...(ncmAviso ? { ncm_aviso: ncmAviso } : {}) });
+    // 427 (De/Por): RETURNING * ja traz promo_* (base com a 427); em_promocao
+    // e preco_efetivo saem pela mesma regra da listagem.
+    res.json({ ...row, card_price: cardPriceOut(row.card_price), supplier: supplierOut, ...camposDoProduto(row), ...(ncmAviso ? { ncm_aviso: ncmAviso } : {}) });
   } catch (err) { console.error('[products] update error:', err.message); res.status(500).json({ error: 'Erro ao atualizar produto' }); }
 });
 
