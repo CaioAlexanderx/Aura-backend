@@ -27,6 +27,26 @@ const { getEndpoints } = require('./endpoints');
 const { decryptString } = require('../../utils/secretCrypto');
 
 const { isoBR: soapIsoNow, ufToCodigo } = require('./nfeHelpers');
+const { loadRespTec } = require('./respTec');
+
+/**
+ * 08/11/2026 (MG): os endpoints saem de nfce_config.uf, mas o cUF da chave e
+ * a <UF> do emitente saem de companies.address_state. Se as duas divergirem
+ * a nota iria com chave de uma UF para a SEFAZ de outra (rejeição certa).
+ *  - as duas preenchidas e iguais (SP/SP, AP/AP...) → company intocada;
+ *  - endereço sem UF → usa a UF da config (para SP o XML é o mesmo de
+ *    antes: o builder já tratava UF vazia como SP);
+ *  - divergentes → erro claro, antes de abrir certificado ou numerar.
+ */
+function companyComUfDaConfig(company, config) {
+  const ufCfg = String(config.uf || '').toUpperCase().trim();
+  const ufEnd = String(company.address_state || '').toUpperCase().trim();
+  if (ufCfg && ufEnd && ufCfg !== ufEnd) {
+    throw new Error(`A UF da configuração da nota (${ufCfg}) é diferente da UF do endereço da empresa (${ufEnd}). Ajuste uma das duas antes de emitir.`);
+  }
+  if (!ufEnd && ufCfg) return { ...company, address_state: ufCfg };
+  return company;
+}
 
 function totalParaQr(nfceData) {
   if (nfceData.total_value !== undefined) return Number(nfceData.total_value);
@@ -56,8 +76,12 @@ async function emitNfce(company, nfceData, ctx) {
   if (!db || !config) throw new Error('sefazSp.emitNfce: ctx {db, config} obrigatório');
   const tpAmb = resolveTpAmb(config);
   const endpoints = getEndpoints(config.uf || 'SP', tpAmb);
+  company = companyComUfDaConfig(company, config);
   const cscToken = resolveCscToken(config);
   if (!config.csc_id) throw new Error('CSC ID não configurado (nfce_config.csc_id).');
+  // infRespTec só em UF que pede (flag no endpoint — hoje MG) e só com os
+  // dados da Aura configurados (respTec.js). SP/AP: null → XML de sempre.
+  const respTec = endpoints.infRespTec ? loadRespTec() : null;
 
   // Certificado A1: decifrado e aberto SÓ em memória
   const { pfx, password } = await loadCertificate(db, company.id);
@@ -65,7 +89,7 @@ async function emitNfce(company, nfceData, ctx) {
   assertValidity(cert);
 
   // 1. monta + 2. assina + 3. QR + 4. compõe
-  const built = buildInfNfe(company, nfceData, { tpAmb, tpEmis: 1 });
+  const built = buildInfNfe(company, nfceData, { tpAmb, tpEmis: 1, respTec });
   const { signatureXml } = signInfNfe(built.infNfeXml, {
     keyPem: cert.keyPem, certDerBase64: cert.certDerBase64,
   });
@@ -86,7 +110,7 @@ async function emitNfce(company, nfceData, ctx) {
   function emitContingency() {
     const dhCont = soapIsoNow();
     const builtC = buildInfNfe(company, nfceData, {
-      tpAmb, tpEmis: 9, dhCont, xJust: contingency.XJUST_DEFAULT,
+      tpAmb, tpEmis: 9, dhCont, xJust: contingency.XJUST_DEFAULT, respTec,
     });
     const sigC = signInfNfe(builtC.infNfeXml, {
       keyPem: cert.keyPem, certDerBase64: cert.certDerBase64,
@@ -261,5 +285,5 @@ async function inutilizarFaixa({ db, config, companyId, cnpj, serie, nIni, nFin,
 
 module.exports = {
   emitNfce, queryNfce, statusServico, cancelNfce, inutilizarFaixa,
-  resolveTpAmb, resolveCscToken,
+  resolveTpAmb, resolveCscToken, companyComUfDaConfig,
 };

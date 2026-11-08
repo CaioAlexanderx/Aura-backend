@@ -16,7 +16,20 @@ const UF_CUF = {
   PR: 41, SC: 42, RS: 43,
   MS: 50, MT: 51, GO: 52, DF: 53,
 };
-function ufToCodigo(uf) { return UF_CUF[(uf || '').toUpperCase().trim()] || 35; }
+// 08/11/2026 (MG): antes QUALQUER texto desconhecido virava 35 (SP) em
+// silêncio — uma UF digitada errado gerava chave e cUF de SP e só
+// estourava na SEFAZ. Agora:
+//   - vazio/nulo  → 35, como sempre (a engine inteira trata "sem UF" como SP:
+//                   config.uf || 'SP', <UF> do emitente || 'SP');
+//   - sigla válida → o código IBGE (MG = 31, AP = 16, SP = 35...);
+//   - qualquer outro texto → erro claro (nunca mais vira SP por engano).
+function ufToCodigo(uf) {
+  const key = String(uf == null ? '' : uf).toUpperCase().trim();
+  if (!key) return 35;
+  const cuf = UF_CUF[key];
+  if (!cuf) throw new Error(`UF inválida: "${uf}". Use a sigla do estado (ex.: SP, MG).`);
+  return cuf;
+}
 
 function isoBR(d = new Date()) {
   const local = new Date(d.getTime() - 3 * 60 * 60 * 1000);

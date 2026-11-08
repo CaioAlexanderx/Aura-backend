@@ -88,13 +88,17 @@ describe('validateCscToken', () => {
   });
   test('UUID com hífens (formato SEFAZ-SP) ok, preservado exato', () => {
     expect(g.validateCscToken(okUuid)).toEqual({ ok: true, value: okUuid });
-    expect(g.validateCscToken('x'.repeat(19)).ok).toBe(false);
+    expect(g.validateCscToken('x'.repeat(15)).ok).toBe(false);
     expect(g.validateCscToken('x'.repeat(45)).ok).toBe(false);
     expect(g.validateCscToken('82adf14f_9d3b').ok).toBe(false);
   });
   test('35 ou 37 falha', () => {
     expect(g.validateCscToken(ok36.slice(0, 15)).ok).toBe(false);
     expect(g.validateCscToken((ok36 + ok36).slice(0, 45)).ok).toBe(false);
+  });
+  test('MG: CSC de 16 caracteres (mínimo do leiaute) ok', () => {
+    expect(g.validateCscToken('A1B2C3D4E5F6G7H8')).toEqual({ ok: true, value: 'A1B2C3D4E5F6G7H8' });
+    expect(g.validateCscToken('x'.repeat(19)).ok).toBe(true);
   });
   test('com símbolo falha', () => {
     expect(g.validateCscToken('A1B2C3D4E5F6G7H8I9J0K1L2M3N4O5P6Q7R*').ok).toBe(false);

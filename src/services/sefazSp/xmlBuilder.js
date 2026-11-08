@@ -393,6 +393,22 @@ function buildInfAdicXml({ observacoes, infAdFisco }) {
     + '</infAdic>';
 }
 
+/**
+ * Grupo ZD — Responsável Técnico (NT 2018.005). Vem logo após infAdic na
+ * ordem do XSD (infAdic, exporta, compra, cana, infRespTec) — a engine não
+ * emite exporta/compra/cana. Sem idCSRT/hashCSRT. Só é chamado quando o
+ * emissor passa opts.respTec (UF com a flag infRespTec, ver endpoints.js).
+ */
+function buildInfRespTecXml(respTec) {
+  if (!respTec) return '';
+  return '<infRespTec>'
+    + tag('CNPJ', onlyDigits(respTec.cnpj))
+    + tag('xContato', txt(respTec.xContato, 60))
+    + tag('email', String(respTec.email || '').trim().slice(0, 60))
+    + tag('fone', onlyDigits(respTec.fone).slice(0, 14))
+    + '</infRespTec>';
+}
+
 // ---------- API principal ----------
 
 /**
@@ -402,7 +418,9 @@ function buildInfAdicXml({ observacoes, infAdFisco }) {
  *                     recipient_cpf?, recipient_cnpj?, recipient_name?,
  *                     observacoes?, natureza_operacao? }
  * @param opts     — { tpAmb: 1|2, tpEmis: 1|9, cNF?, dhEmi?,
- *                     dhCont?, xJust? (contingência), verProc? }
+ *                     dhCont?, xJust? (contingência), verProc?,
+ *                     respTec? {cnpj,xContato,email,fone} — infRespTec, só
+ *                     quando a UF pede (MG); ausente = XML de sempre }
  * @returns { infNfeXml, chave, cNF, dhEmi, tpAmb, tpEmis }
  */
 function buildInfNfe(company, nfceData, opts = {}) {
@@ -458,6 +476,7 @@ function buildInfNfe(company, nfceData, opts = {}) {
     + '<transp>' + tag('modFrete', '9') + '</transp>'
     + buildPagXml(nfceData.payments, totalValue)
     + buildInfAdicXml({ observacoes: nfceData.observacoes, infAdFisco: nfceData.infAdFisco })
+    + buildInfRespTecXml(opts.respTec)
     + '</infNFe>';
 
   return { infNfeXml, chave, cNF, dhEmi, tpAmb, tpEmis };
@@ -482,7 +501,7 @@ module.exports = {
   // exporta blocos p/ teste unitário
   buildIdeXml, buildEmitXml, buildDestXml, buildDetXml, buildTotalXml, buildPisCofinsXml,
   buildIbsCbsItemXml, buildIbsCbsTotXml, fmtPct, itemIbsBase,
-  buildPagXml, buildInfAdicXml,
+  buildPagXml, buildInfAdicXml, buildInfRespTecXml,
   esc, fmt2, fmtQty, fmtUnit,
   XML_HEADER, NFE_NS, HOMOLOG_DEST_XNOME,
 };
