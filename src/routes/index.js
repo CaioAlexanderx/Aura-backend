@@ -39,6 +39,7 @@ router.use('/me', require('./customerConsent').meRouter);
 router.use('/me', require('./customerProfile').meRouter);
 router.use('/me/financeiro', require('./financeiroInsights').meRouter);
 router.use('/me/financeiro', require('./financeiroComparative').meRouter);
+router.use('/me/financeiro', require('./resultadoDoPeriodo').meRouter);
 
 // Telas visitadas: o app envia em lotes (POST /usage/screens) e o painel da
 // Gestão Aura lê em screen_views. Empresa e usuário vêm do token.
