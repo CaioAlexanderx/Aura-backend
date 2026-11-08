@@ -101,6 +101,25 @@ d('Validação XSD oficial (PL_010c, leiaute 4.00)', () => {
     expect(r.valid).toBe(true);
   });
 
+  test('08/11/2026 MG: com infRespTec (após infAdic) e QR/urlChave de MG: valida', () => {
+    const companyMg = { ...companyDavi, address_state: 'MG', ibge_code: '3122306', address_city: 'Divinopolis', tax_regime: 'mei' };
+    const respTec = { cnpj: '11444777000161', xContato: 'Equipe Teste', email: 'teste@exemplo.com.br', fone: '11999990000' };
+    const built = xb.buildInfNfe(companyMg, { ...nfceDataVendaTipica, observacoes: 'obs' }, { tpAmb: 2, respTec });
+    expect(built.infNfeXml).toContain('<infRespTec>');
+    const { signatureXml } = signInfNfe(built.infNfeXml, cert);
+    const qr = buildQrCodeUrl({
+      chave: built.chave, tpAmb: 2, cscId: '1', cscToken: 'A1B2C3D4E5F6G7H8',
+      qrCodeBase: 'https://portalsped.fazenda.mg.gov.br/portalnfce/sistema/qrcode.xhtml',
+    });
+    const r = validate(xb.composeNfe({
+      signedInfNfeXml: built.infNfeXml,
+      infNfeSuplXml: buildInfNfeSupl({ qrCodeUrl: qr, urlConsulta: 'https://hportalsped.fazenda.mg.gov.br/portalnfce' }),
+      signatureXml,
+    }));
+    expect(r.errors).toBe('');
+    expect(r.valid).toBe(true);
+  });
+
   test('quantidade fracionada e cartão: valida', () => {
     const r = validate(buildNfe({
       items: [{ name: 'Meia', ncm: '61159500', quantity: 1.5, price: 9.99 }],

@@ -23,7 +23,7 @@
 
 const { SignedXml } = require('xml-crypto');
 const { XMLParser } = require('fast-xml-parser');
-const { soapEnvelope, postSoap, SefazTransportError } = require('./soapClient');
+const { soapEnvelope, postSoap, SefazTransportError, withSoapAction } = require('./soapClient');
 const { WSDL_NS } = require('./endpoints');
 const { C14N, ENVELOPED, RSA_SHA1, SHA1 } = require('./signer');
 const { isoBR } = require('./nfeHelpers');
@@ -80,16 +80,16 @@ async function callSoap(url, wsdlNs, innerXml, retKey, opts) {
   try {
     resp = await postSoap(url, soapEnvelope(wsdlNs, innerXml), opts);
   } catch (err) {
-    throw new SefazTransportError(`SEFAZ-SP inacessível (${err.message})`, { cause: err });
+    throw new SefazTransportError(`SEFAZ inacessível (${err.message})`, { cause: err });
   }
   if (resp.status !== 200) {
-    throw new SefazTransportError(`SEFAZ-SP HTTP ${resp.status}`, { httpStatus: resp.status });
+    throw new SefazTransportError(`SEFAZ HTTP ${resp.status}`, { httpStatus: resp.status });
   }
   let parsed;
   try { parsed = parser.parse(resp.body); }
-  catch (err) { throw new SefazTransportError('Resposta SEFAZ-SP não é XML válido', { cause: err }); }
+  catch (err) { throw new SefazTransportError('Resposta da SEFAZ não é XML válido', { cause: err }); }
   const ret = findDeep(parsed, retKey);
-  if (!ret) throw new SefazTransportError(`Resposta SEFAZ-SP sem ${retKey}`);
+  if (!ret) throw new SefazTransportError(`Resposta da SEFAZ sem ${retKey}`);
   return { ret, rawXml: resp.body };
 }
 
@@ -142,7 +142,8 @@ async function cancelarNfce({ chave, cnpj, tpAmb, cOrgao, protocolo, justificati
     + `<idLote>${Date.now()}</idLote>${eventoXml}</envEvento>`;
 
   const { ret, rawXml } = await callSoap(
-    endpoints.recepcaoEvento, WSDL_NS.recepcaoEvento, inner, 'retEnvEvento', opts
+    endpoints.recepcaoEvento, WSDL_NS.recepcaoEvento, inner, 'retEnvEvento',
+    withSoapAction(opts, endpoints, 'recepcaoEvento')
   );
   const retEvento = ret.retEvento ? (Array.isArray(ret.retEvento) ? ret.retEvento[0] : ret.retEvento) : null;
   const infEvento = retEvento ? retEvento.infEvento : null;
@@ -207,7 +208,8 @@ async function inutilizar({ tpAmb, cUF, ano2, cnpj, serie, nIni, nFin, justifica
   const inner = `<inutNFe xmlns="${NFE_NS}" versao="4.00">${infInutXml}${signatureXml}</inutNFe>`;
 
   const { ret, rawXml } = await callSoap(
-    endpoints.inutilizacao, WSDL_NS.inutilizacao, inner, 'retInutNFe', opts
+    endpoints.inutilizacao, WSDL_NS.inutilizacao, inner, 'retInutNFe',
+    withSoapAction(opts, endpoints, 'inutilizacao')
   );
   const infInut = ret.infInut || null;
   const cStat = infInut ? String(infInut.cStat ?? '') : String(ret.cStat ?? '');

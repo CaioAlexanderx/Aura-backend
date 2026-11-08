@@ -121,10 +121,14 @@ function paymentLabel(m) {
 }
 
 // URL pública de consulta NFC-e por UF
+// 08/11/2026: MG e RJ alinhados com a urlChave oficial (consulta por chave):
+// MG = Portal SPED MG "Web Services" (produção) e ACBr [NFCe_MG_P];
+// RJ = ACBr [NFCe_RJ_P] URL-ConsultaNFCe_2.00. Os hosts antigos não eram
+// o portal de consulta (nfce.fazenda.mg.gov.br é o dos webservices).
 const CONSULTA_NFCE_URL = {
   SP: 'https://www.nfce.fazenda.sp.gov.br/NFCeConsultaPublica',
-  RJ: 'https://www4.fazenda.rj.gov.br/consultaNFCe/',
-  MG: 'https://nfce.fazenda.mg.gov.br/portalnfce',
+  RJ: 'https://www.fazenda.rj.gov.br/nfce/consulta',
+  MG: 'https://portalsped.fazenda.mg.gov.br/portalnfce',
   RS: 'https://www.sefaz.rs.gov.br/NFCE/NFCE-COM.aspx',
   PR: 'http://www.fazenda.pr.gov.br/nfce',
   SC: 'https://sat.sef.sc.gov.br/nfce/consulta',

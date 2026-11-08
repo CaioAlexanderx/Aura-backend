@@ -55,7 +55,9 @@ function snapshot(tpAmb) {
 
 function reset() { _state.clear(); }
 
-const XJUST_DEFAULT = 'Falha de comunicacao com o autorizador SEFAZ-SP detectada pelo emissor';
+// 08/11/2026 (MG): texto neutro — vai no <xJust> da nota em contingência de
+// QUALQUER UF (antes dizia "SEFAZ-SP" até em nota de AP). 15 a 256 caracteres.
+const XJUST_DEFAULT = 'Falha de comunicacao com o autorizador da SEFAZ detectada pelo emissor';
 
 module.exports = {
   recordFailure, recordSuccess, isLikelyOffline, snapshot, reset,

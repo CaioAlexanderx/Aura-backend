@@ -109,12 +109,14 @@ function validateCscId(v) {
 
 /** Valida o CSC token. A SEFAZ-SP emite em formato UUID COM hífens
  * (ex.: 82adf14f-9d3b-4320-be1f-b4101554c4c9 — 36 chars) — caso real do
- * cutover Davi 16/07; outras UFs variam. Aceita 20–44 chars alfanum/hífen
- * e preserva o valor EXATO (os hífens entram no hash do QR Code). */
+ * cutover Davi 16/07; outras UFs variam. Aceita 16–44 chars alfanum/hífen
+ * e preserva o valor EXATO (os hífens entram no hash do QR Code).
+ * 08/11/2026 (MG): mínimo 20 → 16 — o leiaute admite CSC de 16 a 36
+ * caracteres e a SEFAZ-MG pode gerar um curto; 20 recusava CSC válido. */
 function validateCscToken(v) {
   const s = String(v == null ? '' : v).trim();
-  if (!/^[A-Za-z0-9-]{20,44}$/.test(s)) {
-    return { ok: false, error: 'csc_token inválido (20–44 caracteres alfanuméricos ou hífen, exatamente como emitido pela SEFAZ)' };
+  if (!/^[A-Za-z0-9-]{16,44}$/.test(s)) {
+    return { ok: false, error: 'csc_token inválido (16–44 caracteres alfanuméricos ou hífen, exatamente como emitido pela SEFAZ)' };
   }
   return { ok: true, value: s };
 }

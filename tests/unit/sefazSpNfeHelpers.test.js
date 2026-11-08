@@ -27,6 +27,15 @@ describe('sefazSp/nfeHelpers', () => {
     expect(helpers.ufToCodigo(undefined)).toBe(35);
   });
 
+  test('ufToCodigo: MG = 31; texto desconhecido lança (não vira SP calado)', () => {
+    expect(helpers.ufToCodigo('MG')).toBe(31);
+    expect(helpers.ufToCodigo(' mg ')).toBe(31);
+    expect(helpers.ufToCodigo('')).toBe(35);
+    expect(helpers.ufToCodigo(null)).toBe(35);
+    expect(() => helpers.ufToCodigo('XX')).toThrow(/UF inválida/);
+    expect(() => helpers.ufToCodigo('Minas Gerais')).toThrow(/UF inválida/);
+  });
+
   test('isoBR: horário de Brasília com offset -03:00', () => {
     expect(helpers.isoBR(new Date('2026-10-03T15:30:45.123Z'))).toBe('2026-10-03T12:30:45-03:00');
   });

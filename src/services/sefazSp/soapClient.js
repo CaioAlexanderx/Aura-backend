@@ -17,7 +17,7 @@
 
 const https = require('https');
 const { XMLParser } = require('fast-xml-parser');
-const { getEndpoints, WSDL_NS } = require('./endpoints');
+const { getEndpoints, WSDL_NS, soapActionFor } = require('./endpoints');
 
 const SOAP_NS = 'http://www.w3.org/2003/05/soap-envelope';
 const NFE_NS = 'http://www.portalfiscal.inf.br/nfe';
@@ -98,12 +98,22 @@ function caBundle() {
   return _caBundle;
 }
 
-/** POST SOAP 1.2 com mTLS. Injetável p/ testes via opts.transport. */
-function postSoap(url, envelope, { pfx, passphrase, timeoutMs = DEFAULT_TIMEOUT_MS, transport } = {}) {
-  if (transport) return transport(url, envelope);
+/**
+ * POST SOAP 1.2 com mTLS. Injetável p/ testes via opts.transport.
+ * opts.soapAction (08/11/2026, MG): quando vem, vai no header SOAPAction
+ * (formato do ACBr) e o transport injetado recebe { soapAction } como 3º
+ * argumento. Sem soapAction (SP/AP) a requisição é exatamente a de antes.
+ */
+function postSoap(url, envelope, { pfx, passphrase, timeoutMs = DEFAULT_TIMEOUT_MS, transport, soapAction } = {}) {
+  if (transport) return soapAction ? transport(url, envelope, { soapAction }) : transport(url, envelope);
   return new Promise((resolve, reject) => {
     const u = new URL(url);
     const body = Buffer.from(envelope, 'utf8');
+    const headers = {
+      'Content-Type': 'application/soap+xml; charset=utf-8',
+      'Content-Length': body.length,
+    };
+    if (soapAction) headers.SOAPAction = `"${soapAction}"`;
     const req = https.request({
       host: u.hostname,
       port: u.port || 443,
@@ -111,10 +121,7 @@ function postSoap(url, envelope, { pfx, passphrase, timeoutMs = DEFAULT_TIMEOUT_
       method: 'POST',
       ca: caBundle(),
       ...tlsMaterial(pfx, passphrase),
-      headers: {
-        'Content-Type': 'application/soap+xml; charset=utf-8',
-        'Content-Length': body.length,
-      },
+      headers,
       timeout: timeoutMs,
     }, (res) => {
       const chunks = [];
@@ -151,14 +158,14 @@ async function callService(url, wsdlNs, innerXml, retKey, opts, { ambiguousOnNet
     resp = await postSoap(url, envelope, opts);
   } catch (err) {
     throw new SefazTransportError(
-      `SEFAZ-SP inacessível (${err.message})`,
+      `SEFAZ inacessível (${err.message})`,
       { ambiguous: ambiguousOnNetError, cause: err }
     );
   }
   if (resp.status !== 200) {
     // HTML de proxy/erro 500: nunca tentar parsear como autorização
     throw new SefazTransportError(
-      `SEFAZ-SP HTTP ${resp.status}`,
+      `SEFAZ HTTP ${resp.status}`,
       { ambiguous: ambiguousOnNetError, httpStatus: resp.status }
     );
   }
@@ -166,11 +173,11 @@ async function callService(url, wsdlNs, innerXml, retKey, opts, { ambiguousOnNet
   try {
     parsed = parser.parse(resp.body);
   } catch (err) {
-    throw new SefazTransportError('Resposta SEFAZ-SP não é XML válido', { ambiguous: ambiguousOnNetError, cause: err });
+    throw new SefazTransportError('Resposta da SEFAZ não é XML válido', { ambiguous: ambiguousOnNetError, cause: err });
   }
   const ret = findDeep(parsed, retKey);
   if (!ret) {
-    throw new SefazTransportError(`Resposta SEFAZ-SP sem ${retKey}`, { ambiguous: ambiguousOnNetError });
+    throw new SefazTransportError(`Resposta da SEFAZ sem ${retKey}`, { ambiguous: ambiguousOnNetError });
   }
   return { ret, rawXml: resp.body };
 }
@@ -184,6 +191,13 @@ async function withRetry(fn, { attempts = 3, baseDelayMs = 500 } = {}) {
     }
   }
   throw lastErr;
+}
+
+// opts + soapAction do serviço quando a UF liga a flag (MG). SP/AP: devolve
+// o MESMO objeto opts, sem chave nova — requisição idêntica à de antes.
+function withSoapAction(opts, endpoints, service) {
+  const soapAction = soapActionFor(endpoints, service);
+  return soapAction ? { ...opts, soapAction } : opts;
 }
 
 // ---------- serviços ----------
@@ -201,7 +215,8 @@ async function statusServico({ tpAmb, cUF, endpoints, ...opts }) {
   const inner = `<consStatServ xmlns="${NFE_NS}" versao="4.00">`
     + `<tpAmb>${tpAmb}</tpAmb><cUF>${cUFResolved}</cUF><xServ>STATUS</xServ></consStatServ>`;
   const { ret } = await withRetry(
-    () => callService(eps.statusServico, WSDL_NS.statusServico, inner, 'retConsStatServ', opts,
+    () => callService(eps.statusServico, WSDL_NS.statusServico, inner, 'retConsStatServ',
+      withSoapAction(opts, eps, 'statusServico'),
       { ambiguousOnNetError: false })
   );
   return {
@@ -236,7 +251,8 @@ async function autorizar({ signedNfeXml, idLote, tpAmb, endpoints, ...opts }) {
     + `<idLote>${lote}</idLote><indSinc>1</indSinc>${signedNfeXml}</enviNFe>`;
 
   const { ret, rawXml } = await callService(
-    eps.autorizacao, WSDL_NS.autorizacao, inner, 'retEnviNFe', opts,
+    eps.autorizacao, WSDL_NS.autorizacao, inner, 'retEnviNFe',
+    withSoapAction(opts, eps, 'autorizacao'),
     { ambiguousOnNetError: true }
   );
 
@@ -270,7 +286,8 @@ async function consultarChave({ chave, tpAmb, endpoints, ...opts }) {
   const inner = `<consSitNFe xmlns="${NFE_NS}" versao="4.00">`
     + `<tpAmb>${tpAmb}</tpAmb><xServ>CONSULTAR</xServ><chNFe>${chave}</chNFe></consSitNFe>`;
   const { ret, rawXml } = await withRetry(
-    () => callService(eps.consultaProtocolo, WSDL_NS.consultaProtocolo, inner, 'retConsSitNFe', opts,
+    () => callService(eps.consultaProtocolo, WSDL_NS.consultaProtocolo, inner, 'retConsSitNFe',
+      withSoapAction(opts, eps, 'consultaProtocolo'),
       { ambiguousOnNetError: false })
   );
   const prot = ret.protNFe ? ret.protNFe.infProt : null;
@@ -288,6 +305,6 @@ async function consultarChave({ chave, tpAmb, endpoints, ...opts }) {
 
 module.exports = {
   statusServico, autorizar, consultarChave,
-  soapEnvelope, postSoap, withRetry,
+  soapEnvelope, postSoap, withRetry, withSoapAction,
   SefazTransportError, SOAP_NS, NFE_NS, DEFAULT_TIMEOUT_MS,
 };

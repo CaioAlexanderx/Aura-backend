@@ -1,7 +1,8 @@
 'use strict';
 // Cobertura da extensão multi-UF dos endpoints da engine própria
 // (06/08/2026 — Nuvem Fiscal não existe mais, toda emissão sai pela
-// engine própria; AP entra via SVRS). Ver services/sefazSp/endpoints.js
+// engine própria; AP entra via SVRS; 08/11/2026 MG entra na SEFAZ própria).
+// Ver services/sefazSp/endpoints.js
 // e services/sefazSp/nfe55.js.
 
 const { getEndpoints, ENDPOINTS } = require('../../src/services/sefazSp/endpoints');
@@ -44,8 +45,16 @@ describe('sefazSp/endpoints — NFC-e 65 multi-UF', () => {
     expect(() => getEndpoints('RJ', 'homologacao')).not.toThrow(/escopo: SP/);
   });
 
-  test('ENDPOINTS expõe exatamente as UFs suportadas hoje (SP, AP)', () => {
-    expect(Object.keys(ENDPOINTS).sort()).toEqual(['AP', 'SP']);
+  test('MG resolve na SEFAZ própria — homologação e produção', () => {
+    const h = getEndpoints('MG', 'homologacao');
+    expect(h.autorizacao).toBe('https://hnfce.fazenda.mg.gov.br/nfce/services/NFeAutorizacao4');
+    const p = getEndpoints('MG', 1);
+    expect(p.autorizacao).toBe('https://nfce.fazenda.mg.gov.br/nfce/services/NFeAutorizacao4');
+    expect(() => getEndpoints('mg', 2)).not.toThrow();
+  });
+
+  test('ENDPOINTS expõe exatamente as UFs suportadas hoje (SP, AP, MG)', () => {
+    expect(Object.keys(ENDPOINTS).sort()).toEqual(['AP', 'MG', 'SP']);
   });
 });
 
