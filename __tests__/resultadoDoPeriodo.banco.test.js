@@ -8,7 +8,8 @@
 //   V3  31/10 23h30 em São Paulo (já é 01/11 em UTC) → fora de novembro
 //   V4  30/11 23h30 em São Paulo (já é 01/12 em UTC) → dentro; custo vazio
 //   T1  troca (type 'troca', 300 com custo) → fora da venda e do CMV
-//   Lançamentos: Troca - Venda 150, Troca - Devolucao 100, Fornecedores 800,
+//   Lançamentos: Troca - Venda 150, Troca - Devolucao 100, devolucao 30,
+//   Devolução 5 (as duas contam como Troca - Devolucao), Fornecedores 800,
 //   Aluguel 300, Taxas de cartão 20, uma despesa pendente (fora) e
 //   Fornecedores de dezembro (fora). O income 'Vendas' não entra: o
 //   faturamento vem da venda.
@@ -101,6 +102,8 @@ beforeAll(async () => {
   await lancamento(A, 'income', 'Vendas', 180, '2026-11-03');
   await lancamento(A, 'income', 'Troca - Venda', 150, '2026-11-10');
   await lancamento(A, 'expense', 'Troca - Devolucao', 100, '2026-11-10');
+  await lancamento(A, 'expense', 'devolucao', 30, '2026-11-11');
+  await lancamento(A, 'expense', 'Devolução', 5, '2026-11-11');
   await lancamento(A, 'expense', 'Fornecedores', 800, '2026-11-12');
   await lancamento(A, 'expense', 'Aluguel', 300, '2026-11-05');
   await lancamento(A, 'expense', 'Taxas de cartão', 20, '2026-11-30');
@@ -128,8 +131,8 @@ describe('resultadoDoPeriodo — banco real', () => {
     const r = await R.resultadoDoPeriodo({ empresas: [A], ...NOV, client });
     expect(r.vendas).toBe(240);
     expect(r.vendas_qtd).toBe(2);
-    expect(r.trocas).toEqual({ entrou: 150, devolvido: 100 });
-    expect(r.faturamento).toBe(290);
+    expect(r.trocas).toEqual({ entrou: 150, devolvido: 135 });
+    expect(r.faturamento).toBe(255);
     expect(r.receita_com_custo).toBe(90);
     expect(r.custos).toBe(40);
     expect(r.lucro_bruto).toBe(50);
@@ -150,14 +153,14 @@ describe('resultadoDoPeriodo — banco real', () => {
   test('consolidado A + B soma as lojas e traz cada uma', async () => {
     const r = await R.resultadoDoPeriodo({ empresas: [{ id: A, nome: 'Loja A' }, { id: B, nome: 'Loja B' }], ...NOV, client });
     expect(r.consolidado).toBe(true);
-    expect(r.faturamento).toBe(340);
+    expect(r.faturamento).toBe(305);
     expect(r.custos).toBe(50);
     expect(r.lucro_bruto).toBe(90);
     expect(r.despesas).toBe(390);
     expect(r.compras_pagas.total).toBe(800);
     expect(r.cobertura.pct).toBe(48);
     expect(r.cobertura.lojas_com_pouco_custo).toBe(1);
-    expect(r.por_empresa.map((e) => [e.nome, e.faturamento, e.lucro_bruto])).toEqual([['Loja A', 290, 50], ['Loja B', 50, 40]]);
+    expect(r.por_empresa.map((e) => [e.nome, e.faturamento, e.lucro_bruto])).toEqual([['Loja A', 255, 50], ['Loja B', 50, 40]]);
   });
 
   test('loja sem nada no período: zeros e lucro null', async () => {
