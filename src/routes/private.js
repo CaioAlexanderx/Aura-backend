@@ -18,6 +18,8 @@ router.use('/commercial-dates', require('./commercialDates'));
 router.use('/transactions', require('./transactions'));
 router.use('/transactions', require('./transactionsBatch'));
 router.use('/transactions', require('./transactionReceipt'));
+// 09/11/2026 (migration 434): categorias e subcategorias do Financeiro, por loja.
+router.use('/finance-categories', require('./financeCategories'));
 router.use('/transactions/categorize', require('./categorize'));
 router.use('/transactions', require('./categorize'));
 router.use('/', require('./transactionSale'));

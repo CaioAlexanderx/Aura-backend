@@ -59,6 +59,7 @@ const { resolvePeriod } = require('../services/salesAnalytics');
 const { hasSaleNumberColumn, saleNumberSelect } = require('../utils/saleNumber');
 const attribution = require('../services/marketingAttribution');
 const { addressFromRow, isMissingReferenceColumn } = require('../services/customerAddress');
+const catSql = require('../utils/categoriaDoLancamento');
 
 // 09/11/2026: address_reference e da migration 433. Sem ela, a lista
 // consolidada segue sem o ponto de referencia (mesmo contrato do
@@ -416,18 +417,25 @@ router.get('/transactions', async (req, res) => {
     );
 
     const dataParams = params.concat([limit, offset]);
-    const dataQ = await db.query(
+    // 09/11/2026 (migration 434): subcategoria e nome atual da categoria-mae,
+    // para o consolidado somar por nome (decisao 1 do Caio). Sem a 434, o SQL
+    // de antes (utils/categoriaDoLancamento guarda o estado).
+    const selectMeTransactions = (comCategorias) =>
       `SELECT id, type, amount, description, category, status, notes,
               due_date, paid_at, created_at,
               recurrence_type, recurrence_group_id, recurrence_index,
               payment_method, employee_id, employee_name,
-              idempotency_key, company_id
+              idempotency_key, company_id${comCategorias ? catSql.colunasDaLista('transactions') : ''}
          FROM transactions ${where}
         ORDER BY COALESCE(due_date, (created_at AT TIME ZONE 'America/Sao_Paulo')::date) DESC,
                  created_at DESC
-        LIMIT $${params.length + 1} OFFSET $${params.length + 2}`,
-      dataParams
-    );
+        LIMIT $${params.length + 1} OFFSET $${params.length + 2}`;
+    let dataQ = null;
+    if (catSql.usarCategorias()) {
+      try { dataQ = await db.query(selectMeTransactions(true), dataParams); }
+      catch (e) { if (!catSql.faltaSchema(e)) throw e; catSql.marcarIndisponivel(); }
+    }
+    if (!dataQ) dataQ = await db.query(selectMeTransactions(false), dataParams);
 
     const sumParams = [companyIds];
     let sumWhere = 'WHERE company_id = ANY($1)';
@@ -485,6 +493,9 @@ router.get('/transactions', async (req, res) => {
         desc: r.description || '',
         description: r.description || '',
         category: r.category || 'Outros',
+        category_id: r.category_id || null,
+        subcategory: r.subcategory || null,
+        category_name: r.category_name || null,
         status: r.status || 'confirmed',
         notes: r.notes || '',
         date: r.due_date
