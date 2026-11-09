@@ -87,6 +87,8 @@ const { iniciarTrialPelaPrimeiraVenda } = require('../services/trialRegra');
 const { avancarSemEsperar } = require('../services/onboardingProgress');
 // 17/10/2026 (migration 390): Idempotency-Key — ver cabecalho do servico.
 const vendaIdempotente = require('../services/vendaIdempotente');
+// p-92 (08/11/2026, migration 428): o item guarda se saiu na promocao De/Por.
+const vendaNaPromocao = require('../services/vendaNaPromocao');
 // 04/11/2026: venda realizada e orçamento que virou venda avisam o celular.
 const lojaEvents = require('../services/lojaEvents');
 
@@ -387,6 +389,9 @@ async function handleSale(req, res, opts = {}) {
     // e so quando falta saldo em algum item — venda com estoque nao paga a ida
     // ao banco. undefined = ainda nao consultada.
     let semEstoqueLiberado;
+    // p-92: produtos ja validados para a empresa (so eles ganham a marcacao
+    // de promocao no sale_items).
+    const produtosVisiveis = new Set();
     for (const item of items) {
       const qty = parseFloat(item.quantity);
       const unitPrice = parseFloat(item.unit_price);
@@ -414,6 +419,7 @@ async function handleSale(req, res, opts = {}) {
           [item.product_id, req.params.id]
         );
         if (p.length) {
+          produtosVisiveis.add(String(item.product_id));
           productName = productName || p[0].name;
           costPrice = parseFloat(p[0].cost_price || 0);
           stockCompanyId = p[0].stock_company_id;
@@ -559,13 +565,26 @@ async function handleSale(req, res, opts = {}) {
       }
     }
 
-    for (const item of enrichedItems) {
+    // p-92 (migration 428): preco_lista ("De") e em_promocao de cada item,
+    // pela regra do preco efetivo no relogio do servidor. So grava: o
+    // unit_price e os totais continuam os que o app mandou. Venda com data
+    // retroativa fica sem marcacao (NULL = nao sabemos). Base sem as colunas:
+    // null aqui e o INSERT e o de sempre (services/vendaNaPromocao.js).
+    const marcacoes = sale_date
+      ? null
+      : await vendaNaPromocao.marcarItens((sql, params) => client.query(sql, params), enrichedItems, { visiveis: produtosVisiveis });
+    for (const [idx, item] of enrichedItems.entries()) {
+      const marca = marcacoes ? marcacoes[idx] : null;
       await client.query(
-        `INSERT INTO sale_items (sale_id,product_id,variant_id,quantity,unit_price,unit_cost,discount,total_price,product_name_snapshot)
+        marca
+          ? `INSERT INTO sale_items (sale_id,product_id,variant_id,quantity,unit_price,unit_cost,discount,total_price,product_name_snapshot,preco_lista,em_promocao)
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`
+          : `INSERT INTO sale_items (sale_id,product_id,variant_id,quantity,unit_price,unit_cost,discount,total_price,product_name_snapshot)
          VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
         [sale.id, item.product_id||null, item.variant_id||null,
          item.quantity, item.unit_price, item.cost_price,
-         item.item_discount||0, item.line_total, item.product_name_snapshot]
+         item.item_discount||0, item.line_total, item.product_name_snapshot,
+         ...(marca ? [marca.preco_lista, marca.em_promocao] : [])]
       );
       if (item.product_id) {
         if (item.variant_id) {

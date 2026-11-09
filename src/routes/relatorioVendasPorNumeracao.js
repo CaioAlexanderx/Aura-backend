@@ -98,3 +98,7 @@ router.get('/vendas-por-numeracao', async (req, res) => {
 
 module.exports = router;
 module.exports.podeVerRelatorio = podeVerRelatorio;
+// p-92 (08/11/2026): o resumo de vendidos na promocao usa as mesmas regras
+// de loja/consolidado e de quem ve receita.
+module.exports.lojasDoConsolidado = lojasDoConsolidado;
+module.exports.permitido = permitido;

@@ -5,6 +5,8 @@
 // POST /promotions           previa (dry_run, padrao) ou aplicar.
 // POST /promotions/encerrar  encerra agora (limpa os 3 campos); dry_run idem.
 // GET  /promotions?status=ativa|agendada|encerrada   lista (pagina Black Friday).
+// GET  /promotions/vendidos?desde=&ate=&product_id=&escopo=grupo
+//      resumo do que saiu na promocao (p-92, migration 428).
 //
 // Contrato com o app (p-86/p-87): contrato-de-por.md. Conta pura em
 // services/promocaoEmLote.js; preco que vale agora em services/precoEfetivo.js.
@@ -32,8 +34,10 @@ const db = require('../config/database');
 const { logAuditAction, contextoDaRequisicao } = require('../middleware/auditLog');
 const { productVisibilityWhere } = require('../utils/companyGroup');
 const {
-  lerPedido, lerPedidoEncerrar, montarPrevia, montarEncerrar, itemPublico,
+  lerPedido, lerPedidoEncerrar, montarPrevia, montarEncerrar, itemPublico, lerData,
 } = require('../services/promocaoEmLote');
+const { resumoDosVendidos, resumoVazio } = require('../services/vendaNaPromocao');
+const { lojasDoConsolidado, permitido: podeVerReceita } = require('./relatorioVendasPorNumeracao');
 
 const MIGRATION_PENDING = {
   error: 'A promocao em lote ainda esta sendo instalada. Tente de novo em alguns minutos.',
@@ -326,6 +330,67 @@ router.get('/promotions', async (req, res) => {
     }
     console.error('[promotions] lista:', err.message, err.code);
     return res.status(500).json({ error: 'Erro ao listar as promocoes' });
+  }
+});
+
+// ─── GET /promotions/vendidos (p-92, migration 428) ───────
+// Resumo do que saiu na promocao numa janela (o app manda as datas da
+// promocao). Conta em services/vendaNaPromocao.js (resumoDosVendidos).
+//
+// Query: desde, ate (ISO com hora vale como veio; so o dia AAAA-MM-DD vale
+// em Brasilia, 00:00:00 a 23:59:59; padrao: ultimos 30 dias ate agora;
+// janela de ate 400 dias), product_id (opcional), escopo=grupo.
+// Loja ou consolidado: consolidated_view no token ou ?escopo=grupo soma as
+// lojas do grupo que o usuario alcanca (mesma regra de /reports/
+// vendas-por-numeracao e /estoque/ruptura).
+// Quem ve: traz receita. Perfil "Estoque so consulta" leva 403 no
+// estoqueSoConsulta (caminho fora das leituras liberadas); membro sem chave
+// da retaguarda (financeiro, relatorios, configuracoes, painel) leva 403
+// SEM_PERMISSAO_RELATORIO, igual aos relatorios de venda.
+// So conta venda gravada depois da 428: o passado fica sem marcacao.
+const JANELA_MAX_DIAS = 400;
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+router.get('/promotions/vendidos', async (req, res) => {
+  const cid = req.params.id;
+  const agora = new Date();
+  const ehDia = (v) => typeof v === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(v.trim());
+  let desde = lerData(req.query.desde, false);
+  let ate = lerData(req.query.ate, true);
+  if (desde === undefined || ate === undefined) {
+    return res.status(400).json({ error: 'Datas invalidas', code: 'INVALID_DATES' });
+  }
+  // Fim do dia inclui o ultimo segundo inteiro (23:59:59.999).
+  if (ate && ehDia(req.query.ate)) ate = new Date(ate.getTime() + 999);
+  if (!ate) ate = agora;
+  if (!desde) desde = new Date(ate.getTime() - 30 * 864e5);
+  if (desde > ate || (ate - desde) > JANELA_MAX_DIAS * 864e5) {
+    return res.status(400).json({ error: `O comeco deve ser antes do fim, numa janela de ate ${JANELA_MAX_DIAS} dias`, code: 'INVALID_DATES' });
+  }
+  const productId = req.query.product_id ? String(req.query.product_id) : null;
+  if (productId && !UUID_RE.test(productId)) {
+    return res.status(400).json({ error: 'product_id invalido', code: 'INVALID_INPUT' });
+  }
+
+  try {
+    if (!(await podeVerReceita(req))) {
+      return res.status(403).json({ error: 'Este acesso não inclui os relatórios de vendas.', code: 'SEM_PERMISSAO_RELATORIO' });
+    }
+    const consolidado = req.user?.consolidated_view === true || req.query.escopo === 'grupo';
+    const lojas = consolidado ? await lojasDoConsolidado(cid, req.user) : [];
+    const companyIds = lojas.length ? lojas : [cid];
+    const base = { desde: desde.toISOString(), ate: ate.toISOString(), consolidado, lojas: companyIds.length };
+    try {
+      const r = await resumoDosVendidos((sql, p) => db.query(sql, p), { companyIds, desde, ate, productId });
+      return res.json({ ...base, ...r });
+    } catch (err) {
+      // Base sem a 428: nada foi marcado ainda.
+      if (faltaMigration(err)) return res.json({ ...base, resumo: resumoVazio(), items: [], por_loja: [] });
+      throw err;
+    }
+  } catch (err) {
+    console.error('[promotions] vendidos:', err.message, err.code);
+    return res.status(500).json({ error: 'Erro ao resumir os vendidos na promocao' });
   }
 });
 
