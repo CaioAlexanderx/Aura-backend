@@ -94,7 +94,52 @@ function verifyNfeSignature(nfeXml) {
   }
 }
 
+/**
+ * 09/11/2026 (NFS-e Nacional): assinatura enveloped GENÉRICA de um elemento
+ * com atributo Id, para documentos que não são NF-e (DPS e pedido de evento
+ * do Sistema Nacional NFS-e). signInfNfe acima fica intocada — a NFC-e/NF-e
+ * continua byte a byte igual.
+ *
+ * Mesmo padrão do signInfNfe (enveloped + C14N inclusivo + KeyInfo só com
+ * X509Certificate). A <Signature> entra como ÚLTIMO filho da raiz, que é o
+ * lugar que os XSD do padrão nacional pedem (TCDPS: infDPS, ds:Signature).
+ *
+ * @param {string} xml — documento completo, sem declaração <?xml?>
+ * @param {{ elementName: string, keyPem: string, certDerBase64: string, sha256?: boolean }} opts
+ * @returns {string} documento assinado
+ */
+function signElementById(xml, { elementName, keyPem, certDerBase64, sha256 = true } = {}) {
+  if (!elementName) throw new Error('signer: elementName obrigatório');
+  const idMatch = String(xml || '').match(new RegExp(`<${elementName}\\b[^>]*\\bId="([^"]+)"`));
+  if (!idMatch) throw new Error(`signer: <${elementName}> sem atributo Id`);
+  if (!keyPem) throw new Error('signer: keyPem obrigatória');
+  if (!certDerBase64) throw new Error('signer: certDerBase64 obrigatório');
+
+  const root = String(xml).match(/^\s*<([A-Za-z_][\w.-]*)/);
+  if (!root) throw new Error('signer: documento sem elemento raiz');
+
+  const sig = new SignedXml({
+    privateKey: keyPem,
+    canonicalizationAlgorithm: C14N,
+    signatureAlgorithm: sha256 ? RSA_SHA256 : RSA_SHA1,
+    getKeyInfoContent: () => `<X509Data><X509Certificate>${certDerBase64}</X509Certificate></X509Data>`,
+  });
+  sig.addReference({
+    xpath: `//*[local-name(.)='${elementName}']`,
+    transforms: [ENVELOPED, C14N],
+    digestAlgorithm: sha256 ? SHA256 : SHA1,
+  });
+  sig.computeSignature(xml, {
+    location: { reference: `/*[local-name(.)='${root[1]}']`, action: 'append' },
+  });
+  const signed = sig.getSignedXml();
+  if (!signed.includes(`URI="#${idMatch[1]}"`)) {
+    throw new Error(`signer: Reference URI não aponta pro Id do <${elementName}>`);
+  }
+  return signed;
+}
+
 module.exports = {
-  signInfNfe, verifyNfeSignature,
+  signInfNfe, verifyNfeSignature, signElementById,
   C14N, ENVELOPED, RSA_SHA1, SHA1, RSA_SHA256, SHA256,
 };

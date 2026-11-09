@@ -19,6 +19,12 @@
 // Mountada em private.js como /nfse — disponivel pra qualquer
 // plano (todos os planos podem emitir NFS-e). Nao acoplada
 // a vertical especifica.
+//
+// 09/11/2026 — provider 'nacional' (Emissor Público Nacional, API Sefin
+// Nacional, services/nfseNacional): POST / exige chave de idempotência
+// (corpo idempotency_key ou header Idempotency-Key) e o tomador é opcional;
+// cancel/refresh/pdf/xml da nota nacional vão ao serviço. Liga geral
+// NFSE_NACIONAL_ENABLED (desligada = nada sai).
 // ============================================================
 
 const router = require('express').Router({ mergeParams: true });
@@ -30,8 +36,93 @@ const {
   validateInvoiceData,
   NfseProviderError,
 } = require('../services/nfseProvider');
+// 09/11/2026: provider 'nacional' (Emissor Público Nacional, API Sefin
+// Nacional). Emissão, cancelamento, consulta e DANFSe saem do serviço
+// próprio, que lê o A1 do cofre da empresa (company_certificates). Liga
+// geral NFSE_NACIONAL_ENABLED: desligada, nada é enviado.
+const nacional = require('../services/nfseNacional');
+const { validarCamposNacional } = require('../services/nfseNacional/config');
+const { NfseNacionalError, httpStatusDe } = require('../services/nfseNacional/errors');
 
 const requireWrite = requireRole('client', 'analyst', 'admin');
+
+const NACIONAL_CAMPOS = [
+  'municipio_ibge', 'ctribnac_padrao', 'cnbs_padrao', 'op_simp_nac',
+  'reg_ap_trib_sn', 'reg_esp_trib', 'p_tot_trib_sn', 'next_dps_number',
+];
+
+function sendNacionalError(res, where, err) {
+  console.error(`[nfse nacional ${where}]`, err.code, err.message);
+  const body = { error: err.message, code: err.code };
+  if (Array.isArray(err.details)) body.detalhes = err.details;
+  return res.status(httpStatusDe(err.code)).json(body);
+}
+
+function nacionalResposta(nota, extra = {}) {
+  return {
+    nfse_id: nota.id,
+    status: nota.status,
+    chave_acesso: nota.chave_acesso || null,
+    nfse_number: nota.nfse_number || null,
+    dps_serie: nota.dps_serie || null,
+    dps_number: nota.dps_number != null ? String(nota.dps_number) : null,
+    ambiente: nota.ambiente || null,
+    rejection_reason: nota.rejection_reason || null,
+    error_codes: nota.error_codes || null,
+    ...extra,
+  };
+}
+
+/** Corpo do POST / (mesmos nomes do fluxo antigo) → nota do serviço nacional. */
+function notaNacionalDoCorpo(body) {
+  const b = body || {};
+  const a = b.recipient_address || null;
+  const temTomador = b.recipient_doc || b.recipient_name;
+  return {
+    descricao: b.service_description,
+    valor: b.service_amount,
+    competencia: b.competence_date || undefined,
+    ctribnac: b.service_code || undefined,
+    cnbs: b.cnbs || undefined,
+    iss_retido: b.iss_retained === true,
+    aliquota_iss: b.iss_rate,
+    tot_trib: b.tot_trib || undefined,
+    customer_id: b.customer_id || undefined,
+    payment_id: b.payment_id || undefined,
+    source_type: b.source_type || undefined,
+    tomador: temTomador ? {
+      doc: b.recipient_doc,
+      nome: b.recipient_name,
+      email: b.recipient_email || null,
+      fone: b.recipient_phone || null,
+      im: b.recipient_im || null,
+      endereco: a ? {
+        logradouro: a.logradouro, numero: a.numero, complemento: a.complemento,
+        bairro: a.bairro, cMun: a.codigo_municipio, cep: a.cep,
+      } : null,
+    } : undefined,
+  };
+}
+
+async function emitirNacional(req, res) {
+  const key = (req.body && req.body.idempotency_key) || req.get('Idempotency-Key');
+  try {
+    const r = await nacional.emitir(db, {
+      companyId: req.params.id,
+      idempotencyKey: key,
+      nota: notaNacionalDoCorpo(req.body),
+    });
+    const corpo = nacionalResposta(r.nota, { replay: !!r.replay, aguardando_confirmacao: !!r.aguardando });
+    if (r.aguardando) return res.status(202).json(corpo);
+    if (r.nota.status === 'rejeitada') return res.status(422).json(corpo);
+    if (r.nota.status === 'erro') return res.status(502).json(corpo);
+    return res.status(r.replay ? 200 : 201).json(corpo);
+  } catch (err) {
+    if (err instanceof NfseNacionalError) return sendNacionalError(res, 'emit', err);
+    console.error('[nfse nacional emit] unexpected:', err.message);
+    return res.status(500).json({ error: 'Erro ao emitir NFS-e' });
+  }
+}
 
 // ─────────────────────────────────────────────────────────
 // Helpers de cifragem das credentials
@@ -165,6 +256,17 @@ router.get('/config', requireAuth, async (req, res) => {
     safe.has_api_key = !!config.api_key_encrypted;
     safe.has_certificate = !!config.certificate_url;
 
+    // Emissor nacional: diz se a empresa está apta e o que falta (sem segredo).
+    if (config.provider === 'nacional') {
+      try {
+        safe.nacional = await nacional.situacaoConfig(db, req.params.id);
+        safe.has_certificate = !!safe.nacional.certificado;
+      } catch (e) {
+        console.error('[nfse get config nacional]', e.message);
+        safe.nacional = null;
+      }
+    }
+
     res.json({ config: safe, has_config: true });
   } catch (err) {
     console.error('[nfse get config]', err.message);
@@ -199,12 +301,42 @@ router.put('/config', requireAuth, requireWrite, async (req, res) => {
     // Upsert
     const existing = await getNfseConfig(req.params.id);
 
+    // Emissor nacional (09/11/2026): campos próprios, validados; ambiente só
+    // 'producao_restrita' | 'producao'. O certificado é o A1 do cofre da
+    // empresa (POST /fiscal-certificate) — URL/senha soltas aqui não servem.
+    const providerFinal = data.provider !== undefined ? data.provider : (existing && existing.provider);
+    const temCampoNacional = NACIONAL_CAMPOS.some((k) => body[k] !== undefined);
+    if (providerFinal === 'nacional' || temCampoNacional) {
+      const camposNac = {};
+      for (const k of NACIONAL_CAMPOS) if (body[k] !== undefined) camposNac[k] = body[k];
+      if (providerFinal === 'nacional') {
+        if (body.ambiente !== undefined) camposNac.ambiente = body.ambiente;
+        if (body.serie !== undefined) camposNac.serie = body.serie;
+        if (body.certificate_url || body.certificate_pwd) {
+          return res.status(400).json({
+            error: 'No emissor nacional o certificado é o A1 da empresa: envie o arquivo .pfx em Configurações > Nota Fiscal.',
+            code: 'CERTIFICADO',
+          });
+        }
+      }
+      const { data: nac, erros } = validarCamposNacional(camposNac);
+      if (erros.length) return res.status(400).json({ error: erros.join(' '), code: 'INVALID_INPUT', detalhes: erros });
+      Object.assign(data, nac);
+      // nunca nasce (nem migra de outro provider) em produção sem pedir
+      if (providerFinal === 'nacional' && (!existing || existing.provider !== 'nacional') && data.ambiente === undefined) {
+        data.ambiente = 'producao_restrita';
+      }
+    }
+
     if (existing) {
       const fields = [];
       const values = [];
       let idx = 1;
       for (const [k, v] of Object.entries(data)) {
-        fields.push(`${k} = $${idx++}`);
+        // a numeração da DPS só anda pra frente (número já usado nunca volta)
+        fields.push(k === 'next_dps_number'
+          ? `next_dps_number = GREATEST(next_dps_number, $${idx++})`
+          : `${k} = $${idx++}`);
         values.push(v);
       }
       if (fields.length === 0) return res.status(400).json({ error: 'Nada pra atualizar' });
@@ -254,10 +386,9 @@ router.post('/', requireAuth, requireWrite, async (req, res) => {
   if (!service_amount || service_amount <= 0) {
     return res.status(400).json({ error: 'service_amount deve ser > 0' });
   }
-  if (!recipient_name) return res.status(400).json({ error: 'recipient_name obrigatorio' });
-  if (!recipient_doc) return res.status(400).json({ error: 'recipient_doc (CPF/CNPJ) obrigatorio' });
 
   const client = await db.connect();
+  let released = false;
   try {
     await client.query('BEGIN');
 
@@ -269,6 +400,19 @@ router.post('/', requireAuth, requireWrite, async (req, res) => {
     if (!config.is_active) {
       throw new NfseProviderError('NFS-e desativada. Ative no painel de config.', 'CONFIG_INACTIVE');
     }
+
+    // Emissor nacional (09/11/2026): fluxo próprio — numeração, idempotência
+    // e certificado ficam no serviço. Tomador é opcional no leiaute nacional.
+    if (config.provider === 'nacional') {
+      await client.query('ROLLBACK');
+      client.release();
+      released = true;
+      return emitirNacional(req, res);
+    }
+
+    // providers antigos: tomador obrigatório (como sempre foi)
+    if (!recipient_name) throw new NfseProviderError('recipient_name obrigatorio', 'INVALID_INPUT');
+    if (!recipient_doc) throw new NfseProviderError('recipient_doc (CPF/CNPJ) obrigatorio', 'INVALID_INPUT');
 
     config._decrypted_api_key = decrypt(config.api_key_encrypted);
     if (!config._decrypted_api_key && config.provider !== 'mock') {
@@ -428,7 +572,7 @@ router.post('/', requireAuth, requireWrite, async (req, res) => {
       rps_number: rpsNumber,
     });
   } catch (err) {
-    try { await client.query('ROLLBACK'); } catch (_) {}
+    if (!released) { try { await client.query('ROLLBACK'); } catch (_) {} }
 
     if (err instanceof NfseProviderError) {
       console.error('[nfse emit]', err.code, err.message);
@@ -444,7 +588,7 @@ router.post('/', requireAuth, requireWrite, async (req, res) => {
     console.error('[nfse emit] unexpected:', err.message);
     res.status(500).json({ error: 'Erro ao emitir NFS-e' });
   } finally {
-    client.release();
+    if (!released) client.release();
   }
 });
 
@@ -528,7 +672,8 @@ router.post('/:nid/cancel', requireAuth, requireWrite, async (req, res) => {
 
   try {
     const { rows } = await db.query(
-      `SELECT n.*, c.api_key_encrypted, c.provider, c.is_active, c.ambiente,
+      `SELECT n.*, n.provider AS nota_provider,
+              c.api_key_encrypted, c.provider, c.is_active, c.ambiente,
               c.inscricao_municipal, c.regime_tributario, c.regime_especial,
               c.optante_simples_nacional
          FROM nfse n
@@ -539,6 +684,24 @@ router.post('/:nid/cancel', requireAuth, requireWrite, async (req, res) => {
     if (!rows[0]) return res.status(404).json({ error: 'NFS-e nao encontrada' });
 
     const nfse = rows[0];
+
+    // Emissor nacional: evento de cancelamento 101101 assinado com o A1.
+    // motivo_codigo: 1 erro na emissão, 2 serviço não prestado, 9 outros (padrão).
+    if (nfse.nota_provider === 'nacional') {
+      try {
+        const r = await nacional.cancelar(db, {
+          companyId: req.params.id,
+          nfseId: req.params.nid,
+          cMotivo: (req.body || {}).motivo_codigo != null ? Number(req.body.motivo_codigo) : 9,
+          xMotivo: reason,
+        });
+        return res.json({ ok: true, ...nacionalResposta(r.nota, { replay: !!r.replay }) });
+      } catch (e) {
+        if (e instanceof NfseNacionalError) return sendNacionalError(res, 'cancel', e);
+        throw e;
+      }
+    }
+
     if (nfse.status === 'cancelada') {
       return res.status(409).json({ error: 'NFS-e ja foi cancelada' });
     }
@@ -584,7 +747,7 @@ router.post('/:nid/cancel', requireAuth, requireWrite, async (req, res) => {
 router.post('/:nid/refresh', requireAuth, requireWrite, async (req, res) => {
   try {
     const { rows } = await db.query(
-      `SELECT n.id, n.provider_id, n.status,
+      `SELECT n.id, n.provider_id, n.status, n.provider AS nota_provider,
               c.api_key_encrypted, c.provider AS config_provider, c.is_active,
               c.ambiente, c.inscricao_municipal, c.regime_tributario,
               c.regime_especial, c.optante_simples_nacional
@@ -596,6 +759,18 @@ router.post('/:nid/refresh', requireAuth, requireWrite, async (req, res) => {
     if (!rows[0]) return res.status(404).json({ error: 'NFS-e nao encontrada' });
 
     const nfse = rows[0];
+
+    // Emissor nacional: consulta pela chave (ou pela DPS, se ainda pendente — sem reenviar).
+    if (nfse.nota_provider === 'nacional') {
+      try {
+        const r = await nacional.consultar(db, { companyId: req.params.id, nfseId: req.params.nid });
+        return res.json(nacionalResposta(r.nota));
+      } catch (e) {
+        if (e instanceof NfseNacionalError) return sendNacionalError(res, 'refresh', e);
+        throw e;
+      }
+    }
+
     if (!nfse.provider_id) {
       return res.status(409).json({ error: 'NFS-e sem provider_id' });
     }
@@ -652,18 +827,42 @@ router.post('/:nid/refresh', requireAuth, requireWrite, async (req, res) => {
 // GET /:id/pdf e /:id/xml — redirect pro URL salvo
 router.get('/:nid/pdf', requireAuth, async (req, res) => {
   const { rows } = await db.query(
-    `SELECT pdf_url FROM nfse WHERE id = $1 AND company_id = $2`,
+    `SELECT pdf_url, provider FROM nfse WHERE id = $1 AND company_id = $2`,
     [req.params.nid, req.params.id]
   );
+  // Emissor nacional: DANFSe direto do ADN (mTLS com o A1), repassado aqui.
+  if (rows[0] && rows[0].provider === 'nacional') {
+    try {
+      const pdf = await nacional.danfse(db, { companyId: req.params.id, nfseId: req.params.nid });
+      if (!pdf) return res.status(404).json({ error: 'DANFSe ainda não disponível. Tente de novo em instantes.' });
+      res.set('Content-Type', 'application/pdf');
+      res.set('Content-Disposition', `inline; filename="nfse-${req.params.nid}.pdf"`);
+      return res.send(pdf);
+    } catch (e) {
+      if (e instanceof NfseNacionalError) return sendNacionalError(res, 'danfse', e);
+      console.error('[nfse nacional danfse]', e.message);
+      return res.status(502).json({ error: 'Não foi possível buscar o DANFSe agora.' });
+    }
+  }
   if (!rows[0]?.pdf_url) return res.status(404).json({ error: 'PDF nao disponivel' });
   res.redirect(rows[0].pdf_url);
 });
 
 router.get('/:nid/xml', requireAuth, async (req, res) => {
   const { rows } = await db.query(
-    `SELECT xml_url FROM nfse WHERE id = $1 AND company_id = $2`,
+    `SELECT xml_url, provider FROM nfse WHERE id = $1 AND company_id = $2`,
     [req.params.nid, req.params.id]
   );
+  // Emissor nacional: o XML da NFS-e fica gravado na própria nota.
+  if (rows[0] && rows[0].provider === 'nacional') {
+    const { rows: x } = await db.query(
+      'SELECT xml_nfse FROM nfse WHERE id = $1 AND company_id = $2',
+      [req.params.nid, req.params.id]
+    );
+    if (!x[0] || !x[0].xml_nfse) return res.status(404).json({ error: 'XML nao disponivel' });
+    res.set('Content-Type', 'application/xml; charset=utf-8');
+    return res.send(x[0].xml_nfse);
+  }
   if (!rows[0]?.xml_url) return res.status(404).json({ error: 'XML nao disponivel' });
   res.redirect(rows[0].xml_url);
 });

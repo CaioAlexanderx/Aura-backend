@@ -398,10 +398,75 @@ class MockProvider {
 }
 
 // ─────────────────────────────────────────────────────────
+// 4. NacionalProvider — Emissor Público Nacional (API Sefin Nacional)
+//
+// 09/11/2026: emissor PRÓPRIO (sem gateway), em services/nfseNacional.
+// Diferente dos outros adapters, precisa do banco: reserva o número da DPS
+// em transação, lê o A1 do cofre (company_certificates) e grava a nota.
+// Por isso recebe ctx { db, companyId } — getProvider(config, ctx).
+// Com NFSE_NACIONAL_ENABLED desligada, recusa tudo (nada sai).
+// ─────────────────────────────────────────────────────────
+
+class NacionalProvider {
+  constructor(config, ctx = {}) {
+    this.config = config;
+    this.ctx = ctx;
+  }
+
+  _service() {
+    const svc = require('./nfseNacional');
+    const { nacionalHabilitado } = require('./nfseNacional/endpoints');
+    if (!nacionalHabilitado()) {
+      throw new NfseProviderError(
+        'Emissor nacional de NFS-e desligado neste servidor (NFSE_NACIONAL_ENABLED). Nada foi enviado.',
+        'NACIONAL_DESLIGADO'
+      );
+    }
+    if (!this.ctx.db || !this.ctx.companyId) {
+      throw new NfseProviderError('Provider nacional precisa de { db, companyId }', 'CONFIG_MISSING');
+    }
+    return svc;
+  }
+
+  async _run(fn) {
+    try {
+      return await fn();
+    } catch (err) {
+      if (err instanceof NfseProviderError) throw err;
+      if (err && err.name === 'NfseNacionalError') throw new NfseProviderError(err.message, err.code, err.details);
+      throw err;
+    }
+  }
+
+  /** invoiceData = { idempotency_key, nota } (ver nfseNacional.emitir). */
+  async emit(invoiceData = {}) {
+    const svc = this._service();
+    return this._run(() => svc.emitir(this.ctx.db, {
+      companyId: this.ctx.companyId,
+      idempotencyKey: invoiceData.idempotency_key,
+      nota: invoiceData.nota || {},
+    }, this.ctx));
+  }
+
+  /** providerId aqui é o id da linha em nfse. */
+  async consult(nfseId) {
+    const svc = this._service();
+    return this._run(() => svc.consultar(this.ctx.db, { companyId: this.ctx.companyId, nfseId }, this.ctx));
+  }
+
+  async cancel(nfseId, reason, cMotivo = 9) {
+    const svc = this._service();
+    return this._run(() => svc.cancelar(this.ctx.db, {
+      companyId: this.ctx.companyId, nfseId, cMotivo, xMotivo: reason,
+    }, this.ctx));
+  }
+}
+
+// ─────────────────────────────────────────────────────────
 // Factory
 // ─────────────────────────────────────────────────────────
 
-function getProvider(nfseConfig) {
+function getProvider(nfseConfig, ctx) {
   if (!nfseConfig) {
     throw new NfseProviderError('nfse_config nao encontrado', 'CONFIG_MISSING');
   }
@@ -425,6 +490,8 @@ function getProvider(nfseConfig) {
       return new NorteNotasProvider(adapterConfig);
     case 'mock':
       return new MockProvider(adapterConfig);
+    case 'nacional':
+      return new NacionalProvider(nfseConfig, ctx || {});
     default:
       throw new NfseProviderError(
         `Provider desconhecido: ${nfseConfig.provider}`,
@@ -475,4 +542,5 @@ module.exports = {
   NuvemFiscalProvider,
   NorteNotasProvider,
   MockProvider,
+  NacionalProvider,
 };
