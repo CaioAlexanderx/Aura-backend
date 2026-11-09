@@ -669,6 +669,14 @@ function categoriasSimuladas(companyId) {
   return rows;
 }
 
+// Quanto a grafia caprichou: letras acentuadas e maiusculas contam.
+function capricho(texto) {
+  const t = String(texto || '');
+  const acentos = (t.normalize('NFD').match(/[̀-ͯ]/g) || []).length;
+  const maiusculas = (t.normalize('NFD').match(/[A-Z]/g) || []).length;
+  return Math.min(acentos * 10 + maiusculas, 999);
+}
+
 async function lerTextosSemLigacao(companyId, q) {
   const r = await (q || db).query(
     `SELECT type::text AS kind, category, COUNT(*)::int AS n
@@ -701,11 +709,19 @@ async function planejarMigracao(companyId, q) {
       ligar.push({ kind: t.kind, texto: t.category, n: t.n, categoria: mae ? mae.name + ' › ' + alvo.name : alvo.name, category_id: alvo.id });
     } else {
       const k = t.kind + '|' + normalizarNome(t.category);
-      if (!criar.has(k)) criar.set(k, { kind: t.kind, name: limparNome(t.category).slice(0, 60), n: 0, textos: [] });
+      if (!criar.has(k)) criar.set(k, { kind: t.kind, name: limparNome(t.category).slice(0, 60), n: 0, textos: [], _melhor: -1 });
       const c = criar.get(k); c.n += t.n; c.textos.push(t.category);
+      // O nome da categoria nova e a grafia mais usada; no empate, a mais
+      // bem escrita (com acento e maiuscula: "Veiculo" com acento ganha de
+      // "veiculo"). Deterministico, sem depender da ordem do banco.
+      const nota = t.n * 1000 + capricho(t.category);
+      if (nota > c._melhor) { c._melhor = nota; c.name = limparNome(t.category).slice(0, 60); }
     }
   });
-  return { company_id: companyId, semeia_padroes: simulada, ligar: ligar, criar: Array.from(criar.values()) };
+  const novas = Array.from(criar.values()).map(function (c) {
+    return { kind: c.kind, name: c.name, n: c.n, textos: c.textos.slice().sort() };
+  });
+  return { company_id: companyId, semeia_padroes: simulada, ligar: ligar, criar: novas };
 }
 
 /**

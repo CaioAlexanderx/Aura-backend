@@ -158,6 +158,17 @@ describe('planejarMigracao (dry-run) — so leitura', () => {
     expect(JSON.stringify(plano)).not.toMatch(/annuity/);
     db.query.mock.calls.forEach(([sql]) => expect(sql).not.toMatch(/\b(INSERT|UPDATE|DELETE)\b/i));
   });
+
+  test('categoria nova: a grafia mais usada; no empate, a mais bem escrita, qualquer que seja a ordem do banco', async () => {
+    db.query.mockReset()
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [{ kind: 'expense', category: 'veiculo', n: 1 }, { kind: 'expense', category: 'Veículo', n: 1 }] });
+    expect((await svc.planejarMigracao(COMPANY)).criar[0].name).toBe('Veículo');
+    db.query.mockReset()
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [{ kind: 'expense', category: 'veiculo', n: 5 }, { kind: 'expense', category: 'Veículo', n: 1 }] });
+    expect((await svc.planejarMigracao(COMPANY)).criar[0].name).toBe('veiculo');
+  });
 });
 
 describe('categoriaDoLancamento (SQL de /transactions)', () => {
