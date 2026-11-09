@@ -184,7 +184,10 @@ describe('POST — cadastro "ja paguei"', () => {
     for (const ins of estado.inserts) {
       expect(ins.sql).not.toMatch(/\$8::/);
       expect(ins.sql).toMatch(/CASE WHEN \$\d+::boolean THEN/);
-      expect(ins.params[ins.params.length - 1]).toBe(ins.params[7] === 'confirmed');
+      // 09/11/2026 (434): category_id e o tipo como texto entram depois, entao
+      // o booleano e achado pelo numero citado no CASE, nao pela posicao.
+      const nBool = Number(ins.sql.match(/CASE WHEN \$(\d+)::boolean THEN/)[1]);
+      expect(ins.params[nBool - 1]).toBe(ins.params[7] === 'confirmed');
       conferirParametros(ins.sql, ins.params);
     }
   });

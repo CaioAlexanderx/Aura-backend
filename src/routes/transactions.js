@@ -29,6 +29,9 @@ var db = require('../config/database');
 var crypto = require('crypto');
 var { resolveSaleLink } = require('../utils/saleLink');
 var quadro = require('../utils/quadroFinanceiro');
+// 09/11/2026 (migration 434): categoria/subcategoria do lancamento por id.
+// transactions.category continua com o nome da categoria-MAE.
+var catSql = require('../utils/categoriaDoLancamento');
 
 function todayBR() {
   return new Date().toLocaleDateString('en-CA', { timeZone: 'America/Sao_Paulo' });
@@ -94,13 +97,22 @@ router.get('/', async function(req, res) {
     if (start) { params.push(start); startIdx = params.length; where += ' AND ' + dateClauseCompetencia('>=', startIdx); }
     if (end)   { params.push(end);   endIdx = params.length;   where += ' AND ' + dateClauseCompetencia('<=', endIdx); }
     var dataParams = params.concat([limit, offset]);
-    var dataSql =
-      'SELECT id, type, amount, description, category, status, notes, due_date, paid_at, created_at,' +
+    function dataSqlCom(comCategorias) {
+      return 'SELECT id, type, amount, description, category, status, notes, due_date, paid_at, created_at,' +
       '       recurrence_type, recurrence_group_id, recurrence_index,' +
       '       payment_method, employee_id, employee_name, idempotency_key, original_amount, receipt_filename' +
+      (comCategorias ? catSql.colunasDaLista('transactions') : '') +
       ' FROM transactions ' + where +
       " ORDER BY COALESCE(due_date, (created_at AT TIME ZONE 'America/Sao_Paulo')::date) DESC, created_at DESC" +
       ' LIMIT $' + (params.length + 1) + ' OFFSET $' + (params.length + 2);
+    }
+    async function lerPagina() {
+      if (catSql.usarCategorias()) {
+        try { return await db.query(dataSqlCom(true), dataParams); }
+        catch (e) { if (!catSql.faltaSchema(e)) throw e; catSql.marcarIndisponivel(); }
+      }
+      return db.query(dataSqlCom(false), dataParams);
+    }
 
     // --- Summary: income/expenses CONFIRMED + pending_* separado ---
     // Filtra por COALESCE(due_date, created_at SP) (mesmo do listing).
@@ -131,7 +143,7 @@ router.get('/', async function(req, res) {
 
     var results = await Promise.all([
       db.query(aggSql, params),
-      db.query(dataSql, dataParams),
+      lerPagina(),
     ]);
     var sumRes  = results[0];
     var dataRes = results[1];
@@ -149,6 +161,10 @@ router.get('/', async function(req, res) {
         receipt_filename: r.receipt_filename || null,
         desc: r.description || '', description: r.description || '',
         category: r.category || 'Outros', status: r.status || 'confirmed',
+        // 434: subcategoria (nome) e nome atual da categoria-mae, quando ligado.
+        category_id: r.category_id || null,
+        subcategory: r.subcategory || null,
+        category_name: r.category_name || null,
         notes: r.notes || '',
         date: r.due_date
           ? new Date(r.due_date + 'T12:00:00').toLocaleDateString('pt-BR', { day: '2-digit', month: '2-digit' })
@@ -253,6 +269,8 @@ router.post('/', async function(req, res) {
   }
   var paymentMethod = body.payment_method || null;
   if (paymentMethod && VALID_PAYMENTS.indexOf(paymentMethod) === -1) return res.status(400).json({ error: 'payment_method invalido (aceitos: ' + VALID_PAYMENTS.join(', ') + ')' });
+  if (!catSql.idValido(body.category_id)) return res.status(400).json({ error: 'category_id invalido' });
+  var categoryId = catSql.idOuNull(body.category_id);
   var employeeId = body.employee_id || null;
   var employeeName = body.employee_name || null;
   if (employeeId) {
@@ -286,16 +304,27 @@ router.post('/', async function(req, res) {
   try {
     if (!recurrenceType) {
       var v = valoresDaBaixa(finalStatus);
-      var result = await db.query(
-        'INSERT INTO transactions (company_id, type, amount, description, category, notes, due_date, status, paid_at, created_by, payment_method, employee_id, employee_name, original_amount)' +
-        ' VALUES ($1, $2, $3, $4, $5, $6, $7, $8, ' + PAID_AT_SQL + ', $9, $10, $11, $12, $14)' +
-        ' RETURNING id, type, amount, original_amount, description, category, status, due_date, paid_at, created_at, payment_method, employee_id, employee_name',
-        [cid, body.type, v.amount, String(body.description).trim(), body.category || 'Outros',
+      var unicoParams = [cid, body.type, v.amount, String(body.description).trim(), body.category || 'Outros',
          body.notes || null, dueDate, finalStatus, req.user?.id || null, paymentMethod, employeeId, employeeName,
-         finalStatus === 'confirmed' ? paidAtDate : null, v.original, finalStatus === 'confirmed']
-      );
+         finalStatus === 'confirmed' ? paidAtDate : null, v.original, finalStatus === 'confirmed'];
+      // 434: $16 = category_id, $17 = tipo como texto. Sem a migration, o SQL de antes.
+      var insertUnico = function(comCategorias) {
+        return db.query(
+          'INSERT INTO transactions (company_id, type, amount, description, category, notes, due_date, status, paid_at, created_by, payment_method, employee_id, employee_name, original_amount' + (comCategorias ? ', category_id' : '') + ')' +
+          ' VALUES ($1, $2, $3, $4, ' + (comCategorias ? catSql.sqlDoTexto('$1', '$16', '$17', '$5') : '$5') + ', $6, $7, $8, ' + PAID_AT_SQL + ', $9, $10, $11, $12, $14' +
+          (comCategorias ? ', ' + catSql.sqlDoId('$1', '$16', '$5', '$17') : '') + ')' +
+          ' RETURNING id, type, amount, original_amount, description, category, status, due_date, paid_at, created_at, payment_method, employee_id, employee_name' + (comCategorias ? ', category_id' : ''),
+          comCategorias ? unicoParams.concat([categoryId, body.type]) : unicoParams
+        );
+      };
+      var result = null;
+      if (catSql.usarCategorias()) {
+        try { result = await insertUnico(true); }
+        catch (e) { if (!catSql.faltaSchema(e)) throw e; catSql.marcarIndisponivel(); }
+      }
+      if (!result) result = await insertUnico(false);
       var tx = result.rows[0];
-      return res.status(201).json({ id: tx.id, type: tx.type, amount: parseFloat(tx.amount), original_amount: tx.original_amount == null ? null : parseFloat(tx.original_amount), description: tx.description, category: tx.category, status: tx.status, due_date: tx.due_date, paid_at: tx.paid_at, created_at: tx.created_at, payment_method: tx.payment_method, employee_id: tx.employee_id, employee_name: tx.employee_name });
+      return res.status(201).json({ id: tx.id, type: tx.type, amount: parseFloat(tx.amount), original_amount: tx.original_amount == null ? null : parseFloat(tx.original_amount), description: tx.description, category: tx.category, category_id: tx.category_id || null, status: tx.status, due_date: tx.due_date, paid_at: tx.paid_at, created_at: tx.created_at, payment_method: tx.payment_method, employee_id: tx.employee_id, employee_name: tx.employee_name });
     }
     var groupId = crypto.randomUUID();
     var amount = parseFloat(body.amount); var description = String(body.description).trim();
@@ -308,24 +337,36 @@ router.post('/', async function(req, res) {
       var itemValores = valoresDaBaixa(itemStatus);
       // $16 citado sempre: parametro enviado e nao citado quebra o Postgres.
       var itemPaidAt = "CASE WHEN $18::boolean THEN COALESCE($16::date + INTERVAL '3 hours', NOW()) END";
-      var r = await db.query(
-        'INSERT INTO transactions (company_id, type, amount, description, category, notes, due_date, status, paid_at, created_by, recurrence_type, recurrence_group_id, recurrence_index, payment_method, employee_id, employee_name, original_amount)' +
-        ' VALUES ($1, $2, $3, $4, $5, $6, $7, $8, ' + itemPaidAt + ', $9, $10, $11, $12, $13, $14, $15, $17)' +
-        ' RETURNING id, type, amount, description, category, status, due_date, recurrence_index',
-        [cid, body.type, itemValores.amount, description, category, notes, itemDueDate, itemStatus, userId, recurrenceType, groupId, i, paymentMethod, employeeId, employeeName,
-         itemStatus === 'confirmed' ? paidAtDate : null, itemValores.original, itemStatus === 'confirmed']
-      );
+      var itemParams = [cid, body.type, itemValores.amount, description, category, notes, itemDueDate, itemStatus, userId, recurrenceType, groupId, i, paymentMethod, employeeId, employeeName,
+         itemStatus === 'confirmed' ? paidAtDate : null, itemValores.original, itemStatus === 'confirmed'];
+      // 434: $19 = category_id, $20 = tipo como texto.
+      var insertItem = function(comCategorias) {
+        return db.query(
+          'INSERT INTO transactions (company_id, type, amount, description, category, notes, due_date, status, paid_at, created_by, recurrence_type, recurrence_group_id, recurrence_index, payment_method, employee_id, employee_name, original_amount' + (comCategorias ? ', category_id' : '') + ')' +
+          ' VALUES ($1, $2, $3, $4, ' + (comCategorias ? catSql.sqlDoTexto('$1', '$19', '$20', '$5') : '$5') + ', $6, $7, $8, ' + itemPaidAt + ', $9, $10, $11, $12, $13, $14, $15, $17' +
+          (comCategorias ? ', ' + catSql.sqlDoId('$1', '$19', '$5', '$20') : '') + ')' +
+          ' RETURNING id, type, amount, description, category, status, due_date, recurrence_index' + (comCategorias ? ', category_id' : ''),
+          comCategorias ? itemParams.concat([categoryId, body.type]) : itemParams
+        );
+      };
+      var r = null;
+      if (catSql.usarCategorias()) {
+        try { r = await insertItem(true); }
+        catch (e) { if (!catSql.faltaSchema(e)) throw e; catSql.marcarIndisponivel(); }
+      }
+      if (!r) r = await insertItem(false);
       created.push(r.rows[0]);
     }
     res.status(201).json({
       recurrence: { type: recurrenceType, label: RECURRENCE_LABELS[recurrenceType], group_id: groupId, count: created.length, first_date: created[0]?.due_date, last_date: created[created.length - 1]?.due_date },
-      transactions: created.map(function(tx) { return { id: tx.id, type: tx.type, amount: parseFloat(tx.amount), description: tx.description, category: tx.category, status: tx.status, due_date: tx.due_date, recurrence_index: tx.recurrence_index }; }),
+      transactions: created.map(function(tx) { return { id: tx.id, type: tx.type, amount: parseFloat(tx.amount), description: tx.description, category: tx.category, category_id: tx.category_id || null, status: tx.status, due_date: tx.due_date, recurrence_index: tx.recurrence_index }; }),
     });
   } catch (err) { console.error('[transactions] create:', err.message); res.status(500).json({ error: 'Erro ao criar lancamento' }); }
 });
 
 router.patch('/:txId', async function(req, res) {
   var cid = req.params.id; var txId = req.params.txId;
+  if (!catSql.idValido(req.body.category_id)) return res.status(400).json({ error: 'category_id invalido' });
   var fields = ['type', 'amount', 'description', 'category', 'status', 'notes', 'due_date', 'payment_method', 'employee_id', 'employee_name'];
   var updates = [], values = []; var idx = 1;
   if (req.body.payment_method !== undefined && req.body.payment_method !== null) {
@@ -392,7 +433,31 @@ router.patch('/:txId', async function(req, res) {
   }
   for (var i = 0; i < fields.length; i++) {
     var f = fields[i];
+    if (f === 'category') continue;
     if (req.body[f] !== undefined) { updates.push(f + ' = $' + idx); values.push(f === 'amount' ? parseFloat(req.body[f]) : req.body[f]); idx++; }
+  }
+  // 434: categoria por id (texto = nome da categoria-MAE) ou so por texto.
+  // Os parametros ficam no fim de `values` e entram pela posicao: o SQL e
+  // montado de novo, sem eles, se a migration ainda nao estiver no banco.
+  var mexeNaCategoria = req.body.category !== undefined || req.body.category_id !== undefined;
+  function setsDaCategoria(comCategorias, base) {
+    if (!mexeNaCategoria) return { sets: [], vals: [] };
+    if (!comCategorias) {
+      return req.body.category !== undefined ? { sets: ['category = $' + base], vals: [req.body.category] } : { sets: [], vals: [] };
+    }
+    var pTxt = '$' + base, pId = '$' + (base + 1), pKind = '$' + (base + 2), pCid = '$' + (base + 3);
+    var kind = 'COALESCE(' + pKind + '::text, transactions.type::text)';
+    var txt = 'COALESCE(' + pTxt + '::text, transactions.category)';
+    var novoId = catSql.sqlDoId(pCid + '::uuid', pId, txt, kind);
+    // So texto e o mesmo de antes: a ligacao fica (o modal antigo manda a
+    // categoria em todo Salvar, inclusive no "A Receber" do crediario).
+    var idSet = req.body.category_id !== undefined
+      ? 'category_id = ' + novoId
+      : 'category_id = CASE WHEN finance_category_norm(' + txt + ') = finance_category_norm(transactions.category) THEN transactions.category_id ELSE ' + novoId + ' END';
+    return {
+      sets: ['category = ' + catSql.sqlDoTexto(pCid + '::uuid', pId, kind, txt), idSet],
+      vals: [req.body.category !== undefined ? req.body.category : null, catSql.idOuNull(req.body.category_id), req.body.type || null, cid],
+    };
   }
   // Baixa com data escolhida (quadro): meia-noite SP, mesma convencao '+3h'
   // do sync de sales.created_at. Voltar para pendente limpa a data da baixa —
@@ -415,7 +480,7 @@ router.patch('/:txId', async function(req, res) {
     updates.push('amount = $' + idx + '::numeric');
     values.push(paidAmount); idx++;
   }
-  if (updates.length === 0) return res.status(400).json({ error: 'Nenhum campo para atualizar' });
+  if (updates.length === 0 && !mexeNaCategoria) return res.status(400).json({ error: 'Nenhum campo para atualizar' });
   // 06/11/2026 (Esquina da Make, venda 527): o modal "Editar lancamento"
   // manda due_date em todo Salvar, mesmo quando so a forma de pagamento
   // mudou. O sync abaixo regravava sales.created_at para meia-noite desse
@@ -430,9 +495,19 @@ router.patch('/:txId', async function(req, res) {
     } catch (err) { console.error('[transactions] read due_date:', err.message); }
   }
   var vencimentoMudou = !!(req.body.due_date && String(req.body.due_date).slice(0, 10) !== vencimentoAntes);
-  updates.push('updated_at = NOW()'); values.push(txId, cid);
+  function updateDoLancamento(comCategorias) {
+    var cat = setsDaCategoria(comCategorias, idx);
+    var n = idx + cat.vals.length;
+    var sets = updates.concat(cat.sets, ['updated_at = NOW()']);
+    return db.query('UPDATE transactions SET ' + sets.join(', ') + ' WHERE id = $' + n + ' AND company_id = $' + (n + 1) + ' RETURNING *', values.concat(cat.vals, [txId, cid]));
+  }
   try {
-    var result = await db.query('UPDATE transactions SET ' + updates.join(', ') + ' WHERE id = $' + idx + ' AND company_id = $' + (idx + 1) + ' RETURNING *', values);
+    var result = null;
+    if (catSql.usarCategorias()) {
+      try { result = await updateDoLancamento(true); }
+      catch (e) { if (!catSql.faltaSchema(e)) throw e; catSql.marcarIndisponivel(); }
+    }
+    if (!result) result = await updateDoLancamento(false);
     if (!result.rows.length) return res.status(404).json({ error: 'Lancamento nao encontrado' });
     var updated = result.rows[0];
     var saleId = extractSaleId(updated.idempotency_key);
