@@ -59,20 +59,26 @@ describe('CORS global aceita X-Aura-App', () => {
 
 describe('login grava app_mode', () => {
   const auth = ler('src', 'routes', 'auth.js');
+  // 09/11/2026: o INSERT foi para services/refreshDeSessao.js (gravarRefresh),
+  // usado pelo login e pelo /refresh deslizante do app instalado.
+  const sessao = ler('src', 'services', 'refreshDeSessao.js');
 
-  test('storeRefreshToken le X-Aura-App pelo helper e insere em app_mode', () => {
+  test('storeRefreshToken le X-Aura-App pelo helper e grava pelo gravarRefresh', () => {
     const i = auth.indexOf('async function storeRefreshToken(');
     expect(i).toBeGreaterThan(-1);
     const corpo = auth.slice(i, auth.indexOf('\n}', i));
     expect(corpo).toMatch(/appModeDoCabecalho\(req\.headers\['x-aura-app'\]\)/);
-    expect(corpo).toMatch(/INSERT INTO refresh_tokens \(user_id, token_hash, expires_at, ip_address, user_agent, app_mode\)/);
+    expect(corpo).toMatch(/refreshDeSessao\.gravarRefresh\(/);
+    const j = sessao.indexOf('async function gravarRefresh(');
+    const g = sessao.slice(j, sessao.indexOf('\n}', j));
+    expect(g).toMatch(/INSERT INTO refresh_tokens \(user_id, token_hash, expires_at, ip_address, user_agent, app_mode\)/);
   });
 
   test('sem a coluna (42703) cai no INSERT antigo em vez de perder o refresh token', () => {
-    const i = auth.indexOf('async function storeRefreshToken(');
-    const corpo = auth.slice(i, auth.indexOf('\n}', i));
-    expect(corpo).toMatch(/err\.code === '42703'/);
-    expect(corpo).toMatch(/INSERT INTO refresh_tokens \(user_id, token_hash, expires_at, ip_address, user_agent\) VALUES \(\$1, \$2, \$3, \$4, \$5\)/);
+    const j = sessao.indexOf('async function gravarRefresh(');
+    const g = sessao.slice(j, sessao.indexOf('\n}', j));
+    expect(g).toMatch(/err\.code === '42703'/);
+    expect(g).toMatch(/INSERT INTO refresh_tokens \(user_id, token_hash, expires_at, ip_address, user_agent\) VALUES \(\$1, \$2, \$3, \$4, \$5\)/);
   });
 
   test('o helper esta importado no topo do arquivo', () => {

@@ -131,6 +131,7 @@ const whatsappCadastro = require('../services/whatsappCadastro');
 const signupHandshake = require('../services/signupHandshake');
 const signupLead = require('../services/signupLead');
 const { datasDoAtraso } = require('../services/cobrancaAssinatura');
+const refreshDeSessao = require('../services/refreshDeSessao');
 
 let redis = null;
 try { redis = require('../config/redis').default || require('../config/redis'); } catch (_) {}
@@ -138,8 +139,7 @@ try { redis = require('../config/redis').default || require('../config/redis'); 
 const env        = validateRuntimeEnv();
 const JWT_SECRET = env.JWT_SECRET;
 const ACCESS_TTL  = '1h';
-const REFRESH_TTL = '7d';
-const REFRESH_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+const REFRESH_TTL_MS = refreshDeSessao.REFRESH_TTL_MS; // 7 dias (navegador comum)
 const IS_PROD = env.NODE_ENV === 'production';
 
 // MULTICNPJ: ranking de planos pra calcular plan efetivo no modo consolidado.
@@ -200,29 +200,31 @@ function parseSignupSegment(body) {
 function signAccessToken(payload) {
   return jwt.sign({ ...payload, type: 'access' }, JWT_SECRET, { expiresIn: ACCESS_TTL });
 }
-function signRefreshToken(payload) {
-  const jti = crypto.randomUUID();
-  const token = jwt.sign({ ...payload, type: 'refresh', jti }, JWT_SECRET, { expiresIn: REFRESH_TTL });
-  return { token, jti };
+// 09/11/2026: refresh token do app instalado (X-Aura-App: standalone) e
+// deslizante -- 30 dias sem uso, nao 7 dias do login. Regras e motivo em
+// services/refreshDeSessao.js. O navegador comum segue com os 7 dias.
+function signRefreshToken(payload, req) {
+  const r = refreshDeSessao.assinarRefresh(payload, JWT_SECRET, { deslizante: refreshDeSessao.ehStandalone(req) });
+  return { token: r.token, jti: r.jti, expiresAt: r.expiresAt, deslizante: r.deslizante };
 }
-function hashToken(token) { return crypto.createHash('sha256').update(token).digest('hex'); }
-function setRefreshCookie(res, refreshToken) {
-  res.cookie('aura_refresh', refreshToken, { httpOnly: true, secure: IS_PROD, sameSite: IS_PROD ? 'strict' : 'lax', maxAge: REFRESH_TTL_MS, path: '/api/v1/auth' });
+function hashToken(token) { return refreshDeSessao.hashToken(token); }
+function setRefreshCookie(res, refreshToken, maxAgeMs) {
+  res.cookie('aura_refresh', refreshToken, { httpOnly: true, secure: IS_PROD, sameSite: IS_PROD ? 'strict' : 'lax', maxAge: maxAgeMs || REFRESH_TTL_MS, path: '/api/v1/auth' });
 }
 function clearRefreshCookie(res) { res.clearCookie('aura_refresh', { path: '/api/v1/auth' }); }
-async function storeRefreshToken(userId, refreshToken, req) {
-  const base = [userId, hashToken(refreshToken), new Date(Date.now() + REFRESH_TTL_MS), req.ip, (req.headers['user-agent'] || '').substring(0, 200)];
+async function storeRefreshToken(userId, refreshToken, req, expiresAt) {
   // 22/09/2026 (PWA Fase 2): por onde a pessoa abriu o painel (X-Aura-App),
   // para medir quem usa pelo app instalado. Coluna da migration 349.
   const appMode = appModeDoCabecalho(req.headers['x-aura-app']);
   try {
-    await db.query('INSERT INTO refresh_tokens (user_id, token_hash, expires_at, ip_address, user_agent, app_mode) VALUES ($1, $2, $3, $4, $5, $6)', [...base, appMode]);
+    await refreshDeSessao.gravarRefresh(db, {
+      userId, token: refreshToken, req, appMode,
+      expiresAt: expiresAt || new Date(Date.now() + REFRESH_TTL_MS),
+    });
   } catch (err) {
-    // 42703 = coluna ainda nao existe (codigo novo antes da 349 rodar). O
-    // refresh token vale mais que a metrica: grava do jeito antigo.
-    if (err && err.code === '42703') {
-      try { await db.query('INSERT INTO refresh_tokens (user_id, token_hash, expires_at, ip_address, user_agent) VALUES ($1, $2, $3, $4, $5)', base); } catch (_) {}
-    }
+    // O login nao cai por falha ao gravar a linha (comportamento de antes).
+    // O deslizante se recupera: o /refresh grava a linha que faltou.
+    console.warn('storeRefreshToken falhou:', err && err.message);
   }
 }
 
@@ -744,9 +746,9 @@ router.post('/register', async (req, res) => {
       dojo_id: karateCtx.dojo_id,
     };
     const accessToken = signAccessToken(tokenPayload);
-    const { token: refreshToken } = signRefreshToken({ id: user.id });
-    await storeRefreshToken(user.id, refreshToken, req);
-    setRefreshCookie(res, refreshToken);
+    const { token: refreshToken, expiresAt: refreshExpiresAt } = signRefreshToken({ id: user.id }, req);
+    await storeRefreshToken(user.id, refreshToken, req, refreshExpiresAt);
+    setRefreshCookie(res, refreshToken, refreshExpiresAt.getTime() - Date.now());
     logAuditAction(user.id, company ? company.id : null, 'register', 'New account: ' + email.toLowerCase().trim() + (skipCompany ? ' (invite flow, no company)' : !isNewCompany ? ' (joined existing company)' : '') + (isDojoSignup ? ' [dojo self-signup, federation=' + dojoFederationId + ', NOT linked]' : '') + ' | terms_version=' + acceptedVersion);
 
     res.status(201).json({
@@ -880,9 +882,9 @@ router.post('/login', async (req, res) => {
       dojo_id: karateCtx.dojo_id,
     };
     const accessToken = signAccessToken(tokenPayload);
-    const { token: refreshToken } = signRefreshToken({ id: user.id });
-    await storeRefreshToken(user.id, refreshToken, req);
-    setRefreshCookie(res, refreshToken);
+    const { token: refreshToken, expiresAt: refreshExpiresAt } = signRefreshToken({ id: user.id }, req);
+    await storeRefreshToken(user.id, refreshToken, req, refreshExpiresAt);
+    setRefreshCookie(res, refreshToken, refreshExpiresAt.getTime() - Date.now());
     logAuditAction(user.id, ctx.consolidated ? null : (ctx.primary ? ctx.primary.id : null), 'login', 'Login: ' + user.email + (ctx.consolidated ? ' [consolidated]' : ''));
 
     // 15/06/2026: anexa extra_seats_granted ao company (fallback do gate de Equipe).
@@ -909,46 +911,24 @@ router.post('/login', async (req, res) => {
 });
 
 // POST /api/v1/auth/refresh
+// 09/11/2026: logica em services/refreshDeSessao.js. 401 so para token
+// invalido/expirado/revogado ou usuario desativado; falha do servidor = 503
+// (antes, qualquer excecao aqui virava 401 e o app deslogava).
 router.post('/refresh', async (req, res) => {
   const refreshTokenInput = req.body.refresh_token || req.cookies?.aura_refresh;
   if (!refreshTokenInput) return res.status(400).json({ error: 'refresh_token e obrigatorio' });
-  try {
-    const decoded = jwt.verify(refreshTokenInput, JWT_SECRET);
-    if (decoded.type !== 'refresh') return res.status(400).json({ error: 'Token nao e refresh' });
-    const tokenHash = hashToken(refreshTokenInput);
-    try {
-      const { rows } = await db.query('SELECT id, revoked FROM refresh_tokens WHERE token_hash = $1 AND user_id = $2', [tokenHash, decoded.id]);
-      if (rows.length > 0 && rows[0].revoked) { clearRefreshCookie(res); return res.status(401).json({ error: 'Refresh token revogado', code: 'REFRESH_REVOKED' }); }
-    } catch (_) {}
-
-    const { rows: uRows } = await db.query('SELECT id, role, is_staff FROM users WHERE id = $1 AND is_active = true', [decoded.id]);
-    if (!uRows.length) return res.status(401).json({ error: 'Usuario desativado' });
-    const user = uRows[0];
-
-    const ctx = await resolveDefaultContext(user.id);
-    // Track G: re-resolve contexto karate a cada refresh (TTL 1h mantem fresco).
-    const karateCtx = ctx.consolidated ? { federation_id: null, karate_role: null, dojo_id: null } : resolveKarateContext(ctx.primary);
-
-    const newAccessToken = signAccessToken({
-      id: user.id,
-      role: user.role,
-      plan: ctx.effectivePlan,
-      company: ctx.consolidated ? null : (ctx.primary ? ctx.primary.id : null),
-      is_staff: user.is_staff || false,
-      consolidated_view: ctx.consolidated,
-      federation_id: karateCtx.federation_id,
-      karate_role: karateCtx.karate_role,
-      dojo_id: karateCtx.dojo_id,
-    });
-    res.json({
-      token: newAccessToken,
-      token_expires_in: '1h',
-      consolidated_view: ctx.consolidated,
-    });
-  } catch (err) {
-    if (err.name === 'TokenExpiredError') { clearRefreshCookie(res); return res.status(401).json({ error: 'Refresh token expirado', code: 'REFRESH_EXPIRED' }); }
-    return res.status(401).json({ error: 'Refresh token invalido' });
-  }
+  const r = await refreshDeSessao.processarRefresh({
+    token: refreshTokenInput,
+    req,
+    db,
+    secret: JWT_SECRET,
+    resolveDefaultContext,
+    resolveKarateContext,
+    signAccessToken,
+  });
+  if (r.limparCookie) clearRefreshCookie(res);
+  if (r.novoRefresh) setRefreshCookie(res, r.novoRefresh, refreshDeSessao.INATIVIDADE_STANDALONE_MS);
+  return res.status(r.status).json(r.body);
 });
 
 // POST /api/v1/auth/logout
