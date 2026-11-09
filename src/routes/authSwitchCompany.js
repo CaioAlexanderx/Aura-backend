@@ -16,6 +16,7 @@ const { requireAuth } = require('../middleware/auth');
 const { validateRuntimeEnv } = require('../config/env');
 const { logAuditAction } = require('../middleware/auditLog');
 const { datasDoAtraso } = require('../services/cobrancaAssinatura');
+const { buscarEmpresaComAcesso } = require('../services/empresaComAcesso');
 
 const env = validateRuntimeEnv();
 const JWT_SECRET = env.JWT_SECRET;
@@ -177,36 +178,16 @@ router.post('/switch-company', requireAuth, async (req, res) => {
   }
 
   try {
-    const { rows } = await db.query(
-      `SELECT
-         c.id, c.legal_name, c.trade_name, c.plan, c.cnpj,
-         c.vertical_active, c.is_primary, c.module_overrides,
-         c.billing_status, c.trial_ends_at, c.ai_enabled, c.ai_consent_at,
-         c.logo_url, c.onboarding_step, c.access_code_used, c.segment,
-         c.is_sandbox,
-         CASE
-           WHEN c.owner_id = $2 THEN 'owner'
-           ELSE cm.role_label
-         END AS role
-       FROM companies c
-       LEFT JOIN company_members cm
-         ON cm.company_id = c.id AND cm.user_id = $2
-        AND cm.status = 'active' AND cm.is_active = true
-       WHERE c.id = $1
-         AND c.is_active = true
-         AND (c.owner_id = $2 OR cm.user_id = $2)
-       LIMIT 1`,
-      [company_id, userId]
-    );
+    // 09/11/2026: a checagem de acesso mora em services/empresaComAcesso.js,
+    // a mesma que o /auth/refresh usa para manter a empresa escolhida.
+    const company = await buscarEmpresaComAcesso(db, userId, company_id);
 
-    if (!rows.length) {
+    if (!company) {
       return res.status(403).json({
         error: 'NO_ACCESS',
         message: 'Você não tem acesso a esta empresa.',
       });
     }
-
-    const company = rows[0];
 
     // FIX 2026-05-03: consolidated_view: false explicito no JWT.
     // Antes era omitido, virando undefined no token decodificado.

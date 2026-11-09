@@ -24,6 +24,18 @@
 //
 // O navegador comum não muda: 7 dias do login, sem deslizar, sem token novo.
 // Sem migration: usa as colunas que refresh_tokens já tem.
+//
+// 09/11/2026 (mais tarde): o /refresh mantém a EMPRESA em que a pessoa
+// estava. Antes ele sempre assinava o access token novo com o contexto
+// padrão (resolveDefaultContext): depois de 1 h, quem tinha escolhido outra
+// empresa no seletor voltava sozinho para a principal (ou o consolidado).
+// Agora o app manda `company_id` no corpo (o id da empresa atual, ou 'all'
+// no consolidado). O id NUNCA é assinado só porque veio no corpo: passa pela
+// mesma checagem do switch-company (services/empresaComAcesso.js). Sem
+// acesso (removido da empresa, empresa de outra conta, empresa inativa, id
+// estranho) = contexto padrão, como antes. Sem o campo (app antigo) =
+// exatamente o de antes. 'all' = contexto padrão, que para 2+ empresas já é o
+// consolidado (a mesma regra do switch-company: consolidado exige 2+).
 // ============================================================
 'use strict';
 
@@ -90,6 +102,33 @@ async function etapa(nome, fn) {
 const r401 = (error, code) => ({ status: 401, body: { error, code }, limparCookie: true });
 
 /**
+ * O que o app pediu no corpo: 'all' (consolidado), um id, ou null (nada).
+ * Mesmos valores que o switch-company aceita para o consolidado.
+ */
+function lerEmpresaPedida(valor) {
+  if (valor === 'all' || valor === '*') return 'all';
+  if (typeof valor === 'string' && valor.trim()) return valor.trim();
+  return null;
+}
+
+/**
+ * Contexto do access token novo. Empresa pedida e com acesso = ela; qualquer
+ * outro caso = o padrão de sempre.
+ */
+async function escolherContexto(p, userId) {
+  const pedida = lerEmpresaPedida(p.empresaPedida);
+  if (pedida && pedida !== 'all' && typeof p.buscarEmpresaComAcesso === 'function') {
+    // Erro de banco aqui é 503 (etapa), nunca "cai no padrão": cair no padrão
+    // por um timeout seria o mesmo pulo de empresa que este código evita.
+    const empresa = await etapa('empresa_escolhida', () => p.buscarEmpresaComAcesso(userId, pedida));
+    if (empresa) {
+      return { primary: empresa, consolidated: false, effectivePlan: empresa.plan || 'essencial' };
+    }
+  }
+  return etapa('contexto', () => p.resolveDefaultContext(userId));
+}
+
+/**
  * Lógica do POST /auth/refresh, sem Express (testável com um db falso).
  *
  * @param {object} p
@@ -100,6 +139,8 @@ const r401 = (error, code) => ({ status: 401, body: { error, code }, limparCooki
  * @param {Function} p.resolveDefaultContext  (userId) => ctx
  * @param {Function} p.resolveKarateContext   (company) => karateCtx
  * @param {Function} p.signAccessToken        (payload) => string
+ * @param {string}  [p.empresaPedida]  req.body.company_id: id da empresa atual ou 'all'
+ * @param {Function} [p.buscarEmpresaComAcesso] (userId, companyId) => empresa|null
  * @param {number} [p.agora]          Date.now() (testes)
  * @returns {Promise<{ status: number, body: object, novoRefresh?: string, limparCookie?: boolean }>}
  */
@@ -143,7 +184,7 @@ async function processarRefresh(p) {
     const user = uRows[0];
 
     // 4. Contexto e access token novo.
-    const ctx = await etapa('contexto', () => p.resolveDefaultContext(user.id));
+    const ctx = await escolherContexto(p, user.id);
     const karateCtx = ctx.consolidated
       ? { federation_id: null, karate_role: null, dojo_id: null }
       : await etapa('contexto_karate', () => p.resolveKarateContext(ctx.primary));
@@ -158,7 +199,15 @@ async function processarRefresh(p) {
       karate_role: karateCtx.karate_role,
       dojo_id: karateCtx.dojo_id,
     }));
-    const body = { token, token_expires_in: '1h', consolidated_view: ctx.consolidated };
+    // current_company_id: a empresa do token novo (null no consolidado). O
+    // app compara com a que tem guardada: diferente = a pessoa perdeu o
+    // acesso à escolhida e o servidor caiu no padrão.
+    const body = {
+      token,
+      token_expires_in: '1h',
+      consolidated_view: ctx.consolidated,
+      current_company_id: ctx.consolidated ? null : (ctx.primary ? ctx.primary.id : null),
+    };
     if (!deslizante) return { status: 200, body };
 
     // 5. Deslizante: renova o prazo. Falha aqui não derruba a resposta: o
@@ -206,6 +255,7 @@ async function processarRefresh(p) {
 
 module.exports = {
   processarRefresh,
+  lerEmpresaPedida,
   assinarRefresh,
   gravarRefresh,
   ehStandalone,

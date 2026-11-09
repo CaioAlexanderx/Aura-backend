@@ -132,6 +132,7 @@ const signupHandshake = require('../services/signupHandshake');
 const signupLead = require('../services/signupLead');
 const { datasDoAtraso } = require('../services/cobrancaAssinatura');
 const refreshDeSessao = require('../services/refreshDeSessao');
+const { buscarEmpresaComAcesso } = require('../services/empresaComAcesso');
 
 let redis = null;
 try { redis = require('../config/redis').default || require('../config/redis'); } catch (_) {}
@@ -925,6 +926,9 @@ router.post('/refresh', async (req, res) => {
     resolveDefaultContext,
     resolveKarateContext,
     signAccessToken,
+    // 09/11/2026: mantém a empresa escolhida (validada; ver refreshDeSessao).
+    empresaPedida: req.body ? req.body.company_id : undefined,
+    buscarEmpresaComAcesso: (userId, companyId) => buscarEmpresaComAcesso(db, userId, companyId),
   });
   if (r.limparCookie) clearRefreshCookie(res);
   if (r.novoRefresh) setRefreshCookie(res, r.novoRefresh, refreshDeSessao.INATIVIDADE_STANDALONE_MS);
