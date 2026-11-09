@@ -251,6 +251,8 @@ router.use('/credit', requirePlan('negocio', 'expansao'), require('./creditBalan
 router.use('/credit', requirePlan('negocio', 'expansao'), require('./creditLeads'));
 router.use('/credit', requirePlan('negocio', 'expansao'), require('./credit'));
 router.use('/credit', requirePlan('negocio', 'expansao'), require('./creditInstallments'));
+// 08/11/2026 (p-90): resumo do que vence num periodo (somente leitura).
+router.use('/credit', requirePlan('negocio', 'expansao'), require('./creditResumoVencimento').companyRouter);
 // B4 (11/06/2026): devolucao de venda no crediario -- POST /credit/sales/:saleId/refund
 router.use('/credit', requirePlan('negocio', 'expansao'), require('./creditRefund'));
 // Item 3 (13/06/2026): unificacao de carne -- GET+POST /credit/customers/:cid/accounts/:accountId/unify
