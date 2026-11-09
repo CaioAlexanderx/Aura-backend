@@ -3,6 +3,7 @@
 // GET    /companies/:id/credit/customer/:cid
 // POST   /companies/:id/credit/customer/:cid/payment
 // POST   /companies/:id/credit/customer/:cid/accounts   (F3)
+// DELETE /companies/:id/credit/customers/:cid/accounts/:accountId (excluir carne, 09/11/2026)
 // DELETE /companies/:id/credit/transaction/:txid
 // DELETE /companies/:id/credit/payments/:txid            (desfazer recebimento, 07/10/2026)
 // POST   /companies/:id/credit/manual-entry
@@ -40,6 +41,7 @@ const overdueRule  = require('../services/credit/overdue');  // .ymd: due_date d
 const { undoManualEntry } = require('../services/credit/undoManualEntry');
 const { undoPayment }     = require('../services/credit/undoPayment');
 const { editPayment }     = require('../services/credit/editPayment');
+const { deleteCarne }     = require('../services/credit/deleteCarne');
 // 04/11/2026: recebimento avisa o celular de quem cuida do dinheiro.
 const { avisarRecebimento } = require('../services/credit/avisoDeRecebimento');
 // 16/09/2026: cliente cadastrado em outra loja do mesmo dono tambem vale
@@ -666,6 +668,46 @@ router.post('/customer/:cid/accounts', async (req, res) => {
     if (err.code === '42P01') return res.status(503).json({ error: 'Tabela credit_accounts ainda nao disponivel. Aguarde o deploy completo.' });
     console.error('[credit] create account error:', err.message);
     return res.status(500).json({ error: 'Erro ao criar carne' });
+  }
+});
+
+// DELETE /customers/:cid/accounts/:accountId -- exclui um carne (09/11/2026).
+//
+// A ficha nao tinha como excluir um carne lancado errado. Tudo numa transacao
+// (src/services/credit/deleteCarne.js): desfaz os debitos do carne (e o par da
+// renegociacao), cancela as parcelas abertas, marca o carne 'cancelled' e
+// atualiza o credit_used -- o saldo cai exatamente o aberto do carne.
+// Com recebimento -> 409 CARNE_TEM_RECEBIMENTO (+ receipts); de venda do
+// Caixa -> 409 CARNE_DE_VENDA (+ sale_id); de outra empresa/cliente -> 404.
+// Mesmas checagens do DELETE /transaction/:txid (as do prefixo /credit).
+router.delete('/customers/:cid/accounts/:accountId', async (req, res) => {
+  const companyId = req.params.id;
+  const client = await db.connect();
+  try {
+    await client.query('BEGIN');
+    const result = await deleteCarne(client, {
+      companyId,
+      customerId: req.params.cid,
+      accountId:  req.params.accountId,
+    });
+    await client.query('COMMIT');
+    console.info('[credit] carne excluido', JSON.stringify({
+      companyId,
+      accountId:    result.account_id,
+      removed:      result.removed_amount,
+      installments: result.cancelled_installments,
+      transactions: result.removed_transactions,
+    }));
+    res.json(result);
+  } catch (err) {
+    try { await client.query('ROLLBACK'); } catch (_) {}
+    if (err.status && err.code) {
+      return res.status(err.status).json({ error: err.message, code: err.code, ...(err.extra || {}) });
+    }
+    console.error('[credit] delete carne error:', err.code, err.message);
+    res.status(500).json({ error: 'Erro ao excluir carne' });
+  } finally {
+    client.release();
   }
 });
 
