@@ -170,7 +170,9 @@ describe('NFS-e nacional — banco real', () => {
     expect(r1.nota.status).toBe('pendente');
     expect(String(r1.nota.dps_number)).toBe('2');
 
-    const chave2 = CHAVE.slice(0, 36) + '2' + CHAVE.slice(37);
+    // último dígito do nNFSe (posição 35): 1 → 2 — outra chave de acesso
+    const chave2 = CHAVE.slice(0, 35) + '2' + CHAVE.slice(36);
+    expect(chave2).not.toBe(CHAVE);
     plano.postDps = () => json(201, { chaveAcesso: chave2, nfseXmlGZipB64: gz(NFSE_XML.replace(CHAVE, chave2)) });
     const r2 = await nacional.emitir(db, { companyId, idempotencyKey: 'pay_2', nota: NOTA }, ctx);
     expect(r2.nota.status).toBe('autorizada');
