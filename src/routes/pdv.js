@@ -91,6 +91,9 @@ const vendaIdempotente = require('../services/vendaIdempotente');
 const vendaNaPromocao = require('../services/vendaNaPromocao');
 // 04/11/2026: venda realizada e orçamento que virou venda avisam o celular.
 const lojaEvents = require('../services/lojaEvents');
+// 09/11/2026 (migration 435): endereco de entrega da venda com frete.
+const entregaDaVenda = require('../services/entregaDaVenda');
+const { parseCustomerAddress } = require('../services/customerAddress');
 
 const fmt = (v) => parseFloat(v || 0).toFixed(2);
 const SP_DATE_NOW = "(NOW() AT TIME ZONE 'America/Sao_Paulo')::date";
@@ -211,6 +214,18 @@ async function resolveInlineCustomer(client, companyId, body, { required = false
       ORDER BY (cpf_cnpj = $2) DESC NULLS LAST
       LIMIT 1`;
 
+  // 09/11/2026 (entrega): o cadastro novo ja nasce com o endereco, quando
+  // ele vem no cliente inline (mesmas chaves do POST /customers). Sem
+  // endereco no body o INSERT e o de sempre.
+  const addr = parseCustomerAddress(c);
+  if (!addr.ok) {
+    const err = new Error(addr.error);
+    err.statusCode = 422;
+    err.code = 'INVALID_DELIVERY_ADDRESS';
+    throw err;
+  }
+  const addrCols = Object.entries(addr.values).filter(([, v]) => v !== null);
+
   if (cpf || phone) {
     const { rows } = await client.query(findSql, [companyId, cpf, phone]);
     if (rows.length) return rows[0].id;
@@ -218,9 +233,9 @@ async function resolveInlineCustomer(client, companyId, body, { required = false
 
   try {
     const { rows } = await client.query(
-      `INSERT INTO customers (company_id, name, phone, cpf_cnpj)
-       VALUES ($1, $2, $3, $4) RETURNING id`,
-      [companyId, name || phone || cpf, phone, cpf]
+      `INSERT INTO customers (company_id, name, phone, cpf_cnpj${addrCols.map(([k]) => ', ' + k).join('')})
+       VALUES ($1, $2, $3, $4${addrCols.map((_, i) => ', $' + (i + 5)).join('')}) RETURNING id`,
+      [companyId, name || phone || cpf, phone, cpf, ...addrCols.map(([, v]) => v)]
     );
     return rows[0].id;
   } catch (insertErr) {
@@ -325,6 +340,14 @@ async function handleSale(req, res, opts = {}) {
       customerId = await resolveInlineCustomer(client, req.params.id, req.body, {
         required: !!opts.signalSale,
       });
+    }
+    // 09/11/2026 (entrega, migration 435): venda com frete precisa de para
+    // onde vai. Sem frete e sem delivery_address nao toca o banco. A trava
+    // (422) so vale com delivery_check -- ver services/entregaDaVenda.js.
+    const entrega = await entregaDaVenda.prepararEntrega(client, { customerId, body: req.body, items });
+    if (entrega && entrega.erro) {
+      await client.query('ROLLBACK');
+      return res.status(422).json(entrega.erro);
     }
     let subtotal = 0;
     const enrichedItems = [];
@@ -507,6 +530,14 @@ async function handleSale(req, res, opts = {}) {
       } catch (e) {
         if (e.code !== '42703') throw e;
       }
+    }
+
+    // 09/11/2026: retrato do endereco na venda + cadastro do cliente.
+    if (entrega) {
+      const retrato = await entregaDaVenda.gravarEntrega(client, {
+        companyId: req.params.id, saleId: sale.id, customerId, entrega,
+      });
+      if (retrato) sale.delivery_address = retrato;
     }
 
     // p-92 (migration 428): preco_lista ("De") e em_promocao de cada item,

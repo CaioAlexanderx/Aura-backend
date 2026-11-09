@@ -1,0 +1,48 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8">
+  <title>Entrega - Venda 214</title>
+  <style>
+    @page { margin: 12mm; size: A4; }
+    * { margin:0; padding:0; box-sizing:border-box; }
+    body { font-family:-apple-system,'Segoe UI',Roboto,Arial,sans-serif; font-size:12px; color:#111; overflow-wrap:anywhere; }
+    .hd { display:flex; justify-content:space-between; align-items:flex-start; gap:12px; border-bottom:2px solid #111; padding-bottom:10px; }
+    .loja { display:flex; gap:12px; align-items:center; }
+    .loja-nome { font-size:14px; }
+    .logo { width:46px; height:46px; border-radius:10px; background:#eee; display:flex; align-items:center; justify-content:center; font-weight:900; color:#555; flex:none; overflow:hidden; }
+    .logo img { display:block; width:46px; height:46px; object-fit:contain; }
+    .cinza { color:#555; }
+    .dir { text-align:right; }
+    .tt { font-size:24px; font-weight:900; letter-spacing:.06em; }
+    .blk { border:1.5px solid #111; border-radius:8px; padding:12px 14px; margin-top:14px; page-break-inside:avoid; break-inside:avoid; }
+    .blk .k { font-size:10px; font-weight:800; letter-spacing:.1em; color:#555; }
+    .nm { font-size:20px; font-weight:900; }
+    .tel { font-size:14px; }
+    .addr { font-size:16px; font-weight:700; line-height:1.4; }
+    .lado { display:flex; justify-content:space-between; gap:12px; }
+    .v { font-size:14px; }
+    table { width:100%; border-collapse:collapse; margin-top:6px; }
+    td, th { text-align:left; padding:5px 4px; border-bottom:1px solid #ddd; }
+    .sig { display:flex; gap:30px; margin-top:26px; }
+    .sig div { flex:1; border-top:1px solid #111; padding-top:4px; font-size:11px; color:#444; }
+    @media print { body { -webkit-print-color-adjust:exact; } button { display:none; } }
+  </style>
+</head>
+<body>
+  <div class="hd">
+    <div class="loja"><div class="logo">LE</div><div><b class="loja-nome">Loja Exemplo</b><br><span class="cinza">(11) 3333-0000 · R. do Comércio, 10 · São Paulo/SP</span></div></div>
+    <div class="dir"><div class="tt">ENTREGA</div><div>Venda Nº 214 · 09/11/2026</div></div>
+  </div>
+  <div class="blk"><div class="k">PARA</div><div class="nm">Pessoa Teste</div><div class="tel">(11) 98888-1234</div></div>
+  <div class="blk"><div class="k">ENDEREÇO</div><div class="addr">Av. Paulista, 1000 · Apto 52<br>Bela Vista · São Paulo/SP · CEP 01310-100</div><div style="margin-top:4px">Ponto de referência: portão azul</div></div>
+  <div class="blk"><div class="k">RECADO</div><div style="font-size:13px">Entregar depois das 14h</div></div>
+  <div class="blk"><div class="k">ITENS (3)</div>
+    <table><thead><tr><th style="width:50px">Qtd</th><th>Produto</th></tr></thead><tbody><tr><td>1</td><td>Vestido midi floral (M)</td></tr><tr><td>1</td><td>Cinto couro caramelo</td></tr><tr><td>2</td><td>Brinco argola dourada</td></tr></tbody></table>
+  </div>
+  <div class="blk lado"><div><div class="k">PAGAMENTO</div><b class="v">Pago · Pix</b></div><div class="dir"><div class="k">FRETE</div><b class="v">R$ 15,00</b></div></div>
+  <div class="sig"><div>Recebido por</div><div>Data e hora</div></div>
+  <br><button onclick="window.print()" style="width:100%;padding:8px;margin-top:8px;cursor:pointer">Imprimir</button>
+  
+</body>
+</html>

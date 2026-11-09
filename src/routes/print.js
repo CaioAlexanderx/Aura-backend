@@ -18,6 +18,13 @@
 // 22/10/2026: cupom não fiscal do Caixa mostra a logo da loja (companies.logo_url)
 //   no canto superior esquerdo quando cadastrada. Sem logo o HTML é idêntico
 //   ao de antes (travado por __tests__/cupom.logoDaLoja.test.js).
+// 09/11/2026: papel de entrega (utils/buildDeliverySlipHtml.js).
+//   - /receipt/:saleId e /preview com ?entrega=1 acrescentam o papel depois
+//     do cupom, separado por uma linha de corte. Sem o parametro a rota e a
+//     de sempre e o HTML e identico byte a byte (__tests__/papelDeEntrega).
+//   - GET /delivery/:saleId?format=80|58|a4[&autoprint=1]: o papel sozinho.
+//   Endereco: o retrato da venda (sales.delivery_address, migration 435) e,
+//   na venda sem retrato, o cadastro atual do cliente.
 // ============================================================
 const express = require('express');
 const router  = express.Router({ mergeParams: true });
@@ -33,6 +40,9 @@ const { buildServiceOrderHtml } = require('../utils/buildServiceOrderHtml');
 const { buildWarrantyHtml } = require('../utils/buildWarrantyHtml');
 const { buildCarneA4Html, classifyInstallments } = require('../utils/buildCarneA4Html');
 const { purchasesByGroup, NO_ACCOUNT_KEY } = require('../services/credit/carnePurchases');
+const {
+  dadosDoPapel, blocoDaBobina, comPapelDeEntrega, documentoDoPapel, temEnderecoNoPapel,
+} = require('../utils/buildDeliverySlipHtml');
 
 const NUVEM_URL = process.env.NUVEM_FISCAL_URL || 'https://api.sandbox.nuvemfiscal.com.br';
 
@@ -304,13 +314,47 @@ async function _loadSaleData(saleId, companyId) {
   return { company: companyRows[0] || {}, sale: saleRows[0], items, payments, installments };
 }
 
+// 09/11/2026: para onde vai a entrega. O retrato gravado na venda vale
+// primeiro (o papel reimpresso nao muda se o cadastro mudar); sem ele, o
+// cadastro atual do cliente. null = venda sem endereco.
+async function _loadEntrega(sale) {
+  let e = sale && sale.delivery_address;
+  if (typeof e === 'string') { try { e = JSON.parse(e); } catch (_) { e = null; } }
+  if (e && typeof e === 'object' && temEnderecoNoPapel(e)) return e;
+  if (!sale || !sale.customer_id) return null;
+  const cols = 'name, phone, zip_code, street, number, complement, neighborhood, city, state';
+  let rows;
+  try {
+    ({ rows } = await db.query(`SELECT ${cols}, address_reference FROM customers WHERE id=$1`, [sale.customer_id]));
+  } catch (err) {
+    if (err.code !== '42703') throw err;
+    ({ rows } = await db.query(`SELECT ${cols} FROM customers WHERE id=$1`, [sale.customer_id]));
+  }
+  const c = rows && rows[0];
+  return c && temEnderecoNoPapel(c) ? c : null;
+}
+
+// ?entrega=1: o cupom de sempre + o papel de entrega depois da linha de
+// corte. Se a venda nao tem endereco, ou algo falha aqui, sai o cupom so.
+async function _cupomComEntrega(html, data) {
+  try {
+    const entrega = await _loadEntrega(data.sale);
+    if (!entrega) return html;
+    return comPapelDeEntrega(html, blocoDaBobina(dadosDoPapel({ ...data, entrega })));
+  } catch (err) {
+    console.error('[print] papel de entrega no cupom:', err.message);
+    return html;
+  }
+}
+
 // GET /print/receipt/:saleId
 router.get('/receipt/:saleId', requireAuth, async (req, res) => {
   try {
     const data = await _loadSaleData(req.params.saleId, req.params.id);
     if (!data) return res.status(404).json({ error: 'Venda nao encontrada' });
     res.setHeader('Content-Type', 'text/html; charset=utf-8');
-    res.send(receiptHTML({ ...data, options: { autoprint: false } }));
+    const html = receiptHTML({ ...data, options: { autoprint: false } });
+    res.send(req.query.entrega === '1' ? await _cupomComEntrega(html, data) : html);
   } catch (err) { console.error('[print] receipt error:', err.message); res.status(500).json({ error: 'Erro ao gerar cupom' }); }
 });
 
@@ -320,8 +364,30 @@ router.get('/receipt/:saleId/preview', requireAuth, async (req, res) => {
     const data = await _loadSaleData(req.params.saleId, req.params.id);
     if (!data) return res.status(404).json({ error: 'Venda nao encontrada' });
     res.setHeader('Content-Type', 'text/html; charset=utf-8');
-    res.send(receiptHTML({ ...data, options: { autoprint: true } }));
+    const html = receiptHTML({ ...data, options: { autoprint: true } });
+    res.send(req.query.entrega === '1' ? await _cupomComEntrega(html, data) : html);
   } catch (err) { console.error('[print] preview error:', err.message); res.status(500).json({ error: 'Erro ao gerar cupom' }); }
+});
+
+// GET /print/delivery/:saleId?format=80|58|a4[&autoprint=1]
+// O papel de entrega sozinho. Bobina de 80 mm por padrao.
+router.get('/delivery/:saleId', requireAuth, async (req, res) => {
+  try {
+    const pedido = String(req.query.format || '80').toLowerCase();
+    const formato = ['80', '58', 'a4'].includes(pedido) ? pedido : '80';
+    const data = await _loadSaleData(req.params.saleId, req.params.id);
+    if (!data) return res.status(404).json({ error: 'Venda nao encontrada' });
+    const entrega = await _loadEntrega(data.sale);
+    if (!entrega) {
+      return res.status(422).json({ error: 'Esta venda não tem endereço de entrega.', code: 'NO_DELIVERY_ADDRESS' });
+    }
+    const logoUrl = formato === 'a4' ? receiptLogoUrl(data.company.logo_url) : null;
+    const autoprint = req.query.autoprint === '1'
+      ? (logoUrl ? autoPrintScript({ bailMs: 2000 }) : autoPrintScript())
+      : '';
+    res.setHeader('Content-Type', 'text/html; charset=utf-8');
+    res.send(documentoDoPapel(dadosDoPapel({ ...data, entrega }), { format: formato, autoprintScript: autoprint, logoUrl }));
+  } catch (err) { console.error('[print] delivery error:', err.message); res.status(500).json({ error: 'Erro ao gerar o papel de entrega' }); }
 });
 
 // GET /print/receipt/:saleId/a4
