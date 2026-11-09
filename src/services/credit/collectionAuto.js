@@ -178,20 +178,41 @@ async function alreadyNotified(installmentId, templateName) {
 }
 
 // Histórico + estágio. Só é chamado quando a fila ACEITOU o item.
-// 42P01/42703 em silêncio: perder o histórico é ruim, mas derrubar a
-// régua depois de a mensagem já estar enfileirada seria pior (viraria
-// reenvio no próximo tick).
-async function recordEvent({ installmentId, templateName, daysRelative, preview }) {
+//
+// NUNCA lança (09/11/2026). Quando chegamos aqui a mensagem JÁ está na
+// fila paga; derrubar o tick agora não desfaz o envio, só para a régua
+// no meio da company (as parcelas seguintes ficam sem aviso) e devolve
+// 500 ao envio avulso que já saiu. Foi o que o 23502 fez em produção:
+// a tabela real exige company_id/customer_id e o INSERT não mandava.
+// Então: qualquer erro do histórico ou do estágio é registrado no log
+// e a régua segue. Reenvio não acontece por isso — o dedupeKey da fila
+// (`cred-<parcela>-<template>`) barra a mesma parcela/template mesmo
+// sem o evento gravado. 42P01/42703 continuam em silêncio (CI sem a
+// tabela). Devolve { event, stage } para quem quiser saber o que gravou.
+async function recordEvent({ installmentId, companyId, customerId, templateName, daysRelative, preview }) {
+  const out = { event: false, stage: false };
+  const dias = Number(daysRelative);
   try {
     await db.query(
       `-- cred:auto-evento
        INSERT INTO credit_collection_events
-         (installment_id, channel, template, days_relative, status, message_preview)
-       VALUES ($1, '${CHANNEL_AUTO}', $2, $3, 'queued', $4)`,
-      [installmentId, templateName, daysRelative, preview ? String(preview).slice(0, 300) : null]
+         (installment_id, channel, template, days_relative, status, message_preview, company_id, customer_id)
+       VALUES ($1, '${CHANNEL_AUTO}', $2, $3, 'queued', $4, $5, $6)`,
+      [
+        installmentId,
+        templateName || TEMPLATE_LEMBRETE,
+        Number.isFinite(dias) ? Math.trunc(dias) : 0,
+        preview ? String(preview).slice(0, 300) : null,
+        companyId,
+        customerId,
+      ]
     );
+    out.event = true;
   } catch (e) {
-    if (e.code !== '42P01' && e.code !== '42703') throw e;
+    if (e.code !== '42P01' && e.code !== '42703') {
+      console.error('[creditCollectionAuto] evento nao gravado (mensagem ja na fila)',
+        { installmentId, companyId, code: e.code, message: e.message });
+    }
   }
   try {
     await db.query(
@@ -201,9 +222,14 @@ async function recordEvent({ installmentId, templateName, daysRelative, preview 
         WHERE id = $1`,
       [installmentId]
     );
+    out.stage = true;
   } catch (e) {
-    if (e.code !== '42P01' && e.code !== '42703') throw e;
+    if (e.code !== '42P01' && e.code !== '42703') {
+      console.error('[creditCollectionAuto] estagio nao avancou (mensagem ja na fila)',
+        { installmentId, companyId, code: e.code, message: e.message });
+    }
   }
+  return out;
 }
 
 // Roda a régua de UMA company. `dryRun` é a prévia: mesma seleção,
@@ -308,6 +334,8 @@ async function runForCompany(companyId, { today = null, dryRun = false } = {}) {
         out.enqueued++;
         await recordEvent({
           installmentId: inst.id,
+          companyId: inst.company_id || companyId,
+          customerId: inst.customer_id,
           templateName,
           daysRelative: days,
           preview: composed.message,

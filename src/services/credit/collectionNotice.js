@@ -229,12 +229,27 @@ async function buildNotice(client, { companyId, installmentId, template = 'atras
   const message = composed.message;
   const pixCopiaECola = composed.pix_copia_cola || '';
 
+  // 09/11/2026: em producao credit_collection_events tem company_id,
+  // customer_id, channel, template e days_relative NOT NULL (o formato
+  // real diverge da 136; a 430 alinha o banco limpo). Sem os dois ids o
+  // INSERT dava 23502 a cada aviso: o historico nunca era gravado e, como
+  // o 23502 sobe, a rota devolvia 500 e a lojista ficava sem o texto.
+  // Os ids vem da propria parcela; nenhum campo NOT NULL vai nulo.
   try {
     await client.query(
-      `INSERT INTO credit_collection_events
-         (installment_id, channel, template, days_relative, status, message_preview)
-       VALUES ($1,$2,$3,$4,'sent',$5)`,
-      [inst.id, channel, template, Math.max(0, daysLate), message.slice(0, 300)]
+      `-- cred:notice-evento
+       INSERT INTO credit_collection_events
+         (installment_id, channel, template, days_relative, status, message_preview, company_id, customer_id)
+       VALUES ($1,$2,$3,$4,'sent',$5,$6,$7)`,
+      [
+        inst.id,
+        channel || 'whatsapp',
+        template || 'atraso_1',
+        Number.isFinite(daysLate) ? Math.max(0, daysLate) : 0,
+        String(message || '').slice(0, 300),
+        inst.company_id || companyId,
+        inst.customer_id,
+      ]
     );
     await client.query(
       `UPDATE credit_installments SET collection_stage = collection_stage + 1, updated_at = NOW() WHERE id = $1`,

@@ -1397,6 +1397,8 @@ async function triggerViaCloudApi(req, res, { companyId, installmentId, template
     if (r.queued) {
       await collectionAuto.recordEvent({
         installmentId: inst.id,
+        companyId: inst.company_id || companyId,
+        customerId: inst.customer_id,
         templateName,
         daysRelative: daysLate,
         preview: composed.message,
