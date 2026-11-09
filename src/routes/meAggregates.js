@@ -58,6 +58,12 @@ const db = require('../config/database');
 const { resolvePeriod } = require('../services/salesAnalytics');
 const { hasSaleNumberColumn, saleNumberSelect } = require('../utils/saleNumber');
 const attribution = require('../services/marketingAttribution');
+const { addressFromRow, isMissingReferenceColumn } = require('../services/customerAddress');
+
+// 09/11/2026: address_reference e da migration 433. Sem ela, a lista
+// consolidada segue sem o ponto de referencia (mesmo contrato do
+// per-company, src/routes/customers.js).
+let meReferenceColumnAvailable = null;
 
 router.use(requireAuth);
 
@@ -587,15 +593,22 @@ router.get('/customers', async (req, res) => {
       params
     );
 
-    const dataRes = await db.query(
-      `SELECT id, name, cpf_cnpj, email, phone, birth_date, instagram_handle,
+    const selectMeCustomers = () => `SELECT id, name, cpf_cnpj, email, phone, birth_date, instagram_handle,
               total_purchases, total_spent, last_purchase_at, first_purchase_at,
-              notes, is_active, created_at, company_id
+              notes, is_active, created_at, company_id,
+              zip_code, street, number, complement, neighborhood, city, state,
+              ${meReferenceColumnAvailable !== false ? 'address_reference' : 'NULL::text AS address_reference'}
          FROM customers ${where}
         ${orderBy}
-        LIMIT $${params.length + 1} OFFSET $${params.length + 2}`,
-      [...params, limit, offset]
-    );
+        LIMIT $${params.length + 1} OFFSET $${params.length + 2}`;
+    let dataRes;
+    try {
+      dataRes = await db.query(selectMeCustomers(), [...params, limit, offset]);
+    } catch (e) {
+      if (meReferenceColumnAvailable === false || !isMissingReferenceColumn(e)) throw e;
+      meReferenceColumnAvailable = false;
+      dataRes = await db.query(selectMeCustomers(), [...params, limit, offset]);
+    }
 
     const customers = dataRes.rows.map(r => ({
       id: r.id, name: r.name || '', email: r.email || '', phone: r.phone || '',
@@ -618,6 +631,8 @@ router.get('/customers', async (req, res) => {
       created_at: r.created_at,
       company_id: r.company_id,
       company_name: companyNameById.get(r.company_id) || 'Empresa',
+      // 09/11/2026: endereco para entrega + has_address (selo do Caixa).
+      ...addressFromRow(r),
     }));
 
     res.json({

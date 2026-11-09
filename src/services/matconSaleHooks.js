@@ -80,10 +80,15 @@ function diasDeEntrega(pdvSettings) {
 
 // "Rua das Acacias, 233 - Centro - Campinas". Montado em JS a partir do
 // SELECT * pra nao depender de quais colunas de endereco a tabela ja tem
-// (street/city vem da 001; numero e bairro, da 073).
+// (street/number/city vem da 001; bairro, da 073).
+//
+// 09/11/2026: o numero canonico e `number` (o que o cadastro grava).
+// `address_number` (073) esta vazio em 100% dos clientes, e lendo so ele a
+// entrega saia sem numero. Fica como reserva.
 function enderecoDoCliente(c) {
   if (!c) return null;
-  const rua = [c.street || c.address || null, c.address_number || null].filter(Boolean).join(', ');
+  const numero = (c.number && String(c.number).trim()) || (c.address_number && String(c.address_number).trim()) || null;
+  const rua = [c.street || c.address || null, numero].filter(Boolean).join(', ');
   const partes = [rua, c.neighborhood || null, c.city || null].filter(Boolean);
   return partes.length ? partes.join(' - ') : null;
 }
