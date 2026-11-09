@@ -232,65 +232,9 @@ async function resolveInlineCustomer(client, companyId, body, { required = false
   }
 }
 
-// ── Taxa da maquininha (17/08/2026) ──────────────────────────
-// Toggle em Configuracoes > PDV (vale pro Shell Negocio e pro Studio).
-// Ligado, toda venda no cartao gera a despesa sozinha.
-//
-// Base = soma dos sale_payments no cartao, cada um na SUA aliquota:
-// 'cartao' e CREDITO nos dois shells, 'debito' e separado. Dinheiro, Pix e
-// crediario nao geram taxa.
-//
-// A receita bruta fica INTACTA: a taxa e uma despesa separada, nunca um
-// abatimento da receita. Lancada na COMPETENCIA da venda (status
-// 'confirmed'), nao na data do repasse da adquirente.
-//
-// Fora de escopo por decisao: taxa por parcelamento e conciliacao de repasse.
-const CARD_FEE_KEY = (saleId) => 'pdv-card-fee-' + saleId;
-
-async function insertCardFeeExpense(client, { companyId, saleId, cardBase, createdBy, saleDate, itemsSummary }) {
-  const credBase = parseFloat((cardBase?.cartao || 0).toFixed(2));
-  const debBase  = parseFloat((cardBase?.debito || 0).toFixed(2));
-  if (credBase <= 0 && debBase <= 0) return null;
-
-  let settings = null;
-  try {
-    const { rows } = await client.query(`SELECT pdv_settings FROM companies WHERE id = $1`, [companyId]);
-    settings = rows[0]?.pdv_settings || null;
-  } catch (e) {
-    // Empresa/coluna indisponivel: a venda NAO pode cair por causa da taxa.
-    console.warn('[PDV] card fee fail-open:', e.message);
-    return null;
-  }
-  if (!settings?.card_fee_enabled) return null;
-
-  const clampPct = (v) => Math.min(Math.max(parseFloat(v) || 0, 0), 100);
-  const creditPct = clampPct(settings.card_fee_credit_pct);
-  const debitPct  = clampPct(settings.card_fee_debit_pct);
-
-  const fee = parseFloat((credBase * creditPct / 100 + debBase * debitPct / 100).toFixed(2));
-  if (fee <= 0) return null;
-
-  const parts = [];
-  if (credBase > 0 && creditPct > 0) parts.push(`credito ${fmt(credBase)} x ${creditPct}%`);
-  if (debBase  > 0 && debitPct  > 0) parts.push(`debito ${fmt(debBase)} x ${debitPct}%`);
-
-  const dueExpr = saleDate ? `$6::date` : SP_DATE_NOW;
-  const params = [
-    companyId, fee,
-    `Taxa da maquininha - ${itemsSummary || 'Venda'} (${parts.join(' + ')})`,
-    createdBy || null, CARD_FEE_KEY(saleId),
-  ];
-  if (saleDate) params.push(saleDate);
-
-  await client.query(
-    `INSERT INTO transactions
-       (company_id,type,status,amount,description,category,due_date,paid_at,created_by,idempotency_key)
-     VALUES ($1,'expense','confirmed',$2,$3,'Taxas de cartão',${dueExpr},NOW(),$4,$5)
-     ON CONFLICT (idempotency_key) DO NOTHING`,
-    params
-  );
-  return { fee, credit_pct: creditPct, debit_pct: debitPct, credit_base: credBase, debit_base: debBase };
-}
+// Taxa da maquininha: regra em services/taxaDaMaquininha.js (o Editar venda
+// recalcula a taxa com a mesma funcao).
+const { CARD_FEE_KEY, insertCardFeeExpense } = require('../services/taxaDaMaquininha');
 
 async function fetchCustomerPhone(customerId) {
   if (!customerId) return null;
