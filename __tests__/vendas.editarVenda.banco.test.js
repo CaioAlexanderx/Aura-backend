@@ -27,6 +27,10 @@
 // ============================================================
 'use strict';
 
+// 1ª parcela dentro da janela do crediário (validateFirstDueDate: de hoje
+// até 90 dias), calculada no dia do teste para nunca vencer.
+const PRIMEIRA = new Date(Date.now() + 30 * 86400000).toLocaleDateString('en-CA', { timeZone: 'America/Sao_Paulo' });
+
 const express = require('express');
 const request = require('supertest');
 const { Pool } = require('pg');
@@ -270,7 +274,7 @@ test('A. dry_run não grava nada', async () => {
 
   const plan = await planejar(saleId, {
     customer_id: cliA, seller_id: bia,
-    payments: [{ method: 'crediario', amount: 189.70 }], installments: 3, first_due_date: '2026-12-07',
+    payments: [{ method: 'crediario', amount: 189.70 }], installments: 3, first_due_date: PRIMEIRA,
   });
   expect(plan.changes).toEqual(['seller', 'customer', 'payments']);
   expect(plan.credit.action).toBe('enter');
@@ -344,7 +348,7 @@ test('D e E. entra e sai do crediário com razão e parcelas batendo', async () 
 
   const entra = await patch(saleId, {
     customer_id: cliA,
-    payments: [{ method: 'crediario', amount: 189.70 }], installments: 3, first_due_date: '2026-12-07',
+    payments: [{ method: 'crediario', amount: 189.70 }], installments: 3, first_due_date: PRIMEIRA,
   });
   expect(entra.status).toBe(200);
   expect(entra.body.result.credit.account_name).toBe('Compra de 07/11');
@@ -388,7 +392,7 @@ test('D e E. entra e sai do crediário com razão e parcelas batendo', async () 
 test('F. entrada no Pix + crediário em 2x', async () => {
   const saleId = await vendaAvista({ formas: [{ method: 'dinheiro', amount: 189.70 }], customer: cliA });
   const res = await patch(saleId, {
-    payments: [{ method: 'pix', amount: 50 }, { method: 'crediario', amount: 139.70 }], installments: 2, first_due_date: '2026-12-07',
+    payments: [{ method: 'pix', amount: 50 }, { method: 'crediario', amount: 139.70 }], installments: 2, first_due_date: PRIMEIRA,
   });
   expect(res.status).toBe(200);
   expect(await formas(saleId)).toEqual([{ method: 'pix', amount: 50, sessao_id: sessaoFechada }]);
@@ -494,4 +498,109 @@ test('L. bloqueio manual barra a entrada no crediário', async () => {
   expect(res.status).toBe(422);
   expect(res.body.code).toBe('CUSTOMER_BLOCKED');
   expect(await one(`SELECT 1 FROM customer_credit_transactions WHERE sale_id = $1`, [saleId])).toBeUndefined();
+});
+
+// ── Revisão de 09/11/2026 (Aura-backend#972) ────────────────────────────────
+
+test('M. venda renegociada (cronograma novo sem venda no carnê) trava forma e cliente', async () => {
+  const saleId = await vendaFiada({ customer: cliA });
+  const deb = await one(`SELECT account_id FROM customer_credit_transactions WHERE sale_id = $1 AND type = 'debit'`, [saleId]);
+  // O que o reschedule.js faz: cancela as parcelas da venda e cria o
+  // cronograma novo com sale_id NULL no mesmo carnê.
+  await client.query(`UPDATE credit_installments SET status = 'cancelled', covered_amount = 0 WHERE sale_id = $1`, [saleId]);
+  await client.query(
+    `INSERT INTO credit_installments (company_id, sale_id, customer_id, installment_number, total_installments, amount_due, due_date, status, covered_amount, account_id)
+     VALUES ($1, NULL, $2, 1, 1, 189.70, '2027-01-07', 'paid', 189.70, $3)`,
+    [companyId, cliA, deb.account_id]
+  );
+  const antes = await fotografia(saleId);
+  const r1 = await patch(saleId, { payments: [{ method: 'pix', amount: 189.70 }] });
+  expect(r1.status).toBe(409);
+  expect(r1.body.code).toBe('CREDIT_RENEGOTIATED');
+  const r2 = await patch(saleId, { customer_id: cliB });
+  expect(r2.body.code).toBe('CREDIT_RENEGOTIATED');
+  expect(await fotografia(saleId)).toEqual(antes);
+  const ctx = await request(app).get(`/companies/${companyId}/sales/${saleId}/edit-context`);
+  expect(ctx.body.locks.money.code).toBe('CREDIT_RENEGOTIATED');
+});
+
+test('N. recebimento entre a leitura e a gravação: a edição para e nada do recebimento some', async () => {
+  const saleId = await vendaFiada({ customer: cliA });
+  const ctx = await ev.carregarContexto(client, { companyId, saleId, lock: true });
+  const plan = await ev.planejar(client, ctx, { payments: [{ method: 'pix', amount: 189.70 }] }, TUDO);
+  expect(plan.credit.action).toBe('leave');
+
+  // Entra um recebimento depois da leitura (o applyPayment não trava a venda).
+  await ledger.applyPayment(client, { companyId, customerId: cliA, amount: 94.85, method: 'pix', createdBy: userId });
+  const depoisDoRecebimento = await fotografia(saleId);
+
+  await client.query('SAVEPOINT aplicar');
+  await expect(ev.aplicar(client, ctx, plan, { userId, userName: 'Caio' }))
+    .rejects.toMatchObject({ status: 409, code: 'CREDIT_HAS_PAYMENT' });
+  await client.query('ROLLBACK TO SAVEPOINT aplicar');
+  expect(await fotografia(saleId)).toEqual(depoisDoRecebimento);
+  const sp = await all(`SELECT amount FROM sale_payments WHERE sale_id = $1`, [saleId]);
+  expect(sp.map((r) => Number(r.amount))).toEqual([94.85]);
+});
+
+test('O. entrar no crediário dias depois: débito e A Receber com o instante da venda', async () => {
+  const saleId = await vendaAvista({ formas: [{ method: 'pix', amount: 189.70 }], customer: cliA });
+  const res = await patch(saleId, { payments: [{ method: 'crediario', amount: 189.70 }], installments: 2, first_due_date: PRIMEIRA });
+  expect(res.status).toBe(200);
+  const deb = await one(`SELECT created_at FROM customer_credit_transactions WHERE sale_id = $1 AND type = 'debit'`, [saleId]);
+  const ar = await one(`SELECT created_at FROM transactions WHERE idempotency_key = $1`, ['pdv-credit-receivable-' + saleId]);
+  expect(new Date(deb.created_at).toISOString()).toBe('2026-11-07T18:42:00.000Z');
+  expect(new Date(ar.created_at).toISOString()).toBe('2026-11-07T18:42:00.000Z');
+});
+
+test('P. troca de cliente mantém os termos da venda (juros e periodicidade)', async () => {
+  const saleId = await vendaFiada({ customer: cliA });
+  await client.query(
+    `UPDATE sales SET credit_plan_snapshot = $2::jsonb WHERE id = $1`,
+    [saleId, JSON.stringify({ installments: 2, total_amount: 189.70, interest_rate: 0.1, period_unit: 'week', period_count: 2 })]
+  );
+  const prev = await patch(saleId, { customer_id: cliB, dry_run: true });
+  expect(prev.body.plan.requires_confirmation).toBe(true);
+  const res = await patch(saleId, { customer_id: cliB });
+  expect(res.status).toBe(200);
+  const deb = await one(`SELECT amount, account_id FROM customer_credit_transactions WHERE sale_id = $1 AND type = 'debit'`, [saleId]);
+  expect(Number(deb.amount)).toBeCloseTo(208.67, 2); // 189,70 + 10%
+  const carne = await one(`SELECT terms_snapshot FROM credit_accounts WHERE id = $1`, [deb.account_id]);
+  expect(carne.terms_snapshot).toMatchObject({ interest_rate: 0.1, period_unit: 'week', period_count: 2 });
+  const parc = await all(`SELECT due_date::text AS d FROM credit_installments WHERE sale_id = $1 AND status <> 'cancelled' ORDER BY installment_number`, [saleId]);
+  expect(parc.map((p) => p.d)).toEqual(['2026-12-07', '2026-12-21']);
+  expect(await saldo(cliB)).toBeCloseTo(await abertas(cliB), 2);
+});
+
+test('Q. taxa conciliada no extrato: a edição solta a conciliação e refaz a taxa', async () => {
+  const saleId = await vendaAvista({ formas: [{ method: 'cartao', amount: 189.70 }] });
+  await client.query(
+    `INSERT INTO transactions (company_id, type, status, amount, description, category, due_date, paid_at, created_by, idempotency_key)
+     VALUES ($1, 'expense', 'confirmed', 5.69, 'Taxa da maquininha', 'Taxas de cartão', '2026-11-07', NOW(), $2, $3)`,
+    [companyId, userId, 'pdv-card-fee-' + saleId]
+  );
+  const fee = await one(`SELECT id FROM transactions WHERE idempotency_key = $1`, ['pdv-card-fee-' + saleId]);
+  const conta = await one(`INSERT INTO bank_accounts (company_id, bank_name) VALUES ($1, 'Banco Fixture') RETURNING id`, [companyId]);
+  await client.query(
+    `INSERT INTO bank_statement_entries (company_id, bank_account_id, date, description, amount, matched_transaction_id)
+     VALUES ($1, $2, '2026-11-08', 'Tarifa', -5.69, $3)`,
+    [companyId, conta.id, fee.id]
+  );
+  const res = await patch(saleId, { payments: [{ method: 'debito', amount: 189.70 }] });
+  expect(res.status).toBe(200);
+  expect(await taxa(saleId)).toBeCloseTo(1.90, 2);
+  const entrada = await one(`SELECT matched_transaction_id FROM bank_statement_entries WHERE bank_account_id = $1`, [conta.id]);
+  expect(entrada.matched_transaction_id).toBeNull();
+});
+
+test('R. NF-e 55 autorizada: crediário recusado', async () => {
+  const saleId = await vendaAvista({ formas: [{ method: 'pix', amount: 189.70 }], customer: cliA });
+  await client.query(
+    `INSERT INTO nfce_emissions (company_id, sale_id, tipo, status, numero, authorized_at) VALUES ($1, $2, 'nfe', 'autorizada', 77, NOW())`,
+    [companyId, saleId]
+  );
+  const res = await patch(saleId, { payments: [{ method: 'crediario', amount: 189.70 }] });
+  expect(res.status).toBe(422);
+  expect(res.body.code).toBe('NFCE_AUTHORIZED_NO_CREDIARIO');
+  expect(res.body.error).toContain('NF-e 77');
 });

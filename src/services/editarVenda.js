@@ -42,7 +42,7 @@
 const db = require('../config/database');
 const creditLedger = require('./creditLedger');
 const carneAuto = require('./credit/carneAuto');
-const { resolvePeriod, dueDateForIndex, MAX_INSTALLMENTS_CEILING, round2 } = require('./credit/terms');
+const { resolvePeriod, dueDateForIndex, MAX_INSTALLMENTS_CEILING, round2, validateFirstDueDate } = require('./credit/terms');
 const { CARD_FEE_KEY, insertCardFeeExpense } = require('./taxaDaMaquininha');
 const { findOwnerScopedCustomer } = require('../utils/customerScope');
 
@@ -104,6 +104,16 @@ function mesDe(dia) {
 function somarMes(dia, n) {
   return dueDateForIndex(dia, 'month', 1, n);
 }
+// 'AAAA-MM-DD' que existe no calendário (2026-02-31 não passa).
+function diaReal(v) {
+  const m = DIA_RE.exec(String(v || ''));
+  if (!m) return false;
+  const d = new Date(String(v) + 'T12:00:00Z');
+  return !isNaN(d.getTime()) && d.toISOString().slice(0, 10) === String(v);
+}
+function hojeEmSaoPaulo() {
+  return new Date().toLocaleDateString('en-CA', { timeZone: SP_TZ });
+}
 function listaPorForma(lista) {
   const partes = lista.map((p) => brl(p.amount) + ' ' + (NO[p.method] || ('em ' + nomeDaForma(p.method))));
   if (partes.length <= 1) return partes.join('');
@@ -158,12 +168,15 @@ async function registroDisponivel() {
   if (_logOk === false && Date.now() - _logAt < 60000) return false;
   try {
     const { rows } = await db.query(`SELECT to_regclass('public.sale_edits') IS NOT NULL AS ok`);
+    // Só a resposta "a tabela não existe" fica em cache (60 s). Uma falha
+    // passageira de conexão não pode travar as edições por um minuto.
     _logOk = !!(rows && rows[0] && rows[0].ok);
+    _logAt = Date.now();
+    return _logOk;
   } catch (e) {
-    _logOk = false;
+    console.warn('[editarVenda] sondagem de sale_edits falhou (sem cache):', e.message);
+    return false;
   }
-  _logAt = Date.now();
-  return _logOk;
 }
 
 function _resetCache() { _colunas.clear(); _logOk = null; _logAt = 0; }
@@ -198,17 +211,19 @@ async function permissoesDeEdicao(q, { companyId, user, companyRole }) {
 }
 
 // ── Contexto: tudo o que a venda tem, numa consulta ─────────
-const SQL_CONTEXTO = (lock) => `
+const SQL_CONTEXTO = (comSnapshot) => `
 SELECT s.id, s.company_id, s.sale_number, s.customer_id, s.seller_id, s.employee_id, s.seller_name,
        s.total_amount, s.payment_method, s.status, COALESCE(s.type, 'sale') AS type, s.created_at,
        to_char(s.created_at AT TIME ZONE '${SP_TZ}', 'YYYY-MM-DD') AS dia,
        c.name AS customer_name, e.name AS employee_name,
+       ${comSnapshot ? 's.credit_plan_snapshot' : 'NULL::jsonb'} AS credit_plan_snapshot,
        (SELECT COALESCE(json_agg(json_build_object('id', sp.id, 'method', sp.method, 'amount', sp.amount,
                                                    'sessao_id', sp.sessao_id, 'created_at', sp.created_at)
                                  ORDER BY sp.created_at, sp.id), '[]'::json)
           FROM sale_payments sp WHERE sp.sale_id = s.id) AS pagamentos,
        (SELECT COALESCE(json_agg(json_build_object('id', d.id, 'customer_id', d.customer_id, 'amount', d.amount,
-                                                   'account_id', d.account_id, 'account_name', ca.name)), '[]'::json)
+                                                   'account_id', d.account_id, 'account_name', ca.name,
+                                                   'terms', ca.terms_snapshot)), '[]'::json)
           FROM customer_credit_transactions d
           LEFT JOIN credit_accounts ca ON ca.id = d.account_id
          WHERE d.sale_id = s.id AND d.company_id = s.company_id AND d.type = 'debit') AS debitos,
@@ -224,6 +239,20 @@ SELECT s.id, s.company_id, s.sale_number, s.customer_id, s.seller_id, s.employee
                                  ORDER BY ci.installment_number), '[]'::json)
           FROM credit_installments ci
          WHERE ci.sale_id = s.id AND ci.company_id = s.company_id AND ci.status <> 'cancelled') AS parcelas,
+       -- Renegociação / unificação (services/credit/reschedule.js, unify.js):
+       -- as parcelas da venda são canceladas e o cronograma novo nasce com
+       -- sale_id NULL no carnê. (a) parcela cancelada da própria venda, no
+       -- carnê atual do débito; (b) parcela sem venda no carnê do débito.
+       (SELECT COUNT(*)::int FROM credit_installments ci
+         WHERE ci.sale_id = s.id AND ci.company_id = s.company_id AND ci.status = 'cancelled'
+           AND ci.account_id IS NOT DISTINCT FROM (
+             SELECT d.account_id FROM customer_credit_transactions d
+              WHERE d.sale_id = s.id AND d.company_id = s.company_id AND d.type = 'debit' LIMIT 1)) AS parcelas_canceladas,
+       (SELECT COUNT(*)::int FROM credit_installments ci
+         WHERE ci.company_id = s.company_id AND ci.sale_id IS NULL
+           AND ci.account_id IN (
+             SELECT d.account_id FROM customer_credit_transactions d
+              WHERE d.sale_id = s.id AND d.company_id = s.company_id AND d.type = 'debit' AND d.account_id IS NOT NULL)) AS parcelas_sem_venda,
        (SELECT json_build_object('id', t.id, 'amount', t.amount, 'description', t.description)
           FROM transactions t
          WHERE t.idempotency_key = 'pdv-sale-' || s.id AND t.company_id = s.company_id LIMIT 1) AS receita,
@@ -235,9 +264,9 @@ SELECT s.id, s.company_id, s.sale_number, s.customer_id, s.seller_id, s.employee
             JOIN sales ts ON ts.id = tri.troca_sale_id
            WHERE tri.original_sale_id = s.id AND ts.company_id = s.company_id
              AND COALESCE(ts.status, 'completed') <> 'cancelled') x) AS devolucoes,
-       (SELECT json_build_object('id', n.id, 'numero', n.numero, 'authorized_at', n.authorized_at)
+       (SELECT json_build_object('id', n.id, 'numero', n.numero, 'authorized_at', n.authorized_at, 'tipo', COALESCE(n.tipo, 'nfce'))
           FROM nfce_emissions n
-         WHERE n.sale_id = s.id AND COALESCE(n.tipo, 'nfce') = 'nfce' AND n.status = 'autorizada'
+         WHERE n.sale_id = s.id AND COALESCE(n.tipo, 'nfce') IN ('nfce', 'nfe') AND n.status = 'autorizada'
          ORDER BY n.created_at DESC LIMIT 1) AS nfce,
        (SELECT COALESCE(json_agg(z.nm), '[]'::json) FROM (
           SELECT COALESCE(si.product_name_snapshot, p.name) AS nm
@@ -258,8 +287,7 @@ SELECT s.id, s.company_id, s.sale_number, s.customer_id, s.seller_id, s.employee
   FROM sales s
   LEFT JOIN customers c ON c.id = s.customer_id
   LEFT JOIN employees e ON e.id = s.employee_id
- WHERE s.id = $1 AND s.company_id = $2
- ${lock ? 'FOR UPDATE OF s' : ''}`;
+ WHERE s.id = $1 AND s.company_id = $2`;
 
 function arr(v) {
   if (Array.isArray(v)) return v;
@@ -306,12 +334,16 @@ function derivarPagamentos({ total, pagamentos, debitos, recebiveis, parcelas })
     }
   }
   const entrada = agrupar(entradaRows);
+  const somaPagamentos = round2(pg.reduce((a, p) => a + num(p.amount), 0));
   const pagoNasParcelas = round2(par.reduce((a, p) => a + num(p.covered), 0));
   const pagoNoFinanceiro = round2(rec.filter((r) => r.status !== 'pending').reduce((a, r) => a + num(r.amount), 0));
   const pagoNoCrediario = temCredito && (
     par.some((p) => p.status === 'paid' || num(p.covered) > 0.005) ||
     rec.some((r) => r.status !== 'pending') ||
-    rec.some((r) => /-rest-/.test(String(r.key || '')))
+    rec.some((r) => /-rest-/.test(String(r.key || ''))) ||
+    // Recebimento só de encargos não baixa A Receber nem cobre parcela, mas
+    // grava sale_payments na venda: o que passa da entrada é recebimento.
+    somaPagamentos > entradaTotal + 0.005
   );
   const credito = temCredito ? {
     amount: principal,
@@ -320,16 +352,25 @@ function derivarPagamentos({ total, pagamentos, debitos, recebiveis, parcelas })
     account_id: deb[0].account_id || null,
     account_name: deb[0].account_name || null,
     paid: !!pagoNoCrediario,
-    paid_amount: Math.max(pagoNasParcelas, pagoNoFinanceiro),
+    paid_amount: Math.max(pagoNasParcelas, pagoNoFinanceiro, round2(somaPagamentos - entradaTotal)),
+    terms: obj(deb[0].terms) || null,
   } : null;
   const lista = entrada.slice();
   if (credito && credito.amount > 0) lista.push({ method: 'crediario', amount: credito.amount, installments: credito.installments });
-  return { entrada, credito, lista, sessao_id: (pg.find((p) => p.sessao_id) || {}).sessao_id || null, primeiro_em: pg.length ? pg[0].created_at : null };
+  return { entrada, entrada_ids: entradaRows.map((p) => p.id).filter(Boolean), credito, lista, sessao_id: (pg.find((p) => p.sessao_id) || {}).sessao_id || null, primeiro_em: pg.length ? pg[0].created_at : null };
 }
 
 async function carregarContexto(q, { companyId, saleId, lock = false }) {
   if (!UUID_RE.test(String(saleId || ''))) return null;
-  const { rows } = await q.query(SQL_CONTEXTO(lock), [saleId, companyId]);
+  // A trava vem ANTES, num comando só dela. Em READ COMMITTED um FOR UPDATE
+  // dentro da consulta grande não protege as subconsultas: elas continuam
+  // vendo o retrato de antes, e duas edições juntas criavam dois débitos.
+  if (lock) {
+    const t = await q.query(`SELECT 1 FROM sales WHERE id = $1 AND company_id = $2 FOR UPDATE`, [saleId, companyId]);
+    if (!t.rows || !t.rows.length) return null;
+  }
+  const colSales = await colunasDe('sales');
+  const { rows } = await q.query(SQL_CONTEXTO(colSales.has('credit_plan_snapshot')), [saleId, companyId]);
   const r = rows && rows[0];
   if (!r) return null;
   const total = num(r.total_amount);
@@ -354,6 +395,8 @@ async function carregarContexto(q, { companyId, saleId, lock = false }) {
     devolucoes: arr(r.devolucoes),
     nfce: obj(r.nfce),
     produtos: arr(r.produtos).filter(Boolean),
+    renegociada: arr(r.debitos).length > 0 && ((parseInt(r.parcelas_canceladas, 10) || 0) > 0 || (parseInt(r.parcelas_sem_venda, 10) || 0) > 0),
+    credit_plan_snapshot: obj(r.credit_plan_snapshot),
     caixa: obj(r.caixa),
     pdv_settings: obj(r.pdv_settings) || {},
   };
@@ -385,6 +428,12 @@ function travaDoDinheiro(ctx, perms) {
       returns: ctx.devolucoes,
     };
   }
+  if (ctx.renegociada) {
+    return {
+      code: 'CREDIT_RENEGOTIATED', status: 409,
+      message: 'Este crediário foi renegociado ou juntado a outro carnê, então a forma e o cliente ficam como estão. Se o produto vai voltar, use “Devolver”.',
+    };
+  }
   const c = ctx.pagamentos.credito;
   if (c && c.paid) {
     const quanto = c.paid_amount > 0 ? ` (${brl(c.paid_amount)})` : '';
@@ -414,8 +463,11 @@ function infoNfce(ctx, agora = Date.now()) {
   const prazo = parseInt(process.env.NFCE_CANCEL_DEADLINE_MIN || '30', 10);
   const aut = ctx.nfce.authorized_at ? new Date(ctx.nfce.authorized_at).getTime() : null;
   const ate = aut ? new Date(aut + prazo * 60000) : null;
+  const tipo = ctx.nfce.tipo === 'nfe' ? 'nfe' : 'nfce';
   return {
     id: ctx.nfce.id,
+    tipo,
+    rotulo: tipo === 'nfe' ? 'NF-e' : 'NFC-e',
     numero: ctx.nfce.numero,
     authorized_at: ctx.nfce.authorized_at,
     cancel_until: ate ? ate.toISOString() : null,
@@ -538,6 +590,22 @@ function taxaPrevista(settings, base) {
   return round2(base.cartao * clamp(settings.card_fee_credit_pct) / 100 + base.debito * clamp(settings.card_fee_debit_pct) / 100);
 }
 
+// Termos da venda que já estava no crediário: o snapshot gravado pelo
+// createCreditSale (credit_plan_snapshot) e, por cima, o terms_snapshot do
+// carnê. Só os campos que o cronograma usa.
+function termosDaVenda(ctx) {
+  const snap = ctx.credit_plan_snapshot || {};
+  const carne = (ctx.pagamentos.credito && ctx.pagamentos.credito.terms) || {};
+  const t = {};
+  const rate = carne.interest_rate != null ? carne.interest_rate : snap.interest_rate;
+  if (rate != null && rate !== '') t.interest_rate = parseFloat(rate) || 0;
+  const unit = carne.period_unit || snap.period_unit;
+  if (unit) t.period_unit = unit;
+  const count = carne.period_count != null ? carne.period_count : snap.period_count;
+  if (count != null) t.period_count = parseInt(count, 10) || 1;
+  return Object.keys(t).length ? t : { interest_rate: 0 };
+}
+
 // ── Plano ────────────────────────────────────────────────────
 /**
  * Lê o corpo, aplica as regras e devolve o que VAI acontecer. Não grava nada:
@@ -645,10 +713,20 @@ async function planejar(q, ctx, body, perms) {
         parcelas = 1;
       }
       if (body.first_due_date !== undefined && body.first_due_date !== null && body.first_due_date !== '') {
-        if (!DIA_RE.test(String(body.first_due_date))) throw new EdicaoError(400, 'INVALID_FIRST_DUE_DATE', 'Data da 1ª parcela inválida (AAAA-MM-DD).');
-        primeira = String(body.first_due_date);
+        const pedida = String(body.first_due_date).trim();
+        if (!diaReal(pedida)) throw new EdicaoError(400, 'INVALID_FIRST_DUE_DATE', 'Data da 1ª parcela inválida (AAAA-MM-DD).');
+        // A mesma 1ª parcela de hoje passa como está (o cronograma não muda
+        // de data). Data nova segue a regra do crediário: nem no passado,
+        // nem além do teto (services/credit/terms.validateFirstDueDate).
+        if (!(credAtual && pedida === String(credAtual.first_due_date || ''))) {
+          const v = validateFirstDueDate(pedida);
+          if (!v.ok) throw new EdicaoError(v.status || 422, v.code || 'INVALID_FIRST_DUE_DATE', v.code === 'FIRST_DUE_DATE_PAST' ? 'A 1ª parcela não pode vencer no passado.' : v.error);
+        }
+        primeira = pedida;
       } else if (!credAtual) {
-        primeira = parcelas > 1 ? somarMes(s.dia, 1) : null;
+        // Nunca no passado: venda antiga editada hoje começa a pagar daqui a um mês.
+        const hoje = hojeEmSaoPaulo();
+        primeira = parcelas > 1 ? somarMes(s.dia > hoje ? s.dia : hoje, 1) : null;
       }
     } else {
       parcelas = 1; primeira = null;
@@ -688,7 +766,7 @@ async function planejar(q, ctx, body, perms) {
     const nf = infoNfce(ctx);
     if (nf && credDepois > 0 && (credAntes <= 0 || credValorMudou)) {
       throw new EdicaoError(422, 'NFCE_AUTHORIZED_NO_CREDIARIO',
-        `A NFC-e ${nf.numero || ''} já foi autorizada como pagamento à vista, então esta venda não vai para o crediário.`.replace('  ', ' '));
+        `A ${nf.rotulo} ${nf.numero || ''} já foi autorizada como pagamento à vista, então esta venda não vai para o crediário.`.replace('  ', ' '));
     }
     let acao;
     if (credAntes > 0 && credDepois > 0) acao = (!credValorMudou && !credTermosMudaram && cliente) ? 'move' : 'recreate';
@@ -697,6 +775,7 @@ async function planejar(q, ctx, body, perms) {
 
     let novoCarne = null;
     let previa = [];
+    let termos = null;
     if (credDepois > 0) {
       const bloqueio = await clienteBloqueado(q, { companyId: s.company_id, customerId: clienteFinal.id });
       if (bloqueio) {
@@ -710,14 +789,20 @@ async function planejar(q, ctx, body, perms) {
           { max_installments: maxN, requested: parcelas });
       }
       novoCarne = await nomeDoCarneNovo(q, { companyId: s.company_id, customerId: clienteFinal.id, dia: s.dia });
-      previa = previaDasParcelas({ amount: credDepois, installments: parcelas, firstDueDate: primeira, config });
+      // Venda que já estava no crediário mantém os termos dela (juros e
+      // periodicidade do credit_plan_snapshot / carnê), não os da loja de hoje.
+      termos = credAntes > 0 ? termosDaVenda(ctx) : null;
+      previa = previaDasParcelas({
+        amount: credDepois, installments: parcelas, firstDueDate: primeira,
+        config: termos ? Object.assign({}, config || {}, termos) : config,
+      });
     }
     credito = {
       action: acao,
       cancel: credAntes > 0,
       create: credDepois > 0,
       from: credAtual ? { amount: credAntes, installments: credAtual.installments, first_due_date: credAtual.first_due_date, account_name: credAtual.account_name, customer: ctx.customer } : null,
-      to: credDepois > 0 ? { amount: credDepois, installments: parcelas, first_due_date: primeira, account_name: novoCarne, customer: clienteFinal, schedule: previa } : null,
+      to: credDepois > 0 ? { amount: credDepois, installments: parcelas, first_due_date: primeira, account_name: novoCarne, customer: clienteFinal, schedule: previa, terms: termos } : null,
     };
   }
 
@@ -815,7 +900,7 @@ async function planejar(q, ctx, body, perms) {
   if (nf && dinheiroMudou) {
     avisos.push({
       code: 'NFCE_KEEPS_ORIGINAL',
-      text: `A NFC-e ${nf.numero || ''} já foi autorizada e continua com os dados originais. O que mudar aqui vale para o Financeiro, o caixa e a comissão.`.replace('  ', ' '),
+      text: `A ${nf.rotulo} ${nf.numero || ''} já foi autorizada e continua com os dados originais. O que mudar aqui vale para o Financeiro, o caixa e a comissão.`.replace('  ', ' '),
     });
   }
 
@@ -833,6 +918,19 @@ async function planejar(q, ctx, body, perms) {
       title: 'Tirar do crediário?',
       text: `A dívida de ${brl(f.amount)} de ${(f.customer && f.customer.name) || 'a cliente'} sai do crediário e as parcelas são canceladas.`,
       confirm_label: 'Sim, tirar',
+    };
+  } else if (credito && credito.action === 'move') {
+    confirmacao = {
+      title: 'Passar a dívida para outra cliente?',
+      text: `A dívida de ${brl(credito.from.amount)} sai de ${(credito.from.customer && credito.from.customer.name) || 'quem estava na venda'} e vai para ${(credito.to.customer && credito.to.customer.name) || 'a cliente nova'}, num carnê novo, com as mesmas parcelas.`,
+      confirm_label: 'Sim, passar',
+    };
+  } else if (credito && credito.action === 'recreate') {
+    const p = credito.to;
+    confirmacao = {
+      title: 'Refazer o carnê?',
+      text: `O carnê de hoje sai da ficha e nasce outro: ${brl(p.amount)} em ${p.installments} ${p.installments === 1 ? 'parcela' : 'parcelas'} para ${(p.customer && p.customer.name) || 'a cliente'}.`,
+      confirm_label: 'Sim, refazer',
     };
   }
 
@@ -884,6 +982,58 @@ async function comSavepoint(q, nome, fn) {
   } catch (e) {
     await q.query(`ROLLBACK TO SAVEPOINT ${nome}`);
     if (e.code !== '42P01' && e.code !== '42703') throw e;
+  }
+}
+
+// Trava parcelas e A Receber da venda e confere de novo, já com a trava, que
+// nada foi pago (inclusive recebimento só de encargos, que só deixa
+// sale_payment na venda).
+async function conferirQueNadaFoiPago(q, ctx) {
+  const saleId = ctx.sale.id;
+  const companyId = ctx.sale.company_id;
+  const par = await q.query(
+    `SELECT id, status, covered_amount FROM credit_installments
+      WHERE sale_id = $1 AND company_id = $2 AND status <> 'cancelled' FOR UPDATE`,
+    [saleId, companyId]
+  );
+  const rec = await q.query(
+    `SELECT id, status, idempotency_key FROM transactions
+      WHERE company_id = $2
+        AND idempotency_key >= 'pdv-credit-receivable-' || $1::text
+        AND idempotency_key <  'pdv-credit-receivable-' || $1::text || 'z'
+      FOR UPDATE`,
+    [saleId, companyId]
+  );
+  const sp = await q.query(
+    `SELECT COALESCE(SUM(amount), 0) AS soma FROM sale_payments WHERE sale_id = $1 AND amount > 0`,
+    [saleId]
+  );
+  const entrada = round2((ctx.pagamentos.entrada || []).reduce((a, p) => a + num(p.amount), 0));
+  const pago =
+    (par.rows || []).some((p) => p.status === 'paid' || num(p.covered_amount) > 0.005) ||
+    (rec.rows || []).some((r) => r.status !== 'pending' || /-rest-/.test(String(r.idempotency_key || ''))) ||
+    num(sp.rows && sp.rows[0] && sp.rows[0].soma) > entrada + 0.005;
+  if (pago) {
+    throw new EdicaoError(409, 'CREDIT_HAS_PAYMENT',
+      'Entrou um pagamento neste crediário agora há pouco. Para não bagunçar o que foi pago, a forma e o cliente ficam como estão. Se o produto vai voltar, use “Devolver”.');
+  }
+}
+
+// Apaga um lançamento do Financeiro soltando antes o que aponta para ele
+// (conciliação bancária e nota), como o DELETE /transactions/:txId.
+async function apagarLancamento(q, { companyId, key }) {
+  const { rows } = await q.query(
+    `SELECT id FROM transactions WHERE idempotency_key = $1 AND company_id = $2`,
+    [key, companyId]
+  );
+  for (const r of rows || []) {
+    await comSavepoint(q, 'solta_conciliacao', async () => {
+      await q.query('UPDATE bank_statement_entries SET matched_transaction_id = NULL WHERE matched_transaction_id = $1', [r.id]);
+    });
+    await comSavepoint(q, 'solta_nota', async () => {
+      await q.query('UPDATE nfce_emissions SET transaction_id = NULL WHERE transaction_id = $1', [r.id]);
+    });
+    await q.query(`DELETE FROM transactions WHERE id = $1 AND company_id = $2`, [r.id, companyId]);
   }
 }
 
@@ -952,6 +1102,14 @@ async function aplicar(q, ctx, plan, { userId = null, userName = null, reason = 
     }
   }
 
+  // 1b. Venda no crediário: trava as parcelas e o A Receber dela e confere de
+  //     novo que nada foi pago. O applyPayment não trava a venda; sem isto,
+  //     um recebimento que entrasse entre a leitura e o cancelamento seria
+  //     apagado junto (A Receber baixado, parcela paga, sale_payment).
+  if (ctx.pagamentos.credito && (plan.payments || plan.customer || plan.credit)) {
+    await conferirQueNadaFoiPago(q, ctx);
+  }
+
   // 2. Crediário sai (antes de trocar o cliente: o cancelCreditSale lê o
   //    cliente da venda para recalcular o saldo dele).
   if (plan.credit && plan.credit.cancel) {
@@ -982,7 +1140,15 @@ async function aplicar(q, ctx, plan, { userId = null, userName = null, reason = 
     const entrada = plan.payments.to;
     const dinheiroNaHora = plan.payments.cash_amount;
     if (plan.payments.cash_changed) {
-      await q.query(`DELETE FROM sale_payments WHERE sale_id = $1 AND company_id = $2`, [saleId, companyId]);
+      // Só as linhas da ENTRADA desta venda. Recebimento do crediário que
+      // gravou sale_payment na venda fica onde está.
+      const ids = ctx.pagamentos.entrada_ids || [];
+      if (ids.length) {
+        await q.query(
+          `DELETE FROM sale_payments WHERE id = ANY($1::uuid[]) AND sale_id = $2 AND company_id = $3`,
+          [ids, saleId, companyId]
+        );
+      }
       // Mesma sessão de antes (o caixa de 07/11 continua sendo o de 07/11) e
       // o mesmo instante: relatório por dia não muda de dia.
       const sessaoId = ctx.pagamentos.sessao_id || (ctx.caixa && ctx.caixa.id) || null;
@@ -1023,20 +1189,14 @@ async function aplicar(q, ctx, plan, { userId = null, userName = null, reason = 
         }
       }
     } else if (receita) {
-      await comSavepoint(q, 'desvincula_receita', async () => {
-        await q.query('UPDATE bank_statement_entries SET matched_transaction_id = NULL WHERE matched_transaction_id = $1', [receita.id]);
-      });
-      await comSavepoint(q, 'desvincula_nota', async () => {
-        await q.query('UPDATE nfce_emissions SET transaction_id = NULL WHERE transaction_id = $1', [receita.id]);
-      });
-      await q.query(`DELETE FROM transactions WHERE id = $1 AND company_id = $2`, [receita.id, companyId]);
+      await apagarLancamento(q, { companyId, key: 'pdv-sale-' + saleId });
     }
 
     // Taxa da maquininha: só refaz quando a base no cartão mudou.
     const bA = baseDoCartao(plan.payments.from);
     const bD = baseDoCartao(entrada);
     if (Math.abs(bA.cartao - bD.cartao) > 0.005 || Math.abs(bA.debito - bD.debito) > 0.005) {
-      await q.query(`DELETE FROM transactions WHERE idempotency_key = $1 AND company_id = $2`, [CARD_FEE_KEY(saleId), companyId]);
+      await apagarLancamento(q, { companyId, key: CARD_FEE_KEY(saleId) });
       resultado.card_fee = await insertCardFeeExpense(q, {
         companyId, saleId, cardBase: bD, createdBy: userId, saleDate: s.dia,
         itemsSummary: (ctx.produtos || []).slice(0, 3).join(', '),
@@ -1053,6 +1213,14 @@ async function aplicar(q, ctx, plan, { userId = null, userName = null, reason = 
   if (plan.credit && plan.credit.create) {
     const to = plan.credit.to;
     const carne = await carneAuto.createAutoCarne(q, { companyId, customerId: to.customer.id, prefix: 'Compra', date: s.dia });
+    // Venda que já estava no crediário (troca de cliente, carnê refeito): o
+    // carnê novo leva os termos dela, e o cronograma também.
+    const termos = to.terms || null;
+    if (carne && termos) {
+      await comSavepoint(q, 'termos_do_carne', async () => {
+        await q.query(`UPDATE credit_accounts SET terms_snapshot = $3::jsonb WHERE id = $1 AND company_id = $2`, [carne.id, companyId, JSON.stringify(termos)]);
+      });
+    }
     const r = await creditLedger.createCreditSale(q, {
       companyId,
       customerId: to.customer.id,
@@ -1064,7 +1232,27 @@ async function aplicar(q, ctx, plan, { userId = null, userName = null, reason = 
       enforceCreditBlock: true,
       productNames: ctx.produtos || [],
       createdBy: userId,
+      ...(termos ? {
+        interestRate: termos.interest_rate != null ? termos.interest_rate : 0,
+        periodUnit: termos.period_unit || null,
+        periodCount: termos.period_count || null,
+      } : {}),
     });
+    // O débito e o A Receber são da VENDA, não de hoje: com o instante da
+    // venda, o fiado cai no caixa do dia dela (caixaService.calcularTotais)
+    // e o A Receber fica na ordem certa do FIFO do applyPayment.
+    await q.query(
+      `UPDATE customer_credit_transactions SET created_at = $3
+        WHERE sale_id = $1 AND company_id = $2 AND type = 'debit'`,
+      [saleId, companyId, s.created_at]
+    );
+    await q.query(
+      `UPDATE transactions SET created_at = $3
+        WHERE company_id = $2 AND status = 'pending'
+          AND idempotency_key >= 'pdv-credit-receivable-' || $1::text
+          AND idempotency_key <  'pdv-credit-receivable-' || $1::text || 'z'`,
+      [saleId, companyId, s.created_at]
+    );
     resultado.credit = {
       account_id: carne ? carne.id : null,
       account_name: carne ? carne.name : null,

@@ -22,6 +22,10 @@
 // ============================================================
 'use strict';
 
+// 1ª parcela dentro da janela do crediário (validateFirstDueDate: de hoje
+// até 90 dias), calculada no dia do teste para nunca vencer.
+const PRIMEIRA = new Date(Date.now() + 30 * 86400000).toLocaleDateString('en-CA', { timeZone: 'America/Sao_Paulo' });
+
 jest.mock('../src/config/database');
 const db = require('../src/config/database');
 const express = require('express');
@@ -71,8 +75,11 @@ function venda(over = {}) {
 let linha;
 function montar(over) {
   linha = venda(over);
-  client.query.mockImplementation((sql) => {
+  client.query.mockImplementation((sql, params) => {
     const s = String(sql || '');
+    if (/^SELECT 1 FROM sales WHERE id = \$1 AND company_id = \$2 FOR UPDATE$/.test(s)) {
+      return Promise.resolve({ rows: linha ? [{ '?column?': 1 }] : [] });
+    }
     if (/AS pagamentos,/.test(s) && /FROM sales s/.test(s)) {
       return Promise.resolve({ rows: linha ? [linha] : [] });
     }
@@ -81,6 +88,12 @@ function montar(over) {
     }
     if (/FROM customers WHERE id/.test(s)) {
       return Promise.resolve({ rows: [{ id: CLI, name: 'Cliente Exemplo' }] });
+    }
+    if (/^\s*SELECT id FROM transactions WHERE idempotency_key = \$1/.test(s)) {
+      return Promise.resolve({ rows: [{ id: 'tx-' + String(params && params[0]) }] });
+    }
+    if (/INSERT INTO credit_accounts/.test(s)) {
+      return Promise.resolve({ rows: [{ id: 'acc-novo', name: 'Compra de 07/11' }] });
     }
     if (/INSERT INTO sale_edits/.test(s)) {
       return Promise.resolve({ rows: [{ id: 'ed1', created_at: new Date() }] });
@@ -143,8 +156,8 @@ test('3. venda de outra empresa = 404', async () => {
   linha = null;
   const res = await patch({ seller_id: BIA });
   expect(res.status).toBe(404);
-  const ctxCall = client.query.mock.calls.find(([s]) => /AS pagamentos,/.test(String(s)));
-  expect(ctxCall[1]).toEqual([SALE, CID]);
+  const travaCall = client.query.mock.calls.find(([s]) => /FOR UPDATE$/.test(String(s)));
+  expect(travaCall[1]).toEqual([SALE, CID]);
   expect(escritas()).toHaveLength(0);
 });
 
@@ -339,14 +352,14 @@ describe('12. crediário', () => {
   test('entrar com cliente: carnê novo + createCreditSale com as parcelas', async () => {
     const res = await patch({
       customer_id: CLI,
-      payments: [{ method: 'crediario', amount: 189.70 }], installments: 3, first_due_date: '2026-12-07',
+      payments: [{ method: 'crediario', amount: 189.70 }], installments: 3, first_due_date: PRIMEIRA,
     });
     expect(res.status).toBe(200);
     expect(res.body.plan.credit.action).toBe('enter');
     expect(res.body.plan.requires_confirmation).toBe(true);
     expect(mockCreate).toHaveBeenCalledTimes(1);
     const args = mockCreate.mock.calls[0][1];
-    expect(args).toMatchObject({ companyId: CID, customerId: CLI, saleId: SALE, amount: 189.7, installments: 3, firstDueDate: '2026-12-07', enforceCreditBlock: true });
+    expect(args).toMatchObject({ companyId: CID, customerId: CLI, saleId: SALE, amount: 189.7, installments: 3, firstDueDate: PRIMEIRA, enforceCreditBlock: true });
     expect(houve(/INSERT INTO credit_accounts/)).toBe(true);
     expect(houve(/DELETE FROM sale_payments/)).toBe(true);
     expect(houve(/DELETE FROM transactions WHERE id = \$1/)).toBe(true);
@@ -414,5 +427,148 @@ describe('derivarPagamentos', () => {
     const p = editarVenda.previaDasParcelas({ amount: 189.7, installments: 3, firstDueDate: '2026-12-07', config: null });
     expect(p.map((x) => x.amount_due)).toEqual([63.23, 63.23, 63.24]);
     expect(p.map((x) => x.due_date)).toEqual(['2026-12-07', '2027-01-07', '2027-02-07']);
+  });
+});
+
+// ── Revisão de 09/11/2026 (Aura-backend#972) ────────────────────────────────
+describe('revisão: travas do crediário', () => {
+  test('R1. renegociada (parcela cancelada da própria venda) trava forma e cliente', async () => {
+    montar(Object.assign({}, VENDA_FIADA, { parcelas_canceladas: 2 }));
+    const r1 = await patch({ payments: [{ method: 'pix', amount: 189.70 }] });
+    expect(r1.status).toBe(409);
+    expect(r1.body.code).toBe('CREDIT_RENEGOTIATED');
+    const r2 = await patch({ customer_id: null });
+    expect(r2.body.code).toBe('CREDIT_RENEGOTIATED');
+    expect(mockCancel).not.toHaveBeenCalled();
+    const r3 = await patch({ seller_id: BIA });
+    expect(r3.status).toBe(200);
+  });
+
+  test('R1b. unificada (parcela sem venda no carnê do débito) trava', async () => {
+    montar(Object.assign({}, VENDA_FIADA, { parcelas_sem_venda: 3, customer_id: BIA }));
+    const r = await patch({ customer_id: CLI });
+    expect(r.status).toBe(409);
+    expect(r.body.code).toBe('CREDIT_RENEGOTIATED');
+  });
+
+  test('R3. recebimento só de encargos (sale_payment além da entrada) conta como pago', () => {
+    const r = editarVenda.derivarPagamentos({
+      total: 100,
+      pagamentos: [{ id: 'a', method: 'pix', amount: 30 }, { id: 'b', method: 'dinheiro', amount: 5 }],
+      debitos: [{ id: 'd' }],
+      recebiveis: [{ amount: 70, status: 'pending', key: 'pdv-credit-receivable-x' }],
+      parcelas: [{ total: 1, due_date: '2026-12-01', status: 'pending', covered: 0 }],
+    });
+    expect(r.credito.paid).toBe(true);
+    expect(r.entrada_ids).toEqual(['a']);
+  });
+
+  test('R3b. pagamento que entra entre a leitura e a gravação: 409 e nada é cancelado', async () => {
+    montar(VENDA_FIADA);
+    const original = client.query.getMockImplementation();
+    client.query.mockImplementation((sql, params) => {
+      if (/FROM credit_installments[\s\S]*FOR UPDATE/.test(String(sql))) {
+        return Promise.resolve({ rows: [{ id: 'i1', status: 'paid', covered_amount: '94.85' }] });
+      }
+      return original(sql, params);
+    });
+    const res = await patch({ payments: [{ method: 'pix', amount: 189.70 }] });
+    expect(res.status).toBe(409);
+    expect(res.body.code).toBe('CREDIT_HAS_PAYMENT');
+    expect(mockCancel).not.toHaveBeenCalled();
+    expect(houve(/^COMMIT/)).toBe(false);
+  });
+
+  test('R3c. regrava só as linhas da entrada (recebimento fica)', async () => {
+    montar({
+      pagamentos: [
+        { id: 'sp1', method: 'dinheiro', amount: '100', sessao_id: null, created_at: '2026-11-07T18:42:00Z' },
+        { id: 'sp2', method: 'pix', amount: '89.70', sessao_id: null, created_at: '2026-11-07T18:42:00Z' },
+      ],
+    });
+    const res = await patch({ payments: [{ method: 'pix', amount: 189.70 }] });
+    expect(res.status).toBe(200);
+    const del = client.query.mock.calls.find(([s]) => /DELETE FROM sale_payments/.test(String(s)));
+    expect(del[0]).toMatch(/id = ANY\(\$1::uuid\[\]\)/);
+    expect(del[1][0]).toEqual(['sp1', 'sp2']);
+  });
+});
+
+describe('revisão: datas, termos, nota, taxa e registro', () => {
+  test('R5. 1ª parcela: data que não existe = 400; no passado = 422', async () => {
+    montar({ customer_id: CLI, customer_name: 'Cliente Exemplo' });
+    const r1 = await patch({ payments: [{ method: 'crediario', amount: 189.70 }], installments: 2, first_due_date: '2026-02-31' });
+    expect(r1.status).toBe(400);
+    expect(r1.body.code).toBe('INVALID_FIRST_DUE_DATE');
+    const r2 = await patch({ payments: [{ method: 'crediario', amount: 189.70 }], installments: 2, first_due_date: '2020-01-10' });
+    expect(r2.status).toBe(422);
+    expect(r2.body.code).toBe('FIRST_DUE_DATE_PAST');
+  });
+
+  test('R5b. venda antiga sem data escolhida: a 1ª parcela nasce daqui a um mês, nunca no passado', async () => {
+    montar({ customer_id: CLI, customer_name: 'Cliente Exemplo', dia: '2026-01-10' });
+    const res = await patch({ payments: [{ method: 'crediario', amount: 189.70 }], installments: 2, dry_run: true });
+    expect(res.status).toBe(200);
+    const hoje = new Date().toLocaleDateString('en-CA', { timeZone: 'America/Sao_Paulo' });
+    expect(res.body.plan.credit.to.first_due_date > hoje).toBe(true);
+  });
+
+  test('R4. troca de cliente: termos da venda no carnê e no cronograma; pede confirmação', async () => {
+    montar(Object.assign({}, VENDA_FIADA, {
+      customer_id: BIA, customer_name: 'Outra',
+      credit_plan_snapshot: { installments: 2, interest_rate: 0.05, period_unit: 'week', period_count: 2 },
+    }));
+    const res = await patch({ customer_id: CLI });
+    expect(res.status).toBe(200);
+    expect(res.body.plan.credit.action).toBe('move');
+    expect(res.body.plan.requires_confirmation).toBe(true);
+    expect(mockCreate.mock.calls[0][1]).toMatchObject({ interestRate: 0.05, periodUnit: 'week', periodCount: 2 });
+    const upd = client.query.mock.calls.find(([s]) => /UPDATE credit_accounts SET terms_snapshot/.test(String(s)));
+    expect(JSON.parse(upd[1][2])).toEqual({ interest_rate: 0.05, period_unit: 'week', period_count: 2 });
+  });
+
+  test('R6. débito e A Receber criados na edição levam o instante da venda', async () => {
+    const res = await patch({ customer_id: CLI, payments: [{ method: 'crediario', amount: 189.70 }] });
+    expect(res.status).toBe(200);
+    const deb = client.query.mock.calls.find(([s]) => /UPDATE customer_credit_transactions SET created_at/.test(String(s)));
+    expect(new Date(deb[1][2]).toISOString()).toBe('2026-11-07T18:42:00.000Z');
+    expect(houve(/UPDATE transactions SET created_at = \$3/)).toBe(true);
+  });
+
+  test('R7. NF-e 55 autorizada: mesma trava do crediário e mesmo aviso', async () => {
+    const nfce = { id: 'n1', numero: 77, authorized_at: new Date().toISOString(), tipo: 'nfe' };
+    montar({ nfce, customer_id: CLI, customer_name: 'Cliente Exemplo' });
+    const r1 = await patch({ payments: [{ method: 'crediario', amount: 189.70 }] });
+    expect(r1.status).toBe(422);
+    expect(r1.body.error).toContain('NF-e 77');
+    const r2 = await patch({ payments: [{ method: 'pix', amount: 189.70 }], dry_run: true });
+    expect(r2.body.plan.warnings.find((w) => w.code === 'NFCE_KEEPS_ORIGINAL').text).toContain('NF-e 77');
+  });
+
+  test('R8. antes de apagar a taxa, solta a conciliação bancária', async () => {
+    montar({ pagamentos: [{ id: 'sp1', method: 'cartao', amount: '189.70', sessao_id: null, created_at: '2026-11-07T18:42:00Z' }], taxa: '5.69' });
+    const res = await patch({ payments: [{ method: 'dinheiro', amount: 189.70 }] });
+    expect(res.status).toBe(200);
+    const calls = client.query.mock.calls.map(([s]) => String(s));
+    const solta = calls.findIndex((s) => /UPDATE bank_statement_entries SET matched_transaction_id = NULL/.test(s));
+    const apaga = calls.findIndex((s) => /DELETE FROM transactions WHERE id = \$1/.test(s));
+    expect(solta).toBeGreaterThan(-1);
+    expect(apaga).toBeGreaterThan(solta);
+  });
+
+  test('R9. falha passageira na sondagem do registro não fica em cache', async () => {
+    let falhou = false;
+    const base = db.query.getMockImplementation();
+    db.query.mockImplementation((sql, params) => {
+      if (/to_regclass\('public.sale_edits'\)/.test(String(sql)) && !falhou) {
+        falhou = true;
+        return Promise.reject(Object.assign(new Error('conexão caiu'), { code: 'ECONNRESET' }));
+      }
+      return base(sql, params);
+    });
+    const r1 = await patch({ seller_id: BIA });
+    expect(r1.status).toBe(503);
+    const r2 = await patch({ seller_id: BIA });
+    expect(r2.status).toBe(200);
   });
 });
