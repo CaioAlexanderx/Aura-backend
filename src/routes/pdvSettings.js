@@ -15,7 +15,7 @@
 //         frete_enabled
 //   STRING (enum): studio_approval_mode (wa_me | whatsapp_business)
 //   NUMBER: service_fee_pct, food_service_fee_pct,
-//           card_fee_credit_pct, card_fee_debit_pct
+//           card_fee_credit_pct, card_fee_debit_pct, card_fee_pix_pct
 //   NUMBER OU NULL (percentual 0-100): card_price_pct
 //   STRING (enum) OU NULL: label_size (99x21 | 30x25 | 58mm | 105x21 | 40x25),
 //                          label_design (classico | editorial)
@@ -139,6 +139,8 @@ const ALLOWED_NUMBER_KEYS = [
   // credito e debito. Percentuais (5 = 5%), teto de 100 abaixo.
   'card_fee_credit_pct',
   'card_fee_debit_pct',
+  // 09/11/2026 — Pix pela maquininha. 0/ausente = Pix sem taxa (o de sempre).
+  'card_fee_pix_pct',
 ];
 
 // 22/09/2026 — preco no cartao: acrescimo padrao em % (10 = 10%). Aceita
@@ -149,7 +151,7 @@ const ALLOWED_NULLABLE_PCT_KEYS = ['card_price_pct'];
 
 // Percentuais que nao fazem sentido acima de 100% — sem teto, um dedo
 // escorregado (500 em vez de 5) viraria despesa maior que a venda.
-const PCT_KEYS = ['card_fee_credit_pct', 'card_fee_debit_pct', 'matcon_default_waste_pct'];
+const PCT_KEYS = ['card_fee_credit_pct', 'card_fee_debit_pct', 'card_fee_pix_pct', 'matcon_default_waste_pct'];
 
 // 26/08/2026 — calibracao de etiqueta por loja (labels.js). O offset compensa
 // a margem fisica do driver da impressora, entao pode ser negativo.
@@ -357,6 +359,7 @@ const DEFAULT_SETTINGS = {
   card_fee_enabled:          false,
   card_fee_credit_pct:       0,
   card_fee_debit_pct:        0,
+  card_fee_pix_pct:          0,
   // 22/09/2026 — preco no cartao. Desligado = zero impacto no Caixa.
   card_price_enabled:        false,
   card_price_pct:            null,
