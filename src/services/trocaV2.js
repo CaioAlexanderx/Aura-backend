@@ -106,6 +106,8 @@ const nuvemfiscal = require('./nuvemfiscal');
 const trocaDevolucao55 = require('./trocaDevolucao55');
 const { resolveManualDiscount } = require('./descontoManual');
 const { productVisibilityWhere } = require('../utils/companyGroup');
+// p-92 (08/11/2026, migration 428): item novo da troca guarda se saiu na promocao.
+const vendaNaPromocao = require('./vendaNaPromocao');
 
 const SP_DATE_NOW = "(NOW() AT TIME ZONE 'America/Sao_Paulo')::date";
 
@@ -1074,7 +1076,13 @@ async function handle(req, res) {
       trocaSaleRow = r.rows[0];
     }
 
-    for (const item of new_items) {
+    // p-92: mesma marcacao do Caixa (preco_lista/em_promocao), so gravada;
+    // nenhum valor da troca muda. Base sem as colunas: null, INSERT de sempre.
+    const marcacoes = (new_items || []).length
+      ? await vendaNaPromocao.marcarItens((sql, params) => client.query(sql, params), new_items, { companyId })
+      : null;
+    for (const [idx, item] of new_items.entries()) {
+      const marca = marcacoes ? marcacoes[idx] : null;
       const { qty, unitPrice, itemDiscount, lineTotal } = newItemLine(item);
       let costPrice = 0;
       let productName = item.product_name_snapshot || '';
@@ -1088,10 +1096,15 @@ async function handle(req, res) {
         if (pr.length) { productName = productName || pr[0].name; costPrice = parseFloat(pr[0].cost_price || 0); }
       }
       await client.query(
-        `INSERT INTO sale_items
+        marca
+          ? `INSERT INTO sale_items
+           (sale_id, product_id, variant_id, quantity, unit_price, unit_cost, discount, total_price, product_name_snapshot, preco_lista, em_promocao)
+         VALUES ($1,$2,$3,$4,$5,$6,$9,$7,$8,$10,$11)`
+          : `INSERT INTO sale_items
            (sale_id, product_id, variant_id, quantity, unit_price, unit_cost, discount, total_price, product_name_snapshot)
          VALUES ($1,$2,$3,$4,$5,$6,$9,$7,$8)`,
-        [trocaSaleRow.id, item.product_id || null, item.variant_id || null, qty, unitPrice, costPrice, lineTotal, productName, itemDiscount]
+        [trocaSaleRow.id, item.product_id || null, item.variant_id || null, qty, unitPrice, costPrice, lineTotal, productName, itemDiscount,
+         ...(marca ? [marca.preco_lista, marca.em_promocao] : [])]
       );
     }
 
