@@ -550,7 +550,7 @@ describe('revisão: datas, termos, nota, taxa e registro', () => {
     const res = await patch({ payments: [{ method: 'dinheiro', amount: 189.70 }] });
     expect(res.status).toBe(200);
     const calls = client.query.mock.calls.map(([s]) => String(s));
-    const solta = calls.findIndex((s) => /UPDATE bank_statement_entries SET matched_transaction_id = NULL/.test(s));
+    const solta = calls.findIndex((s) => /UPDATE bank_statement_entries\s+SET matched_transaction_id = NULL, match_status = 'pendente', matched_at = NULL/.test(s));
     const apaga = calls.findIndex((s) => /DELETE FROM transactions WHERE id = \$1/.test(s));
     expect(solta).toBeGreaterThan(-1);
     expect(apaga).toBeGreaterThan(solta);
@@ -590,4 +590,39 @@ test('R11b. dinheiro -> Pix com taxa no Pix: a prévia mostra a taxa nova', asyn
   montar({ pdv_settings: { card_fee_enabled: true, card_fee_pix_pct: 1 } });
   const prev = await patch({ payments: [{ method: 'pix', amount: 189.70 }], dry_run: true });
   expect(prev.body.plan.effects.find((e) => e.code === 'CARD_FEE_CHANGES').text).toBe('A taxa da maquininha passa de R$ 0,00 para R$ 1,90.');
+});
+
+// ── Segunda revisão (09/11/2026) ─────────────────────────────────────────────
+test('T1. venda 1x sem snapshot refeita em 3x: juros da loja (sem interestRate explícito), na prévia também', async () => {
+  montar(Object.assign({}, VENDA_FIADA, { parcelas: [], credit_plan_snapshot: null }));
+  const original = client.query.getMockImplementation();
+  client.query.mockImplementation((sql, params) => {
+    if (/SELECT \* FROM credit_plan_configs/.test(String(sql))) return Promise.resolve({ rows: [{ interest_rate: 0.1 }] });
+    return original(sql, params);
+  });
+  const prev = await patch({ payments: [{ method: 'crediario', amount: 189.70 }], installments: 3, first_due_date: PRIMEIRA, dry_run: true });
+  expect(prev.status).toBe(200);
+  expect(prev.body.plan.credit.action).toBe('recreate');
+  expect(prev.body.plan.credit.to.terms).toBeNull();
+  const soma = prev.body.plan.credit.to.schedule.reduce((a, p) => a + p.amount_due, 0);
+  expect(soma).toBeCloseTo(208.67, 2); // 189,70 + 10% da loja
+  const res = await patch({ payments: [{ method: 'crediario', amount: 189.70 }], installments: 3, first_due_date: PRIMEIRA });
+  expect(res.status).toBe(200);
+  const args = mockCreate.mock.calls[0][1];
+  expect('interestRate' in args).toBe(false);
+  expect(houve(/UPDATE credit_accounts SET terms_snapshot/)).toBe(false);
+});
+
+test('T2. renegociação gravada entre a leitura e a trava: 409 e nada é cancelado', async () => {
+  montar(VENDA_FIADA);
+  const original = client.query.getMockImplementation();
+  client.query.mockImplementation((sql, params) => {
+    if (/WITH deb AS/.test(String(sql))) return Promise.resolve({ rows: [{ canceladas: 0, sem_venda: 2, tem_debito: true }] });
+    return original(sql, params);
+  });
+  const res = await patch({ payments: [{ method: 'pix', amount: 189.70 }] });
+  expect(res.status).toBe(409);
+  expect(res.body.code).toBe('CREDIT_RENEGOTIATED');
+  expect(mockCancel).not.toHaveBeenCalled();
+  expect(houve(/^COMMIT/)).toBe(false);
 });

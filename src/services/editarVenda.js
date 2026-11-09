@@ -601,7 +601,8 @@ function taxaPrevista(settings, base) {
 
 // Termos da venda que já estava no crediário: o snapshot gravado pelo
 // createCreditSale (credit_plan_snapshot) e, por cima, o terms_snapshot do
-// carnê. Só os campos que o cronograma usa.
+// carnê. Só os campos que o cronograma usa. null quando a venda não guardou
+// termo nenhum.
 function termosDaVenda(ctx) {
   const snap = ctx.credit_plan_snapshot || {};
   const carne = (ctx.pagamentos.credito && ctx.pagamentos.credito.terms) || {};
@@ -612,7 +613,9 @@ function termosDaVenda(ctx) {
   if (unit) t.period_unit = unit;
   const count = carne.period_count != null ? carne.period_count : snap.period_count;
   if (count != null) t.period_count = parseInt(count, 10) || 1;
-  return Object.keys(t).length ? t : { interest_rate: 0 };
+  // Sem snapshot nem termos no carnê (venda 1x do Caixa, sem cronograma):
+  // null, e o createCreditSale usa a configuração da loja, como o PDV faz.
+  return Object.keys(t).length ? t : null;
 }
 
 // ── Plano ────────────────────────────────────────────────────
@@ -1016,6 +1019,28 @@ async function conferirQueNadaFoiPago(q, ctx) {
     `SELECT COALESCE(SUM(amount), 0) AS soma FROM sale_payments WHERE sale_id = $1 AND amount > 0`,
     [saleId]
   );
+  // Renegociação que gravou entre a leitura e a trava: as mesmas regras (a)/(b)
+  // do CREDIT_RENEGOTIATED, de novo, já com as parcelas travadas.
+  const reneg = await q.query(
+    `WITH deb AS (
+       SELECT account_id FROM customer_credit_transactions
+        WHERE sale_id = $1 AND company_id = $2 AND type = 'debit' LIMIT 1
+     )
+     SELECT
+       (SELECT COUNT(*)::int FROM credit_installments ci
+         WHERE ci.sale_id = $1 AND ci.company_id = $2 AND ci.status = 'cancelled'
+           AND ci.account_id IS NOT DISTINCT FROM (SELECT account_id FROM deb)) AS canceladas,
+       (SELECT COUNT(*)::int FROM credit_installments ci
+         WHERE ci.company_id = $2 AND ci.sale_id IS NULL
+           AND ci.account_id IN (SELECT account_id FROM deb WHERE account_id IS NOT NULL)) AS sem_venda,
+       EXISTS (SELECT 1 FROM deb) AS tem_debito`,
+    [saleId, companyId]
+  );
+  const rn = (reneg.rows && reneg.rows[0]) || {};
+  if (rn.tem_debito && ((parseInt(rn.canceladas, 10) || 0) > 0 || (parseInt(rn.sem_venda, 10) || 0) > 0)) {
+    throw new EdicaoError(409, 'CREDIT_RENEGOTIATED',
+      'Este crediário acabou de ser renegociado ou juntado a outro carnê, então a forma e o cliente ficam como estão. Se o produto vai voltar, use “Devolver”.');
+  }
   const entrada = round2((ctx.pagamentos.entrada || []).reduce((a, p) => a + num(p.amount), 0));
   const pago =
     (par.rows || []).some((p) => p.status === 'paid' || num(p.covered_amount) > 0.005) ||
@@ -1036,7 +1061,14 @@ async function apagarLancamento(q, { companyId, key }) {
   );
   for (const r of rows || []) {
     await comSavepoint(q, 'solta_conciliacao', async () => {
-      await q.query('UPDATE bank_statement_entries SET matched_transaction_id = NULL WHERE matched_transaction_id = $1', [r.id]);
+      // A linha do extrato volta a "pendente": sem isso ficaria conciliada
+      // sem lançamento nenhum.
+      await q.query(
+        `UPDATE bank_statement_entries
+            SET matched_transaction_id = NULL, match_status = 'pendente', matched_at = NULL
+          WHERE matched_transaction_id = $1`,
+        [r.id]
+      );
     });
     await comSavepoint(q, 'solta_nota', async () => {
       await q.query('UPDATE nfce_emissions SET transaction_id = NULL WHERE transaction_id = $1', [r.id]);

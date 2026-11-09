@@ -582,15 +582,15 @@ test('Q. taxa conciliada no extrato: a edição solta a conciliação e refaz a 
   const fee = await one(`SELECT id FROM transactions WHERE idempotency_key = $1`, ['pdv-card-fee-' + saleId]);
   const conta = await one(`INSERT INTO bank_accounts (company_id, bank_name) VALUES ($1, 'Banco Fixture') RETURNING id`, [companyId]);
   await client.query(
-    `INSERT INTO bank_statement_entries (company_id, bank_account_id, date, description, amount, matched_transaction_id)
-     VALUES ($1, $2, '2026-11-08', 'Tarifa', -5.69, $3)`,
+    `INSERT INTO bank_statement_entries (company_id, bank_account_id, date, description, amount, matched_transaction_id, match_status, matched_at)
+     VALUES ($1, $2, '2026-11-08', 'Tarifa', -5.69, $3, 'manual', NOW())`,
     [companyId, conta.id, fee.id]
   );
   const res = await patch(saleId, { payments: [{ method: 'debito', amount: 189.70 }] });
   expect(res.status).toBe(200);
   expect(await taxa(saleId)).toBeCloseTo(1.90, 2);
-  const entrada = await one(`SELECT matched_transaction_id FROM bank_statement_entries WHERE bank_account_id = $1`, [conta.id]);
-  expect(entrada.matched_transaction_id).toBeNull();
+  const entrada = await one(`SELECT matched_transaction_id, match_status, matched_at FROM bank_statement_entries WHERE bank_account_id = $1`, [conta.id]);
+  expect(entrada).toEqual({ matched_transaction_id: null, match_status: 'pendente', matched_at: null });
 });
 
 test('R. NF-e 55 autorizada: crediário recusado', async () => {
@@ -615,4 +615,58 @@ test('S. Pix pela maquininha (card_fee_pix_pct): Pix -> dinheiro tira a taxa; di
   expect(await taxa(saleId)).toBeCloseTo(1.90, 2);
   expect((await patch(saleId, { payments: [{ method: 'dinheiro', amount: 189.70 }] })).status).toBe(200);
   expect(await taxa(saleId)).toBeNull();
+});
+
+// ── Segunda revisão (09/11/2026) ─────────────────────────────────────────────
+test('T1. venda 1x sem snapshot refeita em 3x: juros da loja no débito, nas parcelas e na prévia', async () => {
+  await ledger._getOrCreatePlanConfig(client, companyId);
+  await client.query(`UPDATE credit_plan_configs SET interest_rate = 0.1 WHERE company_id = $1`, [companyId]);
+  const saleId = uuid();
+  await client.query(
+    `INSERT INTO sales (id, company_id, customer_id, seller_id, total_amount, discount_amount, payment_method, status, created_at)
+     VALUES ($1, $2, $3, $4, 189.70, 0, 'crediario', 'completed', $5)`,
+    [saleId, companyId, cliA, userId, QUANDO]
+  );
+  // Como o Caixa grava a venda 1x: débito e A Receber, sem cronograma nem snapshot.
+  await ledger.createCreditSale(client, { companyId, customerId: cliA, saleId, amount: 189.70, installments: 1, productNames: ['Batom'], createdBy: userId });
+  expect((await one(`SELECT credit_plan_snapshot FROM sales WHERE id = $1`, [saleId])).credit_plan_snapshot).toBeNull();
+
+  const prev = await patch(saleId, { payments: [{ method: 'crediario', amount: 189.70 }], installments: 3, first_due_date: PRIMEIRA, dry_run: true });
+  expect(prev.status).toBe(200);
+  const somaPrevia = prev.body.plan.credit.to.schedule.reduce((a, p) => a + p.amount_due, 0);
+  expect(somaPrevia).toBeCloseTo(208.67, 2);
+
+  const res = await patch(saleId, { payments: [{ method: 'crediario', amount: 189.70 }], installments: 3, first_due_date: PRIMEIRA });
+  expect(res.status).toBe(200);
+  const deb = await one(`SELECT amount FROM customer_credit_transactions WHERE sale_id = $1 AND type = 'debit'`, [saleId]);
+  expect(Number(deb.amount)).toBeCloseTo(208.67, 2);
+  const parc = await all(`SELECT amount_due FROM credit_installments WHERE sale_id = $1 AND status <> 'cancelled'`, [saleId]);
+  expect(parc.reduce((a, p) => a + Number(p.amount_due), 0)).toBeCloseTo(somaPrevia, 2);
+  expect(await saldo(cliA)).toBeCloseTo(await abertas(cliA), 2);
+});
+
+test('T2. renegociação entre a leitura e a trava: a edição para e o cronograma novo fica intacto', async () => {
+  const saleId = await vendaFiada({ customer: cliA });
+  const ctx = await ev.carregarContexto(client, { companyId, saleId, lock: true });
+  const plan = await ev.planejar(client, ctx, { payments: [{ method: 'pix', amount: 189.70 }] }, TUDO);
+  expect(plan.credit.action).toBe('leave');
+
+  // O que o reschedule.js grava depois da leitura: parcelas da venda
+  // canceladas e cronograma novo sem venda no mesmo carnê.
+  const deb = await one(`SELECT account_id FROM customer_credit_transactions WHERE sale_id = $1 AND type = 'debit'`, [saleId]);
+  await client.query(`UPDATE credit_installments SET status = 'cancelled', covered_amount = 0 WHERE sale_id = $1`, [saleId]);
+  await client.query(
+    `INSERT INTO credit_installments (company_id, sale_id, customer_id, installment_number, total_installments, amount_due, due_date, status, covered_amount, account_id)
+     VALUES ($1, NULL, $2, 1, 1, 189.70, $3, 'pending', 0, $4)`,
+    [companyId, cliA, PRIMEIRA, deb.account_id]
+  );
+  const depois = await fotografia(saleId);
+
+  await client.query('SAVEPOINT aplicar_reneg');
+  await expect(ev.aplicar(client, ctx, plan, { userId, userName: 'Caio' }))
+    .rejects.toMatchObject({ status: 409, code: 'CREDIT_RENEGOTIATED' });
+  await client.query('ROLLBACK TO SAVEPOINT aplicar_reneg');
+  expect(await fotografia(saleId)).toEqual(depois);
+  const novo = await one(`SELECT status FROM credit_installments WHERE company_id = $1 AND sale_id IS NULL AND account_id = $2`, [companyId, deb.account_id]);
+  expect(novo.status).toBe('pending');
 });
