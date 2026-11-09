@@ -40,6 +40,8 @@ router.use('/me', require('./customerProfile').meRouter);
 router.use('/me/financeiro', require('./financeiroInsights').meRouter);
 router.use('/me/financeiro', require('./financeiroComparative').meRouter);
 router.use('/me/financeiro', require('./resultadoDoPeriodo').meRouter);
+// 08/11/2026 (p-90): resumo do crediario que vence num periodo, todos os CNPJs.
+router.use('/me/credit', require('./creditResumoVencimento').meRouter);
 
 // Telas visitadas: o app envia em lotes (POST /usage/screens) e o painel da
 // Gestão Aura lê em screen_views. Empresa e usuário vêm do token.
