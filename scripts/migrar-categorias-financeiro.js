@@ -75,7 +75,7 @@ function imprimirPlano(plano, nome) {
   const nCriar = plano.criar.reduce(function (a, c) { return a + c.n; }, 0);
   console.log('\n== ' + (nome || plano.company_id) + ' (' + plano.company_id + ')');
   if (plano.semeia_padroes) console.log('   ganha a lista padrao de categorias (ainda nao tinha nenhuma)');
-  console.log('   ' + nLigar + ' lancamento(s) ligam a categorias que ja existem; ' + nCriar + ' a ' + plano.criar.length + ' categoria(s) nova(s)');
+  console.log('   ' + nLigar + ' lancamento(s) ligam a categorias que ja existem; ' + nCriar + ' vao para ' + plano.criar.length + ' categoria(s) nova(s)');
   plano.ligar.forEach(function (l) {
     console.log('     ' + (l.kind === 'income' ? 'receita' : 'despesa') + '  "' + l.texto + '" x' + l.n + '  ->  ' + l.categoria);
   });
