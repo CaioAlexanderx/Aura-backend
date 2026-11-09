@@ -3,7 +3,8 @@
 //
 // GET    /companies/:id/sales              -> lista paginada + stats agregados
 // GET    /companies/:id/sales/:sale_id     -> detalhes completos + items (+ troca breakdown + fiscal)
-// PATCH  /companies/:id/sales/:sale_id     -> atualiza seller da venda
+// PATCH  /companies/:id/sales/:sale_id     -> Editar venda: forma, vendedor(a), cliente (09/11/2026)
+// GET    /companies/:id/sales/:sale_id/edit-context -> travas e formas atuais para a edicao
 // POST   /companies/:id/sales/:sale_id/cancel  -> cancela venda inteira (troca-aware)
 //
 // 11/05/2026 — cancel deleta sale_payments (auditoria caixa).
@@ -71,6 +72,7 @@ const { cancelDevolucao, activeReturnsOf } = require('../services/credit/refund'
 const { hasSaleNumberColumn, saleNumberSelect } = require('../utils/saleNumber');
 const matconSaleHooks = require('../services/matconSaleHooks');
 const comandaSaleHooks = require('../services/comandaSaleHooks');
+const editarVenda = require('../services/editarVenda');
 
 // Lancamento financeiro da venda, pra UI abrir "Editar lancamento".
 //
@@ -445,6 +447,27 @@ router.get('/:sale_id', asyncHandler(async (req, res) => {
     if (e.code !== '42P01' && e.code !== '42703') throw e;
   }
 
+  // 09/11/2026 (Editar venda): formas da venda em pilulas (a dividida e a
+  // entrada + crediario apareciam como uma forma so) e a ultima edicao
+  // ("Editada em dd/mm por Fulano"). As duas consultas vao juntas.
+  const [formasRes, lastEdit] = await Promise.all([
+    pool.query(
+      "SELECT (SELECT COALESCE(json_agg(json_build_object('method', sp.method, 'amount', sp.amount, 'sessao_id', sp.sessao_id, 'created_at', sp.created_at) ORDER BY sp.created_at, sp.id), '[]'::json) FROM sale_payments sp WHERE sp.sale_id = $1) AS pagamentos, " +
+      "       (SELECT COALESCE(json_agg(json_build_object('id', d.id, 'account_id', d.account_id)), '[]'::json) FROM customer_credit_transactions d WHERE d.sale_id = $1 AND d.company_id = $2 AND d.type = 'debit') AS debitos, " +
+      "       (SELECT COALESCE(json_agg(json_build_object('amount', t.amount, 'status', t.status, 'key', t.idempotency_key)), '[]'::json) FROM transactions t WHERE t.company_id = $2 AND t.idempotency_key >= 'pdv-credit-receivable-' || $1::text AND t.idempotency_key < 'pdv-credit-receivable-' || $1::text || 'z') AS recebiveis, " +
+      "       (SELECT COALESCE(json_agg(json_build_object('total', ci.total_installments, 'due_date', to_char(ci.due_date, 'YYYY-MM-DD'), 'status', ci.status, 'covered', ci.covered_amount) ORDER BY ci.installment_number), '[]'::json) FROM credit_installments ci WHERE ci.sale_id = $1 AND ci.company_id = $2 AND ci.status <> 'cancelled') AS parcelas",
+      [saleId, companyId]
+    ).catch(function(e) { if (e.code === '42P01' || e.code === '42703') return { rows: [] }; throw e; }),
+    editarVenda.ultimaEdicao(pool, saleId),
+  ]);
+  let payments = [];
+  if (formasRes.rows && formasRes.rows[0]) {
+    const f = formasRes.rows[0];
+    payments = editarVenda.derivarPagamentos({
+      total: sale.total_amount, pagamentos: f.pagamentos, debitos: f.debitos, recebiveis: f.recebiveis, parcelas: f.parcelas,
+    }).lista;
+  }
+
   res.json({
     sale: {
       id: sale.id,
@@ -470,9 +493,14 @@ router.get('/:sale_id', asyncHandler(async (req, res) => {
       email: sale.customer_email,
     } : null,
     seller: {
-      id: sale.seller_id || sale.employee_id,
+      // 09/11/2026: o vendedor(a) e o funcionario (employee_id, o que a
+      // comissao le). seller_id e quem operou o Caixa (users.id).
+      id: sale.employee_id || sale.seller_id,
+      employee_id: sale.employee_id || null,
       name: sale.seller_name_eff,
     },
+    payments: payments,
+    last_edit: lastEdit,
     items: items,
     troca: troca,
     devolucao: devolucao,
@@ -482,36 +510,106 @@ router.get('/:sale_id', asyncHandler(async (req, res) => {
   });
 }));
 
-// PATCH /companies/:id/sales/:sale_id
+// ── Editar venda (09/11/2026) ────────────────────────────────
+// GET   /:sale_id/edit-context  -> o que a tela de edição precisa: formas
+//                                  atuais (com o crediário), travas e o
+//                                  porquê, NFC-e, caixa e permissões.
+// PATCH /:sale_id               -> forma de pagamento, vendedor(a) e cliente.
+//                                  dry_run: true devolve o plano sem gravar.
+// Regra toda em services/editarVenda.js.
+//
+// Antes este PATCH só trocava o vendedor e gravava NULL quando o seller_id não
+// vinha no corpo -- o Editar venda do Studio mandava items/discount_amount,
+// o backend ignorava os itens, zerava o vendedor e respondia ok. Agora:
+// campo ausente não mexe; campo desconhecido é 400 com a lista.
+router.get('/:sale_id/edit-context', asyncHandler(async (req, res) => {
+  const companyId = req.params.id;
+  const ctx = await editarVenda.carregarContexto(pool, { companyId, saleId: req.params.sale_id });
+  if (!ctx) throw new AppError('Venda nao encontrada', 404);
+  const perms = await editarVenda.permissoesDeEdicao(pool, { companyId, user: req.user, companyRole: req.companyRole });
+  res.json(editarVenda.resumoParaEdicao(ctx, perms));
+}));
+
 router.patch('/:sale_id', asyncHandler(async (req, res) => {
   const companyId = req.params.id;
   const saleId = req.params.sale_id;
-  const { seller_id } = req.body || {};
+  const body = req.body;
+  if (!body || typeof body !== 'object' || Array.isArray(body)) {
+    return res.status(400).json({ error: 'Corpo inválido.', code: 'INVALID_BODY' });
+  }
+  const desconhecidos = Object.keys(body).filter(function(k) { return editarVenda.CAMPOS_ACEITOS.indexOf(k) === -1; });
+  if (desconhecidos.length) {
+    return res.status(400).json({
+      error: 'Campo não aceito na edição da venda: ' + desconhecidos.join(', ') +
+        '. Aqui mudam só a forma de pagamento, o vendedor(a) e o cliente. Produtos e valores não mudam por aqui.',
+      code: 'UNKNOWN_FIELD',
+      fields: desconhecidos,
+    });
+  }
+  if (!['seller_id', 'customer_id', 'payments'].some(function(k) { return Object.prototype.hasOwnProperty.call(body, k); })) {
+    return res.status(400).json({ error: 'Nada para mudar: envie seller_id, customer_id ou payments.', code: 'NOTHING_TO_EDIT' });
+  }
+  if (!editarVenda.UUID_RE.test(String(saleId || ''))) throw new AppError('Venda nao encontrada', 404);
+  const dryRun = body.dry_run === true || body.dry_run === 'true';
 
-  const saleRes = await pool.query(
-    'SELECT id, status FROM sales WHERE id = $1 AND company_id = $2',
-    [saleId, companyId]
-  );
-  if (!saleRes.rows.length) throw new AppError('Venda nao encontrada', 404);
-
-  let sellerName = null;
-  const resolvedSellerId = seller_id || null;
-
-  if (seller_id) {
-    const empRes = await pool.query(
-      'SELECT id, name FROM employees WHERE id = $1 AND company_id = $2',
-      [seller_id, companyId]
-    );
-    if (!empRes.rows.length) throw new AppError('Vendedor nao encontrado nesta empresa', 404);
-    sellerName = empRes.rows[0].name;
+  const perms = await editarVenda.permissoesDeEdicao(pool, { companyId, user: req.user, companyRole: req.companyRole });
+  // Toda edição fica registrada: sem a tabela (migration 431) não grava.
+  if (!dryRun && !(await editarVenda.registroDisponivel())) {
+    return res.status(503).json({ error: 'O registro de edições ainda não está disponível. Tente de novo em instantes.', code: 'EDIT_LOG_UNAVAILABLE' });
+  }
+  let userName = null;
+  if (!dryRun && req.user && req.user.id) {
+    try {
+      const u = await pool.query('SELECT full_name FROM users WHERE id = $1', [req.user.id]);
+      userName = (u.rows[0] && u.rows[0].full_name) || null;
+    } catch (e) { userName = null; }
   }
 
-  await pool.query(
-    'UPDATE sales SET seller_id = $1, employee_id = $1, seller_name = $2, updated_at = NOW() WHERE id = $3 AND company_id = $4',
-    [resolvedSellerId, sellerName, saleId, companyId]
-  );
-
-  res.json({ ok: true, sale_id: saleId, seller_id: resolvedSellerId, seller_name: sellerName });
+  const client = await pool.connect();
+  try {
+    // dry_run numa transação READ ONLY: o próprio Postgres garante que nada grava.
+    await client.query(dryRun ? 'BEGIN TRANSACTION READ ONLY' : 'BEGIN');
+    const ctx = await editarVenda.carregarContexto(client, { companyId, saleId, lock: !dryRun });
+    if (!ctx) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ error: 'Venda não encontrada.', code: 'SALE_NOT_FOUND' });
+    }
+    const plan = await editarVenda.planejar(client, ctx, body, perms);
+    if (dryRun) {
+      await client.query('ROLLBACK');
+      return res.json({ dry_run: true, plan: plan });
+    }
+    if (!plan.changes.length) {
+      await client.query('ROLLBACK');
+      return res.status(400).json({ error: 'Nada mudou: os dados enviados são os que a venda já tem.', code: 'NO_CHANGES', plan: plan });
+    }
+    const result = await editarVenda.aplicar(client, ctx, plan, {
+      userId: (req.user && req.user.id) || null,
+      userName: userName,
+      reason: body.reason || null,
+    });
+    await client.query('COMMIT');
+    const vend = plan.after.seller;
+    res.json({
+      ok: true,
+      sale_id: saleId,
+      // Compatível com a resposta antiga (só vendedor).
+      seller_id: vend ? vend.id : null,
+      seller_name: vend ? vend.name : null,
+      plan: plan,
+      result: result,
+    });
+  } catch (err) {
+    try { await client.query('ROLLBACK'); } catch (_) { /* conexão perdida */ }
+    if (err instanceof editarVenda.EdicaoError) return res.status(err.status).json(err.body);
+    // createCreditSale / cancelCreditSale lançam com statusCode + code (bloqueio, teto de parcelas).
+    if (err && err.statusCode && err.code && err.statusCode < 500) {
+      return res.status(err.statusCode).json({ error: err.message, code: err.code });
+    }
+    throw err;
+  } finally {
+    client.release();
+  }
 }));
 
 // POST /companies/:id/sales/:sale_id/cancel  (troca-aware)
