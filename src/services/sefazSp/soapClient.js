@@ -307,4 +307,7 @@ module.exports = {
   statusServico, autorizar, consultarChave,
   soapEnvelope, postSoap, withRetry, withSoapAction,
   SefazTransportError, SOAP_NS, NFE_NS, DEFAULT_TIMEOUT_MS,
+  // 09/11/2026: reaproveitados pelo cliente REST da NFS-e Nacional
+  // (services/nfseNacional/client.js) — mesmo material mTLS e mesmas raízes.
+  tlsMaterial, caBundle,
 };

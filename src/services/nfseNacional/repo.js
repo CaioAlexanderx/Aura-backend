@@ -1,0 +1,191 @@
+// ============================================================
+// AURA. — nfseNacional/repo: TODO o SQL do emissor nacional num lugar só.
+// O orquestrador (index.js) não escreve SQL; os testes de unidade trocam
+// este módulo por um banco em memória e o teste *.banco roda o SQL real
+// no Postgres do CI (migration 429 aplicada).
+// ============================================================
+'use strict';
+
+const { getCertificateInfo } = require('../sefazSp/certStore');
+const { lerNfse } = require('./nfseParser');
+
+const onlyDigits = (v) => String(v == null ? '' : v).replace(/\D/g, '');
+
+const COLS = `id, company_id, status, provider, idempotency_key, idempotency_fingerprint,
+  dps_serie, dps_number, dps_id, chave_acesso, nfse_number, ambiente, competence_date,
+  service_code, service_description, service_amount, iss_rate, iss_value, net_amount,
+  recipient_name, recipient_doc, rejection_reason, error_codes, transmitted_at, issued_at,
+  cancelled_at, cancel_reason, created_at, updated_at`;
+
+async function buscarPorChave(db, companyId, key) {
+  const { rows } = await db.query(
+    `SELECT ${COLS} FROM nfse WHERE company_id = $1 AND idempotency_key = $2`,
+    [companyId, key]
+  );
+  return rows[0] || null;
+}
+
+async function buscarPorId(db, companyId, nfseId) {
+  const { rows } = await db.query(
+    `SELECT ${COLS}, xml_dps, dps_dados FROM nfse WHERE id = $1 AND company_id = $2`,
+    [nfseId, companyId]
+  );
+  return rows[0] || null;
+}
+
+async function carregarContexto(db, companyId) {
+  const { rows: cfg } = await db.query('SELECT * FROM nfse_config WHERE company_id = $1', [companyId]);
+  const { rows: comp } = await db.query(
+    'SELECT id, cnpj, COALESCE(trade_name, legal_name) AS nome FROM companies WHERE id = $1',
+    [companyId]
+  );
+  let certInfo = null;
+  try {
+    certInfo = await getCertificateInfo(db, companyId);
+  } catch (err) {
+    if (err.code !== '42P01') throw err; // cofre ainda não criado = sem certificado
+  }
+  return { config: cfg[0] || null, company: comp[0] || null, certInfo };
+}
+
+/**
+ * Reserva o próximo nDPS e grava a nota 'pendente', numa transação só.
+ * @returns {{ row } | { corrida: true }} corrida = outra requisição com a
+ *   mesma chave gravou antes (o número reservado aqui volta no ROLLBACK).
+ */
+async function reservar(db, { companyId, key, fp, entrada, nota, ambiente }) {
+  const cx = await db.connect();
+  try {
+    await cx.query('BEGIN');
+    const { rows: num } = await cx.query(
+      `UPDATE nfse_config SET next_dps_number = next_dps_number + 1
+        WHERE company_id = $1
+        RETURNING next_dps_number - 1 AS n, serie`,
+      [companyId]
+    );
+    if (!num[0]) {
+      await cx.query('ROLLBACK');
+      return { semConfig: true };
+    }
+    const serie = String(parseInt(onlyDigits(num[0].serie || '1'), 10) || 1);
+    const t = entrada.tomador;
+    const { rows } = await cx.query(
+      `INSERT INTO nfse (
+         company_id, customer_id, payment_id, source_type, provider, status, ambiente,
+         idempotency_key, idempotency_fingerprint, dps_serie, dps_number, dps_dados,
+         recipient_type, recipient_name, recipient_doc, recipient_email, recipient_phone, recipient_address,
+         service_code, service_description, service_amount, iss_rate, iss_value, iss_retained,
+         net_amount, competence_date
+       ) VALUES (
+         $1, $2, $3, $4, 'nacional', 'pendente', $5,
+         $6, $7, $8, $9, $10::jsonb,
+         $11, $12, $13, $14, $15, $16::jsonb,
+         $17, $18, $19, $20, 0, $21,
+         $19, $22
+       ) RETURNING ${COLS}`,
+      [
+        companyId, nota.customer_id || null, nota.payment_id || null, nota.source_type || 'manual', ambiente,
+        key, fp, serie, String(num[0].n), JSON.stringify(entrada),
+        t && onlyDigits(t.doc).length === 14 ? 'pj' : 'pf',
+        t ? t.nome : null, t ? onlyDigits(t.doc) : null, t ? (t.email || null) : null, t ? (t.fone || null) : null,
+        t && t.endereco ? JSON.stringify(t.endereco) : null,
+        entrada.servico.cTribNac, entrada.servico.descricao, Number(entrada.valores.vServ),
+        Number(entrada.valores.pAliq || 0), Number(entrada.valores.tpRetISSQN) === 2,
+        entrada.dCompet,
+      ]
+    );
+    await cx.query('COMMIT');
+    return { row: rows[0] };
+  } catch (err) {
+    try { await cx.query('ROLLBACK'); } catch (_) { /* noop */ }
+    if (err && err.code === '23505' && /idempotency/.test(String(err.constraint || err.detail || err.message))) {
+      return { corrida: true };
+    }
+    throw err;
+  } finally {
+    cx.release();
+  }
+}
+
+/** XML assinado + transmitted_at gravados ANTES do POST. */
+async function marcarTransmitindo(db, id, { idDps, xml }) {
+  await db.query(
+    `UPDATE nfse SET dps_id = $1, xml_dps = $2, transmitted_at = NOW(), status = 'pendente', rejection_reason = NULL
+      WHERE id = $3`,
+    [idDps, xml, id]
+  );
+}
+
+async function marcarSemConfirmacao(db, id, mensagem) {
+  await db.query('UPDATE nfse SET rejection_reason = $1 WHERE id = $2', [String(mensagem).slice(0, 1000), id]);
+}
+
+async function marcarErro(db, id, mensagem, codigos = null) {
+  await db.query(
+    `UPDATE nfse SET status = 'erro', rejection_reason = $1, error_codes = COALESCE($2::jsonb, error_codes)
+      WHERE id = $3 AND status IN ('pendente', 'erro')`,
+    [String(mensagem).slice(0, 1000), codigos ? JSON.stringify(codigos) : null, id]
+  );
+}
+
+async function gravarAutorizada(db, id, { chaveAcesso, nfseXml, alertas, cabecalho }) {
+  let lido;
+  try { lido = lerNfse(nfseXml); } catch (_) { lido = { valores: {} }; }
+  const v = lido.valores || {};
+  await db.query(
+    `UPDATE nfse SET
+        status = 'autorizada',
+        chave_acesso = $1,
+        provider_id = $1,
+        nfse_number = $2,
+        xml_nfse = $3,
+        issued_at = COALESCE($4::timestamptz, NOW()),
+        iss_value = COALESCE($5, iss_value),
+        iss_rate = COALESCE($6, iss_rate),
+        net_amount = COALESCE($7, net_amount),
+        rejection_reason = NULL,
+        error_codes = NULL,
+        provider_response = $8::jsonb
+      WHERE id = $9`,
+    [
+      chaveAcesso || lido.chaveAcesso, lido.nNFSe || null, nfseXml, lido.dhProc || null,
+      v.vISSQN, v.pAliqAplic, v.vLiq,
+      JSON.stringify({ alertas: alertas || [], cabecalho: cabecalho || {}, cStat: lido.cStat || null }),
+      id,
+    ]
+  );
+}
+
+async function gravarRejeitada(db, id, { texto, erros, cabecalho }) {
+  await db.query(
+    `UPDATE nfse SET status = 'rejeitada', rejection_reason = $1, error_codes = $2::jsonb, provider_response = $3::jsonb
+      WHERE id = $4`,
+    [String(texto || 'Rejeitada pelo Sistema Nacional').slice(0, 2000), JSON.stringify(erros || []), JSON.stringify({ cabecalho: cabecalho || {} }), id]
+  );
+}
+
+async function gravarCancelada(db, id, { motivo, eventoXml }) {
+  await db.query(
+    `UPDATE nfse SET status = 'cancelada', cancelled_at = COALESCE(cancelled_at, NOW()),
+            cancel_reason = COALESCE($1, cancel_reason), cancel_event_xml = $2
+      WHERE id = $3`,
+    [motivo || null, eventoXml || null, id]
+  );
+}
+
+async function gravarCancelamentoRecusado(db, id, erros) {
+  await db.query(
+    `UPDATE nfse SET provider_response = COALESCE(provider_response, '{}'::jsonb) || $1::jsonb WHERE id = $2`,
+    [JSON.stringify({ cancelamento_recusado: erros || [] }), id]
+  );
+}
+
+async function atualizarXmlNfse(db, id, xml) {
+  await db.query('UPDATE nfse SET xml_nfse = $1 WHERE id = $2', [xml, id]);
+}
+
+module.exports = {
+  buscarPorChave, buscarPorId, carregarContexto, reservar,
+  marcarTransmitindo, marcarSemConfirmacao, marcarErro,
+  gravarAutorizada, gravarRejeitada, gravarCancelada, gravarCancelamentoRecusado, atualizarXmlNfse,
+};

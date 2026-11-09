@@ -67,7 +67,42 @@ function snapshot(companyId) {
 
 function reset() { _state.clear(); }
 
+/**
+ * 09/11/2026 (NFS-e Nacional): breaker INDEPENDENTE com a mesma semântica
+ * (por company, N falhas consecutivas abrem uma janela). Estado próprio —
+ * falha da NFS-e nunca abre o breaker da NFC-e, e vice-versa. As funções
+ * acima (instância da NFC-e) continuam exatamente como eram.
+ */
+function createBreaker({ threshold = FAILURE_THRESHOLD, windowMs = OPEN_WINDOW_MS } = {}) {
+  const state = new Map();
+  const get = (companyId) => {
+    const k = String(companyId);
+    if (!state.has(k)) state.set(k, { consecutiveFailures: 0, openUntil: 0, lastFailureAt: 0 });
+    return state.get(k);
+  };
+  return {
+    recordFailure(companyId, now = Date.now()) {
+      const s = get(companyId);
+      s.consecutiveFailures++;
+      s.lastFailureAt = now;
+      if (s.consecutiveFailures >= threshold) s.openUntil = now + windowMs;
+    },
+    recordSuccess(companyId) {
+      const s = get(companyId);
+      s.consecutiveFailures = 0;
+      s.openUntil = 0;
+    },
+    isOpen(companyId, now = Date.now()) { return now < get(companyId).openUntil; },
+    snapshot(companyId) { const s = get(companyId); return { ...s, open: now() < s.openUntil }; },
+    reset() { state.clear(); },
+    threshold,
+    windowMs,
+  };
+  function now() { return Date.now(); }
+}
+
 module.exports = {
   recordFailure, recordSuccess, isOpen, snapshot, reset,
   FAILURE_THRESHOLD, OPEN_WINDOW_MS,
+  createBreaker,
 };
