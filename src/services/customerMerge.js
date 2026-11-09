@@ -108,7 +108,7 @@ const CHOOSABLE_FIELDS = [
   'name', 'email', 'phone', 'phone_secondary', 'cpf_cnpj', 'birth_date',
   'instagram_handle', 'notes', 'photo_url',
   'street', 'number', 'address_number', 'complement', 'neighborhood',
-  'city', 'state', 'zip_code', 'postal_code',
+  'city', 'state', 'zip_code', 'postal_code', 'address_reference',
   'preferences',
 ];
 

@@ -578,16 +578,25 @@ async function clienteBloqueado(q, { companyId, customerId }) {
 // Taxa da maquininha que a venda TERIA com estas formas (mesma conta de
 // services/taxaDaMaquininha.js, sem gravar).
 function baseDoCartao(lista) {
-  const b = { cartao: 0, debito: 0 };
+  // Pix entra na base sempre; só vira taxa se a loja preencheu
+  // card_fee_pix_pct (Aura-backend#974).
+  const b = { cartao: 0, debito: 0, pix: 0 };
   for (const p of lista || []) {
-    if (p.method === 'cartao' || p.method === 'debito') b[p.method] = round2(b[p.method] + num(p.amount));
+    if (p.method === 'cartao' || p.method === 'debito' || p.method === 'pix') b[p.method] = round2(b[p.method] + num(p.amount));
   }
   return b;
+}
+function baseMudou(a, b) {
+  return ['cartao', 'debito', 'pix'].some((k) => Math.abs((a[k] || 0) - (b[k] || 0)) > 0.005);
 }
 function taxaPrevista(settings, base) {
   if (!settings || !settings.card_fee_enabled) return 0;
   const clamp = (v) => Math.min(Math.max(parseFloat(v) || 0, 0), 100);
-  return round2(base.cartao * clamp(settings.card_fee_credit_pct) / 100 + base.debito * clamp(settings.card_fee_debit_pct) / 100);
+  return round2(
+    base.cartao * clamp(settings.card_fee_credit_pct) / 100 +
+    base.debito * clamp(settings.card_fee_debit_pct) / 100 +
+    (base.pix || 0) * clamp(settings.card_fee_pix_pct) / 100
+  );
 }
 
 // Termos da venda que já estava no crediário: o snapshot gravado pelo
@@ -830,8 +839,7 @@ async function planejar(q, ctx, body, perms) {
     const taxaAntes = ctx.taxa || 0;
     const baseAntes = baseDoCartao(entradaAntes);
     const baseDepois = baseDoCartao(entradaDepois);
-    const baseMudou = Math.abs(baseAntes.cartao - baseDepois.cartao) > 0.005 || Math.abs(baseAntes.debito - baseDepois.debito) > 0.005;
-    if (baseMudou) {
+    if (baseMudou(baseAntes, baseDepois)) {
       const taxaDepois = taxaPrevista(ctx.pdv_settings, baseDepois);
       if (Math.abs(taxaDepois - taxaAntes) > 0.005) {
         efeitos.push({
@@ -1195,7 +1203,7 @@ async function aplicar(q, ctx, plan, { userId = null, userName = null, reason = 
     // Taxa da maquininha: só refaz quando a base no cartão mudou.
     const bA = baseDoCartao(plan.payments.from);
     const bD = baseDoCartao(entrada);
-    if (Math.abs(bA.cartao - bD.cartao) > 0.005 || Math.abs(bA.debito - bD.debito) > 0.005) {
+    if (baseMudou(bA, bD)) {
       await apagarLancamento(q, { companyId, key: CARD_FEE_KEY(saleId) });
       resultado.card_fee = await insertCardFeeExpense(q, {
         companyId, saleId, cardBase: bD, createdBy: userId, saleDate: s.dia,

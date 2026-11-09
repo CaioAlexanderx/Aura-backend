@@ -638,8 +638,9 @@ async function handleSale(req, res, opts = {}) {
       activeSessaoId = sessRes?.rows?.[0]?.id || null;
     } catch (sessErr) {}
     // Base da taxa da maquininha: acumulada a partir dos sale_payments que
-    // realmente entraram, cada forma na sua aliquota.
-    const cardBase = { cartao: 0, debito: 0 };
+    // realmente entraram, cada forma na sua aliquota. 'pix' entra na base
+    // sempre; so vira taxa se a empresa preencheu card_fee_pix_pct.
+    const cardBase = { cartao: 0, debito: 0, pix: 0 };
     if (Array.isArray(payments) && payments.length > 0) {
       for (const p of payments) {
         const m = (p.method || '').toLowerCase();
@@ -651,7 +652,7 @@ async function handleSale(req, res, opts = {}) {
            VALUES ($1,$2,$3,$4,$5) ON CONFLICT DO NOTHING`,
           [sale.id, req.params.id, p.method, amt, activeSessaoId]
         );
-        if (m === 'cartao' || m === 'debito') cardBase[m] += amt;
+        if (m === 'cartao' || m === 'debito' || m === 'pix') cardBase[m] += amt;
       }
     } else if (cashAmount > 0) {
       const fallbackMethod = (payment_method || 'dinheiro').toLowerCase();
@@ -661,7 +662,7 @@ async function handleSale(req, res, opts = {}) {
            VALUES ($1,$2,$3,$4,$5) ON CONFLICT DO NOTHING`,
           [sale.id, req.params.id, fallbackMethod, cashAmount, activeSessaoId]
         );
-        if (fallbackMethod === 'cartao' || fallbackMethod === 'debito') {
+        if (fallbackMethod === 'cartao' || fallbackMethod === 'debito' || fallbackMethod === 'pix') {
           cardBase[fallbackMethod] += cashAmount;
         }
       }
@@ -1326,3 +1327,5 @@ router.get('/sales-by-product-barcode', async (req, res) => {
 
 module.exports = router;
 module.exports.fetchCustomerPhone = fetchCustomerPhone;
+module.exports.insertCardFeeExpense = insertCardFeeExpense;
+module.exports.CARD_FEE_KEY = CARD_FEE_KEY;

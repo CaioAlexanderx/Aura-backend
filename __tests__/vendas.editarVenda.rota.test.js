@@ -572,3 +572,22 @@ describe('revisão: datas, termos, nota, taxa e registro', () => {
     expect(r2.status).toBe(200);
   });
 });
+
+test('R11. Pix com taxa (card_fee_pix_pct): Pix -> dinheiro tira a taxa do Pix', async () => {
+  montar({
+    pagamentos: [{ id: 'sp1', method: 'pix', amount: '189.70', sessao_id: null, created_at: '2026-11-07T18:42:00Z' }],
+    taxa: '1.88', pdv_settings: { card_fee_enabled: true, card_fee_pix_pct: 0.99 },
+  });
+  const prev = await patch({ payments: [{ method: 'dinheiro', amount: 189.70 }], dry_run: true });
+  expect(prev.body.plan.effects.find((e) => e.code === 'CARD_FEE_CHANGES').text).toBe('A taxa da maquininha (R$ 1,88) sai do Financeiro.');
+  const res = await patch({ payments: [{ method: 'dinheiro', amount: 189.70 }] });
+  expect(res.status).toBe(200);
+  expect(houve(/DELETE FROM transactions WHERE id = \$1/)).toBe(true);
+  expect(houve(/'Taxas de cartão'/)).toBe(false);
+});
+
+test('R11b. dinheiro -> Pix com taxa no Pix: a prévia mostra a taxa nova', async () => {
+  montar({ pdv_settings: { card_fee_enabled: true, card_fee_pix_pct: 1 } });
+  const prev = await patch({ payments: [{ method: 'pix', amount: 189.70 }], dry_run: true });
+  expect(prev.body.plan.effects.find((e) => e.code === 'CARD_FEE_CHANGES').text).toBe('A taxa da maquininha passa de R$ 0,00 para R$ 1,90.');
+});

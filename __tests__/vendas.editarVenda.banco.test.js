@@ -604,3 +604,15 @@ test('R. NF-e 55 autorizada: crediário recusado', async () => {
   expect(res.body.code).toBe('NFCE_AUTHORIZED_NO_CREDIARIO');
   expect(res.body.error).toContain('NF-e 77');
 });
+
+test('S. Pix pela maquininha (card_fee_pix_pct): Pix -> dinheiro tira a taxa; dinheiro -> Pix cobra', async () => {
+  await client.query(
+    `UPDATE companies SET pdv_settings = pdv_settings || '{"card_fee_pix_pct": 1}'::jsonb WHERE id = $1`,
+    [companyId]
+  );
+  const saleId = await vendaAvista({ formas: [{ method: 'dinheiro', amount: 189.70 }] });
+  expect((await patch(saleId, { payments: [{ method: 'pix', amount: 189.70 }] })).status).toBe(200);
+  expect(await taxa(saleId)).toBeCloseTo(1.90, 2);
+  expect((await patch(saleId, { payments: [{ method: 'dinheiro', amount: 189.70 }] })).status).toBe(200);
+  expect(await taxa(saleId)).toBeNull();
+});

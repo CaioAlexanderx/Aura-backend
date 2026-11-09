@@ -45,6 +45,16 @@
 // da 341 faz o mesmo nos outros caminhos de escrita. Antes da migration as
 // colunas novas nao existem: 42703 -> cache module-level e a escrita segue
 // sem elas, devolvendo ignored_fields (armadilha 1).
+//
+// 09/11/2026 (Endereco do cliente para entrega, parte 1): POST e PATCH
+// aceitam zip_code, street, number, complement, neighborhood, city, state
+// e address_reference (migration 433); GET devolve os mesmos campos mais
+// has_address (rua ou CEP + numero + cidade), que o seletor do Caixa usa
+// no selo "sem endereco". Canonicos: number e zip_code -- address_number e
+// postal_code (073) estao vazios e ficam como estao. Regras em
+// src/services/customerAddress.js. O cliente e do DONO (owner-scope): o
+// endereco gravado de qualquer loja vale em todas. Sem a 433 aplicada, o
+// address_reference cai fora como o perfil da 341 (ignored_fields).
 // ============================================================
 const router = require('express').Router({ mergeParams: true });
 const db = require('../config/database');
@@ -53,10 +63,15 @@ const { toPhoneE164BR } = require('../utils/phone');
 const { parseCpfCnpjInput } = require('../utils/cpfCnpj');
 const { parseTags, parsePreferences, parseImportantDates } = require('../services/customerProfileFields');
 const { attachProfessionalsToCustomers } = require('../services/matconProfessionals');
+const {
+  parseCustomerAddress, hasDeliveryAddress, addressFromRow, isMissingReferenceColumn,
+} = require('../services/customerAddress');
 
 // Colunas da migration 341. null = ainda nao sabemos; false = 42703 visto.
 let profileColumnsAvailable = null;
-function _resetProfileColumnsCache() { profileColumnsAvailable = null; }
+// Coluna da migration 433 (address_reference). Mesma ideia.
+let referenceColumnAvailable = null;
+function _resetProfileColumnsCache() { profileColumnsAvailable = null; referenceColumnAvailable = null; }
 
 function getPlanLimit(plan) {
   switch ((plan || '').toLowerCase()) {
@@ -162,6 +177,8 @@ router.get('/', async (req, res) => {
       SELECT c.id, c.name, c.cpf_cnpj, c.email, c.phone, c.birth_date, c.instagram_handle,
              c.total_purchases, c.total_spent, c.last_purchase_at, c.first_purchase_at,
              c.notes, c.is_active, c.created_at, c.company_id,
+             c.zip_code, c.street, c.number, c.complement, c.neighborhood, c.city, c.state,
+             ${referenceColumnAvailable !== false ? 'c.address_reference' : 'NULL::text AS address_reference'},
              comp.trade_name AS company_trade, comp.legal_name AS company_legal,
              ${comCredito ? 'COALESCE(cb.balance, 0)' : '0'} AS credit_balance
         FROM customers c
@@ -172,13 +189,27 @@ router.get('/', async (req, res) => {
        ${orderBy}
        LIMIT $${params.length + 1} OFFSET $${params.length + 2}`;
 
+    // Sem a 433, o address_reference sai da lista e ela segue (o resto do
+    // endereco ja existe desde a 001/073).
+    const queryList = async (buildSql) => {
+      try {
+        const r = await db.query(buildSql(), [...params, limit, offset]);
+        if (referenceColumnAvailable === null) referenceColumnAvailable = true;
+        return r;
+      } catch (e) {
+        if (referenceColumnAvailable === false || !isMissingReferenceColumn(e)) throw e;
+        referenceColumnAvailable = false;
+        return db.query(buildSql(), [...params, limit, offset]);
+      }
+    };
+
     let dataRes;
     try {
-      dataRes = await db.query(selectCustomers(true), [...params, limit, offset]);
+      dataRes = await queryList(() => selectCustomers(true));
     } catch (creditErr) {
       if (creditErr.code !== '42P01' && creditErr.code !== '42703') throw creditErr;
       console.warn('[customers] customer_credit_balances indisponivel, listando sem saldo:', creditErr.code);
-      dataRes = await db.query(selectCustomers(false), [...params, limit, offset]);
+      dataRes = await queryList(() => selectCustomers(false));
     }
 
     const customers = dataRes.rows.map(r => ({
@@ -199,6 +230,8 @@ router.get('/', async (req, res) => {
       company_name: r.company_trade || r.company_legal || 'Empresa',
       // Crediario: saldo > 0 = cliente deve. Saldo na empresa onde ele foi cadastrado.
       credit_balance: parseFloat(r.credit_balance) || 0,
+      // 09/11/2026: endereco para entrega + has_address (selo do Caixa).
+      ...addressFromRow(r),
     }));
 
     // 23/09/2026 (Matcon M3): com Matcon + clube do profissional ligados,
@@ -227,6 +260,9 @@ router.post('/', async (req, res) => {
   if (!name || !String(name).trim()) {
     return res.status(400).json({ error: 'name e obrigatorio' });
   }
+  // Endereco: tudo opcional; se vier, CEP com 8 digitos e UF com 2 letras.
+  const addr = parseCustomerAddress(req.body);
+  if (!addr.ok) return res.status(400).json({ error: addr.error, field: addr.field });
 
   // MULTICNPJ Onda 2.3: plan limit conta TODOS os clientes do owner,
   // alinhado com a decisao de lista unica.
@@ -254,31 +290,58 @@ router.post('/', async (req, res) => {
   const finalInstagram = instagram_handle || instagram || null;
 
   try {
-    const baseValues = [companyId, String(name).trim(), email || null, phone || null, notes || null, finalBirthDate, finalInstagram, cpf_cnpj || null];
+    const base = [
+      ['company_id', companyId], ['name', String(name).trim()], ['email', email || null],
+      ['phone', phone || null], ['notes', notes || null], ['birth_date', finalBirthDate],
+      ['instagram_handle', finalInstagram], ['cpf_cnpj', cpf_cnpj || null],
+    ];
+    const addrCols = Object.entries(addr.values);
+    const pedeReferencia = addrCols.some(([k]) => k === 'address_reference');
+    const ignoredFields = [];
+    let withProfile = profileColumnsAvailable !== false;
+    let withRef = referenceColumnAvailable !== false;
+    if (pedeReferencia && !withRef) ignoredFields.push('address_reference');
+
+    // Ate 3 tentativas: sem a 433 cai o address_reference; sem a 341 cai o
+    // phone_e164 (qualquer outro 42703, como era antes).
     let result;
-    if (profileColumnsAvailable !== false) {
+    for (let tentativa = 0; tentativa < 3 && !result; tentativa++) {
+      const cols = [...base];
+      if (withProfile) cols.push(['phone_e164', toPhoneE164BR(phone)]);
+      for (const [k, v] of addrCols) {
+        if (k === 'address_reference' && !withRef) continue;
+        cols.push([k, v]);
+      }
       try {
         result = await db.query(
-          `INSERT INTO customers (company_id, name, email, phone, notes, birth_date, instagram_handle, cpf_cnpj, phone_e164)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+          `INSERT INTO customers (${cols.map(c => c[0]).join(', ')})
+           VALUES (${cols.map((_, i) => '$' + (i + 1)).join(', ')})
            RETURNING *`,
-          [...baseValues, toPhoneE164BR(phone)]
+          cols.map(c => c[1])
         );
-        profileColumnsAvailable = true;
+        if (withProfile) profileColumnsAvailable = true;
+        if (withRef && pedeReferencia) referenceColumnAvailable = true;
       } catch (e) {
         if (e.code !== '42703') throw e;
-        profileColumnsAvailable = false; // migration 341 ainda nao aplicada
+        if (withRef && pedeReferencia && isMissingReferenceColumn(e)) {
+          withRef = false;
+          referenceColumnAvailable = false; // migration 433 ainda nao aplicada
+          ignoredFields.push('address_reference');
+          continue;
+        }
+        if (withProfile) {
+          withProfile = false;
+          profileColumnsAvailable = false; // migration 341 ainda nao aplicada
+          continue;
+        }
+        throw e;
       }
     }
-    if (!result) {
-      result = await db.query(
-        `INSERT INTO customers (company_id, name, email, phone, notes, birth_date, instagram_handle, cpf_cnpj)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-         RETURNING *`,
-        baseValues
-      );
-    }
-    res.status(201).json(result.rows[0]);
+    const row = result.rows[0];
+    // has_address so quando o endereco veio no body (contrato antigo intacto).
+    const out = addrCols.length ? { ...row, has_address: hasDeliveryAddress(row) } : { ...row };
+    if (ignoredFields.length) out.ignored_fields = ignoredFields;
+    res.status(201).json(out);
   } catch (err) {
     console.error('[customers] create error:', err.message);
     res.status(500).json({ error: 'Erro ao criar cliente' });
@@ -331,10 +394,17 @@ router.patch('/:cid', async (req, res) => {
     sets.push({ col: 'important_dates', val: JSON.stringify(r.value), cast: 'jsonb', profile: true, field: 'important_dates' });
   }
 
+  // 09/11/2026: endereco para entrega. Campo ausente nao mexe; '' apaga.
+  const addr = parseCustomerAddress(body);
+  if (!addr.ok) return res.status(400).json({ error: addr.error, field: addr.field });
+  for (const [col, val] of Object.entries(addr.values)) {
+    sets.push(col === 'address_reference' ? { col, val, ref: true, field: col } : { col, val });
+  }
+
   if (sets.length === 0) return res.status(400).json({ error: 'Nenhum campo para atualizar' });
 
-  const runUpdate = (ownerCompanyIds, withProfile) => {
-    const active = sets.filter(x => withProfile || !x.profile);
+  const runUpdate = (ownerCompanyIds, withProfile, withRef) => {
+    const active = sets.filter(x => (withProfile || !x.profile) && (withRef || !x.ref));
     if (!active.length) return null;
     const values = [];
     const parts = active.map((x) => {
@@ -355,10 +425,27 @@ router.patch('/:cid', async (req, res) => {
 
     const hasProfile = sets.some(x => x.profile);
     const ignoredFields = [];
+    // Sem a 433, o address_reference cai fora e o resto grava.
+    const hasRef = sets.some(x => x.ref);
+    let withRef = hasRef && referenceColumnAvailable !== false;
+    if (hasRef && !withRef) ignoredFields.push('address_reference');
+    const tryUpdate = async (withProfile) => {
+      try {
+        const r = await runUpdate(ownerCompanyIds, withProfile, withRef);
+        if (withRef) referenceColumnAvailable = true;
+        return r;
+      } catch (e) {
+        if (!withRef || !isMissingReferenceColumn(e)) throw e;
+        withRef = false;
+        referenceColumnAvailable = false; // migration 433 ainda nao aplicada
+        ignoredFields.push('address_reference');
+        return runUpdate(ownerCompanyIds, withProfile, false);
+      }
+    };
     let result = null;
     if (hasProfile && profileColumnsAvailable !== false) {
       try {
-        result = await runUpdate(ownerCompanyIds, true);
+        result = await tryUpdate(true);
         profileColumnsAvailable = true;
       } catch (e) {
         if (e.code !== '42703') throw e;
@@ -367,7 +454,7 @@ router.patch('/:cid', async (req, res) => {
     }
     if (!result) {
       if (hasProfile) ignoredFields.push(...sets.filter(x => x.profile && x.field).map(x => x.field));
-      result = await runUpdate(ownerCompanyIds, false);
+      result = await tryUpdate(false);
       if (!result) {
         return res.status(409).json({
           error: 'Campos do perfil ainda indisponiveis (migration 341 pendente)',
@@ -377,7 +464,10 @@ router.patch('/:cid', async (req, res) => {
       }
     }
     if (!result.rows.length) return res.status(404).json({ error: 'Cliente nao encontrado' });
-    const row = result.rows[0];
+    // has_address so quando o endereco veio no body (contrato antigo intacto).
+    const row = Object.keys(addr.values).length
+      ? { ...result.rows[0], has_address: hasDeliveryAddress(result.rows[0]) }
+      : result.rows[0];
     res.json(ignoredFields.length ? { ...row, ignored_fields: ignoredFields } : row);
   } catch (err) {
     console.error('[customers] update error:', err.message);
