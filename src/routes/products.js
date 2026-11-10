@@ -815,13 +815,23 @@ async function comFallbackDeFicha(rodar) {
       }
     }
   }
+  // 10/11/2026: o 42703 do Postgres diz QUAL coluna faltou ('column "x"
+  // does not exist'). Os degraus que ainda pedem essa coluna falhariam do
+  // mesmo jeito, entao sao pulados: base so sem a 351 (ou so sem a 437)
+  // continua custando UMA query extra, mesmo com cinco degraus. Sem o nome
+  // na mensagem, desce um degrau por vez como antes.
+  const faltando = new Set();
+  const pedeColunaQueFalta = (d) => [...faltando].some((c) => new RegExp(`(^|[\\s,])${c},`).test(d.join(' ')));
   let ultimo = null;
-  for (const [ficha, duracao, matcon, cartao, nfse] of degraus) {
+  for (const degrau of degraus) {
+    if (pedeColunaQueFalta(degrau)) continue;
     try {
-      return await rodar(ficha, duracao, matcon, cartao, nfse);
+      return await rodar(...degrau);
     } catch (e) {
       if (e.code !== '42703') throw e;
       ultimo = e;
+      const m = /column "(?:[a-z_]+\.)?([a-z_]+)"/i.exec(String(e.message || ''));
+      if (m) faltando.add(m[1]);
     }
   }
   throw ultimo;
