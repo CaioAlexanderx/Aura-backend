@@ -8,7 +8,8 @@
 //      outros só anotam o vínculo.
 //   2. Sem CPF/CNPJ válido de quem contratou, NÃO emite: o registro fica
 //      'pendente_dados' com o motivo, e o app completa e emite.
-//   3. Venda mista: só os serviços (products.unit = 'srv') vão para a NFS-e;
+//   3. Venda mista: só os itens da NFS-e (notaDoItem.vaiNaNfse: products.
+//      nota_fiscal, ou sem escolha unit = 'srv') vão para a NFS-e;
 //      os produtos seguem na NFC-e (outro fluxo, não mexemos aqui).
 //
 // Prestação = (empresa, origem, código de tributação). A origem é a venda ou
@@ -63,6 +64,7 @@ const { NfseNacionalError } = require('./nfseNacional/errors');
 const { hojeBR } = require('./nfseNacional/dpsBuilder');
 const { nacionalHabilitado } = require('./nfseNacional/endpoints');
 const { isValidCpf, isValidCnpj } = require('../utils/cpfCnpj');
+const { vaiNaNfse } = require('./notaDoItem'); // migration 442: o item escolhe a nota
 
 // ── DECISÕES DO DONO EM 10/11/2026 — cada uma num ponto só ──────────────
 // (a) A OS dispara a nota quando passa para este status (não 'pronta').
@@ -275,7 +277,7 @@ function resumirOrigem(rows) {
 function itemDaVenda(r) {
   return {
     id: r.id,
-    servico: r.unit === 'srv',
+    servico: vaiNaNfse(r),
     descricao: r.nfse_descricao || r.product_name_snapshot || r.product_name,
     quantidade: r.quantity,
     valor: Number(r.total_price) || 0,
@@ -287,7 +289,7 @@ function itemDaVenda(r) {
 function itemDaOs(r) {
   return {
     id: r.id,
-    servico: r.kind === 'servico' || r.unit === 'srv',
+    servico: vaiNaNfse({ nota_fiscal: r.nota_fiscal, unit: r.kind === 'servico' ? 'srv' : r.unit }),
     descricao: r.nfse_descricao || r.description || r.product_name,
     quantidade: r.quantity,
     valor: Number(r.total_price) || 0,
@@ -494,7 +496,7 @@ async function processarOs(p) {
 
   if (os.sale_id) {
     const linhasVenda = await repo.itensDaVenda(companyId, os.sale_id);
-    if (linhasVenda.some((l) => l.unit === 'srv')) {
+    if (linhasVenda.some(vaiNaNfse)) {
       return processarVenda({
         companyId, saleId: os.sale_id, gatilho, ref: os.id, manual: true, forcar, tomador, cfg,
       });
@@ -594,7 +596,7 @@ function aoReceberPagamento({ companyId, result, saleId = null }) {
  * Situação das notas de uma origem (OS com venda ligada inclui a venda).
  * Também diz se o botão "Emitir NFS-e" cabe aqui (10/11/2026):
  *   emite       a loja emite NFS-e (lojaEmite), independente da automática;
- *   tem_servico a origem tem serviço (venda: unit 'srv'; OS: item de serviço
+ *   tem_servico a origem tem item da NFS-e (venda: notaDoItem.vaiNaNfse; OS: item de serviço
  *               ou venda ligada com serviço);
  *   pode_emitir emite + tem_servico + origem que gera nota (venda não
  *               cancelada nem troca; OS entregue).
@@ -621,11 +623,11 @@ async function situacaoDaOrigem({ companyId, tipo, id }) {
   let temServico = rows.length > 0;
   if (!temServico) {
     if (tipo === 'venda') {
-      temServico = (await repo.itensDaVenda(companyId, id)).some((l) => l.unit === 'srv');
+      temServico = (await repo.itensDaVenda(companyId, id)).some(vaiNaNfse);
     } else {
       temServico = (await repo.itensDaOs(companyId, id)).map(itemDaOs).some((i) => i.servico);
       if (!temServico && os.sale_id) {
-        temServico = (await repo.itensDaVenda(companyId, os.sale_id)).some((l) => l.unit === 'srv');
+        temServico = (await repo.itensDaVenda(companyId, os.sale_id)).some(vaiNaNfse);
       }
     }
   }

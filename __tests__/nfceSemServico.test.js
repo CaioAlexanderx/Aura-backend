@@ -41,6 +41,9 @@ const S_AJUSTE   = '33333333-3333-4333-8333-333333333333'; // servico (unit srv)
 const P_GRUPO    = '44444444-4444-4444-8444-444444444444'; // compartilhado da matriz
 const S_GRUPO    = '55555555-5555-4555-8555-555555555555'; // servico compartilhado da matriz
 const P_OUTRA    = '66666666-6666-4666-8666-666666666666'; // de outra empresa, NAO compartilhado
+// Migration 442 (o item escolhe a nota):
+const P_CARIMBO  = '77777777-7777-4777-8777-777777777777'; // produto com estoque que sai na NFS-e
+const S_NA_NFCE  = '88888888-8888-4888-8888-888888888888'; // servico que o cadastro manda para a NFC-e
 
 const PRODUCTS = [
   { id: P_CAMISETA, company_id: CID, ncm: '61091000', tax_profile: 'simples_st', unit: 'UN', is_group_shared: false },
@@ -49,6 +52,8 @@ const PRODUCTS = [
   { id: P_GRUPO,    company_id: MATRIZ, ncm: '33049910', tax_profile: 'simples_outros', unit: 'UN', is_group_shared: true },
   { id: S_GRUPO,    company_id: MATRIZ, ncm: null, tax_profile: null, unit: 'srv', is_group_shared: true },
   { id: P_OUTRA,    company_id: MATRIZ, ncm: '99999999', tax_profile: 'simples_st', unit: 'UN', is_group_shared: false },
+  { id: P_CARIMBO,  company_id: CID, ncm: '96110000', tax_profile: null, unit: 'UN', is_group_shared: false, nota_fiscal: 'nfse' },
+  { id: S_NA_NFCE,  company_id: CID, ncm: '49111090', tax_profile: null, unit: 'srv', is_group_shared: false, nota_fiscal: 'nfce' },
 ];
 
 const COMPANY_ROW = {
@@ -475,6 +480,76 @@ describe('item compartilhado do grupo (is_group_shared)', () => {
   });
 });
 
+// ── 4b. Migration 442: o cadastro escolhe a nota ─────────────────────────
+describe('o item escolhe a nota (products.nota_fiscal, migration 442)', () => {
+  test('produto com nota_fiscal nfse sai da NFC-e (vai na NFS-e)', async () => {
+    buildApp(CONFIG_ENGINE);
+    const res = await emitir({
+      items: [
+        { product_id: P_CAMISETA, product_name: 'Camiseta', quantity: 1, unit_price: 50 },
+        { product_id: P_CARIMBO, product_name: 'Carimbo personalizado', quantity: 1, unit_price: 30 },
+      ],
+      payments: [{ method: 'pix', value: 80 }], sale_id: 'nota-1', tipo: 'nfce',
+    });
+    expect(res.status).toBe(201);
+    const payload = ctx.captured.payloads[0];
+    expect(payload.items.map((i) => i.code)).toEqual([P_CAMISETA]);
+    expect(payload.total_value).toBe(50);
+    expect(ctx.captured.xml[0]).not.toMatch(/Carimbo/);
+    expect(res.body.servicos_fora_da_nfce).toEqual({ itens: 1, total: 30 });
+    const sqlProdutos = ctx.db.query.mock.calls.map(([q]) => String(q)).filter((q) => /FROM products/.test(q));
+    expect(sqlProdutos[0]).toMatch(/nota_fiscal/);
+  });
+
+  test('venda so do produto NFS-e: nada de NFC-e (skipped)', async () => {
+    buildApp(CONFIG_ENGINE);
+    const res = await emitir({
+      items: [{ product_id: P_CARIMBO, product_name: 'Carimbo', quantity: 2, unit_price: 30 }],
+      payment_method: 'pix', sale_id: 'nota-2', tipo: 'nfce',
+    });
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual(expect.objectContaining({ skipped: true, reason: 'somente_servicos' }));
+    expect(writes()).toEqual([]);
+  });
+
+  test('servico com nota_fiscal nfce entra na NFC-e', async () => {
+    buildApp(CONFIG_ENGINE);
+    const res = await emitir({
+      items: [{ product_id: S_NA_NFCE, product_name: 'Impressao', quantity: 1, unit_price: 25 }],
+      payment_method: 'pix', sale_id: 'nota-3', tipo: 'nfce',
+    });
+    expect(res.status).toBe(201);
+    const payload = ctx.captured.payloads[0];
+    expect(payload.items).toEqual([expect.objectContaining({ code: S_NA_NFCE, ncm: '49111090' })]);
+    expect(res.body.servicos_fora_da_nfce).toBeUndefined();
+  });
+
+  test('base sem a coluna (42703): le sem ela e segue a regra de hoje', async () => {
+    buildApp(CONFIG_ENGINE);
+    const base = ctx.db.query.getMockImplementation();
+    ctx.db.query.mockImplementation(async (sql, params) => {
+      if (/FROM products/.test(sql) && /nota_fiscal/.test(sql)) {
+        throw Object.assign(new Error('column "nota_fiscal" does not exist'), { code: '42703' });
+      }
+      if (/FROM products/.test(sql)) {
+        const r = await base(sql, params);
+        return { rows: r.rows.map(({ nota_fiscal, ...p }) => p) }; // eslint-disable-line no-unused-vars
+      }
+      return base(sql, params);
+    });
+    const res = await emitir({
+      items: [
+        { product_id: P_CARIMBO, product_name: 'Carimbo', quantity: 1, unit_price: 30 },
+        { product_id: S_AJUSTE, product_name: 'Ajuste', quantity: 1, unit_price: 10 },
+      ],
+      payments: [{ method: 'pix', value: 40 }], sale_id: 'nota-4', tipo: 'nfce',
+    });
+    expect(res.status).toBe(201);
+    // sem a coluna o carimbo e produto (unit UN) e fica; o servico sai
+    expect(ctx.captured.payloads[0].items.map((i) => i.code)).toEqual([P_CARIMBO]);
+  });
+});
+
 // ── 5. Helper puro ───────────────────────────────────────────────────────
 describe('services/nfceSemServico', () => {
   const { separarServicos, pagamentosDosProdutos } = jest.requireActual('../src/services/nfceSemServico');
@@ -482,6 +557,24 @@ describe('services/nfceSemServico', () => {
   test('sem servico devolve o proprio array (mesma referencia)', () => {
     const items = [{ product_id: 'a' }, { product_name: 'b' }];
     expect(separarServicos(items, new Map([['a', { unit: 'UN' }]])).produtos).toBe(items);
+  });
+
+  test('442: o cadastro vence o tipo; nulo segue o tipo; item avulso usa o corpo', () => {
+    const produtos = new Map([
+      ['carimbo', { unit: 'UN', nota_fiscal: 'nfse' }],
+      ['impressao', { unit: 'srv', nota_fiscal: 'nfce' }],
+      ['ajuste', { unit: 'srv', nota_fiscal: null }],
+      ['meia', { unit: 'UN', nota_fiscal: null }],
+    ]);
+    const items = [
+      { product_id: 'carimbo' }, { product_id: 'impressao' }, { product_id: 'ajuste' }, { product_id: 'meia' },
+      { product_name: 'avulso nfse', nota_fiscal: 'nfse' }, { product_name: 'avulso srv', unit: 'srv' },
+      // cadastro achado (com a coluna) vence o corpo
+      { product_id: 'meia', nota_fiscal: 'nfse' },
+    ];
+    const { produtos: p, servicos: s } = separarServicos(items, produtos);
+    expect(p.map((i) => i.product_id || i.product_name)).toEqual(['impressao', 'meia', 'meia']);
+    expect(s.map((i) => i.product_id || i.product_name)).toEqual(['carimbo', 'ajuste', 'avulso nfse', 'avulso srv']);
   });
 
   test('pagamentos: forma que arredonda a zero sai; soma sempre fecha no alvo', () => {
