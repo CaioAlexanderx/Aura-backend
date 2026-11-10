@@ -382,5 +382,9 @@ router.use('/suppliers', require('./suppliers'));
 // 13/10/2026 — Estoque › O que vai faltar (Black Friday). Só leitura de
 // vendas e estoque; sem requirePlan, igual a ./products.
 router.use('/estoque', require('./estoqueRuptura'));
+// 10/11/2026 (migration 444): transferir estoque entre lojas do grupo
+// (POST/GET /estoque/transferencias). Passa pelo negarEmConsultaSemCustoNoResto
+// do /estoque acima; o acesso ao destino e conferido dentro do servico.
+router.use('/estoque/transferencias', require('./estoqueTransferencias'));
 
 module.exports = router;
