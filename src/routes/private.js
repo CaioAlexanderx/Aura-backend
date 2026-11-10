@@ -32,6 +32,10 @@ router.use('/financeiro', require('./financeiroInsights').companyRouter);
 router.use('/financeiro', require('./financeiroComparative').companyRouter);
 // 08/11/2026 (p-81): Faturamento, Custos, Lucro bruto e Despesas da aba Receitas.
 router.use('/financeiro', require('./resultadoDoPeriodo').companyRouter);
+// 10/11/2026 (RA-05, migration 436): Recebe na Aura — subconta Asaas desta
+// empresa (GET /recebe/status, POST /recebe/onboarding). Flag
+// RECEBE_NA_AURA_ENABLED (desligada → 404) e gate de dono/admin no router.
+router.use('/recebe', require('./companyRecebe'));
 // 02/11/2026: estoque_consulta tambem nao recebe custo do bipe (scanner), da
 // venda (sale_items.unit_cost) nem da troca. Preco fica para quem tem pdv.
 // Antes de todo router de /pdv.
