@@ -1,5 +1,5 @@
 // ============================================================
-// NFS-e Nacional — passo a passo da configuração (migration 440), funções
+// NFS-e Nacional — passo a passo da configuração (migration 441), funções
 // puras de nfseNacional/config:
 //   • avaliarAptidao mantém apta/pendências e passa a devolver os passos
 //     por chave (certificado, prefeitura, dados_fiscais, codigo_padrao,

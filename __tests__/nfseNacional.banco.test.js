@@ -9,7 +9,7 @@
 //      gasta número; a reserva concorrente (UNIQUE) devolve o número;
 //   4. timeout → pendente; retomada usa o MESMO número;
 //   5. cancelamento grava o evento;
-//   6–8. migration 440: nota de teste na série 49999 com contador próprio
+//   6–8. migration 441: nota de teste na série 49999 com contador próprio
 //      (a numeração da loja não anda) e o resultado gravado na config.
 //
 // Mesmo padrão de caixa.movimentos.banco.test.js: tudo numa transação
@@ -193,8 +193,8 @@ describe('NFS-e nacional — banco real', () => {
   });
 });
 
-// ── migration 440: nota de teste no banco real ──
-describe('NFS-e nacional — nota de teste (migration 440), banco real', () => {
+// ── migration 441: nota de teste no banco real ──
+describe('NFS-e nacional — nota de teste (migration 441), banco real', () => {
   const ultimo = async () => (await client.query(
     `SELECT next_dps_number, teste_next_dps_number, ultimo_teste_status, ultimo_teste_codigo, ultimo_teste_nfse_id, ultimo_teste_em
        FROM nfse_config WHERE company_id = $1`, [companyId])).rows[0];

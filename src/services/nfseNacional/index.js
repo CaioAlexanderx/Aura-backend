@@ -161,7 +161,7 @@ function montarEntrada({ nota, config, company, tpAmb, dhEmi, item = null }) {
   } : null;
   const retido = nota.iss_retido === true;
   // ISSQN retido: nota → item → alíquota efetiva do Simples da loja
-  // (aliquota_iss_retencao_sn, migration 440). default_iss_rate NÃO entra:
+  // (aliquota_iss_retencao_sn, migration 441). default_iss_rate NÃO entra:
   // ela nasce com 2,00 de fábrica (058) e a alíquota de quem retém no
   // Simples depende do faturamento — sem ela a nota para com aviso gentil.
   const aliqRetida = nota.aliquota_iss != null ? nota.aliquota_iss
@@ -465,7 +465,7 @@ async function danfse(db, { companyId, nfseId }, ctx = {}) {
   return client.baixarDanfse({ danfseUrl: ep.danfse, chave: row.chave_acesso, ...transportOpts(cert, ctx) });
 }
 
-// ── nota de teste (migration 440) ──────────────────────────
+// ── nota de teste (migration 441) ──────────────────────────
 
 const NOTA_TESTE = Object.freeze({
   descricao: 'NOTA DE TESTE - SEM VALOR FISCAL. Conferencia da configuracao da NFS-e na Aura.',

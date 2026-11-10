@@ -1,5 +1,5 @@
 -- ============================================================
--- 440 — NFS-e: configuração da loja passo a passo e nota de teste.
+-- 441 — NFS-e: configuração da loja passo a passo e nota de teste.
 --
 -- Por quê: hoje só a equipe configura a NFS-e (nfse_config), então nenhuma
 -- loja liga a nota de serviço sozinha. A tela "Pronto para emitir NFS-e?"

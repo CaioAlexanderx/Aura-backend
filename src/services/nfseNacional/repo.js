@@ -97,7 +97,7 @@ async function reservar(db, { companyId, key, fp, entrada, nota, ambiente, serie
   const cx = await db.connect();
   try {
     await cx.query('BEGIN');
-    // Nota de teste (migration 440): contador próprio e série fixa — nunca
+    // Nota de teste (migration 441): contador próprio e série fixa — nunca
     // toca next_dps_number, a numeração de verdade da loja.
     const contador = serieTeste ? 'teste_next_dps_number' : 'next_dps_number';
     const { rows: num } = await cx.query(
@@ -224,7 +224,7 @@ async function gravarCancelamentoRecusado(db, id, erros) {
 }
 
 /**
- * Resultado da última nota de teste (migration 440). Gravado a cada teste,
+ * Resultado da última nota de teste (migration 441). Gravado a cada teste,
  * para um teste diário futuro (depois do E0084) só precisar ler daqui.
  */
 async function gravarResultadoTeste(db, companyId, { status, codigo, mensagem, nfseId }) {

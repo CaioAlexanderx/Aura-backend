@@ -89,7 +89,7 @@ function avaliarPendencias({ config, company, certInfo, now }) {
   return { apta: pend.length === 0, pendencias: pend };
 }
 
-// ── passo a passo da tela "Pronto para emitir NFS-e?" (migration 440) ──
+// ── passo a passo da tela "Pronto para emitir NFS-e?" (migration 441) ──
 
 /** Ordem dos passos na tela. As chaves são o contrato com o app. */
 const PASSOS = ['certificado', 'prefeitura', 'dados_fiscais', 'codigo_padrao', 'serie', 'teste', 'ligar'];
@@ -386,7 +386,7 @@ function validarCamposNacional(body = {}) {
     if (r.error || r.value === null) erros.push('default_iss_rate deve ser a alíquota do ISS em %, entre 0 e 5 (ex.: 2 ou 2,5).');
     else data.default_iss_rate = r.value;
   }
-  // ── migration 440: passo a passo da configuração ──
+  // ── migration 441: passo a passo da configuração ──
   if (body.inscricao_municipal !== undefined) {
     const v = body.inscricao_municipal == null ? '' : String(body.inscricao_municipal).trim();
     if (v.length > 15) erros.push('A Inscrição Municipal (inscricao_municipal) tem no máximo 15 caracteres no leiaute da DPS.');

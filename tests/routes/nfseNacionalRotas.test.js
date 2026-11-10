@@ -320,7 +320,7 @@ describe('nota nacional: cancelar, consultar, PDF, XML', () => {
   });
 });
 
-// ── migration 440: passo a passo da configuração e nota de teste ──
+// ── migration 441: passo a passo da configuração e nota de teste ──
 
 describe('PUT /config — ligar a NFS-e (is_active) só depois da nota de teste', () => {
   const existente = { id: 'cfg1', provider: 'nacional', is_active: false, ambiente: 'producao_restrita', op_simp_nac: 3 };
@@ -379,7 +379,7 @@ describe('PUT /config — ligar a NFS-e (is_active) só depois da nota de teste'
   });
 });
 
-describe('PUT /config — campos novos (migration 440)', () => {
+describe('PUT /config — campos novos (migration 441)', () => {
   test('alíquota do ISSQN retido sem cliente que retém: 400', async () => {
     db.query.mockResolvedValueOnce({ rows: [{ id: 'cfg1', provider: 'nacional', op_simp_nac: 3, cliente_retem_iss: false }] });
     const res = await request(app()).put(`${BASE}/config`).set(auth).send({ aliquota_iss_retencao_sn: '2,79' });

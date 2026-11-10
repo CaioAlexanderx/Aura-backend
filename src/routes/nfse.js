@@ -6,7 +6,7 @@
 //   Config:
 //     GET    /config           ler config (sem decifrar api_key!) + passo a passo
 //     PUT    /config           atualizar config (cifra api_key)
-//     POST   /teste            nota de teste em produção restrita (migration 440)
+//     POST   /teste            nota de teste em produção restrita (migration 441)
 //
 //   Notas:
 //     POST   /                 emitir NFS-e
@@ -51,7 +51,7 @@ const requireWrite = requireRole('client', 'analyst', 'admin');
 const NACIONAL_CAMPOS = [
   'municipio_ibge', 'ctribnac_padrao', 'cnbs_padrao', 'op_simp_nac',
   'reg_ap_trib_sn', 'reg_esp_trib', 'p_tot_trib_sn', 'next_dps_number',
-  // migration 440: passo a passo da configuração da loja
+  // migration 441: passo a passo da configuração da loja
   'prefeitura_cadastro_confirmado', 'cliente_retem_iss', 'aliquota_iss_retencao_sn',
 ];
 
@@ -251,7 +251,7 @@ router.get('/config', requireAuth, async (req, res) => {
   try {
     const config = await getNfseConfig(req.params.id);
     if (!config) {
-      // 10/11/2026 (migration 440): a tela "Pronto para emitir NFS-e?" mostra
+      // 10/11/2026 (migration 441): a tela "Pronto para emitir NFS-e?" mostra
       // os passos e os dados da empresa mesmo antes da primeira gravação.
       let situacao = null;
       try {
@@ -272,7 +272,7 @@ router.get('/config', requireAuth, async (req, res) => {
     safe.has_certificate = !!config.certificate_url;
 
     // Emissor nacional: diz se a empresa está apta e o que falta (sem segredo).
-    // 10/11/2026 (migration 440): para qualquer provider — a tela "Pronto
+    // 10/11/2026 (migration 441): para qualquer provider — a tela "Pronto
     // para emitir NFS-e?" grava provider 'nacional' no primeiro passo.
     {
       try {
@@ -354,7 +354,7 @@ router.put('/config', requireAuth, requireWrite, async (req, res) => {
       }
     }
 
-    // Ligar a NFS-e (migration 440): só com a nota de teste aceita em
+    // Ligar a NFS-e (migration 441): só com a nota de teste aceita em
     // produção restrita e os passos obrigatórios prontos. Ligar sem dizer o
     // ambiente = produção, que continua travada no servidor sem
     // NFSE_NACIONAL_PRODUCAO.
@@ -415,7 +415,7 @@ router.put('/config', requireAuth, requireWrite, async (req, res) => {
   }
 });
 
-// POST /teste — "Emitir nota de teste" (migration 440). Sempre em produção
+// POST /teste — "Emitir nota de teste" (migration 441). Sempre em produção
 // restrita (tpAmb 2), série de teste com contador próprio, chave
 // "teste:<idempotency_key>". Não exige is_active. Responde 200 com o
 // resultado traduzido (ok, rejeitado, erro) e a situação atualizada.

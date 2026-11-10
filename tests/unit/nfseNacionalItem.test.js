@@ -109,7 +109,7 @@ describe('montarEntrada — precedência nota → item → empresa', () => {
     expect(e.valores.pAliq).toBe(2.79);
   });
 
-  test('alíquota do ISS (retido): nota → item → alíquota do Simples da loja (migration 440)', () => {
+  test('alíquota do ISS (retido): nota → item → alíquota do Simples da loja (migration 441)', () => {
     const tom = { doc: '11222333000181', nome: 'Cliente PJ' };
     expect(entrada({ valor: 1, iss_retido: true, tomador: tom }, item()).valores.pAliq).toBe(3.5);
     expect(entrada({ valor: 1, iss_retido: true, tomador: tom, aliquota_iss: 5 }, item()).valores.pAliq).toBe(5);
