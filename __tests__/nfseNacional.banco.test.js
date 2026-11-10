@@ -220,6 +220,8 @@ describe('NFS-e nacional — nota de teste (migration 441), banco real', () => {
   });
 
   test('7. teste autorizado: série 49999 nº 1 em produção restrita, numeração da loja intacta, resultado gravado', async () => {
+    // migration 443: o passo "série" exige a resposta "Já emite NFS-e por outro emissor?"
+    await client.query('UPDATE nfse_config SET outro_emissor = false, serie_confirmada_em = NOW() WHERE company_id = $1', [companyId]);
     const antes = await ultimo();
     const chave3 = CHAVE.slice(0, 35) + '3' + CHAVE.slice(36);
     plano.postDps = () => json(201, { chaveAcesso: chave3, nfseXmlGZipB64: gz(NFSE_XML.replace(CHAVE, chave3)) });
