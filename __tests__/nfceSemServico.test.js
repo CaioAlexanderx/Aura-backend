@@ -254,6 +254,9 @@ async function rodarCaso(c) {
   };
 }
 
+const ISO = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
+const semRelogio = (w) => JSON.parse(JSON.stringify(w), (k, v) => (typeof v === 'string' && ISO.test(v) ? '<agora>' : v));
+
 describe('regra de ouro: venda sem servico sai identica', () => {
   const golden = RECORD ? {} : JSON.parse(fs.readFileSync(GOLDEN_FILE, 'utf8'));
 
@@ -267,7 +270,8 @@ describe('regra de ouro: venda sem servico sai identica', () => {
       expect(got.text).toBe(exp.text);           // resposta, byte a byte
       expect(got.xml).toEqual(exp.xml);           // XML do xmlBuilder real, byte a byte
       expect(got.payloads).toEqual(exp.payloads); // o que vai pra engine/gateway
-      expect(got.writes).toEqual(exp.writes);     // INSERT/UPDATE: SQL e parametros
+      // INSERT/UPDATE: SQL e parametros (authorized_at = new Date() vira marcador)
+      expect(semRelogio(got.writes)).toEqual(semRelogio(exp.writes));
     });
   }
 
@@ -275,5 +279,217 @@ describe('regra de ouro: venda sem servico sai identica', () => {
     if (!RECORD) return;
     fs.mkdirSync(path.dirname(GOLDEN_FILE), { recursive: true });
     fs.writeFileSync(GOLDEN_FILE, JSON.stringify(golden, null, 2) + '\n');
+  });
+});
+
+// ── 2. Venda mista: servico fora, totais e pagamentos consistentes ───────
+describe('venda mista (produto + servico)', () => {
+  test('servico do cadastro (unit srv) sai da nota; pagamentos proporcionais fecham no total', async () => {
+    buildApp(CONFIG_ENGINE);
+    // Venda 80 = camiseta 50 + ajuste 30. Pix 40 + dinheiro 40 (troco 10).
+    const res = await emitir({
+      items: [
+        { product_id: P_CAMISETA, product_name: 'Camiseta', quantity: 1, unit_price: 50 },
+        { product_id: S_AJUSTE, product_name: 'Ajuste de barra', quantity: 1, unit_price: 30 },
+      ],
+      payments: [{ method: 'pix', value: 40 }, { method: 'dinheiro', value: 40, change: 10 }],
+      sale_id: 'mista-1', tipo: 'nfce',
+    });
+    expect(res.status).toBe(201);
+    const payload = ctx.captured.payloads[0];
+    expect(payload.items).toHaveLength(1);
+    expect(payload.items[0]).toEqual(expect.objectContaining({ code: P_CAMISETA, ncm: '61091000', csosn: '500' }));
+    expect(payload.total_value).toBe(50);
+    expect(payload.payments).toEqual([
+      expect.objectContaining({ method: '17', value: 25, indPag: 0 }),
+      expect.objectContaining({ method: '01', value: 25, change: 10, indPag: 0 }),
+    ]);
+    // XML: um det so, vNF 50, soma dos vPag 50
+    const xml = ctx.captured.xml[0];
+    expect(xml.match(/<det nItem=/g)).toHaveLength(1);
+    expect(xml).not.toMatch(/Ajuste de barra/);
+    expect(xml).toMatch(/<vNF>50\.00<\/vNF>/);
+    const vPags = [...xml.matchAll(/<vPag>([\d.]+)<\/vPag>/g)].map((m) => Number(m[1]));
+    expect(sum2(vPags)).toBe(50);
+    // Registro da nota (DANFE termica le daqui): so o produto, totais e pagamentos da nota
+    const insert = writes().find(([sql]) => /INSERT INTO nfce_emissions/.test(sql))[1];
+    expect(JSON.parse(insert[8]).map((i) => i.product_id)).toEqual([P_CAMISETA]);
+    expect([insert[9], insert[10], insert[11]]).toEqual([50, 0, 50]);
+    expect(JSON.parse(insert[12])).toEqual([{ method: 'pix', value: 25 }, { method: 'dinheiro', value: 25, change: 10 }]);
+    expect(res.body.servicos_fora_da_nfce).toEqual({ itens: 1, total: 30 });
+  });
+
+  test('centavos: crediario a prazo, soma fecha exata pelo maior resto', async () => {
+    buildApp(CONFIG_ENGINE);
+    // Venda 43,33 = produto 33,33 + servico 10. Pix 20 + crediario 23,33.
+    const res = await emitir({
+      items: [
+        { product_id: P_SEM_NCM, product_name: 'Meia', quantity: 1, unit_price: 33.33 },
+        { product_id: S_AJUSTE, product_name: 'Ajuste', quantity: 1, unit_price: 10 },
+      ],
+      payments: [{ method: 'pix', value: 20 }, { method: 'crediario', value: 23.33 }],
+      sale_id: 'mista-2', tipo: 'nfce',
+    });
+    expect(res.status).toBe(201);
+    const { payments, total_value } = ctx.captured.payloads[0];
+    expect(total_value).toBe(33.33);
+    expect(sum2(payments.map((p) => p.value))).toBe(33.33);
+    expect(payments).toEqual([
+      expect.objectContaining({ method: '17', value: 15.38, indPag: 0 }),
+      expect.objectContaining({ method: '05', value: 17.95, indPag: 1 }),
+    ]);
+  });
+
+  test('pagamentos que ja somam so os produtos vao como vieram', async () => {
+    buildApp(CONFIG_ENGINE);
+    const res = await emitir({
+      items: [
+        { product_id: P_CAMISETA, product_name: 'Camiseta', quantity: 1, unit_price: 50 },
+        { product_id: S_AJUSTE, product_name: 'Ajuste', quantity: 1, unit_price: 30 },
+      ],
+      payments: [{ method: 'pix', value: 50 }],
+      sale_id: 'mista-3', tipo: 'nfce',
+    });
+    expect(res.status).toBe(201);
+    expect(ctx.captured.payloads[0].payments).toEqual([expect.objectContaining({ method: '17', value: 50 })]);
+  });
+
+  test('pagamentos que nao batem nem com a nota nem com a venda: 400 com o total da venda', async () => {
+    buildApp(CONFIG_ENGINE);
+    const res = await emitir({
+      items: [
+        { product_id: P_CAMISETA, product_name: 'Camiseta', quantity: 1, unit_price: 50 },
+        { product_id: S_AJUSTE, product_name: 'Ajuste', quantity: 1, unit_price: 30 },
+      ],
+      payments: [{ method: 'pix', value: 70 }],
+      sale_id: 'mista-4', tipo: 'nfce',
+    });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/R\$ 70\.00.*R\$ 80\.00/);
+    expect(ctx.sefazSp.emitNfce).not.toHaveBeenCalled();
+    expect(writes()).toEqual([]);
+  });
+
+  test('item avulso com unit srv no corpo tambem sai; pagamento unico vira o total da nota', async () => {
+    buildApp(CONFIG_ENGINE);
+    const res = await emitir({
+      items: [
+        { product_id: P_CAMISETA, product_name: 'Camiseta', quantity: 1, unit_price: 50 },
+        { product_name: 'Instalacao', quantity: 1, unit_price: 20, unit: 'srv' },
+      ],
+      payment_method: 'cartao', sale_id: 'mista-5', tipo: 'nfce',
+    });
+    expect(res.status).toBe(201);
+    const payload = ctx.captured.payloads[0];
+    expect(payload.items.map((i) => i.name)).toEqual(['Camiseta']);
+    expect(payload.total_value).toBe(50);
+    expect(payload.payments).toBeUndefined();
+    expect(ctx.captured.xml[0]).toMatch(/<vPag>50\.00<\/vPag>/);
+  });
+});
+
+// ── 3. Venda so de servico: sem NFC-e ────────────────────────────────────
+describe('venda so de servicos', () => {
+  test('200 skipped, sem reservar numero, sem criar emissao, sem transmitir', async () => {
+    buildApp(CONFIG_ENGINE);
+    const res = await emitir({
+      items: [
+        { product_id: S_AJUSTE, product_name: 'Ajuste', quantity: 2, unit_price: 15 },
+        { product_name: 'Instalacao', quantity: 1, unit_price: 20, unit: 'SRV' },
+      ],
+      payments: [{ method: 'pix', value: 50 }], sale_id: 'srv-1', tipo: 'nfce',
+    });
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual(expect.objectContaining({
+      skipped: true, reason: 'somente_servicos', nfce: null, tipo: 'nfce',
+      servicos_fora_da_nfce: { itens: 2, total: 50 },
+    }));
+    expect(res.body.error).toBeUndefined();
+    expect(writes()).toEqual([]);
+    expect(ctx.sefazSp.emitNfce).not.toHaveBeenCalled();
+    expect(ctx.nuvemfiscal.emitNfce).not.toHaveBeenCalled();
+  });
+
+  test('vale mesmo sem a nota configurada (nao ha o que emitir)', async () => {
+    buildApp(null);
+    const res = await emitir({
+      items: [{ product_id: S_GRUPO, product_name: 'Servico do grupo', quantity: 1, unit_price: 40 }],
+      payment_method: 'pix', sale_id: 'srv-2', tipo: 'nfce',
+    });
+    expect(res.status).toBe(200);
+    expect(res.body.skipped).toBe(true);
+  });
+});
+
+// ── 4. Item compartilhado do grupo acha o NCM ────────────────────────────
+describe('item compartilhado do grupo (is_group_shared)', () => {
+  test('NCM e tax_profile do produto da matriz chegam na nota da filial', async () => {
+    buildApp(CONFIG_ENGINE);
+    const res = await emitir({
+      items: [
+        { product_id: P_GRUPO, product_name: 'Batom do grupo', quantity: 1, unit_price: 30 },
+        { product_id: P_OUTRA, product_name: 'Nao compartilhado', quantity: 1, unit_price: 10 },
+      ],
+      payment_method: 'pix', sale_id: 'grupo-1', tipo: 'nfce',
+    });
+    expect(res.status).toBe(201);
+    const [grupo, outra] = ctx.captured.payloads[0].items;
+    expect(grupo).toEqual(expect.objectContaining({ ncm: '33049910', csosn: '900' })); // simples_outros
+    // produto de outra empresa sem compartilhar: continua invisivel (como antes)
+    expect(outra).toEqual(expect.objectContaining({ ncm: '00000000', csosn: '102' }));
+    expect(ctx.captured.xml[0]).toMatch(/<NCM>33049910<\/NCM>/);
+    const sqlProdutos = ctx.db.query.mock.calls.map(([s]) => String(s)).filter((s) => /FROM products/.test(s));
+    expect(sqlProdutos).toHaveLength(1);
+    expect(sqlProdutos[0]).toMatch(/is_group_shared = true/);
+  });
+
+  test('servico compartilhado do grupo tambem fica fora da nota', async () => {
+    buildApp(CONFIG_ENGINE);
+    const res = await emitir({
+      items: [
+        { product_id: P_GRUPO, product_name: 'Batom do grupo', quantity: 1, unit_price: 30 },
+        { product_id: S_GRUPO, product_name: 'Servico do grupo', quantity: 1, unit_price: 40 },
+      ],
+      payments: [{ method: 'pix', value: 70 }], sale_id: 'grupo-2', tipo: 'nfce',
+    });
+    expect(res.status).toBe(201);
+    const payload = ctx.captured.payloads[0];
+    expect(payload.items.map((i) => i.code)).toEqual([P_GRUPO]);
+    expect(payload.payments).toEqual([expect.objectContaining({ value: 30 })]);
+  });
+
+  test('falha na leitura do produto segue o caminho de antes (nota em erro + 502)', async () => {
+    buildApp(CONFIG_ENGINE);
+    const base = ctx.db.query.getMockImplementation();
+    ctx.db.query.mockImplementation(async (sql, params) => {
+      if (/FROM products/.test(sql)) throw new Error('invalid input syntax for type uuid');
+      return base(sql, params);
+    });
+    const res = await emitir({
+      items: [{ product_id: 'nao-e-uuid', product_name: 'X', quantity: 1, unit_price: 10 }],
+      payment_method: 'pix', sale_id: 'erro-1', tipo: 'nfce',
+    });
+    expect(res.status).toBe(502);
+    expect(res.body.error).toMatch(/invalid input syntax for type uuid/);
+    expect(writes().some(([sql]) => /SET status='erro'/.test(sql))).toBe(true);
+  });
+});
+
+// ── 5. Helper puro ───────────────────────────────────────────────────────
+describe('services/nfceSemServico', () => {
+  const { separarServicos, pagamentosDosProdutos } = jest.requireActual('../src/services/nfceSemServico');
+
+  test('sem servico devolve o proprio array (mesma referencia)', () => {
+    const items = [{ product_id: 'a' }, { product_name: 'b' }];
+    expect(separarServicos(items, new Map([['a', { unit: 'UN' }]])).produtos).toBe(items);
+  });
+
+  test('pagamentos: forma que arredonda a zero sai; soma sempre fecha no alvo', () => {
+    const out = pagamentosDosProdutos([{ method: 'pix', value: 0.01 }, { method: 'dinheiro', value: 99.99 }], 10);
+    expect(out).toEqual([{ method: 'dinheiro', value: 10 }]);
+    for (const alvo of [0.01, 1, 33.33, 99.99]) {
+      const r = pagamentosDosProdutos([{ value: 33.33 }, { value: 33.33 }, { value: 33.34 }], alvo);
+      expect(sum2(r.map((p) => p.value))).toBe(alvo);
+    }
   });
 });
