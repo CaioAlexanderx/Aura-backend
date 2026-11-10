@@ -36,8 +36,11 @@ async function buscarPorId(db, companyId, nfseId) {
 
 async function carregarContexto(db, companyId) {
   const { rows: cfg } = await db.query('SELECT * FROM nfse_config WHERE company_id = $1', [companyId]);
+  // SELECT *: município, UF, ibge_code e tax_regime alimentam a sugestão da
+  // tela de configuração; nem toda base tem todas essas colunas (o schema
+  // de teste do CI não tem ibge_code), então nada aqui cita coluna opcional.
   const { rows: comp } = await db.query(
-    'SELECT id, cnpj, COALESCE(trade_name, legal_name) AS nome FROM companies WHERE id = $1',
+    'SELECT *, COALESCE(trade_name, legal_name) AS nome FROM companies WHERE id = $1',
     [companyId]
   );
   let certInfo = null;
@@ -90,21 +93,24 @@ async function buscarItem(db, companyId, productId) {
  * @returns {{ row } | { corrida: true }} corrida = outra requisição com a
  *   mesma chave gravou antes (o número reservado aqui volta no ROLLBACK).
  */
-async function reservar(db, { companyId, key, fp, entrada, nota, ambiente }) {
+async function reservar(db, { companyId, key, fp, entrada, nota, ambiente, serieTeste = null }) {
   const cx = await db.connect();
   try {
     await cx.query('BEGIN');
+    // Nota de teste (migration 440): contador próprio e série fixa — nunca
+    // toca next_dps_number, a numeração de verdade da loja.
+    const contador = serieTeste ? 'teste_next_dps_number' : 'next_dps_number';
     const { rows: num } = await cx.query(
-      `UPDATE nfse_config SET next_dps_number = next_dps_number + 1
+      `UPDATE nfse_config SET ${contador} = ${contador} + 1
         WHERE company_id = $1
-        RETURNING next_dps_number - 1 AS n, serie`,
+        RETURNING ${contador} - 1 AS n, serie`,
       [companyId]
     );
     if (!num[0]) {
       await cx.query('ROLLBACK');
       return { semConfig: true };
     }
-    const serie = String(parseInt(onlyDigits(num[0].serie || '1'), 10) || 1);
+    const serie = serieTeste || String(parseInt(onlyDigits(num[0].serie || '1'), 10) || 1);
     const t = entrada.tomador;
     const { rows } = await cx.query(
       `INSERT INTO nfse (
@@ -217,6 +223,19 @@ async function gravarCancelamentoRecusado(db, id, erros) {
   );
 }
 
+/**
+ * Resultado da última nota de teste (migration 440). Gravado a cada teste,
+ * para um teste diário futuro (depois do E0084) só precisar ler daqui.
+ */
+async function gravarResultadoTeste(db, companyId, { status, codigo, mensagem, nfseId }) {
+  await db.query(
+    `UPDATE nfse_config SET ultimo_teste_em = NOW(), ultimo_teste_status = $1, ultimo_teste_codigo = $2,
+            ultimo_teste_mensagem = $3, ultimo_teste_nfse_id = $4
+      WHERE company_id = $5`,
+    [status, codigo || null, mensagem ? String(mensagem).slice(0, 1000) : null, nfseId || null, companyId]
+  );
+}
+
 async function atualizarXmlNfse(db, id, xml) {
   await db.query('UPDATE nfse SET xml_nfse = $1 WHERE id = $2', [xml, id]);
 }
@@ -225,4 +244,5 @@ module.exports = {
   buscarPorChave, buscarPorId, carregarContexto, buscarItem, reservar,
   marcarTransmitindo, marcarSemConfirmacao, marcarErro,
   gravarAutorizada, gravarRejeitada, gravarCancelada, gravarCancelamentoRecusado, atualizarXmlNfse,
+  gravarResultadoTeste,
 };

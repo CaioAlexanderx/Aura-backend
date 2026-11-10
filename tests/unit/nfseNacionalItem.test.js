@@ -48,7 +48,7 @@ function config(over = {}) {
   return {
     company_id: FILIAL, provider: 'nacional', is_active: true, ambiente: 'producao_restrita',
     municipio_ibge: '3524402', ctribnac_padrao: '010501', cnbs_padrao: '115013000',
-    default_iss_rate: '2.00', serie: '1', next_dps_number: 1,
+    default_iss_rate: '2.00', aliquota_iss_retencao_sn: '2.79', serie: '1', next_dps_number: 1,
     regime_tributario: 'simples_nacional', optante_simples_nacional: true, p_tot_trib_sn: 6,
     inscricao_municipal: null, ...over,
   };
@@ -106,14 +106,25 @@ describe('montarEntrada — precedência nota → item → empresa', () => {
       item({ nfse_ctribnac: null, nfse_cnbs: '', nfse_aliquota_iss: null }));
     expect(e.servico.cTribNac).toBe('010501');
     expect(e.servico.cNBS).toBe('115013000');
-    expect(e.valores.pAliq).toBe(2);
+    expect(e.valores.pAliq).toBe(2.79);
   });
 
-  test('alíquota do ISS (retido): nota → item → empresa', () => {
+  test('alíquota do ISS (retido): nota → item → alíquota do Simples da loja (migration 440)', () => {
     const tom = { doc: '11222333000181', nome: 'Cliente PJ' };
     expect(entrada({ valor: 1, iss_retido: true, tomador: tom }, item()).valores.pAliq).toBe(3.5);
     expect(entrada({ valor: 1, iss_retido: true, tomador: tom, aliquota_iss: 5 }, item()).valores.pAliq).toBe(5);
-    expect(entrada({ valor: 1, iss_retido: true, tomador: tom }, null).valores.pAliq).toBe(2);
+    expect(entrada({ valor: 1, iss_retido: true, tomador: tom }, null).valores.pAliq).toBe(2.79);
+  });
+
+  test('retido sem aliquota_iss_retencao_sn: default_iss_rate (2,00 de fábrica) NÃO entra', () => {
+    const tom = { doc: '11222333000181', nome: 'Cliente PJ' };
+    const e = nacional.montarEntrada({
+      nota: { valor: 1, descricao: 'x', iss_retido: true, tomador: tom },
+      config: config({ aliquota_iss_retencao_sn: null }), company, tpAmb: 2, dhEmi, item: null,
+    });
+    expect(e.valores.pAliq).toBeNull();
+    // sem retenção a alíquota nem entra
+    expect(entrada({ valor: 1 }, null).valores.pAliq).toBeNull();
   });
 
   test('cTribMun e IBS/CBS do item ainda não entram no leiaute', () => {

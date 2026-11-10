@@ -8,7 +8,9 @@
 //   3. idempotência no banco: a mesma chave não cria segunda nota nem
 //      gasta número; a reserva concorrente (UNIQUE) devolve o número;
 //   4. timeout → pendente; retomada usa o MESMO número;
-//   5. cancelamento grava o evento.
+//   5. cancelamento grava o evento;
+//   6–8. migration 440: nota de teste na série 49999 com contador próprio
+//      (a numeração da loja não anda) e o resultado gravado na config.
 //
 // Mesmo padrão de caixa.movimentos.banco.test.js: tudo numa transação
 // revertida no afterAll; BEGIN/COMMIT/ROLLBACK do serviço viram SAVEPOINT.
@@ -188,5 +190,53 @@ describe('NFS-e nacional — banco real', () => {
     const { rows: c } = await client.query('SELECT cancel_event_xml, cancel_reason, cancelled_at FROM nfse WHERE id = $1', [rows[0].id]);
     expect(c[0]).toMatchObject({ cancel_event_xml: '<evento>ok</evento>', cancel_reason: 'Fatura emitida em duplicidade' });
     expect(c[0].cancelled_at).not.toBeNull();
+  });
+});
+
+// ── migration 440: nota de teste no banco real ──
+describe('NFS-e nacional — nota de teste (migration 440), banco real', () => {
+  const ultimo = async () => (await client.query(
+    `SELECT next_dps_number, teste_next_dps_number, ultimo_teste_status, ultimo_teste_codigo, ultimo_teste_nfse_id, ultimo_teste_em
+       FROM nfse_config WHERE company_id = $1`, [companyId])).rows[0];
+
+  test('6. colunas novas sem valor de fábrica: alíquota do retido e respostas nulas, contador de teste em 1', async () => {
+    const { rows } = await client.query(
+      `SELECT aliquota_iss_retencao_sn, cliente_retem_iss, prefeitura_cadastro_confirmado, serie_confirmada_em, teste_next_dps_number
+         FROM nfse_config WHERE company_id = $1`, [companyId]);
+    expect(rows[0]).toEqual({
+      aliquota_iss_retencao_sn: null, cliente_retem_iss: null, prefeitura_cadastro_confirmado: null,
+      serie_confirmada_em: null, teste_next_dps_number: '1',
+    });
+    // CHECK 1,80 a 5,00 (savepoint: o erro não derruba a transação do arquivo)
+    await client.query('SAVEPOINT ck');
+    await expect(client.query('UPDATE nfse_config SET aliquota_iss_retencao_sn = 1.5 WHERE company_id = $1', [companyId]))
+      .rejects.toMatchObject({ code: '23514' });
+    await client.query('ROLLBACK TO SAVEPOINT ck');
+  });
+
+  test('7. teste autorizado: série 49999 nº 1 em produção restrita, numeração da loja intacta, resultado gravado', async () => {
+    const antes = await ultimo();
+    const chave3 = CHAVE.slice(0, 35) + '3' + CHAVE.slice(36);
+    plano.postDps = () => json(201, { chaveAcesso: chave3, nfseXmlGZipB64: gz(NFSE_XML.replace(CHAVE, chave3)) });
+    const r = await nacional.emitirTeste(db, { companyId, idempotencyKey: 'clique-1' }, ctx);
+    plano = {};
+    expect(r.resultado.status).toBe('ok');
+    expect(r.nota).toMatchObject({ status: 'autorizada', dps_serie: '49999', ambiente: 'producao_restrita', idempotency_key: 'teste:clique-1' });
+    expect(String(r.nota.dps_number)).toBe('1');
+    const depois = await ultimo();
+    expect(depois.next_dps_number).toBe(antes.next_dps_number);
+    expect(depois).toMatchObject({ teste_next_dps_number: '2', ultimo_teste_status: 'ok', ultimo_teste_codigo: null, ultimo_teste_nfse_id: r.nota.id });
+    expect(depois.ultimo_teste_em).not.toBeNull();
+    const { rows } = await client.query('SELECT source_type FROM nfse WHERE id = $1', [r.nota.id]);
+    expect(rows[0].source_type).toBe('teste');
+  });
+
+  test('8. teste com E0084: rejeitado, código gravado; o próximo teste usa o nº 2 da série de teste', async () => {
+    plano.postDps = () => json(400, { erros: [{ Codigo: 'E0084', Descricao: 'Contribuinte não habilitado no município' }] });
+    const r = await nacional.emitirTeste(db, { companyId, idempotencyKey: 'clique-2' }, ctx);
+    plano = {};
+    expect(r.resultado).toMatchObject({ status: 'rejeitado', passo: 'prefeitura', codigo: 'E0084' });
+    expect(String(r.nota.dps_number)).toBe('2');
+    expect(await ultimo()).toMatchObject({ teste_next_dps_number: '3', ultimo_teste_status: 'rejeitado', ultimo_teste_codigo: 'E0084' });
   });
 });

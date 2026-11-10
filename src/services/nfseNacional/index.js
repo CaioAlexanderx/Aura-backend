@@ -40,7 +40,9 @@ const client = require('./client');
 const repo = require('./repo');
 const { buildDps, validarEntrada, hojeBR, paraLatin1 } = require('./dpsBuilder');
 const { buildCancelamento, COD_CANCELAMENTO } = require('./eventoBuilder');
-const { resolverRegime, avaliarAptidao } = require('./config');
+const {
+  resolverRegime, avaliarAptidao, avaliarPassos, sugestaoDaEmpresa, faltasParaLigar, CODIGOS_PREFEITURA, SERIE_TESTE,
+} = require('./config');
 const { getEndpoints, nacionalHabilitado, producaoHabilitada } = require('./endpoints');
 const { NfseNacionalError, NfseNacionalTransportError } = require('./errors');
 
@@ -158,6 +160,12 @@ function montarEntrada({ nota, config, company, tpAmb, dhEmi, item = null }) {
     endereco: t.endereco || null,
   } : null;
   const retido = nota.iss_retido === true;
+  // ISSQN retido: nota → item → alíquota efetiva do Simples da loja
+  // (aliquota_iss_retencao_sn, migration 440). default_iss_rate NÃO entra:
+  // ela nasce com 2,00 de fábrica (058) e a alíquota de quem retém no
+  // Simples depende do faturamento — sem ela a nota para com aviso gentil.
+  const aliqRetida = nota.aliquota_iss != null ? nota.aliquota_iss
+    : (doItem('nfse_aliquota_iss') != null ? doItem('nfse_aliquota_iss') : config.aliquota_iss_retencao_sn);
   return {
     tpAmb,
     dhEmi,
@@ -180,8 +188,7 @@ function montarEntrada({ nota, config, company, tpAmb, dhEmi, item = null }) {
     valores: {
       vServ: Number(nota.valor),
       tpRetISSQN: retido ? 2 : 1,
-      pAliq: retido ? Number(nota.aliquota_iss != null ? nota.aliquota_iss
-        : (doItem('nfse_aliquota_iss') != null ? doItem('nfse_aliquota_iss') : config.default_iss_rate)) : null,
+      pAliq: retido && aliqRetida != null && aliqRetida !== '' ? Number(aliqRetida) : null,
       pTotTribSN: config.p_tot_trib_sn != null ? Number(config.p_tot_trib_sn) : null,
       totTrib: nota.tot_trib || null,
     },
@@ -306,6 +313,9 @@ async function retomar(db, rowCurta, env, ctx) {
 async function emitir(db, { companyId, idempotencyKey, nota = {} }, ctx = {}) {
   exigirLigado();
   const key = validarChave(idempotencyKey);
+  if (key.startsWith('teste:')) {
+    throw new NfseNacionalError('Chaves que começam com "teste:" são da nota de teste (POST /nfse/teste).', 'IDEMPOTENCY_KEY');
+  }
   const fp = fingerprint(nota);
 
   const existente = await repo.buscarPorChave(db, companyId, key);
@@ -345,6 +355,13 @@ async function emitir(db, { companyId, idempotencyKey, nota = {} }, ctx = {}) {
   }
 
   const entrada = montarEntrada({ nota, config, company, tpAmb: ep.tpAmb, dhEmi: comMargem(ctx), item });
+  if (entrada.valores.tpRetISSQN === 2 && entrada.prestador.opSimpNac === 3 && entrada.valores.pAliq == null) {
+    throw new NfseNacionalError(
+      'Esta nota tem Retenção do ISSQN pelo cliente, e ainda falta a Alíquota do ISSQN no Simples Nacional. '
+        + 'Peça o número ao seu contador e preencha em Notas fiscais > Emitir NFS-e. Nada foi enviado.',
+      'ALIQUOTA_RETENCAO_AUSENTE'
+    );
+  }
   const erros = validarEntrada(entrada, { semNumero: true });
   if (erros.length) throw new NfseNacionalError('Dados da nota inválidos: ' + erros.join(' '), 'INVALID_INPUT', erros);
 
@@ -448,20 +465,231 @@ async function danfse(db, { companyId, nfseId }, ctx = {}) {
   return client.baixarDanfse({ danfseUrl: ep.danfse, chave: row.chave_acesso, ...transportOpts(cert, ctx) });
 }
 
+// ── nota de teste (migration 440) ──────────────────────────
+
+const NOTA_TESTE = Object.freeze({
+  descricao: 'NOTA DE TESTE - SEM VALOR FISCAL. Conferencia da configuracao da NFS-e na Aura.',
+  valor: 1,
+  source_type: 'teste',
+});
+
+const PASSOS_DO_TESTE = ['certificado', 'dados_fiscais', 'codigo_padrao', 'serie'];
+
+function cidadeDe(company) {
+  const c = company && company.address_city;
+  return c ? String(c).trim() : '';
+}
+
+function codigosDe(nota) {
+  const e = nota && nota.error_codes;
+  return Array.isArray(e) ? e.filter((x) => x && x.codigo) : [];
+}
+
+/**
+ * Resultado da nota de teste em português simples: o que aconteceu, em que
+ * passo cai e o caminho a seguir. E0084/E0116/E0120 caem no passo
+ * "prefeitura" (cadastro que só a prefeitura faz). Nunca "não atendido".
+ * @returns {{ status: 'ok'|'rejeitado'|'erro', passo, codigo, titulo, mensagem, caminho: string[], aguardando? }}
+ */
+function traduzirResultadoTeste({ nota = null, aguardando = false, erro = null, company = null }) {
+  const cidade = cidadeDe(company);
+  const pref = cidade ? `a prefeitura de ${cidade}` : 'a prefeitura';
+  const Pref = pref.charAt(0).toUpperCase() + pref.slice(1);
+  const semResposta = {
+    status: 'erro', passo: 'teste', codigo: null,
+    titulo: 'Não conseguimos resposta do gov.br agora.',
+    mensagem: 'Nada foi cobrado e nenhuma nota de verdade saiu. Tente de novo em alguns minutos.',
+    caminho: [],
+  };
+  if (erro) {
+    if (erro.code === 'CERTIFICADO') {
+      return {
+        status: 'erro', passo: 'certificado', codigo: null,
+        titulo: 'O certificado digital A1 não passou na conferência.',
+        mensagem: erro.message,
+        caminho: ['Envie de novo o certificado A1 desta empresa (arquivo .pfx e senha).', 'Depois, emita a nota de teste de novo.'],
+      };
+    }
+    if (erro.code === 'NACIONAL_INDISPONIVEL') return semResposta;
+    return {
+      status: 'erro', passo: 'teste', codigo: null,
+      titulo: 'A nota de teste não saiu.',
+      mensagem: erro.message,
+      caminho: [],
+    };
+  }
+  if (aguardando || !nota || nota.status === 'pendente') return { ...semResposta, aguardando: true };
+  if (nota.status === 'autorizada') {
+    return {
+      status: 'ok', passo: 'teste', codigo: null,
+      titulo: 'Deu certo! O gov.br aceitou a nota de teste.',
+      mensagem: 'Certificado, prefeitura e código conferem. Falta só ligar a NFS-e.',
+      caminho: [],
+    };
+  }
+  if (nota.status === 'rejeitada') {
+    const cods = codigosDe(nota);
+    const daPref = cods.find((c) => CODIGOS_PREFEITURA.has(c.codigo));
+    if (daPref && daPref.codigo === 'E0084') {
+      return {
+        status: 'rejeitado', passo: 'prefeitura', codigo: 'E0084',
+        titulo: `Quase lá: ${pref} ainda não liberou a sua empresa no Emissor Nacional.`,
+        mensagem: 'O certificado e o código estão certos. Falta um cadastro que só a prefeitura faz: '
+          + 'incluir a empresa no Cadastro Nacional de Contribuintes da NFS-e (CNC). Não é erro seu nem da Aura.',
+        caminho: [
+          `Peça ao setor de tributos (ISS) de ${pref} para incluir a empresa no Cadastro Nacional de Contribuintes da NFS-e (CNC).`,
+          'Se a prefeitura passar uma Inscrição Municipal, preencha aqui.',
+          'Assim que a prefeitura fizer o cadastro, emita a nota de teste de novo.',
+        ],
+      };
+    }
+    if (daPref && daPref.codigo === 'E0116') {
+      return {
+        status: 'rejeitado', passo: 'prefeitura', codigo: 'E0116',
+        titulo: `${Pref} pede a Inscrição Municipal na nota.`,
+        mensagem: 'O resto está certo. A sua cidade pede a Inscrição Municipal da empresa em toda NFS-e.',
+        caminho: [
+          'A Inscrição Municipal está no alvará ou no carnê do ISS. Se não tiver, peça à prefeitura.',
+          'Preencha a Inscrição Municipal aqui.',
+          'Emita a nota de teste de novo.',
+        ],
+      };
+    }
+    if (daPref && daPref.codigo === 'E0120') {
+      return {
+        status: 'rejeitado', passo: 'prefeitura', codigo: 'E0120',
+        titulo: 'A Inscrição Municipal ainda não aparece no cadastro da prefeitura.',
+        mensagem: 'O gov.br recebeu a Inscrição Municipal, mas a prefeitura ainda não cadastrou a empresa com ela no Cadastro Nacional de Contribuintes da NFS-e (CNC).',
+        caminho: [
+          `Peça a ${pref} para incluir a empresa e a Inscrição Municipal no CNC da NFS-e.`,
+          'Se a sua cidade não pede Inscrição Municipal, apague o campo e emita a nota de teste de novo.',
+        ],
+      };
+    }
+    const primeiro = cods[0] || null;
+    return {
+      status: 'rejeitado', passo: 'teste', codigo: primeiro ? primeiro.codigo : null,
+      titulo: 'O gov.br devolveu a nota de teste com um aviso.',
+      mensagem: (primeiro && primeiro.descricao ? `Aviso do gov.br: ${primeiro.descricao}. ` : '')
+        + 'Em caso de dúvidas, acione seu contador ou o suporte Aura.',
+      caminho: [],
+    };
+  }
+  return semResposta; // 'erro': falha nossa ou certificado recusado na conexão
+}
+
+/**
+ * Emite a nota de teste: SEMPRE em produção restrita (tpAmb 2), valor
+ * mínimo, descrição de teste, série SERIE_TESTE com contador próprio
+ * (teste_next_dps_number) e chave de idempotência própria ("teste:...").
+ * Não exige is_active nem a produção liberada — é o que vem ANTES de ligar.
+ * Grava o resultado em nfse_config.ultimo_teste_*.
+ * @param {{ companyId, idempotencyKey? }} p — sem chave, uma nova por chamada
+ * @returns {{ resultado, nota, replay? }}
+ */
+async function emitirTeste(db, { companyId, idempotencyKey }, ctx = {}) {
+  exigirLigado();
+  const sufixo = String(idempotencyKey == null ? '' : idempotencyKey).trim() || crypto.randomUUID();
+  const key = validarChave(`teste:${sufixo}`);
+
+  const { config, company, certInfo } = await repo.carregarContexto(db, companyId);
+  if (!config) {
+    throw new NfseNacionalError(
+      'Antes da nota de teste, confira os dados da nota: município, Situação perante o Simples Nacional, Código de Tributação Nacional e Série da DPS.',
+      'CONFIG_MISSING'
+    );
+  }
+  const av = avaliarPassos({ config, company, certInfo, now: agora(ctx) });
+  const faltam = PASSOS_DO_TESTE.filter((k) => av.passos[k].estado !== 'ok');
+  if (faltam.length) {
+    throw new NfseNacionalError(
+      'A nota de teste libera quando estes passos estiverem prontos: ' + faltam.map((k) => av.passos[k].motivo).join(' '),
+      'TESTE_TRAVADO',
+      faltam
+    );
+  }
+  const ep = getEndpoints('producao_restrita');
+  const env = { config, company, ep };
+
+  let r;
+  try {
+    const existente = await repo.buscarPorChave(db, companyId, key);
+    if (existente && FINAIS.has(existente.status)) {
+      r = { nota: existente, replay: true };
+    } else {
+      if (breaker.isOpen(companyId)) {
+        throw new NfseNacionalError('O Sistema Nacional NFS-e não respondeu nas últimas tentativas.', 'NACIONAL_INDISPONIVEL');
+      }
+      if (existente) {
+        r = await retomar(db, existente, env, ctx);
+      } else {
+        // Teste sem valor fiscal: sem o percentual do Simples ainda (ele é
+        // pedido no último passo), vai 0,00; não optante vai com tributos 0.
+        const { opSimpNac } = resolverRegime(config);
+        const cfgTeste = { ...config, p_tot_trib_sn: config.p_tot_trib_sn != null ? config.p_tot_trib_sn : 0 };
+        const nota = { ...NOTA_TESTE, ...(opSimpNac === 1 ? { tot_trib: { fed: 0, est: 0, mun: 0 } } : {}) };
+        const entrada = montarEntrada({ nota, config: cfgTeste, company, tpAmb: ep.tpAmb, dhEmi: comMargem(ctx) });
+        const erros = validarEntrada(entrada, { semNumero: true });
+        if (erros.length) throw new NfseNacionalError('Algum dado da nota não passou na conferência: ' + erros.join(' '), 'INVALID_INPUT', erros);
+        const reserva = await repo.reservar(db, {
+          companyId, key, fp: fingerprint(nota), entrada, nota, ambiente: ep.ambiente, serieTeste: SERIE_TESTE,
+        });
+        if (reserva.semConfig) throw new NfseNacionalError('NFS-e não configurada nesta empresa.', 'CONFIG_MISSING');
+        if (reserva.corrida) {
+          const outra = await repo.buscarPorChave(db, companyId, key);
+          r = { nota: outra, replay: true, aguardando: !(outra && FINAIS.has(outra.status)) };
+        } else {
+          r = await montarETransmitir(db, reserva.row, entrada, env, ctx);
+        }
+      }
+    }
+  } catch (err) {
+    if (!(err instanceof NfseNacionalError)) throw err;
+    const resultado = traduzirResultadoTeste({ erro: err, company });
+    await repo.gravarResultadoTeste(db, companyId, { status: resultado.status, codigo: resultado.codigo, mensagem: resultado.titulo, nfseId: null });
+    return { resultado, nota: null };
+  }
+  const resultado = traduzirResultadoTeste({ nota: r.nota, aguardando: r.aguardando, company });
+  await repo.gravarResultadoTeste(db, companyId, {
+    status: resultado.status, codigo: resultado.codigo, mensagem: resultado.titulo, nfseId: r.nota && r.nota.id,
+  });
+  return { resultado, nota: r.nota, replay: !!r.replay };
+}
+
+/**
+ * Pode ligar a NFS-e (is_active) com esta config final? Exige os passos
+ * obrigatórios prontos, a nota de teste aceita em produção restrita e, no
+ * Simples (ME/EPP), o percentual de tributos e a resposta sobre a retenção.
+ * A trava da produção (NFSE_NACIONAL_PRODUCAO) é conferida pela rota.
+ * @returns {{ ok: boolean, motivos: string[], passos }}
+ */
+async function avaliarLigar(db, companyId, configFinal) {
+  const { company, certInfo } = await repo.carregarContexto(db, companyId);
+  const av = avaliarPassos({ config: configFinal, company, certInfo, producaoLiberada: true });
+  const motivos = PASSOS_DO_TESTE.filter((k) => av.passos[k].estado !== 'ok').map((k) => av.passos[k].motivo);
+  if (av.passos.teste.estado !== 'ok') {
+    motivos.push('Antes de ligar, emita a nota de teste: ela confere, sem valor fiscal, que o gov.br aceita as suas notas.');
+  }
+  motivos.push(...faltasParaLigar(configFinal));
+  return { ok: motivos.length === 0, motivos, passos: av.passos };
+}
+
 /** Situação da configuração (sem segredo) para a tela/GET /config. */
 async function situacaoConfig(db, companyId) {
   const { config, company, certInfo } = await repo.carregarContexto(db, companyId);
-  const apt = avaliarAptidao({ config, company, certInfo });
+  const apt = avaliarAptidao({ config, company, certInfo, producaoLiberada: producaoHabilitada() });
   return {
     ...apt,
     ligado: nacionalHabilitado(),
     ambiente: getEndpoints(config && config.ambiente).ambiente,
     certificado: certInfo ? { subject_cn: certInfo.subject_cn, not_after: certInfo.not_after } : null,
+    sugestao: sugestaoDaEmpresa(company),
+    serie_teste: SERIE_TESTE,
   };
 }
 
 module.exports = {
-  emitir, cancelar, consultar, danfse, situacaoConfig,
+  emitir, cancelar, consultar, danfse, situacaoConfig, emitirTeste, traduzirResultadoTeste, avaliarLigar,
   montarEntrada, fingerprint,
   _breaker: breaker,
   MARGEM_RELOGIO_MS,
