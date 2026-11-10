@@ -417,6 +417,78 @@ describe('agrupamento e falhas', () => {
   });
 });
 
+describe('DPS com série/número já usados por outro emissor (incidente de 10/11/2026)', () => {
+  const MSG = 'A série 1 e o número 1 da DPS já foram usados por outro emissor desta empresa. '
+    + 'Confira na configuração da NFS-e a Série da DPS e o último Número usado e tente de novo.';
+
+  test('nota marcada DPS_NUMERO_JA_USADO: registro em erro com o motivo e o código; o app oferece tentar de novo', async () => {
+    venda({ itens: [SRV('a', 44)], total: 44 });
+    nacional.emitir.mockImplementationOnce(async (_db, { idempotencyKey, nota }) => {
+      const n = {
+        id: 'nfse-d', idempotency_key: idempotencyKey, status: 'erro', dps_serie: '1', dps_number: '1',
+        rejection_reason: MSG, error_codes: [{ codigo: 'DPS_NUMERO_JA_USADO', descricao: MSG }], nota,
+      };
+      mockMem.notas.set(n.id, n);
+      return { nota: n };
+    });
+    auto.aoFinalizarVenda({ companyId: C1, saleId: VENDA });
+    await rodarFila();
+    const reg = [...mockMem.regs.values()][0];
+    expect(reg).toMatchObject({ status: 'erro', motivo: MSG, motivo_codigo: 'DPS_NUMERO_JA_USADO', nfse_id: 'nfse-d' });
+    const sit = await auto.situacaoDaOrigem({ companyId: C1, tipo: 'venda', id: VENDA });
+    expect(sit).toMatchObject({ estado: 'erro', acao: 'tentar_de_novo', tem_nota: false });
+    expect(sit.notas[0]).toMatchObject({ estado: 'erro', motivo: MSG, motivo_codigo: 'DPS_NUMERO_JA_USADO' });
+  });
+
+  test('loja ainda sem conferir a série: o emissor recusa e o registro fica em erro com a mensagem dele', async () => {
+    venda({ itens: [SRV('a', 44)], total: 44 });
+    nacional.emitir.mockRejectedValueOnce(new NfseNacionalError(MSG, 'DPS_NUMERO_JA_USADO'));
+    auto.aoFinalizarVenda({ companyId: C1, saleId: VENDA });
+    await rodarFila();
+    expect([...mockMem.regs.values()][0]).toMatchObject({ status: 'erro', motivo: MSG, motivo_codigo: 'DPS_NUMERO_JA_USADO' });
+  });
+
+  test('"Tentar de novo" depois da correção: chave nova (a nota anterior está morta), mesmo com os mesmos dados', async () => {
+    venda({ itens: [SRV('a', 44)], total: 44 });
+    nacional.emitir.mockImplementationOnce(async (_db, { idempotencyKey, nota }) => {
+      // forma da correção manual dos dados do incidente: código no começo do rejection_reason, sem error_codes
+      const n = { id: 'nfse-d', idempotency_key: idempotencyKey, status: 'erro', rejection_reason: `DPS_NUMERO_JA_USADO: ${MSG}`, nota };
+      mockMem.notas.set(n.id, n);
+      return { nota: n };
+    });
+    auto.aoFinalizarVenda({ companyId: C1, saleId: VENDA });
+    await rodarFila();
+    expect([...mockMem.regs.values()][0]).toMatchObject({ status: 'erro', motivo: MSG, motivo_codigo: 'DPS_NUMERO_JA_USADO' });
+
+    const r = await auto.emitirManual({ companyId: C1, tipo: 'venda', id: VENDA });
+    expect(r.grupos[0].acao).toBe('emitida');
+    expect(nacional.emitir).toHaveBeenCalledTimes(2);
+    expect(nacional.emitir.mock.calls[0][1].idempotencyKey).toBe(`aura-auto-venda-${VENDA}-010501-1`);
+    expect(nacional.emitir.mock.calls[1][1].idempotencyKey).toBe(`aura-auto-venda-${VENDA}-010501-2`);
+    expect(nacional.emitir.mock.calls[1][1].nota).toEqual(nacional.emitir.mock.calls[0][1].nota);
+    expect([...mockMem.regs.values()][0]).toMatchObject({ status: 'emitida', tentativa: 2, motivo_codigo: null });
+  });
+
+  test('erro comum (não é número já usado) segue retomando com a MESMA chave', async () => {
+    venda({ itens: [SRV('a', 44)], total: 44 });
+    nacional.emitir.mockImplementationOnce(async (_db, { idempotencyKey, nota }) => {
+      const n = { id: 'nfse-e', idempotency_key: idempotencyKey, status: 'erro', rejection_reason: 'Certificado recusado', nota };
+      mockMem.notas.set(n.id, n);
+      return { nota: n };
+    });
+    auto.aoFinalizarVenda({ companyId: C1, saleId: VENDA });
+    await rodarFila();
+    nacional.emitir.mockImplementationOnce(async (_db, { idempotencyKey }) => {
+      const n = mockMem.notas.get('nfse-e');
+      expect(idempotencyKey).toBe(n.idempotency_key);
+      n.status = 'autorizada';
+      return { nota: n };
+    });
+    await auto.emitirManual({ companyId: C1, tipo: 'venda', id: VENDA });
+    expect(nacional.emitir.mock.calls[1][1].idempotencyKey).toBe(`aura-auto-venda-${VENDA}-010501-1`);
+  });
+});
+
 describe('rotas /nfse/automatica', () => {
   function app() {
     const a = express();

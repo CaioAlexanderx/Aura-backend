@@ -122,7 +122,7 @@ function configBase(over = {}) {
     company_id: CID, provider: 'nacional', is_active: false, ambiente: 'producao_restrita',
     municipio_ibge: '3524402', ctribnac_padrao: '060201', serie: '1', next_dps_number: 48,
     teste_next_dps_number: 1, op_simp_nac: 3, reg_ap_trib_sn: 1, p_tot_trib_sn: null,
-    serie_confirmada_em: '2026-11-10T12:00:00Z', inscricao_municipal: null, default_iss_rate: '2.00',
+    serie_confirmada_em: '2026-11-10T12:00:00Z', outro_emissor: false, inscricao_municipal: null, default_iss_rate: '2.00',
     ...over,
   };
 }
@@ -260,6 +260,7 @@ describe('emitirTeste — sempre em produção restrita, série e contador próp
   test('passos base faltando (sem código padrão, série não confirmada): TESTE_TRAVADO, nada sai, nada gravado', async () => {
     repo.__state.config.ctribnac_padrao = null;
     repo.__state.config.serie_confirmada_em = null;
+    repo.__state.config.outro_emissor = null;
     repo.__state.config.next_dps_number = 1;
     const t = sefinFalso();
     await expect(nacional.emitirTeste(db, { companyId: CID, idempotencyKey: 'k' }, { ...ctxBase, transport: t }))

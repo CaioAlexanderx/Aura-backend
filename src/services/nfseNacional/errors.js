@@ -47,10 +47,41 @@ const STATUS_POR_CODIGO = {
   TESTE_TRAVADO: 409,
   NAO_PODE_LIGAR: 409,
   PRODUCAO_NAO_LIBERADA: 409,
+  DPS_NUMERO_JA_USADO: 409,
 };
 
 function httpStatusDe(code) {
   return STATUS_POR_CODIGO[code] || 502;
 }
 
-module.exports = { NfseNacionalError, NfseNacionalTransportError, httpStatusDe };
+// ── DPS com série/número já usados por outro emissor (incidente 10/11/2026) ──
+
+const DPS_NUMERO_JA_USADO = 'DPS_NUMERO_JA_USADO';
+
+/** Mensagem para a tela de quem emite. Sem série/número: texto genérico. */
+function mensagemDpsNumeroJaUsado(serie, numero) {
+  const s = serie != null && String(serie).trim() !== '' ? String(parseInt(String(serie), 10) || serie) : null;
+  const n = numero != null && String(numero).trim() !== '' ? String(numero) : null;
+  const qual = s && n ? `A série ${s} e o número ${n} da DPS já foram usados` : 'A série e o número desta DPS já foram usados';
+  return `${qual} por outro emissor desta empresa. Confira na configuração da NFS-e a Série da DPS e o último Número usado e tente de novo.`;
+}
+
+/**
+ * A nota morreu por série/número já usados? Vale o error_codes gravado pela
+ * Aura e também o rejection_reason começando pelo código (forma da correção
+ * manual dos dados do incidente).
+ */
+function temDpsNumeroJaUsado(nota) {
+  if (!nota) return false;
+  let cods = nota.error_codes;
+  if (typeof cods === 'string') {
+    try { cods = JSON.parse(cods); } catch (_) { cods = null; }
+  }
+  if (Array.isArray(cods) && cods.some((c) => c && c.codigo === DPS_NUMERO_JA_USADO)) return true;
+  return String(nota.rejection_reason || '').trim().startsWith(DPS_NUMERO_JA_USADO);
+}
+
+module.exports = {
+  NfseNacionalError, NfseNacionalTransportError, httpStatusDe,
+  DPS_NUMERO_JA_USADO, mensagemDpsNumeroJaUsado, temDpsNumeroJaUsado,
+};

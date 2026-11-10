@@ -42,7 +42,8 @@ const {
 // próprio, que lê o A1 do cofre da empresa (company_certificates). Liga
 // geral NFSE_NACIONAL_ENABLED: desligada, nada é enviado.
 const nacional = require('../services/nfseNacional');
-const { validarCamposNacional, validarRetencao } = require('../services/nfseNacional/config');
+const { validarCamposNacional, validarRetencao, validarOutroEmissor } = require('../services/nfseNacional/config');
+const { normalizarSerie } = require('../services/nfseNacional/dpsBuilder');
 const { producaoHabilitada, normalizarAmbiente } = require('../services/nfseNacional/endpoints');
 const { NfseNacionalError, httpStatusDe } = require('../services/nfseNacional/errors');
 
@@ -53,6 +54,8 @@ const NACIONAL_CAMPOS = [
   'reg_ap_trib_sn', 'reg_esp_trib', 'p_tot_trib_sn', 'next_dps_number',
   // migration 441: passo a passo da configuração da loja
   'prefeitura_cadastro_confirmado', 'cliente_retem_iss', 'aliquota_iss_retencao_sn',
+  // migration 443: "Já emite NFS-e por outro emissor?" (todos opcionais)
+  'outro_emissor', 'outro_emissor_serie', 'outro_emissor_ultimo_numero',
 ];
 
 function sendNacionalError(res, where, err) {
@@ -347,7 +350,32 @@ router.put('/config', requireAuth, requireWrite, async (req, res) => {
       // alíquota do ISSQN retido: só com cliente que retém e ME/EPP do Simples
       const errosRet = validarRetencao(existing, data);
       if (errosRet.length) return res.status(400).json({ error: errosRet.join(' '), code: 'INVALID_INPUT', detalhes: errosRet });
-      if (providerFinal === 'nacional' && body.serie_confirmada === true) data.serie_confirmada_em = new Date();
+      if (providerFinal === 'nacional' && body.serie_confirmada === true) {
+        data.serie_confirmada_em = new Date();
+        // App anterior à migration 443 (não manda outro_emissor): quem
+        // informou o último número da série ("continuar de onde parou")
+        // respondeu que já emite por outro emissor nesta mesma série.
+        if (body.outro_emissor === undefined && data.next_dps_number > 1) {
+          data.outro_emissor = true;
+          data.outro_emissor_serie = normalizarSerie(data.serie || (existing && existing.serie) || '1');
+          data.outro_emissor_ultimo_numero = data.next_dps_number - 1;
+        }
+      }
+      // série/último número do outro emissor: na mesma série, a Aura continua
+      // a partir do número seguinte
+      const errosOutro = validarOutroEmissor(existing, data);
+      if (errosOutro.length) return res.status(400).json({ error: errosOutro.join(' '), code: 'INVALID_INPUT', detalhes: errosOutro });
+      // Conflito de numeração (DPS_NUMERO_JA_USADO): só sai quando a loja
+      // confirma a série respondendo sobre o outro emissor ou trocando de série.
+      if (providerFinal === 'nacional' && body.serie_confirmada === true && existing && existing.dps_conflito_em) {
+        const final = { ...existing, ...data };
+        const trocouDeSerie = normalizarSerie(final.serie || '1') !== normalizarSerie(existing.dps_conflito_serie || '');
+        if (final.outro_emissor != null || trocouDeSerie) {
+          data.dps_conflito_em = null;
+          data.dps_conflito_serie = null;
+          data.dps_conflito_numero = null;
+        }
+      }
       // nunca nasce (nem migra de outro provider) em produção sem pedir
       if (providerFinal === 'nacional' && (!existing || existing.provider !== 'nacional') && data.ambiente === undefined) {
         data.ambiente = 'producao_restrita';

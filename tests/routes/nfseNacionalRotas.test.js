@@ -420,6 +420,105 @@ describe('PUT /config — campos novos (migration 441)', () => {
     const res = await request(app()).put(`${BASE}/config`).set(auth).send({ serie: '70000' });
     expect(res.status).toBe(400);
     expect(res.body.error).toMatch(/faixa do emissor do gov\.br/);
+    expect(res.body.error).not.toMatch(/nunca/); // a faixa não garante nada (incidente de 10/11/2026)
+  });
+});
+
+describe('PUT /config — "Já emite NFS-e por outro emissor?" (migration 443)', () => {
+  const existente = (over = {}) => ({ id: 'cfg1', provider: 'nacional', serie: '1', next_dps_number: 1, ...over });
+  const campos = (sql) => Object.fromEntries([...sql.matchAll(/(\w+) = (?:GREATEST\(\w+, )?\$(\d+)/g)].map((m) => [m[1], Number(m[2]) - 1]));
+
+  test('sim, na mesma série: grava a série e o último número do outro e a Aura continua no seguinte', async () => {
+    db.query.mockResolvedValueOnce({ rows: [existente()] }).mockResolvedValueOnce({ rows: [{ id: 'cfg1' }] });
+    const res = await request(app()).put(`${BASE}/config`).set(auth).send({
+      serie: '1', serie_confirmada: true, outro_emissor: true, outro_emissor_serie: '00001', outro_emissor_ultimo_numero: '12',
+    });
+    expect(res.status).toBe(200);
+    const [sql, values] = db.query.mock.calls[1];
+    const i = campos(sql);
+    expect(values[i.outro_emissor]).toBe(true);
+    expect(values[i.outro_emissor_serie]).toBe('1');
+    expect(values[i.outro_emissor_ultimo_numero]).toBe(12);
+    expect(sql).toMatch(/next_dps_number = GREATEST\(next_dps_number, \$\d+\)/);
+    expect(values[i.next_dps_number]).toBe(13);
+  });
+
+  test('sim, com série diferente na Aura: a numeração da Aura não muda', async () => {
+    db.query.mockResolvedValueOnce({ rows: [existente()] }).mockResolvedValueOnce({ rows: [{ id: 'cfg1' }] });
+    const res = await request(app()).put(`${BASE}/config`).set(auth).send({
+      serie: '3', serie_confirmada: true, outro_emissor: true, outro_emissor_serie: '1', outro_emissor_ultimo_numero: 40,
+    });
+    expect(res.status).toBe(200);
+    expect(db.query.mock.calls[1][0]).not.toMatch(/next_dps_number/);
+  });
+
+  test('sim, sem a série ou o último número do outro: 400 e nada gravado', async () => {
+    db.query.mockResolvedValueOnce({ rows: [existente()] });
+    const res = await request(app()).put(`${BASE}/config`).set(auth).send({ serie_confirmada: true, outro_emissor: true });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/outro emissor/);
+    expect(db.query).toHaveBeenCalledTimes(1);
+  });
+
+  test('não: apaga a série e o último número do outro', async () => {
+    db.query.mockResolvedValueOnce({ rows: [existente({ outro_emissor: true, outro_emissor_serie: '1', outro_emissor_ultimo_numero: 3 })] })
+      .mockResolvedValueOnce({ rows: [{ id: 'cfg1' }] });
+    const res = await request(app()).put(`${BASE}/config`).set(auth).send({ serie_confirmada: true, outro_emissor: false });
+    expect(res.status).toBe(200);
+    const [sql, values] = db.query.mock.calls[1];
+    const i = campos(sql);
+    expect(values[i.outro_emissor]).toBe(false);
+    expect(values[i.outro_emissor_serie]).toBeNull();
+    expect(values[i.outro_emissor_ultimo_numero]).toBeNull();
+  });
+
+  test('app de hoje (sem outro_emissor) que informa o último número: conta como "sim, nesta série"', async () => {
+    db.query.mockResolvedValueOnce({ rows: [existente()] }).mockResolvedValueOnce({ rows: [{ id: 'cfg1' }] });
+    const res = await request(app()).put(`${BASE}/config`).set(auth).send({ serie: '1', serie_confirmada: true, next_dps_number: 213 });
+    expect(res.status).toBe(200);
+    const [sql, values] = db.query.mock.calls[1];
+    const i = campos(sql);
+    expect(values[i.outro_emissor]).toBe(true);
+    expect(values[i.outro_emissor_serie]).toBe('1');
+    expect(values[i.outro_emissor_ultimo_numero]).toBe(212);
+    expect(values[i.next_dps_number]).toBe(213);
+  });
+
+  test('app de hoje sem o último número: grava como antes, sem inventar a resposta', async () => {
+    db.query.mockResolvedValueOnce({ rows: [existente()] }).mockResolvedValueOnce({ rows: [{ id: 'cfg1' }] });
+    const res = await request(app()).put(`${BASE}/config`).set(auth).send({ serie: '1', serie_confirmada: true });
+    expect(res.status).toBe(200);
+    expect(db.query.mock.calls[1][0]).not.toMatch(/outro_emissor/);
+  });
+
+  test('conflito DPS_NUMERO_JA_USADO: confirmar a série com a resposta limpa o conflito', async () => {
+    db.query.mockResolvedValueOnce({ rows: [existente({ dps_conflito_em: '2026-11-10T15:00:00Z', dps_conflito_serie: '1', dps_conflito_numero: 1, next_dps_number: 2 })] })
+      .mockResolvedValueOnce({ rows: [{ id: 'cfg1' }] });
+    const res = await request(app()).put(`${BASE}/config`).set(auth).send({
+      serie: '1', serie_confirmada: true, outro_emissor: true, outro_emissor_serie: '1', outro_emissor_ultimo_numero: 1,
+    });
+    expect(res.status).toBe(200);
+    const [sql, values] = db.query.mock.calls[1];
+    const i = campos(sql);
+    expect(values[i.dps_conflito_em]).toBeNull();
+    expect(values[i.dps_conflito_serie]).toBeNull();
+    expect(values[i.dps_conflito_numero]).toBeNull();
+  });
+
+  test('conflito: confirmar a MESMA série sem responder sobre o outro emissor não limpa', async () => {
+    db.query.mockResolvedValueOnce({ rows: [existente({ dps_conflito_em: '2026-11-10T15:00:00Z', dps_conflito_serie: '1', dps_conflito_numero: 1 })] })
+      .mockResolvedValueOnce({ rows: [{ id: 'cfg1' }] });
+    const res = await request(app()).put(`${BASE}/config`).set(auth).send({ serie: '1', serie_confirmada: true });
+    expect(res.status).toBe(200);
+    expect(db.query.mock.calls[1][0]).not.toMatch(/dps_conflito_em/);
+  });
+
+  test('conflito: trocar de série (app de hoje) limpa', async () => {
+    db.query.mockResolvedValueOnce({ rows: [existente({ dps_conflito_em: '2026-11-10T15:00:00Z', dps_conflito_serie: '1', dps_conflito_numero: 1 })] })
+      .mockResolvedValueOnce({ rows: [{ id: 'cfg1' }] });
+    const res = await request(app()).put(`${BASE}/config`).set(auth).send({ serie: '3', serie_confirmada: true });
+    expect(res.status).toBe(200);
+    expect(db.query.mock.calls[1][0]).toMatch(/dps_conflito_em = \$\d/);
   });
 });
 

@@ -20,6 +20,7 @@ const { isValidCnpj } = require('../../utils/cpfCnpj');
 const { cnpjDoCn } = require('../sefazSp/certCnpj');
 const { normalizarSerie } = require('./dpsBuilder');
 const { normalizarAliquotaIss } = require('../camposNfseDoItem');
+const { mensagemDpsNumeroJaUsado, DPS_NUMERO_JA_USADO } = require('./errors');
 
 const onlyDigits = (v) => String(v == null ? '' : v).replace(/\D/g, '');
 const temTexto = (v) => typeof v === 'string' && v.trim() !== '';
@@ -177,6 +178,11 @@ const SERIE_TESTE = '49999';
  * v1.01-20260209, campo serie): 00001–49999 aplicativo próprio (a Aura);
  * 50000–69999 Emissor Móvel; 70000–79999 Emissor Web; 80000–89999
  * transcrição manual (Web).
+ *
+ * As faixas NÃO garantem que a série da Aura não se repete: no incidente de
+ * 10/11/2026 outro emissor da loja usou a série 1 (a mesma da Aura). Por
+ * isso o passo "série" pergunta se a loja já emite por outro emissor e,
+ * se sim, a série e o último número dele.
  */
 function faixaDaSerie(serie) {
   const n = Number(normalizarSerie(serie));
@@ -242,17 +248,41 @@ function passoCodigoPadrao(config) {
   return passo('ok', 'Código de Tributação Nacional escolhido.');
 }
 
+const PERGUNTA_OUTRO_EMISSOR = 'Conte se você já emite NFS-e por outro emissor (o site ou o app do gov.br, ou outro sistema), para a numeração não se repetir.';
+
+/**
+ * Passo "série" (migration 443): exige a resposta a "Já emite NFS-e por
+ * outro emissor?" (outro_emissor). Se sim, a Série da DPS e o último Número
+ * usados nele. Conflito registrado pela emissão (dps_conflito_em) = problema.
+ */
 function passoSerie(config, temConfig) {
-  if (!temConfig) return passo('falta', 'Conte se você já emite NFS-e pelo Emissor Nacional, para a numeração não se repetir.');
+  if (!temConfig) return passo('falta', PERGUNTA_OUTRO_EMISSOR);
+  if (config.dps_conflito_em) {
+    return passo('problema', mensagemDpsNumeroJaUsado(config.dps_conflito_serie, config.dps_conflito_numero), {
+      codigo: DPS_NUMERO_JA_USADO,
+      serie_usada: config.dps_conflito_serie != null ? String(config.dps_conflito_serie) : null,
+      numero_usado: config.dps_conflito_numero != null ? String(config.dps_conflito_numero) : null,
+    });
+  }
   const serie = normalizarSerie(config.serie || '1');
   if (faixaDaSerie(serie) !== 'aplicativo_proprio' || serie === SERIE_TESTE) {
     return passo('problema', 'A Série da DPS da Aura precisa estar entre 1 e 49998, a faixa de aplicativo próprio do Sistema Nacional.');
   }
   const proximo = String(Number(config.next_dps_number) || 1);
-  if (!config.serie_confirmada_em && Number(proximo) <= 1) {
-    return passo('falta', 'Conte se você já emite NFS-e pelo Emissor Nacional, para a numeração não se repetir.');
+  if (config.outro_emissor == null) return passo('falta', PERGUNTA_OUTRO_EMISSOR);
+  const extra = { serie, proximo_numero: proximo, outro_emissor: config.outro_emissor === true };
+  if (config.outro_emissor === true) {
+    const so = normalizarSerie(config.outro_emissor_serie);
+    const ult = Number(config.outro_emissor_ultimo_numero);
+    if (!so || !Number.isInteger(ult) || ult < 1) {
+      return passo('falta', 'Informe a Série da DPS e o último Número usados no outro emissor, para a Aura não repetir a numeração.', extra);
+    }
+    Object.assign(extra, { outro_emissor_serie: so, outro_emissor_ultimo_numero: String(ult) });
+    if (so === serie && Number(proximo) <= ult) {
+      return passo('problema', `O próximo Número da DPS da Aura (${proximo}) já foi usado no outro emissor, na mesma série ${serie}. Use outra série ou continue a partir do ${ult + 1}.`, extra);
+    }
   }
-  return passo('ok', `Série da DPS ${serie}, próximo Número da DPS ${proximo}.`, { serie, proximo_numero: proximo });
+  return passo('ok', `Série da DPS ${serie}, próximo Número da DPS ${proximo}.`, extra);
 }
 
 function passoTeste(config, basePronta) {
@@ -435,7 +465,7 @@ function validarCamposNacional(body = {}) {
     const s = normalizarSerie(body.serie);
     const faixa = faixaDaSerie(s);
     if (faixa === 'emissor_web' || faixa === 'transcricao_manual' || faixa === 'emissor_movel') {
-      erros.push(`A Série da DPS (serie) ${s} é da faixa do emissor do gov.br. Pela Aura a série fica entre 1 e 49998 (faixa de aplicativo próprio, Anexo I do leiaute da DPS), então ela nunca se encontra com as notas emitidas no site ou no app do gov.br.`);
+      erros.push(`A Série da DPS (serie) ${s} é da faixa do emissor do gov.br. Pela Aura a série fica entre 1 e 49998 (faixa de aplicativo próprio, Anexo I do leiaute da DPS). Se você já emite por outro emissor, informe a série e o último número dele para a numeração não se repetir.`);
     } else if (s === SERIE_TESTE) {
       erros.push(`A Série da DPS (serie) ${SERIE_TESTE} é reservada para a nota de teste da Aura. Use outra série entre 1 e 49998.`);
     } else if (faixa !== 'aplicativo_proprio') {
@@ -476,7 +506,62 @@ function validarCamposNacional(body = {}) {
       erros.push('A Alíquota do ISSQN no Simples Nacional (aliquota_iss_retencao_sn) fica entre 1,80% e 5,00%. Peça o número ao seu contador.');
     } else data.aliquota_iss_retencao_sn = r.value;
   }
+  // ── migration 443: "Já emite NFS-e por outro emissor?" ──
+  if (body.outro_emissor !== undefined) {
+    const v = body.outro_emissor;
+    if (v !== null && typeof v !== 'boolean') erros.push('outro_emissor deve ser true ou false.');
+    else data.outro_emissor = v;
+  }
+  if (body.outro_emissor_serie !== undefined) {
+    const v = body.outro_emissor_serie === null || body.outro_emissor_serie === '' ? null : normalizarSerie(body.outro_emissor_serie);
+    if (body.outro_emissor_serie !== null && body.outro_emissor_serie !== '' && (!v || Number(v) < 1 || Number(v) > 99999)) {
+      erros.push('A Série da DPS do outro emissor (outro_emissor_serie) tem de 1 a 5 números (1 a 99999).');
+    } else data.outro_emissor_serie = v;
+  }
+  if (body.outro_emissor_ultimo_numero !== undefined) {
+    const raw = body.outro_emissor_ultimo_numero;
+    const v = raw === null || raw === '' ? null : Number(String(raw).replace(/\D/g, '') || NaN);
+    if (v !== null && (!Number.isInteger(v) || v < 1 || v > 999999999999999)) {
+      erros.push('O último Número da DPS do outro emissor (outro_emissor_ultimo_numero) deve ser um número inteiro a partir de 1.');
+    } else data.outro_emissor_ultimo_numero = v;
+  }
   return { data, erros };
+}
+
+/**
+ * Regra do outro emissor sobre o estado FINAL da config (o que já existe +
+ * o que veio). Muta `data`:
+ *   - outro_emissor false → apaga a série e o último número do outro;
+ *   - outro_emissor true → exige a série e o último número do outro; na
+ *     MESMA série da Aura, a Aura continua a partir do número seguinte
+ *     (next_dps_number; a rota grava com GREATEST, então só anda pra frente).
+ * @returns {string[]} erros
+ */
+function validarOutroEmissor(existing, data) {
+  const final = { ...(existing || {}), ...data };
+  const erros = [];
+  if (data.outro_emissor === false) {
+    data.outro_emissor_serie = null;
+    data.outro_emissor_ultimo_numero = null;
+    return erros;
+  }
+  if (final.outro_emissor !== true) {
+    if (data.outro_emissor_serie != null || data.outro_emissor_ultimo_numero != null) {
+      erros.push('A Série e o último Número do outro emissor só valem quando a loja já emite NFS-e por outro emissor (outro_emissor: true).');
+    }
+    return erros;
+  }
+  const so = normalizarSerie(final.outro_emissor_serie);
+  const ult = Number(final.outro_emissor_ultimo_numero);
+  if (!so) erros.push('Informe a Série da DPS usada no outro emissor.');
+  if (!Number.isInteger(ult) || ult < 1) erros.push('Informe o último Número da DPS usado no outro emissor.');
+  if (erros.length) return erros;
+  const serieAura = normalizarSerie(final.serie || '1');
+  if (so === serieAura) {
+    const prox = Math.max(Number(final.next_dps_number) || 1, Number(data.next_dps_number) || 0);
+    if (prox <= ult) data.next_dps_number = ult + 1;
+  }
+  return erros;
 }
 
 const CADASTRO_PREFEITURA = new Set(['sim', 'nao', 'nao_sei']);
@@ -503,7 +588,7 @@ function validarRetencao(existing, data) {
 }
 
 module.exports = {
-  resolverRegime, avaliarAptidao, avaliarPassos, validarCamposNacional, validarRetencao,
+  resolverRegime, avaliarAptidao, avaliarPassos, validarCamposNacional, validarRetencao, validarOutroEmissor,
   faltasParaLigar, faixaDaSerie, sugestaoDaEmpresa, opSimpNacDoRegime,
   PASSOS, CODIGOS_PREFEITURA, SERIE_TESTE,
   ERROS_SO_DO_AMBIENTE_DE_TESTES, AVISO_SO_DO_AMBIENTE_DE_TESTES, aceitoComAvisoDoAmbienteDeTestes, codigosDoErro,

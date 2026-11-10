@@ -187,6 +187,42 @@ async function marcarErro(db, id, mensagem, codigos = null) {
   );
 }
 
+/**
+ * A DPS da Aura caiu numa série/número que outro emissor da empresa já usou
+ * (incidente de 10/11/2026). A nota vira 'erro' com o código próprio; a
+ * NFS-e devolvida fica SÓ como evidência em provider_response.
+ * nfse_de_outro_emissor — nunca em xml_nfse, chave_acesso ou nfse_number.
+ * bloquearConfig: marca o conflito em nfse_config (migration 443) para a
+ * Aura não gastar mais números até a loja conferir a série e o último
+ * número. Base sem a 443: só a nota é marcada.
+ * @returns {boolean} true = a nota foi marcada (estava pendente/erro)
+ */
+async function marcarNumeroJaUsado(db, row, { mensagem, evidencia, bloquearConfig = true }) {
+  const { rowCount } = await db.query(
+    `UPDATE nfse SET status = 'erro', rejection_reason = $1, error_codes = $2::jsonb,
+            provider_response = COALESCE(provider_response, '{}'::jsonb) || $3::jsonb
+      WHERE id = $4 AND status IN ('pendente', 'erro')`,
+    [
+      String(mensagem).slice(0, 1000),
+      JSON.stringify([{ codigo: 'DPS_NUMERO_JA_USADO', descricao: String(mensagem).slice(0, 500) }]),
+      JSON.stringify({ nfse_de_outro_emissor: evidencia || {} }),
+      row.id,
+    ]
+  );
+  if (!rowCount || !bloquearConfig) return rowCount > 0;
+  try {
+    await db.query(
+      `UPDATE nfse_config SET dps_conflito_em = NOW(), dps_conflito_serie = $1, dps_conflito_numero = $2
+        WHERE company_id = $3`,
+      [row.dps_serie != null ? String(row.dps_serie) : null, row.dps_number != null ? String(row.dps_number) : null, row.company_id]
+    );
+  } catch (err) {
+    if (err.code !== '42703') throw err;
+    console.warn('[nfse nacional] conflito de numeração não gravado na config: base sem a migration 443');
+  }
+  return true;
+}
+
 async function gravarAutorizada(db, id, { chaveAcesso, nfseXml, alertas, cabecalho }) {
   let lido;
   try { lido = lerNfse(nfseXml); } catch (_) { lido = { valores: {} }; }
@@ -258,7 +294,7 @@ async function atualizarXmlNfse(db, id, xml) {
 
 module.exports = {
   buscarPorChave, buscarPorId, carregarContexto, buscarItem, reservar,
-  marcarTransmitindo, marcarSemConfirmacao, marcarErro,
+  marcarTransmitindo, marcarSemConfirmacao, marcarErro, marcarNumeroJaUsado,
   gravarAutorizada, gravarRejeitada, gravarCancelada, gravarCancelamentoRecusado, atualizarXmlNfse,
   gravarResultadoTeste,
 };
