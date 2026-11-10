@@ -60,7 +60,9 @@
 const db = require('../config/database');
 const repo = require('./nfseAutomaticaRepo');
 const nacional = require('./nfseNacional');
-const { NfseNacionalError } = require('./nfseNacional/errors');
+const {
+  NfseNacionalError, DPS_NUMERO_JA_USADO, temDpsNumeroJaUsado, mensagemDpsNumeroJaUsado,
+} = require('./nfseNacional/errors');
 const { hojeBR } = require('./nfseNacional/dpsBuilder');
 const { nacionalHabilitado } = require('./nfseNacional/endpoints');
 const { isValidCpf, isValidCnpj } = require('../utils/cpfCnpj');
@@ -120,6 +122,8 @@ const MSG = {
 
 function mensagemDoEmissor(err) {
   const m = String((err && err.message) || '').trim();
+  // série/número já usados por outro emissor: a mensagem do emissor já diz o que fazer
+  if (err && err.code === DPS_NUMERO_JA_USADO && m) return m;
   return m ? `Não conseguimos emitir a NFS-e: ${m}` : MSG.INESPERADO;
 }
 
@@ -382,12 +386,21 @@ async function emitirGrupo(ctx, grupo) {
   // processar, rejeitada, cancelada). Pendente no Sistema Nacional (pode
   // virar nota) ou autorizada: segue com os MESMOS dados e a MESMA chave —
   // nunca duas notas vivas para a mesma prestação.
+  // Nota da chave anterior morta por série/número já usados por outro
+  // emissor (DPS_NUMERO_JA_USADO): chave nova mesmo com os mesmos dados — a
+  // nota nova reserva o próximo número da série configurada agora.
   let tentativa = row.tentativa || 1;
   const mesmaChave = row.idempotency_key === chaveDeIdempotencia(origemTipo, origemId, grupo.ctribnac, tentativa);
-  if (mesmaChave && row.nota && nacional.fingerprint(row.nota) !== nacional.fingerprint(nota)) {
-    const anterior = await repo.notaPorChave(companyId, row.idempotency_key);
-    if (anterior && ['erro', 'rejeitada', 'cancelada'].includes(anterior.status)) tentativa += 1;
-    else if (anterior) nota = row.nota;
+  if (mesmaChave) {
+    const mudou = !!row.nota && nacional.fingerprint(row.nota) !== nacional.fingerprint(nota);
+    if (mudou || row.nfse_id || row.motivo_codigo === DPS_NUMERO_JA_USADO) {
+      const anterior = await repo.notaPorChave(companyId, row.idempotency_key);
+      if (anterior && anterior.status === 'erro' && temDpsNumeroJaUsado(anterior)) tentativa += 1;
+      else if (mudou && anterior) {
+        if (['erro', 'rejeitada', 'cancelada'].includes(anterior.status)) tentativa += 1;
+        else nota = row.nota;
+      }
+    }
   }
   const key = chaveDeIdempotencia(origemTipo, origemId, grupo.ctribnac, tentativa);
   await repo.gravar(row.id, {
@@ -401,12 +414,18 @@ async function emitirGrupo(ctx, grupo) {
     if (n.id) await repo.ligarNotaAOrigem(companyId, n.id, origemId);
     let status = 'emitindo';
     let motivo = null;
-    if (n.status === 'autorizada') status = 'emitida';
+    let motivoCodigo = null;
+    if (n.status === 'erro' && temDpsNumeroJaUsado(n)) {
+      status = 'erro';
+      motivo = String(n.rejection_reason || '').replace(/^DPS_NUMERO_JA_USADO[:\s-]*/, '').trim()
+        || mensagemDpsNumeroJaUsado(n.dps_serie, n.dps_number);
+      motivoCodigo = DPS_NUMERO_JA_USADO;
+    } else if (n.status === 'autorizada') status = 'emitida';
     else if (n.status === 'rejeitada') { status = 'rejeitada'; motivo = `O Sistema Nacional recusou a NFS-e: ${n.rejection_reason || 'sem detalhe'}`; }
     else if (n.status === 'cancelada') status = 'cancelada';
     else if (n.status === 'erro') { status = 'erro'; motivo = mensagemDoEmissor({ message: n.rejection_reason }); }
     else motivo = MSG.AGUARDANDO;
-    await repo.gravar(row.id, { status, motivo, motivo_codigo: null, nfse_id: n.id || null });
+    await repo.gravar(row.id, { status, motivo, motivo_codigo: motivoCodigo, nfse_id: n.id || null });
     return { ctribnac: grupo.ctribnac, acao: status, registro_id: row.id, nfse_id: n.id || null, motivo };
   } catch (err) {
     const conhecido = err instanceof NfseNacionalError;

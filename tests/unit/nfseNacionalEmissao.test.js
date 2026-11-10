@@ -91,6 +91,11 @@ const nfseXml = (chave = CHAVE, n = '7') => `<NFSe xmlns="http://www.sped.fazend
 
 const NOTA = { descricao: 'Licença de uso do sistema Aura - novembro/2026', valor: 199.9, competencia: '2026-11-09' };
 
+// A NFS-e traz a DPS que a gerou (infNFSe/DPS): a recuperação pela consulta
+// só adota a nota quando ela é da DPS que a Aura assinou.
+const dpsPostada = (t, i = 0) => ungz(t.posts()[i].body.dpsXmlGZipB64).replace(/^<\?xml[^>]*\?>/, '');
+const nfseXmlCom = (dps, chave = CHAVE, n = '7') => nfseXml(chave, n).replace('</infNFSe>', `${dps}</infNFSe>`);
+
 /** Sefin falso: cada rota responde pelo `plano` do teste. Registra as chamadas. */
 function sefinFalso(plano = {}) {
   const chamadas = [];
@@ -254,9 +259,11 @@ describe('emissão', () => {
   });
 
   test('timeout mas a DPS virou nota: recupera pela consulta, sem reenviar', async () => {
-    const t = sefinFalso({
+    let t = null;
+    t = sefinFalso({
       postDps: () => { throw new Error('socket hang up'); },
       getDps: () => json(200, { idDps: 'x', chaveAcesso: CHAVE }),
+      getNfse: () => json(200, { chaveAcesso: CHAVE, nfseXmlGZipB64: gz(nfseXmlCom(dpsPostada(t))) }),
     });
     const r = await nacional.emitir(db, { companyId: CID, idempotencyKey: 'fatura-6', nota: NOTA }, { ...ctxBase, transport: t });
     expect(r.nota.status).toBe('autorizada');
@@ -271,10 +278,12 @@ describe('emissão', () => {
     expect(r.nota.status).toBe('pendente');
   });
 
-  test('E0014 (DPS já gerou nota): recupera a nota em vez de marcar rejeitada', async () => {
-    const t = sefinFalso({
+  test('E0014 (a própria DPS já gerou nota): recupera a nota em vez de marcar rejeitada', async () => {
+    let t = null;
+    t = sefinFalso({
       postDps: () => json(400, { erros: [{ codigo: 'E0014', descricao: 'Conjunto já existe' }] }),
       getDps: () => json(200, { chaveAcesso: CHAVE }),
+      getNfse: () => json(200, { chaveAcesso: CHAVE, nfseXmlGZipB64: gz(nfseXmlCom(dpsPostada(t))) }),
     });
     const r = await nacional.emitir(db, { companyId: CID, idempotencyKey: 'fatura-8', nota: NOTA }, { ...ctxBase, transport: t });
     expect(r.nota.status).toBe('autorizada');

@@ -301,7 +301,7 @@ async function ligarNotaAOrigem(companyId, nfseId, sourceId) {
 
 async function notaPorChave(companyId, key) {
   const { rows } = await db.query(
-    'SELECT id, status, rejection_reason FROM nfse WHERE company_id = $1 AND idempotency_key = $2',
+    'SELECT id, status, rejection_reason, error_codes FROM nfse WHERE company_id = $1 AND idempotency_key = $2',
     [companyId, key]
   );
   return rows[0] || null;
