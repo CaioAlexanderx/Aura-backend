@@ -17,9 +17,24 @@
 // :tipo = 'venda' (sales.id) | 'os' (service_orders.id). Um recebimento do
 // crediário não é origem: a nota dele é a da venda.
 //
-// Liga geral NFSE_AUTOMATICA_ENABLED: desligada, as ESCRITAS respondem 404 e
-// as leituras seguem (mostram o que já existe). O "Emitir NFS-e" manual por
-// origem não exige o opt-in da empresa (é a lojista apertando o botão).
+// Duas ligas separadas (10/11/2026):
+//   - AUTOMÁTICA (NFSE_AUTOMATICA_ENABLED + opt-in da empresa): só os
+//     gatilhos da venda/OS/pagamento e o PUT /config dependem dela;
+//   - MANUAL ("Emitir NFS-e", completar, tentar de novo): basta a loja emitir
+//     NFS-e (nfse_config.is_active=true, provider 'nacional') e o emissor
+//     nacional ligado no servidor (NFSE_NACIONAL_ENABLED). Sem isso: 404
+//     NFSE_NACIONAL_DESLIGADA (servidor) ou 409 LOJA_NAO_EMITE (loja).
+// As leituras (situação e 2ª via) seguem sempre: mostram o que já existe.
+//
+// GET /config devolve:
+//   ligada_no_servidor  NFSE_AUTOMATICA_ENABLED
+//   emissao_automatica  opt-in da empresa
+//   ativa               a automática emite sozinha nesta loja (flag + opt-in)
+//   emite               a loja emite NFS-e pelo botão (is_active + nacional + servidor)
+//
+// GET /origem/... (e a resposta das escritas) também traz emite, tem_servico
+// e pode_emitir (emite + serviço + venda válida / OS entregue): o app mostra
+// "Emitir NFS-e" na origem ainda sem nota quando pode_emitir.
 // ============================================================
 'use strict';
 
@@ -30,6 +45,7 @@ const auto = require('../services/nfseAutomatica');
 const repo = require('../services/nfseAutomaticaRepo');
 const nacional = require('../services/nfseNacional');
 const { NfseNacionalError, httpStatusDe } = require('../services/nfseNacional/errors');
+const { nacionalHabilitado } = require('../services/nfseNacional/endpoints');
 
 const requireWrite = requireRole('client', 'analyst', 'admin');
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -40,6 +56,29 @@ function exigirLigada(req, res, next) {
     error: 'A emissão automática da NFS-e ainda não está disponível neste servidor.',
     code: 'NFSE_AUTOMATICA_DESLIGADA',
   });
+}
+
+/**
+ * Emissão manual: a loja precisa emitir NFS-e. Não olha a automática.
+ * Guarda a config em req.nfseCfg (a emissão não relê).
+ */
+async function exigirLojaEmissora(req, res, next) {
+  if (!nacionalHabilitado()) {
+    return res.status(404).json({
+      error: 'A emissão de NFS-e ainda não está disponível neste servidor.',
+      code: 'NFSE_NACIONAL_DESLIGADA',
+    });
+  }
+  try {
+    const cfg = await repo.carregarConfig(req.params.id);
+    if (!auto.lojaEmite(cfg)) {
+      return res.status(409).json({ error: auto.MSG.LOJA_NAO_EMITE, code: 'LOJA_NAO_EMITE' });
+    }
+    req.nfseCfg = cfg;
+    return next();
+  } catch (err) {
+    return falhar(res, 'loja emissora', err);
+  }
 }
 
 function origemValida(req, res, next) {
@@ -75,6 +114,7 @@ router.get('/config', requireAuth, async (req, res) => {
       emissao_automatica: !!(cfg && cfg.emissao_automatica),
       emissao_automatica_desde: cfg ? cfg.emissao_automatica_desde || null : null,
       ativa: auto.ligadaNoServidor() && auto.optInAtivo(cfg),
+      emite: auto.lojaEmite(cfg),
     });
   } catch (err) {
     falhar(res, 'get config', err);
@@ -135,15 +175,19 @@ function tomadorDoCorpo(body) {
 }
 
 async function processarManual(req, { forcar }) {
-  const base = {
-    companyId: req.params.id, gatilho: 'manual', manual: true, forcar, tomador: tomadorDoCorpo(req.body),
-  };
-  if (req.params.tipo === 'os') return auto.processarOs({ ...base, osId: req.params.origemId });
-  return auto.processarVenda({ ...base, saleId: req.params.origemId });
+  return auto.emitirManual({
+    companyId: req.params.id,
+    tipo: req.params.tipo,
+    id: req.params.origemId,
+    tomador: tomadorDoCorpo(req.body),
+    forcar,
+    cfg: req.nfseCfg,
+  });
 }
 
 function corpoDoResultado(r) {
   if (!r) return {};
+  if (r.acao === 'recusada') return { aviso: r.motivo, aviso_codigo: r.codigo };
   if (r.acao === 'erro' && r.codigo) return { aviso: r.motivo, aviso_codigo: r.codigo };
   if (r.acao === 'nada') {
     const textos = {
@@ -156,7 +200,7 @@ function corpoDoResultado(r) {
   return {};
 }
 
-router.post('/origem/:tipo/:origemId/emitir', requireAuth, requireWrite, exigirLigada, origemValida, async (req, res) => {
+router.post('/origem/:tipo/:origemId/emitir', requireAuth, requireWrite, origemValida, exigirLojaEmissora, async (req, res) => {
   try {
     const r = await processarManual(req, { forcar: false });
     await responderSituacao(req, res, corpoDoResultado(r));
@@ -165,7 +209,7 @@ router.post('/origem/:tipo/:origemId/emitir', requireAuth, requireWrite, exigirL
   }
 });
 
-router.post('/origem/:tipo/:origemId/completar', requireAuth, requireWrite, exigirLigada, origemValida, async (req, res) => {
+router.post('/origem/:tipo/:origemId/completar', requireAuth, requireWrite, origemValida, exigirLojaEmissora, async (req, res) => {
   const t = tomadorDoCorpo(req.body);
   if (!t || !t.doc) {
     return res.status(400).json({ error: 'Informe o CPF/CNPJ de quem contratou o serviço.', code: 'SEM_TOMADOR' });
@@ -181,7 +225,7 @@ router.post('/origem/:tipo/:origemId/completar', requireAuth, requireWrite, exig
   }
 });
 
-router.post('/origem/:tipo/:origemId/tentar-de-novo', requireAuth, requireWrite, exigirLigada, origemValida, async (req, res) => {
+router.post('/origem/:tipo/:origemId/tentar-de-novo', requireAuth, requireWrite, origemValida, exigirLojaEmissora, async (req, res) => {
   try {
     const r = await processarManual(req, { forcar: true });
     await responderSituacao(req, res, corpoDoResultado(r));
