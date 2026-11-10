@@ -238,15 +238,18 @@ function agrupar(rows, chave) {
 }
 
 // SAVEPOINT para as tabelas penduradas no produto (fotos, fornecedores,
-// categorias): base sem a tabela/coluna segue sem elas.
-async function opcional(conn, nome, fn) {
+// categorias): base sem a tabela/coluna segue sem elas. `toleraDuplicado`:
+// categoria que colide na unicidade do destino (ex.: mesmo caminho/slug com
+// outro nome) nao derruba a transferencia — o produto vai sem a categoria
+// (o texto products.category segue copiado).
+async function opcional(conn, nome, fn, { toleraDuplicado = false } = {}) {
   await conn.query(`SAVEPOINT ${nome}`);
   try {
     const r = await fn();
     await conn.query(`RELEASE SAVEPOINT ${nome}`);
     return r;
   } catch (e) {
-    if (e && (e.code === '42P01' || e.code === '42703')) {
+    if (e && (e.code === '42P01' || e.code === '42703' || (toleraDuplicado && e.code === '23505'))) {
       await conn.query(`ROLLBACK TO SAVEPOINT ${nome}`);
       return null;
     }
@@ -540,7 +543,7 @@ async function transferir(conn, { origemId, destinoId, userId, isStaff = false, 
        ON CONFLICT DO NOTHING`,
       [destinoId, orig, novo]
     ));
-    await opcional(conn, 'sp_categorias', () => copiarCategorias(conn, destinoId, mapaCopias));
+    await opcional(conn, 'sp_categorias', () => copiarCategorias(conn, destinoId, mapaCopias), { toleraDuplicado: true });
   }
 
   // 7. variante no destino
