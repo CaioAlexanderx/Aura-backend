@@ -54,6 +54,7 @@ const notify              = require('../services/digitalOrderNotifications');
 // Sino da loja (10/09/2026): pedido do Studio tambem avisa ao nascer.
 const lojaEvents          = require('../services/lojaEvents');
 const { generatePix }     = require('../services/pixService');
+const pedidoSemPix        = require('../services/pedidoSemPix');
 const { onOrderConfirmed } = require('../services/digitalOrderConfirmation');
 const { createMpPixPayment, createMpPreference } = require('../services/mpService');
 const mpGatewaySvc = require('../services/mpGateway');
@@ -1212,30 +1213,39 @@ router.post('/:slug/studio/order', async (req, res) => {
       };
       await guardarPix(pixData, { comId: true });
     } else if (pmethod === 'pix') {
-      if (hasMpGateway) {
-        try {
-          pixData = await createMpPixPayment({
-            accessToken:   mpGateway.access_token,
-            total,
-            orderId:       order.id,
-            orderNumber:   order.order_number,
-            customerEmail: customer_email || null,
-            description:   `Pedido Studio #${order.order_number}`,
-            horasDeValidade: PRAZO_HORAS_STUDIO,
-          });
-          await db.query(
-            `UPDATE digital_orders SET mp_payment_id = $1, updated_at = NOW() WHERE id = $2`,
-            [pixData.payment_id, order.id]
-          );
-          await guardarPix(pixData, { comId: false });
-        } catch (mpErr) {
-          console.error('[studio-storefront] MP Pix error, fallback static:', mpErr.message);
+      try {
+        if (hasMpGateway) {
+          try {
+            pixData = await createMpPixPayment({
+              accessToken:   mpGateway.access_token,
+              total,
+              orderId:       order.id,
+              orderNumber:   order.order_number,
+              customerEmail: customer_email || null,
+              description:   `Pedido Studio #${order.order_number}`,
+              horasDeValidade: PRAZO_HORAS_STUDIO,
+            });
+            await db.query(
+              `UPDATE digital_orders SET mp_payment_id = $1, updated_at = NOW() WHERE id = $2`,
+              [pixData.payment_id, order.id]
+            );
+            await guardarPix(pixData, { comId: false });
+          } catch (mpErr) {
+            console.error('[studio-storefront] MP Pix error, fallback static:', mpErr.message);
+            pixData = await generatePix({ order, company_id: cid, total });
+            if (pixData) await guardarPix(pixData, { comId: true });
+          }
+        } else {
           pixData = await generatePix({ order, company_id: cid, total });
           if (pixData) await guardarPix(pixData, { comId: true });
         }
-      } else {
-        pixData = await generatePix({ order, company_id: cid, total });
-        if (pixData) await guardarPix(pixData, { comId: true });
+      } catch (pixErr) {
+        // RA-04: sem chave Pix valida (e sem o Mercado Pago) o Pix nao sai.
+        // Em producao nao existe QR falso: o pedido recem-criado e desfeito
+        // e a cliente escolhe outra forma de pagamento.
+        if (!pedidoSemPix.ehPixNaoConfigurado(pixErr)) throw pixErr;
+        await pedidoSemPix.desfazerPedidoSemPix(db, order);
+        return pedidoSemPix.responderPixNaoConfigurado(res, pixErr);
       }
     }
 

@@ -1,21 +1,52 @@
 // ============================================================
 // AURA. — Pix Service para Canal Digital
 //
-// Ordem de prioridade pra gerar cobranca Pix:
+// Ordem para gerar a cobranca Pix:
 //   1. Pix MANUAL — chave Pix cadastrada em digital_channel_config (BR Code estatico)
-//   2. Asaas subconta — fallback legado (gera cobranca via Asaas)
-//   3. Mock — desenvolvimento/quando nada esta configurado
+//   2. Fora de producao: Mock (desenvolvimento e testes)
+//   3. Em producao, sem chave valida: erro PIX_NOT_CONFIGURED (4xx) — o
+//      chamador desfaz o pedido e a cliente escolhe outra forma de pagamento.
 //
 // Migration 088 adicionou pix_key/pix_key_type/pix_holder_name/pix_holder_city
 // em digital_channel_config. Lojista cadastra a chave dele e a storefront
 // gera o BR Code estatico apontando pra essa chave + valor + nome + cidade.
-// Confirmacao deixa de ser via webhook Asaas e passa a ser manual pelo lojista
-// (com comprovante anexado pelo cliente como nudge).
+// Confirmacao e manual pela lojista (com comprovante anexado pelo cliente
+// como nudge).
+//
+// RA-04 (10/11/2026): saiu o fallback legado de "subconta Asaas" que lia
+// companies.asaas_subconta_id/asaas_subconta_token. Essas colunas nao existem
+// no banco de producao (a migration 071 nunca chegou la): a consulta dava
+// 42703 e o pedido da loja online caia em 500 — com o pedido ja gravado
+// esperando um Pix que nao vinha. O Recebe na Aura tera tabela propria de
+// subconta por empresa, em outro PR.
+//
+// E o Mock NUNCA sai em producao: o QR falso parece de verdade, a cliente
+// pagaria um Pix que nao existe.
 // ============================================================
 'use strict';
 
 const db = require('../config/database');
 const { buildStaticBrCode, validatePixKey } = require('./staticPixService');
+
+const PIX_NOT_CONFIGURED = 'PIX_NOT_CONFIGURED';
+const MENSAGEM_PIX_NAO_CONFIGURADO =
+  'O Pix desta loja ainda não está disponível. Por favor, escolha outra forma de pagamento.';
+
+// Erro com codigo estavel: o chamador responde 422 { error, code } e desfaz
+// o pedido (services/pedidoSemPix.js).
+class PixNaoConfiguradoError extends Error {
+  constructor(motivo) {
+    super(MENSAGEM_PIX_NAO_CONFIGURADO);
+    this.name = 'PixNaoConfiguradoError';
+    this.code = PIX_NOT_CONFIGURED;
+    this.status = 422;
+    this.motivo = motivo || null;
+  }
+}
+
+function emProducao() {
+  return process.env.NODE_ENV === 'production';
+}
 
 async function generatePix({ order, company_id, total }) {
   // 1. Pix MANUAL — chave do lojista cadastrada
@@ -25,25 +56,22 @@ async function generatePix({ order, company_id, total }) {
     [company_id]
   );
   const cfg = configs[0];
+  let motivo = 'sem_chave';
   if (cfg && cfg.pix_key && String(cfg.pix_key).trim()) {
     try {
       return generateManualPix({ order, total, cfg });
     } catch (err) {
-      console.warn('[PIX] Erro ao gerar Pix manual, usando fallback:', err.message);
+      motivo = 'chave_invalida';
+      console.warn('[PIX] Chave Pix da loja nao gerou o BR Code:', err.message);
     }
   }
 
-  // 2. Asaas subconta (legado — empresas antigas que ainda usam)
-  const { rows: companies } = await db.query(
-    `SELECT asaas_subconta_id, asaas_subconta_token FROM companies WHERE id = $1`,
-    [company_id]
-  );
-  const co = companies[0];
-  if (co && co.asaas_subconta_id && co.asaas_subconta_token) {
-    return generateAsaasPix({ order, company: co, total });
+  // 2. Producao: nada de QR falso.
+  if (emProducao()) {
+    throw new PixNaoConfiguradoError(motivo);
   }
 
-  // 3. Mock — sem nada configurado
+  // 3. Mock — desenvolvimento/testes, sem chave configurada
   return generateMockPix({ order, total });
 }
 
@@ -80,53 +108,14 @@ function generateManualPix({ order, total, cfg }) {
   };
 }
 
-async function generateAsaasPix({ order, company, total }) {
-  const ASAAS_BASE = process.env.ASAAS_API_URL || 'https://api.asaas.com/v3';
-  const dueDate    = new Date(Date.now() + 30 * 60 * 1000);
-  const dueDateStr = dueDate.toISOString().split('T')[0];
-  try {
-    const payResp = await fetch(`${ASAAS_BASE}/payments`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'access_token': company.asaas_subconta_token },
-      body: JSON.stringify({
-        billingType:       'PIX',
-        customer:          company.asaas_subconta_id,
-        value:             total,
-        dueDate:           dueDateStr,
-        description:       `Pedido ${order.order_number}`,
-        externalReference: `digital-order-${order.id}`,
-      }),
-    });
-    const payData = await payResp.json();
-    if (!payResp.ok) {
-      console.warn('[PIX] Asaas payment error, usando mock:', JSON.stringify(payData));
-      return generateMockPix({ order, total });
-    }
-    const qrResp = await fetch(`${ASAAS_BASE}/payments/${payData.id}/pixQrCode`, {
-      headers: { 'access_token': company.asaas_subconta_token },
-    });
-    const qrData = await qrResp.json();
-    return {
-      payment_id: payData.id,
-      qrcode:     qrData.encodedImage || null,
-      payload:    qrData.payload      || null,
-      expires_at: dueDate.toISOString(),
-      mode:       'asaas',
-    };
-  } catch (err) {
-    console.warn('[PIX] Asaas call falhou, usando mock:', err.message);
-    return generateMockPix({ order, total });
-  }
-}
-
 function generateMockPix({ order, total }) {
   const expiresAt = new Date(Date.now() + 30 * 60 * 1000);
-  const ref       = (order.order_number || '').replace('-', '').slice(0, 10).padEnd(10, '0');
+  const ref       = String(order.order_number || '').replace('-', '').slice(0, 10).padEnd(10, '0');
   const amt       = Number(total).toFixed(2);
   const payload   = [
     '000201',
     '26580014br.gov.bcb.pix',
-    `0136mock-${order.id.slice(0, 22)}`,
+    `0136mock-${String(order.id).slice(0, 22)}`,
     '520400005303986',
     `5406${amt}`,
     '5802BR',
@@ -138,4 +127,9 @@ function generateMockPix({ order, total }) {
   return { payment_id: `mock-${order.id}`, qrcode: null, payload, expires_at: expiresAt.toISOString(), mode: 'mock' };
 }
 
-module.exports = { generatePix };
+module.exports = {
+  generatePix,
+  PixNaoConfiguradoError,
+  PIX_NOT_CONFIGURED,
+  MENSAGEM_PIX_NAO_CONFIGURADO,
+};
