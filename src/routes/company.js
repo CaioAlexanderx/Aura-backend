@@ -4,6 +4,7 @@
 // ============================================================
 const router = require('express').Router({ mergeParams: true });
 const db = require('../config/database');
+const { normalizarTelefone } = require('../utils/telefone');
 
 router.get('/profile', async (req, res) => {
   try {
@@ -97,6 +98,13 @@ router.put('/profile', async (req, res) => {
         if (nums.length !== 0 && nums.length !== 11 && nums.length !== 14) {
           return res.status(400).json({ error: 'CNPJ/CPF invalido' });
         }
+      }
+      // 10/11/2026: telefone com +55 perde o 55 antes de gravar; com
+      // digitos a mais, 400 com mensagem gentil (nunca corta).
+      if (dbCol === 'phone') {
+        const tel = normalizarTelefone(req.body[bodyKey]);
+        if (!tel.ok) return res.status(400).json({ error: tel.error, code: tel.code, field: 'phone' });
+        req.body[bodyKey] = tel.valor;
       }
       if (dbCol === 'tax_regime' && req.body[bodyKey]) {
         const valid = ['mei', 'simples', 'simples_nacional', 'lucro_presumido', 'lucro_real', 'pessoa_fisica'];

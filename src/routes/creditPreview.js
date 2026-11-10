@@ -9,6 +9,7 @@
 
 const router = require('express').Router({ mergeParams: true });
 const db = require('../config/database');
+const { normalizarTelefone } = require('../utils/telefone');
 const { getCustomerCreditPreview } = require('../services/creditLedger');
 
 // GET /companies/:id/credit/customers/:cid/preview
@@ -27,10 +28,14 @@ router.get('/customers/:cid/preview', async (req, res) => {
 // Cadastro-relampago: cria cliente minimo (nome+telefone) + define credit_limit
 // Retorna o preview para PDV continuar o checkout sem sair da tela
 router.post('/quick-customer', async (req, res) => {
-  const { name, phone, cpf_cnpj, credit_limit } = req.body || {};
-  if (!name && !phone) {
+  const { name, cpf_cnpj, credit_limit } = req.body || {};
+  if (!name && !(req.body || {}).phone) {
     return res.status(400).json({ error: 'Nome ou telefone obrigatorio.' });
   }
+  // 10/11/2026: +55 sai antes de gravar; digitos a mais, 400 (nunca corta).
+  const tel = normalizarTelefone((req.body || {}).phone);
+  if (!tel.ok) return res.status(400).json({ error: tel.error, code: tel.code, field: 'phone' });
+  const phone = tel.valor;
   const client = await db.connect();
   try {
     await client.query('BEGIN');
