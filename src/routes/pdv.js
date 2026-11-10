@@ -94,6 +94,7 @@ const lojaEvents = require('../services/lojaEvents');
 // 09/11/2026 (migration 435): endereco de entrega da venda com frete.
 const entregaDaVenda = require('../services/entregaDaVenda');
 const { parseCustomerAddress } = require('../services/customerAddress');
+const { normalizarTelefone } = require('../utils/telefone');
 // 10/11/2026 (migration 438): NFS-e automatica da venda com servico.
 const nfseAutomatica = require('../services/nfseAutomatica');
 // 10/11/2026 (migration 440): tomador da NFS-e (nfse_tomador) gravado na venda.
@@ -197,8 +198,17 @@ async function resolveInlineCustomer(client, companyId, body, { required = false
 
   const c     = body?.customer || {};
   const name  = String(c.name     || body?.customer_name     || '').trim() || null;
-  const phone = String(c.phone    || body?.customer_phone    || '').trim() || null;
+  const phoneBruto = String(c.phone || body?.customer_phone || '').trim() || null;
   const cpf   = String(c.cpf_cnpj || body?.customer_cpf_cnpj || '').trim() || null;
+  // 10/11/2026: +55 sai antes de buscar/gravar; digitos a mais, 422 (nunca corta).
+  const tel = normalizarTelefone(phoneBruto);
+  if (!tel.ok) {
+    const err = new Error(tel.error);
+    err.statusCode = 422;
+    err.code = tel.code;
+    throw err;
+  }
+  const phone = tel.valor;
 
   if (!name && !phone && !cpf) {
     if (!required) return null;

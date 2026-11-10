@@ -8,6 +8,7 @@
 // ============================================================
 const router  = require('express').Router({ mergeParams: true });
 const db      = require('../config/database');
+const { normalizarTelefone } = require('../utils/telefone');
 const { requireAuth } = require('../middleware/auth');
 const { lookupCNPJ, validateCNPJ, sanitizeCNPJ } = require('../services/cnpj');
 const { suggestSegmentFromCnae, normalizeCnae } = require('../services/segment');
@@ -263,7 +264,11 @@ router.post('/step/regime', requireAuth, async (req, res) => {
 // Último step — conclui o onboarding
 router.post('/step/perfil', requireAuth, async (req, res) => {
   const cid = req.params.id;
-  const { trade_name, phone, email, name } = req.body;
+  const { trade_name, email, name } = req.body;
+  // 10/11/2026: +55 sai antes de gravar; digitos a mais, 400 (nunca corta).
+  const tel = normalizarTelefone(req.body.phone);
+  if (!tel.ok) return res.status(400).json({ error: tel.error, code: tel.code, field: 'phone' });
+  const phone = tel.valor;
   try {
     const { rows } = await db.query(
       `SELECT id FROM companies WHERE id=$1 AND owner_id=$2`, [cid, req.user.id]

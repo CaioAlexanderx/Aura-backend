@@ -28,6 +28,7 @@
 const router = require('express').Router();
 const { requireAuth } = require('../middleware/auth');
 const db = require('../config/database');
+const { normalizarTelefone } = require('../utils/telefone');
 const { logAuditAction, contextoDaRequisicao } = require('../middleware/auditLog');
 const {
   calculateMulticnpjValue,
@@ -252,9 +253,12 @@ router.post('/', async (req, res) => {
     vertical,
     tax_regime,
     email,
-    phone,
     address,
   } = req.body || {};
+  // 10/11/2026: +55 sai antes de gravar; digitos a mais, 400 (nunca corta).
+  const tel = normalizarTelefone((req.body || {}).phone);
+  if (!tel.ok) return res.status(400).json({ error: tel.error, code: tel.code, field: 'phone' });
+  const phone = tel.valor;
 
   if (!legal_name || String(legal_name).trim().length < 2) {
     return res

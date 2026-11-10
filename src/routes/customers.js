@@ -60,6 +60,7 @@ const router = require('express').Router({ mergeParams: true });
 const db = require('../config/database');
 const { getOwnerScopedCompanyIds } = require('../utils/ownerScope');
 const { toPhoneE164BR } = require('../utils/phone');
+const { normalizarTelefone, mesmoTelefone } = require('../utils/telefone');
 const { parseCpfCnpjInput } = require('../utils/cpfCnpj');
 const { parseTags, parsePreferences, parseImportantDates } = require('../services/customerProfileFields');
 const { attachProfessionalsToCustomers } = require('../services/matconProfessionals');
@@ -255,11 +256,16 @@ router.get('/', async (req, res) => {
 // POST / -- create customer (na empresa atual, com plan limit do OWNER inteiro)
 router.post('/', async (req, res) => {
   const companyId = req.params.id;
-  const { name, email, phone, notes, birthday, birth_date, instagram, instagram_handle, cpf_cnpj } = req.body;
+  const { name, email, notes, birthday, birth_date, instagram, instagram_handle, cpf_cnpj } = req.body;
 
   if (!name || !String(name).trim()) {
     return res.status(400).json({ error: 'name e obrigatorio' });
   }
+  // 10/11/2026: telefone com +55 perde o 55 antes de gravar; com digitos a
+  // mais, 400 com mensagem gentil (nunca corta). utils/telefone.
+  const tel = normalizarTelefone(req.body.phone);
+  if (!tel.ok) return res.status(400).json({ error: tel.error, code: tel.code, field: 'phone' });
+  const phone = tel.valor;
   // Endereco: tudo opcional; se vier, CEP com 8 digitos e UF com 2 letras.
   const addr = parseCustomerAddress(req.body);
   if (!addr.ok) return res.status(400).json({ error: addr.error, field: addr.field });
@@ -352,6 +358,25 @@ router.post('/', async (req, res) => {
 router.patch('/:cid', async (req, res) => {
   const { id: companyId, cid } = req.params;
   const body = req.body || {};
+  // 10/11/2026: telefone com +55 perde o 55 antes de gravar; com digitos a
+  // mais, 400 (nunca corta). Excecao: o formulario de edicao reenvia o
+  // telefone que JA estava gravado (cadastro antigo, importacao) -- esse
+  // segue como esta, para editar o nome nao virar erro de telefone.
+  if (body.phone !== undefined) {
+    const tel = normalizarTelefone(body.phone);
+    if (tel.ok) {
+      body.phone = tel.valor;
+    } else {
+      let atual = null;
+      try {
+        const { rows } = await db.query('SELECT phone FROM customers WHERE id = $1', [cid]);
+        atual = rows && rows[0] ? rows[0].phone : null;
+      } catch (_) { atual = null; }
+      if (atual == null || !mesmoTelefone(atual, body.phone)) {
+        return res.status(400).json({ error: tel.error, code: tel.code, field: 'phone' });
+      }
+    }
+  }
   const fieldMap = {
     name: 'name', email: 'email', phone: 'phone', notes: 'notes',
     cpf_cnpj: 'cpf_cnpj', birth_date: 'birth_date', birthday: 'birth_date',
