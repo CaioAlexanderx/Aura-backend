@@ -103,6 +103,66 @@ const PASSOS = ['certificado', 'prefeitura', 'dados_fiscais', 'codigo_padrao', '
 const CODIGOS_PREFEITURA = new Set(['E0084', 'E0116', 'E0120']);
 
 /**
+ * Rejeições que só acontecem no ambiente de testes do gov.br (produção
+ * restrita), nunca por erro da loja. Quando a nota de teste volta SÓ com
+ * códigos desta lista, o teste conta como pronto, com aviso, e "Ligar" fica
+ * liberado. Qualquer outro código junto mantém o bloqueio.
+ *
+ *   E0312 — "O código de tributação nacional informado não está
+ *           administrado pelo município de incidência do ISSQN na data de
+ *           competência". Caso real de 10/11/2026: loja de São Paulo
+ *           capital (IBGE 3550308, ME/EPP) com o MESMO cTribNac (130501)
+ *           que ela já usa para emitir no ambiente de PRODUÇÃO do Emissor
+ *           Nacional; as três notas de teste voltaram só com o E0312 (sem
+ *           E0084). O município parametrizou o código na produção e não na
+ *           produção restrita.
+ *
+ * Nunca entram aqui os códigos da prefeitura (E0084, E0116, E0120): eles
+ * dependem de um cadastro que a loja precisa pedir, e a nota de verdade
+ * voltaria com o mesmo aviso. aceitoComAvisoDoAmbienteDeTestes recusa esses
+ * códigos mesmo que alguém os ponha na lista.
+ */
+const ERROS_SO_DO_AMBIENTE_DE_TESTES = Object.freeze(['E0312']);
+
+const AVISO_SO_DO_AMBIENTE_DE_TESTES = 'O gov.br aceitou o certificado, os dados e o cadastro da sua empresa. '
+  + 'Só o código do serviço ainda não está habilitado pela prefeitura no ambiente de testes do governo. '
+  + 'Pode ligar: a primeira nota de verdade confirma tudo.';
+
+/** Códigos ("E0312") de error_codes ([{ codigo, descricao }]) da nota. */
+function codigosDoErro(errorCodes) {
+  let lista = errorCodes;
+  if (typeof lista === 'string') {
+    try { lista = JSON.parse(lista); } catch { lista = null; }
+  }
+  if (!Array.isArray(lista)) return [];
+  return lista
+    .map((e) => (e && typeof e === 'object' ? e.codigo : e))
+    .filter((c) => c != null && String(c).trim() !== '')
+    .map((c) => String(c).trim().toUpperCase());
+}
+
+/**
+ * A nota de teste rejeitada só com códigos de ERROS_SO_DO_AMBIENTE_DE_TESTES?
+ * Lista vazia (rejeição sem código) não conta; código da prefeitura nunca conta.
+ */
+function aceitoComAvisoDoAmbienteDeTestes(errorCodes) {
+  const cods = codigosDoErro(errorCodes);
+  if (!cods.length) return false;
+  return cods.every((c) => ERROS_SO_DO_AMBIENTE_DE_TESTES.includes(c) && !CODIGOS_PREFEITURA.has(c));
+}
+
+/**
+ * O último teste foi rejeitado só pelo ambiente de testes? Lê os error_codes
+ * da nota de teste (ultimo_teste_nfse_id), que o repo traz em
+ * config.ultimo_teste_error_codes — não só o ultimo_teste_codigo, que guarda
+ * um código só.
+ */
+function testeComAvisoDoAmbiente(config) {
+  return !!config && config.ultimo_teste_status === 'rejeitado'
+    && aceitoComAvisoDoAmbienteDeTestes(config.ultimo_teste_error_codes);
+}
+
+/**
  * Série reservada para a nota de teste em produção restrita. Fica na faixa
  * de "aplicativo próprio" (00001 a 49999 — Anexo I do leiaute da DPS,
  * campo serie) e tem contador próprio (teste_next_dps_number): o teste
@@ -157,6 +217,7 @@ function passoPrefeitura(config) {
   const cod = config.ultimo_teste_codigo;
   if (st === 'rejeitado' && CODIGOS_PREFEITURA.has(cod)) return passo('problema', MOTIVO_PREFEITURA[cod], { codigo: cod });
   if (st === 'ok') return passo('ok', 'A prefeitura já liberou a sua empresa: a nota de teste passou.');
+  if (testeComAvisoDoAmbiente(config)) return passo('ok', 'O gov.br aceitou o cadastro da sua empresa na nota de teste.');
   if (temTexto(config.inscricao_municipal) && config.prefeitura_cadastro_confirmado === 'sim') {
     return passo('ok', 'Inscrição Municipal informada e cadastro na prefeitura feito.');
   }
@@ -202,6 +263,13 @@ function passoTeste(config, basePronta) {
     nfse_id: config.ultimo_teste_nfse_id || null,
   } : undefined;
   if (st === 'ok') return passo('ok', 'O gov.br aceitou a nota de teste.', extra);
+  // Pronto com aviso: estado 'ok' (libera o Ligar), motivo = aviso e o
+  // campo `aviso` com o mesmo texto, para o app pintar o cartão de aviso.
+  if (testeComAvisoDoAmbiente(config)) {
+    return passo('ok', AVISO_SO_DO_AMBIENTE_DE_TESTES, {
+      ...extra, aviso: AVISO_SO_DO_AMBIENTE_DE_TESTES, codigos: codigosDoErro(config.ultimo_teste_error_codes),
+    });
+  }
   if (st === 'rejeitado' || st === 'erro') {
     return passo('problema', config.ultimo_teste_mensagem || 'A nota de teste voltou com um aviso do gov.br.', extra);
   }
@@ -438,4 +506,5 @@ module.exports = {
   resolverRegime, avaliarAptidao, avaliarPassos, validarCamposNacional, validarRetencao,
   faltasParaLigar, faixaDaSerie, sugestaoDaEmpresa, opSimpNacDoRegime,
   PASSOS, CODIGOS_PREFEITURA, SERIE_TESTE,
+  ERROS_SO_DO_AMBIENTE_DE_TESTES, AVISO_SO_DO_AMBIENTE_DE_TESTES, aceitoComAvisoDoAmbienteDeTestes, codigosDoErro,
 };

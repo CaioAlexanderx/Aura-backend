@@ -49,7 +49,23 @@ async function carregarContexto(db, companyId) {
   } catch (err) {
     if (err.code !== '42P01') throw err; // cofre ainda não criado = sem certificado
   }
-  return { config: cfg[0] || null, company: comp[0] || null, certInfo };
+  const config = cfg[0] || null;
+  if (config) config.ultimo_teste_error_codes = await errosDoUltimoTeste(db, companyId, config);
+  return { config, company: comp[0] || null, certInfo };
+}
+
+/**
+ * error_codes ([{ codigo, descricao }]) da última nota de teste rejeitada
+ * (nfse_config.ultimo_teste_nfse_id). O passo "teste" decide por eles se a
+ * rejeição é só do ambiente de testes (E0312). null fora desse caso.
+ */
+async function errosDoUltimoTeste(db, companyId, config) {
+  if (config.ultimo_teste_status !== 'rejeitado' || !config.ultimo_teste_nfse_id) return null;
+  const { rows } = await db.query(
+    'SELECT error_codes FROM nfse WHERE id = $1 AND company_id = $2',
+    [config.ultimo_teste_nfse_id, companyId]
+  );
+  return rows[0] ? rows[0].error_codes || null : null;
 }
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
