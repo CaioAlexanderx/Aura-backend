@@ -1570,51 +1570,17 @@ router.delete('/upload-image', requireRole('client', 'analyst', 'admin'), async 
   }
 });
 
-router.post('/setup-pix', requireRole('client', 'analyst', 'admin'), async (req, res) => {
-  const cid = req.params.id;
-  const { name, email, cpf_cnpj, mobile_phone, company_type = 'MEI', birth_date } = req.body;
-  if (!name || !email || !cpf_cnpj || !mobile_phone) {
-    return res.status(400).json({ error: 'Nome, e-mail, CPF/CNPJ e celular sao obrigatorios' });
-  }
-  if ((company_type === 'INDIVIDUAL' || company_type === 'MEI') && !birth_date) {
-    return res.status(400).json({ error: 'Data de nascimento e obrigatoria para CPF/MEI' });
-  }
-  if (birth_date && !/^\d{4}-\d{2}-\d{2}$/.test(birth_date)) {
-    return res.status(400).json({ error: 'Data de nascimento deve estar no formato AAAA-MM-DD' });
-  }
-  const ASAAS_BASE = (process.env.ASAAS_API_URL || 'https://api.asaas.com/api/v3').replace(/\/api\/v3\/?$/, '');
-  const ASAAS_MASTER_KEY = process.env.ASAAS_API_KEY;
-  if (!ASAAS_MASTER_KEY) {
-    return res.status(503).json({ error: 'Integracao Pix nao configurada no servidor. Contate o suporte.' });
-  }
-  try {
-    const cleanCpfCnpj = cpf_cnpj.replace(/\D/g, '');
-    const cleanPhone   = mobile_phone.replace(/\D/g, '');
-    const resp = await fetch(`${ASAAS_BASE}/v3/accounts`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'access_token': ASAAS_MASTER_KEY, 'User-Agent': 'Aura-Backend/1.0' },
-      body: JSON.stringify({
-        name, email, loginEmail: email, cpfCnpj: cleanCpfCnpj, mobilePhone: cleanPhone,
-        companyType: company_type, birthDate: birth_date || undefined,
-        incomeValue: 1000, address: 'Rua Principal', addressNumber: '1', province: 'Centro', postalCode: '01310100',
-      }),
-    });
-    const data = await resp.json();
-    if (!resp.ok) {
-      const errMsg = (data.errors && data.errors[0] && data.errors[0].description) || data.message || 'Erro ao criar conta de pagamentos';
-      return res.status(400).json({ error: errMsg });
-    }
-    const subcontaId = data.walletId || data.id;
-    const subcontaToken = data.apiKey;
-    await db.query(
-      `UPDATE companies SET asaas_subconta_id = $1, asaas_subconta_token = $2, updated_at = NOW() WHERE id = $3`,
-      [subcontaId, subcontaToken, cid]
-    );
-    res.json({ success: true, message: 'Pix ativado com sucesso! Ja pode receber pagamentos.' });
-  } catch (err) {
-    console.error('[setup-pix] error:', err.message);
-    res.status(500).json({ error: 'Erro ao ativar Pix. Tente novamente.' });
-  }
+// RA-04 (10/11/2026): "Ativar Pix" pela subconta Asaas desativado. A rota
+// criava a conta na Asaas com o token mestre e depois gravava em
+// companies.asaas_subconta_* — colunas que nao existem no banco de producao —
+// e caia em 500 deixando uma conta orfa na Asaas. Nenhum botao do app a
+// chama hoje (o hook useDigitalChannel ainda a declara). O Pix da loja usa
+// a chave cadastrada em Pagamentos; o Recebe na Aura tera subconta propria.
+router.post('/setup-pix', requireRole('client', 'analyst', 'admin'), (req, res) => {
+  res.status(410).json({
+    error: 'Esta forma de ativar o Pix foi desativada. Para receber Pix na loja, cadastre a sua chave Pix em Pagamentos.',
+    code: 'SUBCONTA_LEGADA_DESATIVADA',
+  });
 });
 
 module.exports = router;

@@ -81,6 +81,7 @@ const lojaEvents          = require('../services/lojaEvents');
 const { validateCpfCnpj } = require('../services/cpfCnpj');
 // Toque repetido no checkout nao vira pedido novo (migration 416, 27/10/2026).
 const pedidoIdem          = require('../services/pedidoOnlineIdempotente');
+const pedidoSemPix        = require('../services/pedidoSemPix');
 // Pagar na entrega com forma e troco; pedido espera o aceite (tq-44).
 const pagarNaEntrega      = require('../services/pagarNaEntrega');
 const aceiteDoPedido      = require('../services/aceiteDoPedido');
@@ -983,22 +984,36 @@ router.post('/:slug/order', async (req, res) => {
 
     let pixData = null;
     if (pmethod === 'pix') {
-      if (hasMpGateway) {
-        try {
-          pixData = await createMpPixPayment({
-            accessToken:   mpGateway.access_token,
-            total,
-            orderId:       order.id,
-            orderNumber:   order.order_number,
-            customerEmail: customer_email || null,
-            description:   `Pedido #${order.order_number}`,
-          });
-          await db.query(
-            `UPDATE digital_orders SET mp_payment_id = $1, updated_at = NOW() WHERE id = $2`,
-            [pixData.payment_id, order.id]
-          );
-        } catch (mpErr) {
-          console.error('[storefront] MP Pix error, fallback to static Pix:', mpErr.message);
+      try {
+        if (hasMpGateway) {
+          try {
+            pixData = await createMpPixPayment({
+              accessToken:   mpGateway.access_token,
+              total,
+              orderId:       order.id,
+              orderNumber:   order.order_number,
+              customerEmail: customer_email || null,
+              description:   `Pedido #${order.order_number}`,
+            });
+            await db.query(
+              `UPDATE digital_orders SET mp_payment_id = $1, updated_at = NOW() WHERE id = $2`,
+              [pixData.payment_id, order.id]
+            );
+          } catch (mpErr) {
+            console.error('[storefront] MP Pix error, fallback to static Pix:', mpErr.message);
+            pixData = await generatePix({ order, company_id: cid, total });
+            if (pixData) {
+              await db.query(`
+                UPDATE digital_orders SET
+                  asaas_payment_id     = $1,
+                  asaas_pix_qrcode     = $2,
+                  asaas_pix_payload    = $3,
+                  asaas_pix_expires_at = $4
+                WHERE id = $5
+              `, [pixData.payment_id, pixData.qrcode, pixData.payload, pixData.expires_at, order.id]);
+            }
+          }
+        } else {
           pixData = await generatePix({ order, company_id: cid, total });
           if (pixData) {
             await db.query(`
@@ -1011,18 +1026,13 @@ router.post('/:slug/order', async (req, res) => {
             `, [pixData.payment_id, pixData.qrcode, pixData.payload, pixData.expires_at, order.id]);
           }
         }
-      } else {
-        pixData = await generatePix({ order, company_id: cid, total });
-        if (pixData) {
-          await db.query(`
-            UPDATE digital_orders SET
-              asaas_payment_id     = $1,
-              asaas_pix_qrcode     = $2,
-              asaas_pix_payload    = $3,
-              asaas_pix_expires_at = $4
-            WHERE id = $5
-          `, [pixData.payment_id, pixData.qrcode, pixData.payload, pixData.expires_at, order.id]);
-        }
+      } catch (pixErr) {
+        // RA-04: sem chave Pix valida (e sem o Mercado Pago) o Pix nao sai.
+        // Em producao nao existe QR falso: o pedido recem-criado e desfeito
+        // e a cliente escolhe outra forma de pagamento.
+        if (!pedidoSemPix.ehPixNaoConfigurado(pixErr)) throw pixErr;
+        await pedidoSemPix.desfazerPedidoSemPix(db, order, { comChave: !!idemKey });
+        return pedidoSemPix.responderPixNaoConfigurado(res, pixErr);
       }
     }
 
