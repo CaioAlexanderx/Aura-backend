@@ -188,7 +188,10 @@ test('loja sem promocao: GET /products e variantes iguais, so com os campos novo
     'duration_minutes', 'is_active', 'is_group_shared', 'supplier_id', 'supplier', 'stock_company_id', 'created_at',
     'has_variants', 'variants_stock_total', 'variant_barcodes'];
   const NOVOS = ['promo_price', 'promo_starts_at', 'promo_ends_at', 'em_promocao', 'preco_efetivo'];
-  expect(Object.keys(p).sort()).toEqual([...ANTES, ...NOVOS].sort());
+  // migration 437: campos de NFS-e do servico (nulos para quem nao usa)
+  const NFSE = ['nfse_ctribnac', 'nfse_cnbs', 'nfse_ctribmun', 'nfse_aliquota_iss', 'nfse_descricao',
+    'ibscbs_cst', 'ibscbs_cclasstrib', 'ibscbs_cindop'];
+  expect(Object.keys(p).sort()).toEqual([...ANTES, ...NOVOS, ...NFSE].sort());
   expect(p).toMatchObject({ price: 59.9, promo_price: null, promo_starts_at: null, promo_ends_at: null, em_promocao: false, preco_efetivo: 59.9 });
 
   const um = await request(app).get(`/companies/${matriz}/products/${pid}/variants`);

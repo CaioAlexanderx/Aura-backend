@@ -129,9 +129,28 @@ async function abrirCertificado(db, companyId, cnpjEmpresa) {
   return c;
 }
 
-/** Pedido da rota/serviço → entrada normalizada do dpsBuilder (sem série/número). */
-function montarEntrada({ nota, config, company, tpAmb, dhEmi }) {
+const temTexto = (v) => typeof v === 'string' && v.trim() !== '';
+
+/**
+ * Descrição da nota: a da nota, senão a do item para NFS-e (nfse_descricao),
+ * senão o nome do item. Sem item, a da nota como sempre foi.
+ */
+function descricaoDoServico(nota, item) {
+  if (!item || temTexto(nota.descricao)) return nota.descricao;
+  if (temTexto(item.nfse_descricao)) return item.nfse_descricao;
+  return item.name;
+}
+
+/**
+ * Pedido da rota/serviço → entrada normalizada do dpsBuilder (sem série/número).
+ * `item` (opcional) = serviço do estoque citado pela nota (repo.buscarItem).
+ * Precedência por campo: valor explícito na nota → valor do item → padrão da
+ * empresa (nfse_config). Sem item, a entrada sai igual à de antes.
+ * cTribMun e IBS/CBS do item ainda não entram no leiaute (PR próprio).
+ */
+function montarEntrada({ nota, config, company, tpAmb, dhEmi, item = null }) {
   const regime = resolverRegime(config);
+  const doItem = (col) => (item && item[col] != null && item[col] !== '' ? item[col] : null);
   const t = nota.tomador;
   const tomador = t && (t.doc || t.nome) ? {
     doc: t.doc, nome: t.nome,
@@ -153,15 +172,16 @@ function montarEntrada({ nota, config, company, tpAmb, dhEmi }) {
     },
     tomador,
     servico: {
-      cTribNac: String(nota.ctribnac || config.ctribnac_padrao || ''),
-      cNBS: nota.cnbs || config.cnbs_padrao || null,
-      descricao: nota.descricao,
+      cTribNac: String(nota.ctribnac || doItem('nfse_ctribnac') || config.ctribnac_padrao || ''),
+      cNBS: nota.cnbs || doItem('nfse_cnbs') || config.cnbs_padrao || null,
+      descricao: descricaoDoServico(nota, item),
       cLocPrestacao: onlyDigits(nota.municipio_prestacao || config.municipio_ibge),
     },
     valores: {
       vServ: Number(nota.valor),
       tpRetISSQN: retido ? 2 : 1,
-      pAliq: retido ? Number(nota.aliquota_iss != null ? nota.aliquota_iss : config.default_iss_rate) : null,
+      pAliq: retido ? Number(nota.aliquota_iss != null ? nota.aliquota_iss
+        : (doItem('nfse_aliquota_iss') != null ? doItem('nfse_aliquota_iss') : config.default_iss_rate)) : null,
       pTotTribSN: config.p_tot_trib_sn != null ? Number(config.p_tot_trib_sn) : null,
       totTrib: nota.tot_trib || null,
     },
@@ -277,7 +297,7 @@ async function retomar(db, rowCurta, env, ctx) {
  * Emite uma NFS-e pelo emissor nacional.
  * @param db   pool pg (query + connect)
  * @param {{ companyId, idempotencyKey, nota }} p
- *   nota = { descricao, valor, competencia?, ctribnac?, cnbs?, municipio_prestacao?,
+ *   nota = { descricao, valor, competencia?, ctribnac?, cnbs?, municipio_prestacao?, product_id?,
  *            tomador?: { doc, nome, email?, fone?, im?, endereco? }, iss_retido?, aliquota_iss?,
  *            tot_trib?: { fed, est, mun }, customer_id?, payment_id?, source_type? }
  * @param ctx  { transport?, now?, timeoutMs?, retry? } (testes)
@@ -310,7 +330,21 @@ async function emitir(db, { companyId, idempotencyKey, nota = {} }, ctx = {}) {
   const env = { config, company, ep };
   if (existente) return retomar(db, existente, env, ctx);
 
-  const entrada = montarEntrada({ nota, config, company, tpAmb: ep.tpAmb, dhEmi: comMargem(ctx) });
+  // Serviço do estoque citado pela nota (migration 437). Só numa emissão
+  // nova: a retomada usa os dados já gravados (dps_dados), então editar o
+  // item depois não muda uma nota que já tem número.
+  let item = null;
+  if (nota.product_id) {
+    item = await repo.buscarItem(db, companyId, nota.product_id);
+    if (!item) {
+      throw new NfseNacionalError(
+        'Não encontramos este serviço no estoque desta empresa. Confira se ele não foi excluído — item de outra empresa do grupo só vale aqui quando está compartilhado.',
+        'NOT_FOUND'
+      );
+    }
+  }
+
+  const entrada = montarEntrada({ nota, config, company, tpAmb: ep.tpAmb, dhEmi: comMargem(ctx), item });
   const erros = validarEntrada(entrada, { semNumero: true });
   if (erros.length) throw new NfseNacionalError('Dados da nota inválidos: ' + erros.join(' '), 'INVALID_INPUT', erros);
 

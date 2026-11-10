@@ -19,6 +19,7 @@
 const { isValidCnpj } = require('../../utils/cpfCnpj');
 const { cnpjDoCn } = require('../sefazSp/certCnpj');
 const { normalizarSerie } = require('./dpsBuilder');
+const { normalizarAliquotaIss } = require('../camposNfseDoItem');
 
 const onlyDigits = (v) => String(v == null ? '' : v).replace(/\D/g, '');
 
@@ -137,6 +138,13 @@ function validarCamposNacional(body = {}) {
     const v = Number(body.next_dps_number);
     if (!Number.isInteger(v) || v < 1 || v > 999999999999999) erros.push('next_dps_number deve ser inteiro positivo.');
     else data.next_dps_number = v;
+  }
+  // 10/11/2026 (migration 437): alíquota padrão do ISS da empresa, último
+  // degrau de nota → item → empresa. Mesma régua do cadastro do item.
+  if (body.default_iss_rate !== undefined) {
+    const r = normalizarAliquotaIss(body.default_iss_rate);
+    if (r.error || r.value === null) erros.push('default_iss_rate deve ser a alíquota do ISS em %, entre 0 e 5 (ex.: 2 ou 2,5).');
+    else data.default_iss_rate = r.value;
   }
   return { data, erros };
 }
