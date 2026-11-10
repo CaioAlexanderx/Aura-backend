@@ -161,6 +161,10 @@ router.use('/nfe', require('./nfe'));
 // 14/10/2026: o dono envia o proprio certificado A1 (mesmo certStore da Gestao
 // Aura; so o dono, CNPJ do certificado confere). Nao mexe em /nfe/certificate.
 router.use('/fiscal-certificate', require('./fiscalCertificate'));
+// 10/11/2026 (migration 438): emissao automatica da NFS-e (estado por
+// origem, completar tomador, tentar de novo, 2a via). ANTES de /nfse: la o
+// GET /:nid engoliria "automatica".
+router.use('/nfse/automatica', require('./nfseAutomatica'));
 router.use('/nfse', require('./nfse'));
 router.use('/storage', require('./storage'));
 router.use('/obligations', require('./fiscalObligations'));

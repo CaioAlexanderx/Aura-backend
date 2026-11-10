@@ -36,6 +36,8 @@ const {
   assertOticaEnabled, erroOticaDesligada, carregarOticaSettings, OTICA_DEFAULTS, waParam, primeiroNome,
 } = require('./otica');
 const waOutbox = require('../services/waOutbox');
+// 10/11/2026 (migration 438): NFS-e automatica da OS concluida.
+const nfseAutomatica = require('../services/nfseAutomatica');
 
 // ─── Gate do modulo ──────────────────────────────────────────
 //
@@ -983,6 +985,12 @@ router.post('/:osId/status', async function (req, res) {
     );
 
     const atualizada = await carregarOs(os.id, cid);
+
+    // NFS-e automatica (migration 438): a OS concluida emite a nota dos
+    // servicos. So agenda, depois do UPDATE; nunca segura nem derruba o balcao.
+    if (status === nfseAutomatica.STATUS_OS_QUE_EMITE && atualizada) {
+      nfseAutomatica.aoConcluirOs({ companyId: cid, osId: os.id });
+    }
 
     // Aviso automatico de "oculos prontos" (otica_settings.wa_ready_auto).
     // Best-effort: a transicao ja esta gravada e um problema na fila do

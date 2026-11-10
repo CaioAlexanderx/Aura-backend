@@ -32,6 +32,8 @@ const crypto  = require('crypto');
 const db      = require('../config/database');
 const collectionNotice = require('../services/credit/collectionNotice');
 const creditLedger     = require('../services/creditLedger');
+// 10/11/2026 (migration 438): baixa do saldo da encomenda emite a NFS-e da venda com servico.
+const nfseAutomatica   = require('../services/nfseAutomatica');
 const pagamentoDoPedido = require('../services/pagamentoDoPedidoStudio');
 // QA final 28/09/2026 (LJ-33): pedido cancelado e etapa 'cancelled' tambem
 // na leitura — o cancelamento so mudava `status`, e o quadro lia a etapa.
@@ -456,6 +458,7 @@ router.post('/orders/:oid/registrar-pagamento', async function(req, res) {
     const remaining = parseFloat(after[0]?.remaining || 0);
 
     await client.query('COMMIT');
+    nfseAutomatica.aoReceberPagamento({ companyId: cid, result: null, saleId: oid });
     return res.json({
       success:        true,
       installment_id: inst.id,

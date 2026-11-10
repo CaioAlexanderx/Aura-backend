@@ -94,6 +94,8 @@ const lojaEvents = require('../services/lojaEvents');
 // 09/11/2026 (migration 435): endereco de entrega da venda com frete.
 const entregaDaVenda = require('../services/entregaDaVenda');
 const { parseCustomerAddress } = require('../services/customerAddress');
+// 10/11/2026 (migration 438): NFS-e automatica da venda com servico.
+const nfseAutomatica = require('../services/nfseAutomatica');
 
 const fmt = (v) => parseFloat(v || 0).toFixed(2);
 const SP_DATE_NOW = "(NOW() AT TIME ZONE 'America/Sao_Paulo')::date";
@@ -787,6 +789,10 @@ async function handleSale(req, res, opts = {}) {
         }, { exceto: quemVendeu });
       }
     });
+    // 10/11/2026 (migration 438): venda com servico emite a NFS-e sozinha
+    // (services/nfseAutomatica). So agenda (setImmediate), nunca lanca:
+    // com NFSE_AUTOMATICA_ENABLED desligada nao faz nem uma consulta.
+    nfseAutomatica.aoFinalizarVenda({ companyId: req.params.id, saleId: sale.id });
 
     const { rows: saleItems } = await db.query(
       `SELECT si.*, p.name AS product_name FROM sale_items si

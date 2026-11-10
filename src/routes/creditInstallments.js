@@ -57,6 +57,8 @@ const { buildStaticBrCode, validatePixKey, sanitizeTxid } = require('../services
 const collectionNotice = require('../services/credit/collectionNotice');
 // 04/11/2026: recebimento avisa o celular de quem cuida do dinheiro.
 const { avisarRecebimento } = require('../services/credit/avisoDeRecebimento');
+// 10/11/2026 (migration 438): recebimento emite a NFS-e da venda com servico.
+const nfseAutomatica = require('../services/nfseAutomatica');
 // Fase 6: a régua do crediário passa a poder enfileirar na fila paga do
 // WhatsApp (wa_outbox). Ligar isso é o único botão desta tela que gasta
 // dinheiro por clique — daí o gate próprio no PUT de regras.
@@ -845,6 +847,7 @@ router.patch('/installments/:iid/pay', async (req, res) => {
       companyId, customerId: ins.customer_id, result, amount: payAmount,
       method: payment_method || 'dinheiro', userId: req.user?.id,
     });
+    nfseAutomatica.aoReceberPagamento({ companyId, result });
 
     const { rows: updated } = await pool.query(
       `SELECT * FROM credit_installments WHERE id=$1`, [installmentId]
