@@ -8,6 +8,7 @@
 
 const { getCertificateInfo } = require('../sefazSp/certStore');
 const { lerNfse } = require('./nfseParser');
+const { productVisibilityWhere } = require('../../utils/companyGroup');
 
 const onlyDigits = (v) => String(v == null ? '' : v).replace(/\D/g, '');
 
@@ -46,6 +47,42 @@ async function carregarContexto(db, companyId) {
     if (err.code !== '42P01') throw err; // cofre ainda não criado = sem certificado
   }
   return { config: cfg[0] || null, company: comp[0] || null, certInfo };
+}
+
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const COLS_ITEM_NFSE = `nfse_ctribnac, nfse_cnbs, nfse_ctribmun, nfse_aliquota_iss, nfse_descricao,
+  ibscbs_cst, ibscbs_cclasstrib, ibscbs_cindop`;
+
+/**
+ * Item do estoque (serviço) citado pela nota, com os campos de NFS-e
+ * (migration 437). Lido pela MESMA regra de visibilidade do Estoque e do
+ * Caixa (productVisibilityWhere): o item compartilhado do grupo
+ * (is_group_shared) vale para qualquer empresa do grupo — ler com
+ * `company_id = $2` repetiria o erro da NFC-e, que não achava o item
+ * compartilhado vendido por outra empresa do grupo. Item arquivado
+ * (is_active = false) não vale.
+ * Base sem a 437 (42703): devolve o item sem os campos (a nota usa o nome
+ * e o padrão da empresa) em vez de derrubar a emissão.
+ * @returns {object|null} null = não existe ou não é visível para a empresa
+ */
+async function buscarItem(db, companyId, productId) {
+  if (!UUID_RE.test(String(productId || ''))) return null;
+  const where = `id = $1 AND is_active IS NOT FALSE AND ${productVisibilityWhere('$2')}`;
+  try {
+    const { rows } = await db.query(
+      `SELECT id, company_id, name, unit, ${COLS_ITEM_NFSE} FROM products WHERE ${where}`,
+      [productId, companyId]
+    );
+    return rows[0] || null;
+  } catch (err) {
+    if (err.code !== '42703') throw err;
+    console.warn('[nfse nacional] item sem os campos de NFS-e: base sem a migration 437');
+    const { rows } = await db.query(
+      `SELECT id, company_id, name, unit FROM products WHERE ${where}`,
+      [productId, companyId]
+    );
+    return rows[0] || null;
+  }
 }
 
 /**
@@ -185,7 +222,7 @@ async function atualizarXmlNfse(db, id, xml) {
 }
 
 module.exports = {
-  buscarPorChave, buscarPorId, carregarContexto, reservar,
+  buscarPorChave, buscarPorId, carregarContexto, buscarItem, reservar,
   marcarTransmitindo, marcarSemConfirmacao, marcarErro,
   gravarAutorizada, gravarRejeitada, gravarCancelada, gravarCancelamentoRecusado, atualizarXmlNfse,
 };

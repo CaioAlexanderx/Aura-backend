@@ -89,6 +89,9 @@ function notaNacionalDoCorpo(body) {
     tot_trib: b.tot_trib || undefined,
     customer_id: b.customer_id || undefined,
     payment_id: b.payment_id || undefined,
+    // migration 437: serviço do estoque; os campos dele preenchem o que a
+    // nota não trouxe (nota → item → padrão da empresa).
+    product_id: b.product_id || undefined,
     source_type: b.source_type || undefined,
     tomador: temTomador ? {
       doc: b.recipient_doc,
@@ -312,6 +315,10 @@ router.put('/config', requireAuth, requireWrite, async (req, res) => {
       if (providerFinal === 'nacional') {
         if (body.ambiente !== undefined) camposNac.ambiente = body.ambiente;
         if (body.serie !== undefined) camposNac.serie = body.serie;
+        // alíquota padrão do ISS: já estava em ALLOWED (sem validar); no
+        // nacional ela é o último degrau da precedência nota → item → empresa,
+        // então passa pela mesma régua do cadastro do item (0 a 5).
+        if (body.default_iss_rate !== undefined) camposNac.default_iss_rate = body.default_iss_rate;
         if (body.certificate_url || body.certificate_pwd) {
           return res.status(400).json({
             error: 'No emissor nacional o certificado é o A1 da empresa: envie o arquivo .pfx em Configurações > Nota Fiscal.',
@@ -382,7 +389,11 @@ router.post('/', requireAuth, requireWrite, async (req, res) => {
     recipient_type,
   } = req.body || {};
 
-  if (!service_description) return res.status(400).json({ error: 'service_description obrigatorio' });
+  // Com product_id a descrição pode vir do item (emissor nacional); sem
+  // item, segue obrigatória como sempre.
+  if (!service_description && !(req.body && req.body.product_id)) {
+    return res.status(400).json({ error: 'service_description obrigatorio' });
+  }
   if (!service_amount || service_amount <= 0) {
     return res.status(400).json({ error: 'service_amount deve ser > 0' });
   }
@@ -410,6 +421,9 @@ router.post('/', requireAuth, requireWrite, async (req, res) => {
       return emitirNacional(req, res);
     }
 
+    // providers antigos: descrição e tomador obrigatórios (como sempre foi);
+    // product_id só é lido pelo emissor nacional.
+    if (!service_description) throw new NfseProviderError('service_description obrigatorio', 'INVALID_INPUT');
     // providers antigos: tomador obrigatório (como sempre foi)
     if (!recipient_name) throw new NfseProviderError('recipient_name obrigatorio', 'INVALID_INPUT');
     if (!recipient_doc) throw new NfseProviderError('recipient_doc (CPF/CNPJ) obrigatorio', 'INVALID_INPUT');

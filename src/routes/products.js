@@ -63,6 +63,10 @@ const { excluirProdutoComHistorico } = require('../services/excluirProduto');
 const {
   camposDoProduto, camposDaVariante, colunasPromo, colunasPromoNulas, comColunasPromo,
 } = require('../services/precoEfetivo');
+// Migration 437 (10/11/2026): campos de NFS-e do servico (cTribNac, NBS,
+// cTribMun, aliquota do ISS, descricao da nota, IBS/CBS). Validacao e
+// leitura num lugar so; o emissor (services/nfseNacional) le as colunas.
+const { lerCamposNfse, camposNfseDaLinha, COLUNAS_SELECT: COLS_NFSE } = require('../services/camposNfseDoItem');
 
 // ─── Fase 1 fornecedores (16/09/2026) ────────────────────────
 //
@@ -249,7 +253,7 @@ router.get('/', async (req, res) => {
     // dos testes de integracao, e no caminho feliz ela e pura perda.
     // 427 (De/Por): as colunas promo_* entram por fora da escada da ficha;
     // base sem a 427 cai para NULL e memoriza por 5 min (precoEfetivo.js).
-    const dataP = comColunasPromo((comPromo) => comFallbackDeFicha((colsFicha, colDuracao, colsMatcon, colCartao) => db.query(
+    const dataP = comColunasPromo((comPromo) => comFallbackDeFicha((colsFicha, colDuracao, colsMatcon, colCartao, colsNfse) => db.query(
       `SELECT id, name, sku, barcode, category, description, price, cost_price,
               stock_qty, stock_min, stock_max, unit, color, size, image_url, ncm,
               -- brand (migration 261) e mais antiga que a 305/342/350 acima,
@@ -257,6 +261,7 @@ router.get('/', async (req, res) => {
               brand,
               ${colsMatcon}
               ${colCartao}
+              ${colsNfse}
               ${colsFicha}
               ${colDuracao}
               ${comPromo ? colunasPromo() : colunasPromoNulas()},
@@ -310,6 +315,9 @@ router.get('/', async (req, res) => {
       // Migration 351 — preco no cartao. null = segue o % da loja (e tambem
       // o valor quando a base ainda nao tem a coluna).
       card_price: cardPriceOut(r.card_price),
+      // Migration 437 — campos de NFS-e do servico. null = segue o padrao
+      // da empresa (e tambem o valor quando a base ainda nao tem a coluna).
+      ...camposNfseDaLinha(r),
       color: r.color || '', size: r.size || '',
       image_url: r.image_url || '',
       ncm: r.ncm || '',
@@ -574,6 +582,11 @@ router.post('/', async (req, res) => {
   const cartao = sanitizeCardPrice(req.body.card_price);
   if (cartao.error) return res.status(400).json({ error: cartao.error });
 
+  // Migration 437 — campos de NFS-e do servico. Validar antes de criar:
+  // codigo errado que vira NULL em silencio so aparece como nota rejeitada.
+  const nfseItem = lerCamposNfse(req.body);
+  if (nfseItem.erros.length) return res.status(400).json({ error: nfseItem.erros.join(' '), detalhes: nfseItem.erros });
+
   const isGroupShared = req.body.is_group_shared !== undefined
     ? !!req.body.is_group_shared
     : defaultShared;
@@ -734,6 +747,27 @@ router.post('/', async (req, res) => {
       }
     }
 
+    // 10/11/2026 (NFS-e do servico, migration 437): UPDATE separado, mesmo
+    // motivo do card_price (INSERT posicional), e so com valor de verdade.
+    // Os campos sao gravados para QUALQUER unidade, nao so 'srv': a unidade
+    // pode mudar depois e o emissor so le estas colunas quando a nota cita o
+    // item (product_id). Ignorar perderia o que a lojista digitou.
+    // Base atras da 437 (42703): o produto ja existe, entao segue sem eles.
+    const nfseComValor = Object.entries(nfseItem.campos).filter(([, v]) => v !== null);
+    if (nfseComValor.length) {
+      try {
+        const sets = nfseComValor.map(([col], i) => `${col} = $${i + 2}`);
+        const upd = await db.query(
+          `UPDATE products SET ${sets.join(', ')} WHERE id = $1 RETURNING *`,
+          [result.rows[0].id, ...nfseComValor.map(([, v]) => v)]
+        );
+        if (upd.rows[0]) result.rows[0] = upd.rows[0];
+      } catch (e) {
+        if (e.code !== '42703') throw e;
+        console.warn('[products] campos de NFS-e ignorados: base sem a migration 437');
+      }
+    }
+
     const supplierOut = supplierFields.supplier_id
       ? { id: supplierFields.supplier_id, name: supplierFields.supplier_name, cnpj: supplierFields.supplier_cnpj }
       : null;
@@ -741,7 +775,7 @@ router.post('/', async (req, res) => {
     avancarSemEsperar(cid, 'produto');
     // t3-05: aviso de NCM (sem bloquear). O campo so aparece quando ha o que avisar.
     const ncmAviso = avisoDeNcm(ncm);
-    res.status(201).json({ ...result.rows[0], card_price: cardPriceOut(result.rows[0].card_price), supplier: supplierOut, merge_suggestion, ...camposDoProduto(result.rows[0]), ...(ncmAviso ? { ncm_aviso: ncmAviso } : {}) });
+    res.status(201).json({ ...result.rows[0], card_price: cardPriceOut(result.rows[0].card_price), ...camposNfseDaLinha(result.rows[0]), supplier: supplierOut, merge_suggestion, ...camposDoProduto(result.rows[0]), ...(ncmAviso ? { ncm_aviso: ncmAviso } : {}) });
   } catch (err) { console.error('[products] create error:', err.message); res.status(500).json({ error: 'Erro ao criar produto' }); }
 });
 
@@ -770,16 +804,21 @@ async function comFallbackDeFicha(rodar) {
   // interno — e a migration mais nova, entao e a que mais provavelmente
   // falta: base so sem a 351 custa UMA query extra, nao dezesseis.
   const CARTAO = 'card_price,';
+  // 10/11/2026 (NFS-e do servico, migration 437): quinto degrau, agora o
+  // mais interno pelo mesmo motivo — base so sem a 437 custa UMA query extra.
+  const NFSE = COLS_NFSE;
   const degraus = [];
   for (const matcon of [MATCON, '']) {
     for (const [ficha, duracao] of [[FICHA, DURACAO], [FICHA, ''], ['', DURACAO], ['', '']]) {
-      for (const cartao of [CARTAO, '']) degraus.push([ficha, duracao, matcon, cartao]);
+      for (const cartao of [CARTAO, '']) {
+        for (const nfse of [NFSE, '']) degraus.push([ficha, duracao, matcon, cartao, nfse]);
+      }
     }
   }
   let ultimo = null;
-  for (const [ficha, duracao, matcon, cartao] of degraus) {
+  for (const [ficha, duracao, matcon, cartao, nfse] of degraus) {
     try {
-      return await rodar(ficha, duracao, matcon, cartao);
+      return await rodar(ficha, duracao, matcon, cartao, nfse);
     } catch (e) {
       if (e.code !== '42703') throw e;
       ultimo = e;
@@ -840,6 +879,14 @@ router.patch('/:pid', async (req, res) => {
     cartao = c;
   }
 
+  // Migration 437 — campos de NFS-e do servico. Fora do fieldMap pelos
+  // mesmos motivos do cartao: validacao propria (400 com mensagem, nunca
+  // null em silencio) e degrau quando a base ainda nao tem as colunas.
+  // null/'' limpa (volta a seguir o padrao da empresa).
+  const nfseLido = lerCamposNfse(req.body);
+  if (nfseLido.erros.length) return res.status(400).json({ error: nfseLido.erros.join(' '), detalhes: nfseLido.erros });
+  const nfse = nfseLido.presentes ? nfseLido.campos : null;
+
   // Fase 1 fornecedores (16/09/2026). Fora do fieldMap porque precisa de
   // uma consulta ao banco pra validar visibilidade (mesma razao de
   // duracao/galeria acima terem saido do fieldMap). undefined = nao
@@ -870,7 +917,7 @@ router.patch('/:pid', async (req, res) => {
   // Numericos que aceitam null (limpar a conversao/peso/origem).
   const nullableNumFields = ['purchase_factor','weight_kg','origem'];
 
-  function montarUpdate(comDuracao, comCartao) {
+  function montarUpdate(comDuracao, comCartao, comNfse) {
     const updates = [], values = []; let idx = 1;
     for (const [bodyKey, dbCol] of Object.entries(fieldMap)) {
       if (req.body[bodyKey] !== undefined) {
@@ -895,6 +942,12 @@ router.patch('/:pid', async (req, res) => {
     if (comCartao && cartao) {
       updates.push(`card_price = $${idx}`);
       values.push(cartao.value); idx++;
+    }
+    if (comNfse && nfse) {
+      for (const [col, v] of Object.entries(nfse)) {
+        updates.push(`${col} = $${idx}`);
+        values.push(v); idx++;
+      }
     }
     if (galeria) {
       updates.push(`gallery_urls = $${idx}::jsonb`);
@@ -922,23 +975,27 @@ router.patch('/:pid', async (req, res) => {
     );
   }
 
-  const montado = montarUpdate(true, true);
+  const montado = montarUpdate(true, true, true);
   if (montado.updates.length === 0) return res.status(400).json({ error: 'Nenhum campo para atualizar' });
   try {
-    // 42703 com duration_minutes (323) ou card_price (351) no SET = base
-    // atras da migration. Degraus da mais completa pra mais pobre; a 351 sai
-    // primeiro por ser a mais nova. Sem nenhuma das duas no body, o 42703
-    // e de outra coluna e sobe como antes.
-    const degraus = [[true, false], [false, true], [false, false]]
-      .filter(([d, c]) => (d || duracao) && (c || cartao));
+    // 42703 com duration_minutes (323), card_price (351) ou um campo de
+    // NFS-e (437) no SET = base atras da migration. Degraus da mais completa
+    // pra mais pobre; a mais nova sai primeiro (437, depois 351). So entra o
+    // degrau que tira algo que veio no body. Sem nenhuma delas no body, o
+    // 42703 e de outra coluna e sobe como antes.
+    const degraus = [
+      [true, true, false], [true, false, true], [false, true, true],
+      [true, false, false], [false, true, false], [false, false, true],
+      [false, false, false],
+    ].filter(([d, c, n]) => (d || duracao) && (c || cartao) && (n || nfse));
     let result;
     try {
       result = await rodarUpdate(montado);
     } catch (e) {
-      if (e.code !== '42703' || (!duracao && !cartao)) throw e;
+      if (e.code !== '42703' || (!duracao && !cartao && !nfse)) throw e;
       let ultimo = e;
-      for (const [d, c] of degraus) {
-        const m = montarUpdate(d, c);
+      for (const [d, c, n] of degraus) {
+        const m = montarUpdate(d, c, n);
         if (m.updates.length === 0) continue;
         try { result = await rodarUpdate(m); break; } catch (e2) {
           if (e2.code !== '42703') throw e2;

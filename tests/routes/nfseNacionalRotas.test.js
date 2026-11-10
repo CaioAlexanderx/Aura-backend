@@ -187,6 +187,93 @@ describe('POST / — emissão nacional', () => {
   });
 });
 
+// migration 437: serviço do estoque na nota (nota → item → padrão da empresa)
+describe('POST / — product_id (serviço do estoque)', () => {
+  const PID = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee';
+  function comConfig(provider) {
+    const client = { query: jest.fn().mockResolvedValue({ rows: [] }), release: jest.fn() };
+    db.connect.mockReturnValueOnce(client);
+    db.query.mockResolvedValueOnce({ rows: [{ company_id: 'c1', is_active: true, provider }] });
+    return client;
+  }
+
+  test('nacional: product_id vai ao serviço e a descrição pode vir do item', async () => {
+    comConfig('nacional');
+    nacional.emitir.mockResolvedValueOnce({ nota: notaAutorizada });
+    const res = await request(app()).post(BASE).set(auth).send({ idempotency_key: 'k-item', product_id: PID, service_amount: 350 });
+    expect(res.status).toBe(201);
+    const { nota } = nacional.emitir.mock.calls[0][1];
+    expect(nota).toMatchObject({ product_id: PID, valor: 350 });
+    expect(nota.descricao).toBeUndefined();
+  });
+
+  test('nacional: valores explícitos seguem na nota junto do product_id', async () => {
+    comConfig('nacional');
+    nacional.emitir.mockResolvedValueOnce({ nota: notaAutorizada });
+    await request(app()).post(BASE).set(auth).send({
+      idempotency_key: 'k-exp', product_id: PID, service_amount: 350,
+      service_description: 'Instalação especial', service_code: '070201', cnbs: '101010101', iss_rate: 4,
+    });
+    expect(nacional.emitir.mock.calls[0][1].nota).toMatchObject({
+      product_id: PID, descricao: 'Instalação especial', ctribnac: '070201', cnbs: '101010101', aliquota_iss: 4,
+    });
+  });
+
+  test('item inexistente/invisível → 404 em português', async () => {
+    comConfig('nacional');
+    nacional.emitir.mockRejectedValueOnce(new NfseNacionalError('Não encontramos este serviço no estoque desta empresa.', 'NOT_FOUND'));
+    const res = await request(app()).post(BASE).set(auth).send({ idempotency_key: 'k', product_id: PID, service_amount: 10 });
+    expect(res.status).toBe(404);
+    expect(res.body.error).toMatch(/Não encontramos este serviço/);
+  });
+
+  test('sem descrição e sem product_id → 400 como antes, sem abrir conexão', async () => {
+    const res = await request(app()).post(BASE).set(auth).send({ service_amount: 10 });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/service_description/);
+    expect(db.connect).not.toHaveBeenCalled();
+  });
+
+  test('provider antigo com product_id e sem descrição → 400 (product_id só vale no nacional)', async () => {
+    const client = comConfig('mock');
+    const res = await request(app()).post(BASE).set(auth).send({ product_id: PID, service_amount: 10, recipient_name: 'X', recipient_doc: '52998224725' });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/service_description/);
+    expect(nacional.emitir).not.toHaveBeenCalled();
+    expect(client.release).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('PUT /config — default_iss_rate no nacional', () => {
+  test('aceita e normaliza ("2,5" → 2.5)', async () => {
+    db.query
+      .mockResolvedValueOnce({ rows: [{ id: 'cfg1', provider: 'nacional' }] })
+      .mockResolvedValueOnce({ rows: [{ id: 'cfg1' }] });
+    const res = await request(app()).put(`${BASE}/config`).set(auth).send({ default_iss_rate: '2,5' });
+    expect(res.status).toBe(200);
+    const [sql, values] = db.query.mock.calls[1];
+    expect(sql).toMatch(/default_iss_rate = \$\d/);
+    expect(values).toContain(2.5);
+  });
+
+  test.each([[6], ['abc'], [null], [-1]])('valor %j → 400, nada gravado', async (v) => {
+    db.query.mockResolvedValueOnce({ rows: [{ id: 'cfg1', provider: 'nacional' }] });
+    const res = await request(app()).put(`${BASE}/config`).set(auth).send({ default_iss_rate: v });
+    expect(res.status).toBe(400);
+    expect(res.body.detalhes.join(' ')).toMatch(/default_iss_rate/);
+    expect(db.query).toHaveBeenCalledTimes(1);
+  });
+
+  test('provider antigo: default_iss_rate continua como antes (sem a régua nova)', async () => {
+    db.query
+      .mockResolvedValueOnce({ rows: [{ id: 'cfg1', provider: 'mock' }] })
+      .mockResolvedValueOnce({ rows: [{ id: 'cfg1' }] });
+    const res = await request(app()).put(`${BASE}/config`).set(auth).send({ default_iss_rate: 3 });
+    expect(res.status).toBe(200);
+    expect(db.query.mock.calls[1][1]).toContain(3);
+  });
+});
+
 describe('nota nacional: cancelar, consultar, PDF, XML', () => {
   test('cancelar vai ao serviço com o motivo e o código', async () => {
     db.query.mockResolvedValueOnce({ rows: [{ id: 'n1', nota_provider: 'nacional', status: 'autorizada' }] });
