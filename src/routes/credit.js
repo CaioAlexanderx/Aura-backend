@@ -44,6 +44,8 @@ const { editPayment }     = require('../services/credit/editPayment');
 const { deleteCarne }     = require('../services/credit/deleteCarne');
 // 04/11/2026: recebimento avisa o celular de quem cuida do dinheiro.
 const { avisarRecebimento } = require('../services/credit/avisoDeRecebimento');
+// 10/11/2026 (migration 438): recebimento emite a NFS-e da venda com servico.
+const nfseAutomatica = require('../services/nfseAutomatica');
 // 16/09/2026: cliente cadastrado em outra loja do mesmo dono tambem vale
 // (src/utils/customerScope.js -- incidente Davi / Mary Lucy).
 const { findOwnerScopedCustomer, CUSTOMER_NOT_FOUND_BODY } = require('../utils/customerScope');
@@ -811,6 +813,7 @@ router.post('/customer/:cid/payment', async (req, res) => {
           result: { ...allResults[0].result, new_balance: ultimo.new_balance },
           amount, method, userId: req.user?.id,
         });
+        for (const a of allResults) nfseAutomatica.aoReceberPagamento({ companyId: req.params.id, result: a.result });
       }
 
       // Retorna novo saldo consolidado
@@ -861,6 +864,7 @@ router.post('/customer/:cid/payment', async (req, res) => {
       companyId: req.params.id, customerId: req.params.cid, result,
       amount, method, userId: req.user?.id,
     });
+    nfseAutomatica.aoReceberPagamento({ companyId: req.params.id, result });
 
     res.status(201).json({
       mode: accountId ? 'account' : 'global',
@@ -1561,6 +1565,7 @@ router.post('/customers/:cid/payments', async (req, res) => {
 
     await client.query('COMMIT');
     avisarRecebimento({ companyId, customerId, result, amount, method, userId: req.user?.id });
+    nfseAutomatica.aoReceberPagamento({ companyId, result });
 
     const applied = [...allInstIds].map(instId => {
       const cd  = chargesMap[instId]  || {};
