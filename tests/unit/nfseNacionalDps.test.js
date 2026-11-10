@@ -1,7 +1,11 @@
 // ============================================================
 // NFS-e Nacional — montagem da DPS e do pedido de cancelamento.
-//   • campos, ordem e Id (E0004) conferidos contra o XSD OFICIAL v1.01
-//     (schemas/NFSe_v1.01) pelo validador enxuto tests/helpers/xsdLite;
+//   • campos, ordem e Id (E0004) conferidos contra os XSD OFICIAIS pelo
+//     validador enxuto tests/helpers/xsdLite — um por ambiente:
+//       produção (tpAmb 1)          schemas/NFSe_v1.01 (v1.01-20260209)
+//       produção restrita (tpAmb 2) schemas/NFSe_v1.01_PRODREST_20261020
+//                                   (NT 009: finNFSe em infDPS, cNBS antes
+//                                   de xDescServ);
 //   • regras do Anexo I que dependem de nós (Simples, pAliq, totTrib, xNome);
 //   • assinatura verifica com o certificado embutido (mesmo verificador da NFC-e);
 //   • se houver xmllint na máquina, valida também com ele (no CI é pulado).
@@ -14,16 +18,22 @@ const os = require('os');
 const crypto = require('crypto');
 const { execFileSync } = require('child_process');
 
-const { buildDps, buildIdDps, validarEntrada, paraLatin1 } = require('../../src/services/nfseNacional/dpsBuilder');
+const { buildDps, buildIdDps, validarEntrada, paraLatin1, leiauteDoAmbiente } = require('../../src/services/nfseNacional/dpsBuilder');
 const { buildCancelamento } = require('../../src/services/nfseNacional/eventoBuilder');
 const { signElementById, verifyNfeSignature, signInfNfe } = require('../../src/services/sefazSp/signer');
 const { createValidator } = require('../helpers/xsdLite');
 const { gerarA1 } = require('../helpers/certA1Teste');
 
-const DIR = path.join(__dirname, '../../schemas/NFSe_v1.01');
+const DIR_PROD = path.join(__dirname, '../../schemas/NFSe_v1.01');
+const DIR = path.join(__dirname, '../../schemas/NFSe_v1.01_PRODREST_20261020');
 const NS = 'http://www.sped.fazenda.gov.br/nfse';
-const dpsXsd = createValidator(DIR, ['tiposSimples_v1.01.xsd', 'tiposComplexos_v1.01.xsd', 'DPS_v1.01.xsd']);
-const eventoXsd = createValidator(DIR, ['tiposSimples_v1.01.xsd', 'tiposEventos_v1.01.xsd', 'pedRegEvento_v1.01.xsd']);
+const DPS_FILES = ['tiposSimples_v1.01.xsd', 'tiposComplexos_v1.01.xsd', 'DPS_v1.01.xsd'];
+const EVT_FILES = ['tiposSimples_v1.01.xsd', 'tiposEventos_v1.01.xsd', 'pedRegEvento_v1.01.xsd'];
+// entradaBase usa tpAmb 2 → o esquema padrão dos testes é o da produção restrita
+const dpsXsd = createValidator(DIR, DPS_FILES);
+const eventoXsd = createValidator(DIR, EVT_FILES);
+const dpsXsdProd = createValidator(DIR_PROD, DPS_FILES);
+const eventoXsdProd = createValidator(DIR_PROD, EVT_FILES);
 
 const JACAREI = '3524402';
 const CNPJ = '11222333000181';
@@ -65,8 +75,7 @@ describe('DPS — campos e XSD oficial', () => {
     expect(xml).toContain(`<infDPS Id="${idDps}">`);
     expect(xml).toContain('<tpAmb>2</tpAmb>');
     expect(xml).toContain('<dhEmi>2026-11-09T10:00:00-03:00</dhEmi>');
-    expect(xml).toContain('<serie>1</serie><nDPS>42</nDPS><dCompet>2026-11-09</dCompet><tpEmit>1</tpEmit>');
-    expect(xml).toContain(`<cLocEmi>${JACAREI}</cLocEmi>`);
+    expect(xml).toContain(`<serie>1</serie><nDPS>42</nDPS><dCompet>2026-11-09</dCompet><tpEmit>1</tpEmit><finNFSe>0</finNFSe><cLocEmi>${JACAREI}</cLocEmi>`);
     expect(xml).toContain('<regTrib><opSimpNac>3</opSimpNac><regApTribSN>1</regApTribSN><regEspTrib>0</regEspTrib></regTrib>');
     expect(xml).toContain('<cTribNac>010501</cTribNac>');
     expect(xml).toContain('<vServ>199.90</vServ>');
@@ -131,10 +140,73 @@ describe('DPS — campos e XSD oficial', () => {
   });
 
   test('os esquemas não usam construções fora do alcance do xsdLite', () => {
-    for (const f of ['tiposSimples_v1.01.xsd', 'tiposComplexos_v1.01.xsd', 'DPS_v1.01.xsd', 'tiposEventos_v1.01.xsd', 'pedRegEvento_v1.01.xsd']) {
-      const txt = fs.readFileSync(path.join(DIR, f), 'utf8');
-      expect(txt).not.toMatch(/xs:(union|list|all|group|any)\b|simpleContent|complexContent/);
+    for (const dir of [DIR, DIR_PROD]) {
+      for (const f of ['tiposSimples_v1.01.xsd', 'tiposComplexos_v1.01.xsd', 'DPS_v1.01.xsd', 'tiposEventos_v1.01.xsd', 'pedRegEvento_v1.01.xsd']) {
+        const txt = fs.readFileSync(path.join(dir, f), 'utf8');
+        expect(txt).not.toMatch(/xs:(union|list|all|group|any)\b|simpleContent|complexContent/);
+      }
     }
+  });
+});
+
+describe('DPS — leiaute por ambiente (E1235 de 09/11/2026)', () => {
+  // A emissão real da Aura em produção restrita (série 900) voltou com:
+  // "The element 'infDPS' ... has invalid child element 'cLocEmi'. List of
+  // possible elements expected: 'cMotivoEmisTI, finNFSe'."
+  const aura = (over = {}) => entradaBase({
+    serie: '900', nDPS: '2',
+    servico: { cTribNac: '010501', descricao: 'Licença de uso do sistema Aura', cLocPrestacao: JACAREI },
+    valores: { vServ: 199.9, tpRetISSQN: 1, pTotTribSN: 6 },
+    ...over,
+  });
+
+  test('cada ambiente tem o seu leiaute', () => {
+    expect(leiauteDoAmbiente(2).id).toBe('v1.01-PRODREST-20261020');
+    expect(leiauteDoAmbiente(1).id).toBe('v1.01-20260209');
+    expect(() => leiauteDoAmbiente(3)).toThrow(/tpAmb/);
+  });
+
+  test('produção restrita: DPS da Aura (série 900, nº 2) valida no XSD PRODREST-20261020', () => {
+    const { xml, leiaute, idDps } = buildDps(aura());
+    expect(leiaute).toBe('v1.01-PRODREST-20261020');
+    expect(dpsXsd.validate(xml, { rootNamespace: NS })).toEqual([]);
+    expect(idDps).toBe(`DPS${JACAREI}2${CNPJ}00900000000000000002`);
+    expect(xml).toContain(`<DPS xmlns="${NS}" versao="1.01">`);
+    expect(xml).toContain(`<tpEmit>1</tpEmit><finNFSe>0</finNFSe><cLocEmi>${JACAREI}</cLocEmi><prest>`);
+    expect(xml).not.toContain('<IBSCBS>'); // opcional; obrigatório p/ o Simples só em 2027
+  });
+
+  test('regressão: sem finNFSe o XSD da produção restrita recusa (o erro E1235 recebido)', () => {
+    const { xml } = buildDps(aura());
+    const erros = dpsXsd.validate(xml.replace('<finNFSe>0</finNFSe>', ''));
+    expect(erros.join(' ')).toMatch(/finNFSe/);
+  });
+
+  test('finNFSe só aceita 0 (NFS-e regular) no esquema atual', () => {
+    const { xml } = buildDps(aura());
+    expect(dpsXsd.validate(xml.replace('<finNFSe>0</finNFSe>', '<finNFSe>1</finNFSe>'))).not.toEqual([]);
+  });
+
+  test('produção restrita: com cNBS, cNBS vem antes de xDescServ', () => {
+    const { xml } = buildDps(aura({ servico: { cTribNac: '010501', cNBS: '115013000', descricao: 'Licença', cLocPrestacao: JACAREI } }));
+    expect(dpsXsd.validate(xml)).toEqual([]);
+    expect(xml).toContain('<cServ><cTribNac>010501</cTribNac><cNBS>115013000</cNBS><xDescServ>Licença</xDescServ></cServ>');
+  });
+
+  test('produção (tpAmb 1): segue o XSD v1.01-20260209, sem finNFSe e com cNBS depois da descrição', () => {
+    const { xml, leiaute } = buildDps(aura({ tpAmb: 1, servico: { cTribNac: '010501', cNBS: '115013000', descricao: 'Licença', cLocPrestacao: JACAREI } }));
+    expect(leiaute).toBe('v1.01-20260209');
+    expect(dpsXsdProd.validate(xml, { rootNamespace: NS })).toEqual([]);
+    expect(xml).not.toContain('<finNFSe>');
+    expect(xml).toContain(`<tpEmit>1</tpEmit><cLocEmi>${JACAREI}</cLocEmi>`);
+    expect(xml).toContain('<cServ><cTribNac>010501</cTribNac><xDescServ>Licença</xDescServ><cNBS>115013000</cNBS></cServ>');
+  });
+
+  test('os dois esquemas divergem de fato: a DPS de um ambiente não passa no outro', () => {
+    const restrita = buildDps(aura()).xml;
+    const prod = buildDps(aura({ tpAmb: 1 })).xml;
+    expect(dpsXsdProd.validate(restrita)).not.toEqual([]);
+    expect(dpsXsd.validate(prod)).not.toEqual([]);
   });
 });
 
@@ -216,6 +288,7 @@ describe('assinatura (XMLDSig enveloped em infDPS / infPedReg)', () => {
     });
     expect(idPedido).toBe(`PRE${chave}101101`);
     expect(eventoXsd.validate(xml, { rootNamespace: NS })).toEqual([]);
+    expect(eventoXsdProd.validate(xml, { rootNamespace: NS })).toEqual([]);
     expect(xml).toContain('<e101101><xDesc>Cancelamento de NFS-e</xDesc><cMotivo>1</cMotivo><xMotivo>Valor do serviço digitado errado</xMotivo></e101101>');
     const signed = signElementById(xml, { elementName: 'infPedReg', keyPem: cert.keyPem, certDerBase64: cert.certDerBase64 });
     expect(verifyNfeSignature(signed).valid).toBe(true);
@@ -249,7 +322,7 @@ comXmllint('DPS contra o XSD oficial com xmllint', () => {
     const tmp = path.join(os.tmpdir(), `dps-${crypto.randomBytes(6).toString('hex')}.xml`);
     fs.writeFileSync(tmp, `<?xml version="1.0" encoding="UTF-8"?>${signed}`);
     try {
-      execFileSync('xmllint', ['--noout', '--schema', path.join(DIR, 'DPS_v1.01.xsd'), tmp], { stdio: 'pipe' });
+      execFileSync('xmllint', ['--noout', '--schema', path.join(DIR, 'DPS_v1.01.xsd'), tmp], { stdio: 'pipe' }); // tpAmb 2
     } finally {
       fs.unlinkSync(tmp);
     }
