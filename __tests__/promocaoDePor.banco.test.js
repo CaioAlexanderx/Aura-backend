@@ -191,7 +191,10 @@ test('loja sem promocao: GET /products e variantes iguais, so com os campos novo
   // migration 437: campos de NFS-e do servico (nulos para quem nao usa)
   const NFSE = ['nfse_ctribnac', 'nfse_cnbs', 'nfse_ctribmun', 'nfse_aliquota_iss', 'nfse_descricao',
     'ibscbs_cst', 'ibscbs_cclasstrib', 'ibscbs_cindop'];
-  expect(Object.keys(p).sort()).toEqual([...ANTES, ...NOVOS, ...NFSE].sort());
+  // migration 442: "Sai em" (null = segue o tipo)
+  const NOTA = ['nota_fiscal'];
+  expect(Object.keys(p).sort()).toEqual([...ANTES, ...NOVOS, ...NFSE, ...NOTA].sort());
+  expect(p.nota_fiscal).toBeNull();
   expect(p).toMatchObject({ price: 59.9, promo_price: null, promo_starts_at: null, promo_ends_at: null, em_promocao: false, preco_efetivo: 59.9 });
 
   const um = await request(app).get(`/companies/${matriz}/products/${pid}/variants`);
