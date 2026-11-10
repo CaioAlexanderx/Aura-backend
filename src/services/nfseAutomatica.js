@@ -34,6 +34,14 @@
 // Venda, aoConcluirOs, aoReceberPagamento) só agendam com setImmediate,
 // depois do COMMIT, e engolem qualquer erro (vira registro 'erro' + log).
 //
+// Tomador (quem contratou), do mais forte para o mais fraco:
+//   1. o completado pelo app (POST .../completar ou "Emitir" com tomador),
+//      agora ou numa tentativa anterior (nfse_automatica.tomador);
+//   2. o informado no Caixa junto com a venda (POST /pdv/sale nfse_tomador,
+//      gravado em sales.nfse_tomador na transação da venda, migration 440);
+//   3. o cadastro do cliente da venda/OS (customers.cpf_cnpj + nome).
+// Nenhum deles cria ou altera cadastro de cliente.
+//
 // Ligas: NFSE_AUTOMATICA_ENABLED=true no servidor E nfse_config.
 // emissao_automatica=true na empresa (provider 'nacional', ativa). Com
 // qualquer uma desligada os gatilhos não fazem nem uma consulta ao banco.
@@ -128,6 +136,23 @@ function resolverTomador(informado, cliente) {
       fone: fone.length >= 10 && fone.length <= 13 ? fone : null,
     },
   };
+}
+
+/**
+ * nfse_tomador do corpo do POST /pdv/sale: { doc, nome? }.
+ * Nunca recusa a venda: ausente → nada; inválido → ignorado com aviso
+ * (quem chama registra no log, sem o documento).
+ * @returns {{ tomador: { doc, nome } | null, aviso: string | null }}
+ */
+function tomadorDaVendaDoCorpo(raw) {
+  if (raw == null || raw === '') return { tomador: null, aviso: null };
+  if (typeof raw !== 'object' || Array.isArray(raw)) return { tomador: null, aviso: 'FORMATO' };
+  const doc = onlyDigits(raw.doc);
+  if (!doc) return { tomador: null, aviso: raw.doc == null || String(raw.doc).trim() === '' ? null : 'TOMADOR_INVALIDO' };
+  const valido = doc.length === 11 ? isValidCpf(doc) : doc.length === 14 ? isValidCnpj(doc) : false;
+  if (!valido) return { tomador: null, aviso: 'TOMADOR_INVALIDO' };
+  const nome = raw.nome == null ? '' : String(raw.nome).trim().slice(0, 300);
+  return { tomador: { doc, nome: nome || null }, aviso: null };
 }
 
 /**
@@ -289,7 +314,10 @@ async function pegarVez(p, { forcar }) {
 }
 
 async function emitirGrupo(ctx, grupo) {
-  const { companyId, origemTipo, origemId, gatilho, ref, customerId, competencia, tomadorInformado, forcar } = ctx;
+  const {
+    companyId, origemTipo, origemId, gatilho, ref, customerId, competencia, tomadorInformado, forcar,
+    tomadorDaVenda = null,
+  } = ctx;
   const { row, vez } = await pegarVez({
     companyId, origemTipo, origemId, ctribnac: grupo.ctribnac, gatilho,
     itens: grupo.itens, valor: grupo.valor, customerId,
@@ -305,14 +333,15 @@ async function emitirGrupo(ctx, grupo) {
     return { ctribnac: grupo.ctribnac, acao: 'ja_existe', registro_id: row.id, estado: estadoDoRegistro(row) };
   }
 
-  // Tomador: o completado pelo app (agora ou antes) vale mais que o cadastro.
-  const informado = tomadorInformado || row.tomador || null;
+  // Tomador: o completado pelo app (agora ou antes) > o informado no Caixa
+  // com a venda > o cadastro do cliente.
+  const informado = tomadorInformado || row.tomador || tomadorDaVenda || null;
   const cliente = informado && informado.doc && informado.nome ? null : await repo.buscarCliente(customerId);
   const tom = resolverTomador(informado, cliente);
   if (!tom.ok) {
     await repo.gravar(row.id, {
       status: 'pendente_dados', motivo: tom.motivo, motivo_codigo: tom.codigo,
-      tomador: tomadorInformado || row.tomador || null,
+      tomador: tomadorInformado || row.tomador || tomadorDaVenda || null,
     });
     return { ctribnac: grupo.ctribnac, acao: 'pendente_dados', registro_id: row.id, motivo: tom.motivo };
   }
@@ -343,7 +372,7 @@ async function emitirGrupo(ctx, grupo) {
   const key = chaveDeIdempotencia(origemTipo, origemId, grupo.ctribnac, tentativa);
   await repo.gravar(row.id, {
     nota, idempotency_key: key, tentativa,
-    tomador: tomadorInformado || row.tomador || null,
+    tomador: tomadorInformado || row.tomador || tomadorDaVenda || null,
   });
 
   try {
@@ -374,7 +403,10 @@ async function emitirGrupo(ctx, grupo) {
 
 /**
  * Processa uma venda do Caixa.
- * @param p { companyId, saleId, gatilho, ref?, manual?, forcar?, tomador?, cfg? }
+ * @param p { companyId, saleId, gatilho, ref?, manual?, forcar?, tomador?, tomadorDaVenda?, cfg? }
+ *   tomador        = completado pelo app (vale mais que tudo)
+ *   tomadorDaVenda = informado no Caixa com a venda (em memória, no gatilho
+ *                    da venda); sem ele, vale o gravado em sales.nfse_tomador
  * @returns {{ acao, motivo?, grupos? }}
  */
 async function processarVenda(p) {
@@ -395,8 +427,14 @@ async function processarVenda(p) {
     companyId, origemTipo: 'venda', origemId: venda.id, gatilho, ref,
     customerId: venda.customer_id, competencia: hojeBR(venda.created_at ? new Date(venda.created_at) : new Date()),
     tomadorInformado: tomador, forcar,
+    tomadorDaVenda: tomadorValido(p.tomadorDaVenda) || tomadorValido(venda.nfse_tomador),
   };
   return emitirPrestacao(ctx, agruparPorCodigo(itens, cfg, fator));
+}
+
+/** Tomador da venda com dígito conferido, ou null (aí vale o cadastro do cliente). */
+function tomadorValido(t) {
+  return tomadorDaVendaDoCorpo(t).tomador;
 }
 
 /**
@@ -483,10 +521,14 @@ function disparar(onde, fn) {
   }
 }
 
-/** POST /pdv/sale (e /sale-com-sinal) depois do COMMIT. */
-function aoFinalizarVenda({ companyId, saleId }) {
+/**
+ * POST /pdv/sale (e /sale-com-sinal) depois do COMMIT. tomador = o
+ * nfse_tomador já validado da venda (o mesmo gravado em sales.nfse_tomador);
+ * em memória para não depender da migration 440 no gatilho da própria venda.
+ */
+function aoFinalizarVenda({ companyId, saleId, tomador = null }) {
   if (!companyId || !saleId) return false;
-  return disparar('venda', () => processarVenda({ companyId, saleId, gatilho: 'venda' }));
+  return disparar('venda', () => processarVenda({ companyId, saleId, gatilho: 'venda', tomadorDaVenda: tomador }));
 }
 
 /** POST /service-orders/:osId/status → STATUS_OS_QUE_EMITE, depois do UPDATE. */
@@ -536,7 +578,7 @@ module.exports = {
   ligadaNoServidor, optInAtivo,
   STATUS_OS_QUE_EMITE, UMA_NOTA_PELO_TOTAL_NO_PRIMEIRO_GATILHO, CTRIBNAC_SEM_CODIGO,
   // regras puras
-  resolverTomador, agruparPorCodigo, chaveDeIdempotencia, estadoDoRegistro, resumirOrigem,
+  resolverTomador, tomadorDaVendaDoCorpo, agruparPorCodigo, chaveDeIdempotencia, estadoDoRegistro, resumirOrigem,
   MSG, TIPOS,
   _setAgendador: (fn) => { agendar = fn || ((f) => setImmediate(f)); },
 };

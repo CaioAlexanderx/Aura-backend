@@ -96,6 +96,8 @@ const entregaDaVenda = require('../services/entregaDaVenda');
 const { parseCustomerAddress } = require('../services/customerAddress');
 // 10/11/2026 (migration 438): NFS-e automatica da venda com servico.
 const nfseAutomatica = require('../services/nfseAutomatica');
+// 10/11/2026 (migration 440): tomador da NFS-e (nfse_tomador) gravado na venda.
+const nfseAutomaticaRepo = require('../services/nfseAutomaticaRepo');
 
 const fmt = (v) => parseFloat(v || 0).toFixed(2);
 const SP_DATE_NOW = "(NOW() AT TIME ZONE 'America/Sao_Paulo')::date";
@@ -301,6 +303,15 @@ async function handleSale(req, res, opts = {}) {
       error: 'Cliente obrigatorio para venda no crediario.',
       code: 'CREDIARIO_REQUIRES_CUSTOMER',
     });
+  }
+
+  // 10/11/2026 (migration 440): nfse_tomador { doc, nome? } opcional -- quem
+  // contratou o servico, digitado no Caixa. Vale mais que o cadastro do
+  // cliente na NFS-e automatica. Documento invalido NUNCA recusa a venda: e
+  // ignorado com aviso no log (sem o documento). Ausente: nada muda.
+  const nfseTomador = nfseAutomatica.tomadorDaVendaDoCorpo(req.body?.nfse_tomador);
+  if (nfseTomador.aviso) {
+    console.warn('[pdv] nfse_tomador ignorado na venda:', nfseTomador.aviso, { companyId: req.params.id });
   }
 
   // 17/10/2026 (tq-15): null = venda sem chave, exatamente como antes.
@@ -532,6 +543,15 @@ async function handleSale(req, res, opts = {}) {
       } catch (e) {
         if (e.code !== '42703') throw e;
       }
+    }
+
+    // 10/11/2026 (migration 440): o tomador da NFS-e fica NA VENDA, dentro
+    // desta transacao -- sobrevive se o processo cair entre o COMMIT e o
+    // agendamento da emissao. SAVEPOINT: sem a 440 a venda segue igual.
+    if (nfseTomador.tomador) {
+      await nfseAutomaticaRepo.gravarTomadorDaVenda(client, {
+        companyId: req.params.id, saleId: sale.id, tomador: nfseTomador.tomador,
+      });
     }
 
     // 09/11/2026: retrato do endereco na venda + cadastro do cliente.
@@ -792,7 +812,8 @@ async function handleSale(req, res, opts = {}) {
     // 10/11/2026 (migration 438): venda com servico emite a NFS-e sozinha
     // (services/nfseAutomatica). So agenda (setImmediate), nunca lanca:
     // com NFSE_AUTOMATICA_ENABLED desligada nao faz nem uma consulta.
-    nfseAutomatica.aoFinalizarVenda({ companyId: req.params.id, saleId: sale.id });
+    // nfse_tomador da venda (440) vai junto, em memoria.
+    nfseAutomatica.aoFinalizarVenda({ companyId: req.params.id, saleId: sale.id, tomador: nfseTomador.tomador });
 
     const { rows: saleItems } = await db.query(
       `SELECT si.*, p.name AS product_name FROM sale_items si
