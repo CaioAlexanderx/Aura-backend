@@ -57,6 +57,7 @@ const { requireAuth, requirePlan } = require('../middleware/auth');
 const db = require('../config/database');
 const { resolvePeriod } = require('../services/salesAnalytics');
 const { hasSaleNumberColumn, saleNumberSelect } = require('../utils/saleNumber');
+const { hasSaleHiddenColumn, visibleInListCond } = require('../utils/saleHidden');
 const attribution = require('../services/marketingAttribution');
 const { addressFromRow, isMissingReferenceColumn } = require('../services/customerAddress');
 const catSql = require('../utils/categoriaDoLancamento');
@@ -723,18 +724,25 @@ router.get('/sales', async (req, res) => {
     }
 
     const whereClause = conds.join(' AND ');
+    // 10/11/2026 (migration 439): venda cancelada excluida da lista (hidden_at)
+    // sai da LISTA e da contagem da paginacao. Stats e breakdown seguem com
+    // whereClause puro: excluir da lista nao muda nenhum total.
+    const [withSaleNumber, comOculta] = await Promise.all([
+      hasSaleNumberColumn(db),
+      hasSaleHiddenColumn(db),
+    ]);
+    const listWhere = whereClause + visibleInListCond(comOculta);
 
     const countRes = await db.query(
       `SELECT COUNT(*)::int AS total
          FROM sales s
          LEFT JOIN customers c ON c.id = s.customer_id
          LEFT JOIN employees e ON e.id = s.employee_id OR e.id = s.seller_id
-        WHERE ${whereClause}`,
+        WHERE ${listWhere}`,
       vals
     );
     const total = countRes.rows[0]?.total || 0;
 
-    const withSaleNumber = await hasSaleNumberColumn(db);
     const listRes = await db.query(
       `SELECT s.id, ${saleNumberSelect(withSaleNumber)},
               s.total_amount, s.discount_amount, s.payment_method, s.status,
@@ -758,7 +766,7 @@ router.get('/sales', async (req, res) => {
          FROM sales s
          LEFT JOIN customers c ON c.id = s.customer_id
          LEFT JOIN employees e ON e.id = s.employee_id OR e.id = s.seller_id
-        WHERE ${whereClause}
+        WHERE ${listWhere}
         ORDER BY s.created_at DESC
         LIMIT $${vals.length + 1} OFFSET $${vals.length + 2}`,
       [...vals, limitNum, offsetNum]
