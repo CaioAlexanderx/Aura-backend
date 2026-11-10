@@ -38,7 +38,15 @@ jest.mock('../../src/services/nfseNacional/repo', () => {
     },
     buscarPorChave: jest.fn(async (db, companyId, key) => clone(state.notas.find((n) => n.company_id === companyId && n.idempotency_key === key)) || null),
     buscarPorId: jest.fn(async (db, companyId, id) => clone(state.notas.find((n) => n.company_id === companyId && n.id === id)) || null),
-    carregarContexto: jest.fn(async () => ({ config: clone(state.config), company: clone(state.company), certInfo: clone(state.certInfo) })),
+    carregarContexto: jest.fn(async () => {
+      // como o repo de verdade: traz os error_codes da última nota de teste rejeitada
+      const config = clone(state.config);
+      if (config) {
+        const n = config.ultimo_teste_status === 'rejeitado' && config.ultimo_teste_nfse_id ? find(config.ultimo_teste_nfse_id) : null;
+        config.ultimo_teste_error_codes = n ? clone(n.error_codes) || null : null;
+      }
+      return { config, company: clone(state.company), certInfo: clone(state.certInfo) };
+    }),
     reservar: jest.fn(async (db, { companyId, key, fp, entrada, nota, ambiente, serieTeste }) => {
       if (!state.config) return { semConfig: true };
       if (state.notas.some((n) => n.company_id === companyId && n.idempotency_key === key)) return { corrida: true };
@@ -211,6 +219,21 @@ describe('emitirTeste — sempre em produção restrita, série e contador próp
     expect(r.resultado).toMatchObject({ status: 'rejeitado', passo: 'teste', codigo: 'E0310' });
     expect(r.resultado.mensagem).toMatch(/contador ou o suporte Aura/);
     expect(repo.__state.config.ultimo_teste_codigo).toBe('E0310');
+  });
+
+  test('E0312 sozinho (São Paulo, 10/11): status aviso, grava rejeitado, passo teste ok com aviso, Ligar liberado', async () => {
+    Object.assign(repo.__state.config, { municipio_ibge: '3550308', ctribnac_padrao: '130501', p_tot_trib_sn: 6.54, cliente_retem_iss: false });
+    const t = sefinFalso({ postDps: () => json(400, { erros: [{ Codigo: 'E0312', Descricao: 'O código de tributação nacional informado não está administrado pelo município' }] }) });
+    const r = await nacional.emitirTeste(db, { companyId: CID, idempotencyKey: 'k' }, { ...ctxBase, transport: t });
+    expect(r.resultado).toMatchObject({ status: 'aviso', passo: 'teste', codigo: 'E0312' });
+    expect(r.resultado.aviso).toMatch(/Pode ligar/);
+    expect(repo.__state.config).toMatchObject({ ultimo_teste_status: 'rejeitado', ultimo_teste_codigo: 'E0312', ultimo_teste_nfse_id: r.nota.id });
+    const { config, company, certInfo } = await repo.carregarContexto(db, CID);
+    const av = avaliarPassos({ config, company, certInfo, producaoLiberada: true });
+    expect(av.passos.teste).toMatchObject({ estado: 'ok', codigo: 'E0312' });
+    expect(av.passos.teste.aviso).toMatch(/ambiente de testes do governo/);
+    expect(av.pronta_para_ligar).toBe(true);
+    expect(av.passos.ligar.estado).toBe('falta');
   });
 
   test('timeout: erro "sem resposta", aguardando; a mesma chave retoma com o MESMO número', async () => {

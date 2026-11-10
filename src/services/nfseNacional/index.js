@@ -42,6 +42,7 @@ const { buildDps, validarEntrada, hojeBR, paraLatin1 } = require('./dpsBuilder')
 const { buildCancelamento, COD_CANCELAMENTO } = require('./eventoBuilder');
 const {
   resolverRegime, avaliarAptidao, avaliarPassos, sugestaoDaEmpresa, faltasParaLigar, CODIGOS_PREFEITURA, SERIE_TESTE,
+  aceitoComAvisoDoAmbienteDeTestes, AVISO_SO_DO_AMBIENTE_DE_TESTES,
 } = require('./config');
 const { getEndpoints, nacionalHabilitado, producaoHabilitada } = require('./endpoints');
 const { NfseNacionalError, NfseNacionalTransportError } = require('./errors');
@@ -489,7 +490,11 @@ function codigosDe(nota) {
  * Resultado da nota de teste em português simples: o que aconteceu, em que
  * passo cai e o caminho a seguir. E0084/E0116/E0120 caem no passo
  * "prefeitura" (cadastro que só a prefeitura faz). Nunca "não atendido".
- * @returns {{ status: 'ok'|'rejeitado'|'erro', passo, codigo, titulo, mensagem, caminho: string[], aguardando? }}
+ * Rejeitada SÓ com códigos de ERROS_SO_DO_AMBIENTE_DE_TESTES (E0312) →
+ * status 'aviso': pode seguir com aviso, o Ligar fica liberado; `aviso`
+ * traz o texto para a tela. Gravado como 'rejeitado' (é o que o gov.br
+ * respondeu) e o passo "teste" vira 'ok' com aviso pelos error_codes.
+ * @returns {{ status: 'ok'|'aviso'|'rejeitado'|'erro', passo, codigo, titulo, mensagem, caminho: string[], aviso?, aguardando? }}
  */
 function traduzirResultadoTeste({ nota = null, aguardando = false, erro = null, company = null }) {
   const cidade = cidadeDe(company);
@@ -529,6 +534,15 @@ function traduzirResultadoTeste({ nota = null, aguardando = false, erro = null, 
   }
   if (nota.status === 'rejeitada') {
     const cods = codigosDe(nota);
+    if (aceitoComAvisoDoAmbienteDeTestes(cods)) {
+      return {
+        status: 'aviso', passo: 'teste', codigo: cods[0].codigo,
+        titulo: 'Pode ligar a NFS-e.',
+        mensagem: AVISO_SO_DO_AMBIENTE_DE_TESTES,
+        aviso: AVISO_SO_DO_AMBIENTE_DE_TESTES,
+        caminho: [],
+      };
+    }
     const daPref = cods.find((c) => CODIGOS_PREFEITURA.has(c.codigo));
     if (daPref && daPref.codigo === 'E0084') {
       return {
@@ -651,7 +665,10 @@ async function emitirTeste(db, { companyId, idempotencyKey }, ctx = {}) {
   }
   const resultado = traduzirResultadoTeste({ nota: r.nota, aguardando: r.aguardando, company });
   await repo.gravarResultadoTeste(db, companyId, {
-    status: resultado.status, codigo: resultado.codigo, mensagem: resultado.titulo, nfseId: r.nota && r.nota.id,
+    // 'aviso' grava 'rejeitado' (a resposta do gov.br): o passo "teste" relê
+    // os error_codes da nota e decide pela lista ERROS_SO_DO_AMBIENTE_DE_TESTES.
+    status: resultado.status === 'aviso' ? 'rejeitado' : resultado.status,
+    codigo: resultado.codigo, mensagem: resultado.titulo, nfseId: r.nota && r.nota.id,
   });
   return { resultado, nota: r.nota, replay: !!r.replay };
 }
@@ -660,17 +677,25 @@ async function emitirTeste(db, { companyId, idempotencyKey }, ctx = {}) {
  * Pode ligar a NFS-e (is_active) com esta config final? Exige os passos
  * obrigatórios prontos, a nota de teste aceita em produção restrita e, no
  * Simples (ME/EPP), o percentual de tributos e a resposta sobre a retenção.
+ * O teste rejeitado só com erros do ambiente de testes (E0312) conta como
+ * aceito: os error_codes vêm da nota de teste, pelo repo.
  * A trava da produção (NFSE_NACIONAL_PRODUCAO) é conferida pela rota.
  * @returns {{ ok: boolean, motivos: string[], passos }}
  */
 async function avaliarLigar(db, companyId, configFinal) {
-  const { company, certInfo } = await repo.carregarContexto(db, companyId);
-  const av = avaliarPassos({ config: configFinal, company, certInfo, producaoLiberada: true });
+  const { config, company, certInfo } = await repo.carregarContexto(db, companyId);
+  // a config final vem do SELECT da rota, sem os error_codes da nota de teste
+  const cfg = { ...configFinal };
+  if (cfg.ultimo_teste_error_codes === undefined && config
+      && String(config.ultimo_teste_nfse_id || '') === String(cfg.ultimo_teste_nfse_id || '')) {
+    cfg.ultimo_teste_error_codes = config.ultimo_teste_error_codes;
+  }
+  const av = avaliarPassos({ config: cfg, company, certInfo, producaoLiberada: true });
   const motivos = PASSOS_DO_TESTE.filter((k) => av.passos[k].estado !== 'ok').map((k) => av.passos[k].motivo);
   if (av.passos.teste.estado !== 'ok') {
     motivos.push('Antes de ligar, emita a nota de teste: ela confere, sem valor fiscal, que o gov.br aceita as suas notas.');
   }
-  motivos.push(...faltasParaLigar(configFinal));
+  motivos.push(...faltasParaLigar(cfg));
   return { ok: motivos.length === 0, motivos, passos: av.passos };
 }
 
