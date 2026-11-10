@@ -160,7 +160,7 @@ describe('POST /estoque/transferencias', () => {
     expect(res.status).toBe(403);
     expect(res.body.code).toBe('NAO_E_DO_GRUPO');
     expect(chamadas.map((c) => c.sql)).toContain('ROLLBACK');
-    expect(chamadas.some((c) => /UPDATE|INSERT/.test(c.sql))).toBe(false);
+    expect(chamadas.some((c) => /^\s*(UPDATE|INSERT)/.test(c.sql))).toBe(false);
   });
 
   test('membro "so consulta" no destino: 403 NAO_E_DO_GRUPO', async () => {
@@ -209,6 +209,29 @@ describe('POST /estoque/transferencias', () => {
     expect(mov.params[2]).toEqual(['out', 'in']);
     expect(mov.params[3]).toEqual([3, 3]);
     expect(chamadas.length).toBeLessThan(25);
+  });
+
+  test('servico (unit srv): 400 QUANTIDADE_INVALIDA sem gravar nada', async () => {
+    const { chamadas } = clienteFalso((sql) => {
+      if (/FROM companies c/.test(sql)) return lojas();
+      if (/FROM products\s+WHERE id = ANY/.test(sql)) return { rows: [{ id: P1, name: 'Ajuste de barra', is_active: true, stock_qty: 0, unit: 'srv' }] };
+      return null;
+    });
+    const res = await request(app).post(BASE).set('Authorization', `Bearer ${token()}`)
+      .send({ destino_company_id: DESTINO, itens: [{ product_id: P1, quantidade: 1 }] });
+    expect(res.status).toBe(400);
+    expect(res.body.code).toBe('QUANTIDADE_INVALIDA');
+    expect(res.body.error).toMatch(/Serviço não tem estoque.*Ajuste de barra/);
+    expect(res.body.itens).toEqual([{ product_id: P1, variant_id: null, nome: 'Ajuste de barra', motivo: 'servico' }]);
+    expect(chamadas.some((c) => /^\s*(UPDATE|INSERT)/.test(c.sql))).toBe(false);
+  });
+
+  test('rotulo da variante: nome da cor + tamanho; sem atributos, o sku_suffix', () => {
+    expect(svc.rotuloDaVariante({ color_name: 'Azul', sku_suffix: 'AZUL-M' },
+      [{ attribute_name: 'Cor', value: '#3B82F6' }, { attribute_name: 'Tamanho', value: 'm' }])).toBe('Azul / M');
+    expect(svc.rotuloDaVariante({ sku_suffix: 'X' }, [{ attribute_name: 'Cor', value: 'Verde' }])).toBe('Verde');
+    expect(svc.rotuloDaVariante({ sku_suffix: 'PRETO-G' }, [{ attribute_name: 'Cor', value: '#000000' }, { attribute_name: 'Tamanho', value: 'g' }])).toBe('G');
+    expect(svc.rotuloDaVariante({ sku_suffix: 'PRETO-G' }, [])).toBe('PRETO-G');
   });
 
   test('tabela ainda nao criada: 503 SCHEMA_PENDENTE', async () => {

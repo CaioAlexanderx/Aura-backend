@@ -213,10 +213,22 @@ function _limparCacheDeColunas() { colunasCache = null; }
 const q = (c) => `"${c}"`;
 
 // ─── rotulo da variante ──────────────────────────────────────
+// "Azul / M": nome da cor (a Cor guarda o hex; o nome fica em color_name)
+// e depois os outros atributos; tamanho curto em maiuscula. Sem nada
+// legivel, o sku_suffix ("AZUL-M").
 function rotuloDaVariante(v, valores) {
-  if (txt(v && v.sku_suffix)) return txt(v.sku_suffix);
-  const partes = (valores || []).map((x) => txt(x.value)).filter(Boolean);
-  return partes.length ? partes.join(' / ') : null;
+  const lista = valores || [];
+  const partes = [];
+  const cor = lista.find((x) => norm(x.attribute_name) === 'cor');
+  const corLegivel = txt(v && v.color_name) || (cor && !txt(cor.value).startsWith('#') ? txt(cor.value) : '');
+  if (corLegivel) partes.push(corLegivel);
+  for (const x of lista) {
+    if (x === cor) continue;
+    const val = txt(x.value);
+    if (val) partes.push(val.length <= 4 ? val.toUpperCase() : val);
+  }
+  if (partes.length) return partes.join(' / ');
+  return txt(v && v.sku_suffix) || null;
 }
 
 function assinaturaDosAtributos(valores) {
@@ -335,7 +347,7 @@ async function transferir(conn, { origemId, destinoId, userId, isStaff = false, 
 
   // 1. origem, com lock (ordem por id: dois lotes travam na mesma ordem)
   const { rows: prodOrigem } = await conn.query(
-    `SELECT id, name, is_active, stock_qty, barcode, sku, master_sku
+    `SELECT id, name, is_active, stock_qty, barcode, sku, master_sku, unit
        FROM products
       WHERE id = ANY($1::uuid[]) AND company_id = $2
       ORDER BY id
@@ -344,7 +356,7 @@ async function transferir(conn, { origemId, destinoId, userId, isStaff = false, 
   );
   const prodPorId = new Map(prodOrigem.map((p) => [String(p.id).toLowerCase(), p]));
   const varOrigem = vids.length ? (await conn.query(
-    `SELECT id, product_id, is_active, stock_qty, barcode, sku_suffix
+    `SELECT id, product_id, is_active, stock_qty, barcode, sku_suffix, color_name
        FROM product_variants
       WHERE id = ANY($1::uuid[])
       ORDER BY id
@@ -359,9 +371,12 @@ async function transferir(conn, { origemId, destinoId, userId, isStaff = false, 
   const temGradeOrigem = new Set(comGrade.map((r) => String(r.product_id).toLowerCase()));
 
   const naoAchados = [];
+  const servicos = [];
   for (const it of itens) {
     const p = prodPorId.get(it.product_id);
     if (!p || p.is_active === false) { naoAchados.push({ product_id: it.product_id, variant_id: it.variant_id }); continue; }
+    // Servico (products.unit 'srv', a mesma marca da NFC-e) nao tem estoque.
+    if (norm(p.unit) === 'srv') { servicos.push({ product_id: it.product_id, variant_id: it.variant_id, nome: p.name, motivo: 'servico' }); continue; }
     if (it.variant_id) {
       const v = varPorId.get(it.variant_id);
       if (!v || v.is_active === false || String(v.product_id).toLowerCase() !== it.product_id) {
@@ -370,6 +385,11 @@ async function transferir(conn, { origemId, destinoId, userId, isStaff = false, 
     } else if (temGradeOrigem.has(it.product_id)) {
       naoAchados.push({ product_id: it.product_id, variant_id: null, nome: p.name, motivo: 'informe_a_variante' });
     }
+  }
+  if (servicos.length) {
+    const nomes = servicos.map((x) => x.nome).filter(Boolean).slice(0, 3).join(', ');
+    throw new ErroDeTransferencia(400, 'QUANTIDADE_INVALIDA',
+      `Serviço não tem estoque e não entra na transferência. Tire da lista: ${nomes}${servicos.length > 3 ? '…' : ''}.`, { itens: servicos });
   }
   if (naoAchados.length) {
     throw new ErroDeTransferencia(404, 'ITEM_NAO_ENCONTRADO',
@@ -672,7 +692,7 @@ async function transferir(conn, { origemId, destinoId, userId, isStaff = false, 
       quantidade: it.quantidade,
       criado_no_destino: mp.criado || !!(mv && mv.criada),
       nome: prodPorId.get(it.product_id).name,
-      variante: it.variant_id ? rotuloDaVariante(varPorId.get(it.variant_id), valoresOrigem.get(it.variant_id)) : null,
+      rotulo: it.variant_id ? rotuloDaVariante(varPorId.get(it.variant_id), valoresOrigem.get(it.variant_id)) : null,
     };
   });
   const col = (k) => saida.map((s) => s[k]);
@@ -681,7 +701,7 @@ async function transferir(conn, { origemId, destinoId, userId, isStaff = false, 
        (transfer_id, product_id, variant_id, destino_product_id, destino_variant_id, quantidade, criado_no_destino, nome, variante)
      SELECT $1, * FROM unnest($2::uuid[], $3::uuid[], $4::uuid[], $5::uuid[], $6::numeric[], $7::boolean[], $8::text[], $9::text[])`,
     [t.id, col('product_id'), col('variant_id'), col('destino_product_id'), col('destino_variant_id'),
-      col('quantidade'), col('criado_no_destino'), col('nome'), col('variante')]
+      col('quantidade'), col('criado_no_destino'), col('nome'), col('rotulo')]
   );
 
   const mProd = [], mEmp = [], mTipo = [], mQtd = [], mVar = [], mNota = [];
@@ -708,6 +728,8 @@ async function transferir(conn, { origemId, destinoId, userId, isStaff = false, 
     criada_em: t.criada_em,
     criada_por: t.criada_por,
     observacao: t.observacao,
+    total_itens: itens.length,
+    total_pecas: total,
     itens: saida,
   };
 }
@@ -719,7 +741,7 @@ async function listar(conn, companyId, { limit = 20, offset = 0 } = {}) {
             t.observacao, t.itens_count, t.quantidade_total,
             COALESCE(co.trade_name, co.legal_name) AS origem_nome,
             COALESCE(cd.trade_name, cd.legal_name) AS destino_nome,
-            u.full_name AS criada_por_nome,
+            u.full_name AS usuario_nome,
             COUNT(*) OVER () AS total
        FROM stock_transfers t
        LEFT JOIN companies co ON co.id = t.origem_company_id
@@ -759,10 +781,10 @@ async function listar(conn, companyId, { limit = 20, offset = 0 } = {}) {
       sentido: String(r.origem_company_id).toLowerCase() === cid ? 'saida' : 'entrada',
       criada_em: r.criada_em,
       criada_por: r.criada_por,
-      criada_por_nome: r.criada_por_nome || null,
+      usuario_nome: r.usuario_nome || null,
       observacao: r.observacao,
-      itens_count: Number(r.itens_count),
-      quantidade_total: Number(r.quantidade_total),
+      total_itens: Number(r.itens_count),
+      total_pecas: Number(r.quantidade_total),
       itens: (itens.get(String(r.id).toLowerCase()) || []).map((i) => ({
         product_id: i.product_id,
         variant_id: i.variant_id,
@@ -771,7 +793,7 @@ async function listar(conn, companyId, { limit = 20, offset = 0 } = {}) {
         quantidade: Number(i.quantidade),
         criado_no_destino: !!i.criado_no_destino,
         nome: i.nome,
-        variante: i.variante,
+        rotulo: i.variante,
       })),
     })),
     total,

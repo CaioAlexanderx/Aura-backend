@@ -50,10 +50,18 @@ const deFora = uuid();
 const empresas = [filial, deFora, matriz];
 
 const ids = {};
+// A base do CI nasce so das migrations: colunas que a producao ganhou a mao
+// (ncm, por exemplo) podem faltar. O fixture e a conferencia da copia usam
+// so as que existem — o servico copia o que a base tiver.
+let colunasDeProduto = new Set();
+const CADASTRO_DA_BLUSA = {
+  sku: 'BL-001', ncm: '61061000', brand: 'Marca X', category: 'Blusas', nota_fiscal: 'nfce', unit: 'un',
+};
 
 const q = (sql, params) => pool.query(sql, params);
 async function produto(companyId, nome, extra = {}) {
-  const campos = { name: nome, price: 99.9, cost_price: 40, stock_qty: 10, ...extra };
+  const campos = Object.fromEntries(Object.entries({ name: nome, price: 99.9, cost_price: 40, stock_qty: 10, ...extra })
+    .filter(([k]) => colunasDeProduto.has(k)));
   const cols = Object.keys(campos);
   const { rows } = await q(
     `INSERT INTO products (company_id, ${cols.join(', ')}) VALUES ($1, ${cols.map((_, i) => `$${i + 2}`).join(', ')}) RETURNING id`,
@@ -91,6 +99,10 @@ beforeAll(async () => {
     };
   });
 
+  const { rows: colunas } = await q(
+    `SELECT column_name FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'products'`);
+  colunasDeProduto = new Set(colunas.map((c) => c.column_name));
+
   for (const u of usuarios) {
     await q(`INSERT INTO users (id, email, password_hash, full_name) VALUES ($1, $2, 'x', 'Fixture Transferencia')`,
       [u, `fixture-${u}@example.test`]);
@@ -108,14 +120,13 @@ beforeAll(async () => {
   const { rows: [roupas] } = await q(`INSERT INTO product_categories (company_id, type, name) VALUES ($1, 'product', 'Roupas') RETURNING id`, [matriz]);
   const { rows: [blusas] } = await q(`INSERT INTO product_categories (company_id, type, name, parent_id) VALUES ($1, 'product', 'Blusas', $2) RETURNING id`, [matriz, roupas.id]);
 
-  ids.semGrade = await produto(matriz, 'Blusa lisa', {
-    sku: 'BL-001', ncm: '61061000', brand: 'Marca X', category: 'Blusas', nota_fiscal: 'nfce', unit: 'un', stock_qty: 10,
-  });
+  ids.semGrade = await produto(matriz, 'Blusa lisa', { ...CADASTRO_DA_BLUSA, stock_qty: 10 });
   await q(`INSERT INTO product_category_links (product_id, category_id, is_primary) VALUES ($1, $2, true)`, [ids.semGrade, blusas.id]);
   await q(`INSERT INTO product_images (company_id, product_id, url, position) VALUES ($1, $2, 'https://img.example.test/a.jpg', 0)`, [matriz, ids.semGrade]);
 
   ids.comGrade = await produto(matriz, 'Vestido', { sku: 'VS-001', stock_qty: 0 });
   ids.vPretoM = await variante(ids.comGrade, { stock: 5, sku: 'PRETO-M', cor: '#000000', tamanho: 'm' });
+  await q(`UPDATE product_variants SET color_name = 'Preto' WHERE id = $1`, [ids.vPretoM]);
   ids.vPretoG = await variante(ids.comGrade, { stock: 4, sku: 'PRETO-G', cor: '#000000', tamanho: 'g' });
 
   ids.comCodigo = await produto(matriz, 'Calça', { barcode: '7891000000017', stock_qty: 5 });
@@ -130,6 +141,7 @@ beforeAll(async () => {
   ids.disputado = await produto(matriz, 'Bolsa', { stock_qty: 5 });
   ids.comVenda = await produto(matriz, 'Cinto', { stock_qty: 5 });
   ids.deFora = await produto(deFora, 'De outra loja', { stock_qty: 5 });
+  ids.servico = await produto(matriz, 'Ajuste de barra', { unit: 'srv', stock_qty: 0 });
 
   app = express();
   app.use(express.json());
@@ -178,7 +190,10 @@ describe('produto sem variante', () => {
     expect(copia.company_id).toBe(filial);
     expect(num(copia.stock_qty)).toBe(3);
     expect(copia.is_group_shared).toBe(false);
-    expect(copia).toMatchObject({ name: 'Blusa lisa', sku: 'BL-001', ncm: '61061000', brand: 'Marca X', category: 'Blusas', nota_fiscal: 'nfce', unit: 'un' });
+    expect(copia.name).toBe('Blusa lisa');
+    for (const [k, v] of Object.entries(CADASTRO_DA_BLUSA)) {
+      if (colunasDeProduto.has(k)) expect(copia[k]).toBe(v);
+    }
     expect(num(copia.price)).toBe(99.9);
     expect(num(copia.cost_price)).toBe(40);
 
@@ -237,6 +252,7 @@ describe('produto com variante', () => {
     const it = res.body.transferencia.itens[0];
     expect(it.criado_no_destino).toBe(true);
     expect(it.variant_id).toBe(ids.vPretoM);
+    expect(it.rotulo).toBe('Preto / M');
     ids.copiaGrade = it.destino_product_id;
     ids.copiaPretoM = it.destino_variant_id;
 
@@ -347,6 +363,15 @@ describe('recusas sem mudar nada', () => {
     expect(b.body.code).toBe('NAO_E_DO_GRUPO');
   });
 
+  test('servico (unit srv) nao entra: QUANTIDADE_INVALIDA com mensagem clara', async () => {
+    const res = await transferir(matriz, { destino_company_id: filial, itens: [item(ids.servico, 1), item(ids.semGrade, 1)] });
+    expect(res.status).toBe(400);
+    expect(res.body.code).toBe('QUANTIDADE_INVALIDA');
+    expect(res.body.error).toMatch(/Serviço não tem estoque/);
+    expect(res.body.error).toMatch(/Ajuste de barra/);
+    expect(res.body.itens).toEqual([expect.objectContaining({ product_id: ids.servico, motivo: 'servico' })]);
+  });
+
   test('mesma loja, quantidade invalida e item de outra loja', async () => {
     const mesma = await transferir(matriz, { destino_company_id: matriz, itens: [item(ids.semGrade, 1)] });
     expect(mesma.body.code).toBe('MESMA_LOJA');
@@ -432,8 +457,13 @@ describe('GET', () => {
     expect(volta.origem_nome).toBe('Loja Shopping');
     expect(volta.itens).toHaveLength(1);
     const primeira = naMatriz.body.transferencias.find((t) => t.numero === 1);
-    expect(primeira).toMatchObject({ sentido: 'saida', observacao: 'abertura', destino_nome: 'Loja Shopping' });
-    expect(primeira.itens[0]).toMatchObject({ product_id: ids.semGrade, nome: 'Blusa lisa', quantidade: 3, criado_no_destino: true });
+    expect(primeira).toMatchObject({
+      sentido: 'saida', observacao: 'abertura', origem_nome: 'Loja Centro', destino_nome: 'Loja Shopping',
+      usuario_nome: 'Fixture Transferencia', total_itens: 1, total_pecas: 3,
+    });
+    expect(primeira.itens[0]).toMatchObject({ product_id: ids.semGrade, nome: 'Blusa lisa', rotulo: null, quantidade: 3, criado_no_destino: true });
+    const vestido = naMatriz.body.transferencias.find((t) => t.numero === 4);
+    expect(vestido.itens[0].rotulo).toBe('Preto / M');
 
     const naFilial = await request(app).get(`/companies/${filial}/estoque/transferencias?limit=2&offset=0`);
     expect(naFilial.body.transferencias).toHaveLength(2);

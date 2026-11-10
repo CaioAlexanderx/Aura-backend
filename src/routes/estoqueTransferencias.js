@@ -6,13 +6,16 @@
 //   POST /companies/:id/estoque/transferencias   (:id = loja de origem)
 //     { destino_company_id, itens: [{ product_id, variant_id|null, quantidade }], observacao? }
 //     201 { transferencia: { id, numero, origem_company_id, destino_company_id,
-//                            criada_em, criada_por, observacao, itens: [...] } }
-//     4xx { error, code }: NAO_E_DO_GRUPO, MESMA_LOJA, QUANTIDADE_INVALIDA,
-//                          ITEM_NAO_ENCONTRADO, ESTOQUE_INSUFICIENTE,
-//                          GRADE_DIFERENTE
+//                            criada_em, criada_por, observacao, total_itens,
+//                            total_pecas, itens: [{ ..., nome, rotulo }] } }
+//     4xx { error, code, itens? }: NAO_E_DO_GRUPO, MESMA_LOJA,
+//       QUANTIDADE_INVALIDA (tambem servico, unit 'srv'), ITEM_NAO_ENCONTRADO,
+//       ESTOQUE_INSUFICIENTE (itens: product_id, variant_id, disponivel),
+//       GRADE_DIFERENTE
 //   GET  /companies/:id/estoque/transferencias?limit&offset
-//     { transferencias: [...com itens], total, limit, offset }
-//     (as que a loja mandou ou recebeu)
+//     { transferencias: [{ ..., origem_nome, destino_nome, total_pecas,
+//       total_itens, observacao, usuario_nome, itens: [{ ..., nome, rotulo }] }],
+//       total, limit, offset }  (as que a loja mandou ou recebeu)
 //
 // Montado em private.js sob /estoque: requireCompanyAccess na origem e o
 // negarEmConsultaSemCustoNoResto do mount (estoque so consulta leva 403).
