@@ -46,7 +46,7 @@ function configSp(over = {}) {
   return {
     company_id: CID, provider: 'nacional', is_active: false, ambiente: 'producao_restrita',
     municipio_ibge: '3550308', ctribnac_padrao: '130501', serie: '1', next_dps_number: 1,
-    serie_confirmada_em: '2026-11-10T10:00:00Z', op_simp_nac: 3, reg_ap_trib_sn: 1,
+    serie_confirmada_em: '2026-11-10T10:00:00Z', outro_emissor: false, op_simp_nac: 3, reg_ap_trib_sn: 1,
     p_tot_trib_sn: 6.54, cliente_retem_iss: false, aliquota_iss_retencao_sn: null,
     ultimo_teste_em: '2026-11-10T13:00:00Z', ultimo_teste_status: 'rejeitado', ultimo_teste_codigo: 'E0312',
     ultimo_teste_mensagem: 'O gov.br devolveu a nota de teste com um aviso.', ultimo_teste_nfse_id: NOTA_TESTE,

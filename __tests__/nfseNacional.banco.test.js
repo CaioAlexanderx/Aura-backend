@@ -11,6 +11,10 @@
 //   5. cancelamento grava o evento;
 //   6–8. migration 441: nota de teste na série 49999 com contador próprio
 //      (a numeração da loja não anda) e o resultado gravado na config.
+//   9–10. migration 443: a consulta da DPS devolve a NFS-e de OUTRO emissor
+//      (incidente de 10/11/2026) → nota em erro DPS_NUMERO_JA_USADO, nada
+//      autorizado, evidência em provider_response, conflito na config; a
+//      venda seguinte não gasta número até a loja conferir.
 //
 // Mesmo padrão de caixa.movimentos.banco.test.js: tudo numa transação
 // revertida no afterAll; BEGIN/COMMIT/ROLLBACK do serviço viram SAVEPOINT.
@@ -50,7 +54,8 @@ let plano = {};
 const transport = async (req) => {
   const p = new URL(req.url).pathname;
   if (req.method === 'POST' && p.endsWith('/nfse')) return (plano.postDps || (() => json(201, { chaveAcesso: CHAVE, nfseXmlGZipB64: gz(NFSE_XML) })))();
-  if (req.method === 'GET' && p.includes('/dps/')) return json(404, {});
+  if (req.method === 'GET' && p.includes('/dps/')) return (plano.getDps || (() => json(404, {})))();
+  if (req.method === 'GET' && /\/nfse\/\d{50}$/.test(p)) return (plano.getNfse || (() => json(404, {})))();
   if (req.method === 'POST' && p.endsWith('/eventos')) return json(201, { eventoXmlGZipB64: gz('<evento>ok</evento>') });
   return json(404, {});
 };
@@ -238,5 +243,49 @@ describe('NFS-e nacional — nota de teste (migration 441), banco real', () => {
     expect(r.resultado).toMatchObject({ status: 'rejeitado', passo: 'prefeitura', codigo: 'E0084' });
     expect(String(r.nota.dps_number)).toBe('2');
     expect(await ultimo()).toMatchObject({ teste_next_dps_number: '3', ultimo_teste_status: 'rejeitado', ultimo_teste_codigo: 'E0084' });
+  });
+});
+
+// ── migration 443: DPS com série/número já usados por outro emissor ──
+describe('NFS-e nacional — DPS com número já usado (migration 443), banco real', () => {
+  const incidente = require('../tests/fixtures/nfseDpsNumeroJaUsado');
+  const conflito = async () => (await client.query(
+    `SELECT next_dps_number, dps_conflito_em, dps_conflito_serie, dps_conflito_numero, outro_emissor
+       FROM nfse_config WHERE company_id = $1`, [companyId])).rows[0];
+
+  test('9. timeout e a consulta devolve a NFS-e do outro emissor: erro, nada autorizado, evidência à parte, conflito na config', async () => {
+    plano.postDps = () => { throw new Error('timeout após 30000ms'); };
+    plano.getDps = () => json(200, { chaveAcesso: incidente.CHAVE_DO_OUTRO_EMISSOR });
+    plano.getNfse = () => json(200, { chaveAcesso: incidente.CHAVE_DO_OUTRO_EMISSOR, nfseXmlGZipB64: gz(incidente.NFSE_DO_OUTRO_EMISSOR) });
+    const antes = await proximo();
+    const r = await nacional.emitir(db, { companyId, idempotencyKey: 'venda_carimbo', nota: incidente.VENDA_DA_AURA }, ctx);
+    plano = {};
+    expect(r.nota.status).toBe('erro');
+    const { rows } = await client.query(
+      `SELECT status, chave_acesso, provider_id, nfse_number, xml_nfse, issued_at, error_codes, rejection_reason,
+              provider_response->'nfse_de_outro_emissor' AS ev
+         FROM nfse WHERE id = $1`, [r.nota.id]
+    );
+    expect(rows[0]).toMatchObject({ status: 'erro', chave_acesso: null, provider_id: null, nfse_number: null, xml_nfse: null, issued_at: null });
+    expect(rows[0].error_codes[0].codigo).toBe('DPS_NUMERO_JA_USADO');
+    expect(rows[0].rejection_reason).toBe(`A série 1 e o número ${antes} da DPS já foram usados por outro emissor desta empresa. `
+      + 'Confira na configuração da NFS-e a Série da DPS e o último Número usado e tente de novo.');
+    expect(rows[0].ev).toMatchObject({ motivo: 'nfse_de_outra_dps', chave_acesso: incidente.CHAVE_DO_OUTRO_EMISSOR, nNFSe: '1' });
+    expect(rows[0].ev.xml_nfse).toBe(incidente.NFSE_DO_OUTRO_EMISSOR);
+    const c = await conflito();
+    expect(c).toMatchObject({ dps_conflito_serie: '1', dps_conflito_numero: String(antes), next_dps_number: String(antes + 1) });
+    expect(c.dps_conflito_em).not.toBeNull();
+  });
+
+  test('10. com o conflito aberto, venda nova não gasta número nem cria nota; a mesma chave não reenvia', async () => {
+    const antes = await proximo();
+    const notas = await contar();
+    await expect(nacional.emitir(db, { companyId, idempotencyKey: 'venda_seguinte', nota: NOTA }, ctx))
+      .rejects.toMatchObject({ code: 'DPS_NUMERO_JA_USADO' });
+    const again = await nacional.emitir(db, { companyId, idempotencyKey: 'venda_carimbo', nota: incidente.VENDA_DA_AURA }, ctx);
+    expect(again.replay).toBe(true);
+    expect(again.nota.status).toBe('erro');
+    expect(await proximo()).toBe(antes);
+    expect(await contar()).toBe(notas);
   });
 });

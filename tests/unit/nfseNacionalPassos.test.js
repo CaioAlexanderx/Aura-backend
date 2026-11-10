@@ -27,7 +27,7 @@ function pronta(over = {}) {
   return {
     provider: 'nacional', is_active: false, ambiente: 'producao_restrita',
     municipio_ibge: '3524402', ctribnac_padrao: '060201', serie: '1', next_dps_number: 1,
-    serie_confirmada_em: '2026-11-10T10:00:00Z', op_simp_nac: 3, reg_ap_trib_sn: 1,
+    serie_confirmada_em: '2026-11-10T10:00:00Z', outro_emissor: false, op_simp_nac: 3, reg_ap_trib_sn: 1,
     p_tot_trib_sn: 6.54, cliente_retem_iss: false, aliquota_iss_retencao_sn: null,
     ultimo_teste_status: 'ok', ultimo_teste_em: '2026-11-10T11:00:00Z', ...over,
   };
@@ -64,10 +64,38 @@ describe('avaliarPassos', () => {
     expect(r.base_pronta).toBe(true);
   });
 
-  test('série não confirmada (next_dps_number 1, sem serie_confirmada_em): falta; quem já emitiu (next > 1) conta como confirmada', () => {
-    expect(avaliarPassos({ config: pronta({ serie_confirmada_em: null }), company, certInfo, now }).passos.serie.estado).toBe('falta');
-    const r = avaliarPassos({ config: pronta({ serie_confirmada_em: null, next_dps_number: 48 }), company, certInfo, now });
-    expect(r.passos.serie).toMatchObject({ estado: 'ok', serie: '1', proximo_numero: '48' });
+  test('série sem a resposta "Já emite NFS-e por outro emissor?": falta, mesmo com número andado (migration 443)', () => {
+    for (const over of [{ outro_emissor: null }, { outro_emissor: null, next_dps_number: 48 }, { outro_emissor: undefined, serie_confirmada_em: null }]) {
+      const s = avaliarPassos({ config: pronta(over), company, certInfo, now }).passos.serie;
+      expect(s.estado).toBe('falta');
+      expect(s.motivo).toMatch(/outro emissor/);
+    }
+  });
+
+  test('não emite por outro emissor: ok com a série e o próximo número', () => {
+    const r = avaliarPassos({ config: pronta({ outro_emissor: false, next_dps_number: 48 }), company, certInfo, now });
+    expect(r.passos.serie).toMatchObject({ estado: 'ok', serie: '1', proximo_numero: '48', outro_emissor: false });
+  });
+
+  test('emite por outro emissor: pede série e último número; na mesma série o próximo da Aura vem depois do último dele', () => {
+    const base = { outro_emissor: true, serie: '1', next_dps_number: 1 };
+    expect(avaliarPassos({ config: pronta(base), company, certInfo, now }).passos.serie.estado).toBe('falta');
+    const colide = avaliarPassos({ config: pronta({ ...base, outro_emissor_serie: '1', outro_emissor_ultimo_numero: 12 }), company, certInfo, now }).passos.serie;
+    expect(colide.estado).toBe('problema');
+    expect(colide.motivo).toMatch(/13/);
+    const segue = avaliarPassos({ config: pronta({ ...base, next_dps_number: 13, outro_emissor_serie: '1', outro_emissor_ultimo_numero: 12 }), company, certInfo, now }).passos.serie;
+    expect(segue).toMatchObject({ estado: 'ok', proximo_numero: '13', outro_emissor_serie: '1', outro_emissor_ultimo_numero: '12' });
+    const outraSerie = avaliarPassos({ config: pronta({ ...base, serie: '3', outro_emissor_serie: '1', outro_emissor_ultimo_numero: 12 }), company, certInfo, now }).passos.serie;
+    expect(outraSerie).toMatchObject({ estado: 'ok', serie: '3', proximo_numero: '1' });
+  });
+
+  test('conflito registrado pela emissão (DPS_NUMERO_JA_USADO): problema com a série e o número, até a loja conferir', () => {
+    const s = avaliarPassos({
+      config: pronta({ dps_conflito_em: '2026-11-10T15:00:00Z', dps_conflito_serie: '1', dps_conflito_numero: '1' }),
+      company, certInfo, now,
+    }).passos.serie;
+    expect(s).toMatchObject({ estado: 'problema', codigo: 'DPS_NUMERO_JA_USADO', serie_usada: '1', numero_usado: '1' });
+    expect(s.motivo).toBe('A série 1 e o número 1 da DPS já foram usados por outro emissor desta empresa. Confira na configuração da NFS-e a Série da DPS e o último Número usado e tente de novo.');
   });
 
   test('série fora da faixa de aplicativo próprio ou a de teste: problema', () => {

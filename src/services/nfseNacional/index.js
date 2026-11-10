@@ -24,6 +24,13 @@
 //      ambíguo (timeout/5xx) → consulta GET /dps/{Id} na hora; sem
 //      confirmação a nota fica 'pendente' e a próxima chamada com a mesma
 //      chave consulta de novo antes de reenviar o MESMO XML.
+//   6. recuperação pela DPS (timeout ou E0014): a NFS-e devolvida só é
+//      adotada se for da DPS que a Aura assinou (conferenciaDps: assinatura,
+//      senão valor, cTribNac, dhEmi, dCompet e tomador). Outra DPS com a
+//      mesma série/número (outro emissor da empresa, incidente de
+//      10/11/2026) → nota 'erro' DPS_NUMERO_JA_USADO, evidência à parte, e
+//      a config fica com o conflito: nenhuma nota nova gasta número até a
+//      loja conferir a série e o último número. Nunca renumera às cegas.
 //
 // Breaker por empresa (mesma semântica do engineBreaker da NFC-e, estado
 // separado): falhas de transporte seguidas abrem 15 min de recusa imediata.
@@ -45,7 +52,10 @@ const {
   aceitoComAvisoDoAmbienteDeTestes, AVISO_SO_DO_AMBIENTE_DE_TESTES,
 } = require('./config');
 const { getEndpoints, nacionalHabilitado, producaoHabilitada } = require('./endpoints');
-const { NfseNacionalError, NfseNacionalTransportError } = require('./errors');
+const {
+  NfseNacionalError, NfseNacionalTransportError, DPS_NUMERO_JA_USADO, mensagemDpsNumeroJaUsado, temDpsNumeroJaUsado,
+} = require('./errors');
+const { conferirNfseComDps } = require('./conferenciaDps');
 
 const breaker = createBreaker();
 const MARGEM_RELOGIO_MS = 60 * 1000; // dhEmi ≤ dhProc (E0008): folga para relógio adiantado
@@ -198,19 +208,78 @@ function montarEntrada({ nota, config, company, tpAmb, dhEmi, item = null }) {
 
 // ── transmissão ────────────────────────────────────────────
 
-/** GET /dps/{Id} → GET /nfse/{chave}. true = a DPS já virou nota (gravada). */
-async function recuperarPelaDps(db, row, ep, cert, ctx) {
-  const r = await client.consultarDps({ sefinUrl: ep.sefin, idDps: row.dps_id, ...transportOpts(cert, ctx) });
-  if (!r.encontrada) return false;
-  const n = await client.consultarNfse({ sefinUrl: ep.sefin, chave: r.chaveAcesso, ...transportOpts(cert, ctx) });
-  if (!n) return false;
-  await repo.gravarAutorizada(db, row.id, {
-    chaveAcesso: r.chaveAcesso, nfseXml: n.nfseXml, alertas: [], cabecalho: { recuperada_por: 'consulta_dps' },
-  });
-  return true;
+const ehTeste = (row) => String((row && row.idempotency_key) || '').startsWith('teste:');
+
+const MSG_SEM_CONFERENCIA = 'O Sistema Nacional devolveu uma NFS-e para esta série e este número, mas não conseguimos '
+  + 'conferir se ela é desta nota. Nada foi gravado como emitido. Fale com o suporte Aura antes de tentar de novo.';
+
+const MSG_E0014_SEM_CONFERENCIA = 'O Sistema Nacional diz que esta série e este número já viraram NFS-e e ainda não '
+  + 'conseguimos conferir qual. Tente de novo em instantes — repetir é seguro.';
+
+/** Marca a nota com DPS_NUMERO_JA_USADO e bloqueia a numeração da loja (fora do teste). */
+async function marcarNumeroJaUsado(db, row, evidencia) {
+  const mensagem = mensagemDpsNumeroJaUsado(row.dps_serie, row.dps_number);
+  await repo.marcarNumeroJaUsado(db, row, { mensagem, evidencia, bloquearConfig: !ehTeste(row) });
+  console.warn('[nfse nacional] DPS com série/número já usados por outro emissor:', JSON.stringify({
+    nfse_id: row.id, company_id: row.company_id, serie: row.dps_serie, numero: row.dps_number,
+    divergencias: evidencia && evidencia.divergencias, motivo: evidencia && evidencia.motivo,
+  }));
 }
 
-async function transmitir(db, row, signedXml, ep, cert, ctx) {
+/**
+ * GET /dps/{Id} → GET /nfse/{chave} → confere a NFS-e com a DPS assinada
+ * pela Aura (row.xml_dps). O Id da DPS só tem município, CNPJ, série e
+ * número: outra DPS da mesma empresa com a mesma série/número tem o MESMO Id.
+ * @returns {'adotada'|'nao_encontrada'|'numero_ja_usado'|'indeterminado'}
+ *   adotada         a NFS-e é desta DPS: gravada como autorizada;
+ *   numero_ja_usado é de OUTRA DPS: nota em erro, NFS-e só como evidência;
+ *   indeterminado   faltou dado para conferir: segue pendente, nada adotado.
+ */
+async function recuperarPelaDps(db, row, ep, cert, ctx) {
+  if (temDpsNumeroJaUsado(row)) return 'numero_ja_usado'; // já conferida: não consulta nem remarca
+  const r = await client.consultarDps({ sefinUrl: ep.sefin, idDps: row.dps_id, ...transportOpts(cert, ctx) });
+  if (!r.encontrada) return 'nao_encontrada';
+  const n = await client.consultarNfse({ sefinUrl: ep.sefin, chave: r.chaveAcesso, ...transportOpts(cert, ctx) });
+  if (!n) return 'nao_encontrada';
+  const conf = conferirNfseComDps({ nfseXml: n.nfseXml, dpsXml: row.xml_dps });
+  if (conf.resultado === 'igual') {
+    await repo.gravarAutorizada(db, row.id, {
+      chaveAcesso: r.chaveAcesso, nfseXml: n.nfseXml, alertas: [],
+      cabecalho: { recuperada_por: 'consulta_dps', conferida_por: conf.por },
+    });
+    return 'adotada';
+  }
+  const evidencia = {
+    em: agora(ctx).toISOString(),
+    motivo: conf.resultado === 'diferente' ? 'nfse_de_outra_dps' : 'sem_conferencia',
+    conferida_por: conf.por,
+    divergencias: conf.divergencias,
+    faltando: conf.faltando,
+    chave_acesso: r.chaveAcesso,
+    nNFSe: conf.nfse ? conf.nfse.nNFSe : null,
+    dps_devolvida: conf.devolvida,
+    dps_da_aura: conf.nossa,
+    xml_nfse: n.nfseXml,
+  };
+  if (conf.resultado === 'diferente') {
+    await marcarNumeroJaUsado(db, row, evidencia);
+    return 'numero_ja_usado';
+  }
+  await repo.marcarSemConfirmacao(db, row.id, MSG_SEM_CONFERENCIA);
+  console.warn('[nfse nacional] NFS-e devolvida pela consulta da DPS sem como conferir:', JSON.stringify({
+    nfse_id: row.id, company_id: row.company_id, faltando: conf.faltando,
+  }));
+  return 'indeterminado';
+}
+
+const resolvida = (rec) => rec === 'adotada' || rec === 'numero_ja_usado';
+
+/**
+ * @param row   a nota com dps_id e xml_dps (a DPS assinada)
+ * @param reenvio true = o MESMO XML já saiu antes (retomada depois de um
+ *   timeout): um E0014 pode ser da própria nota
+ */
+async function transmitir(db, row, signedXml, ep, cert, ctx, { reenvio = false } = {}) {
   const recarregar = () => repo.buscarPorId(db, row.company_id, row.id);
   let r;
   try {
@@ -221,8 +290,11 @@ async function transmitir(db, row, signedXml, ep, cert, ctx) {
     await repo.marcarSemConfirmacao(db, row.id, `Sem confirmação do Sistema Nacional: ${err.message}`);
     // Ambíguo: pergunta na hora se a DPS virou nota. Nunca reenvia aqui.
     try {
-      if (await recuperarPelaDps(db, row, ep, cert, ctx)) return { nota: await recarregar() };
-    } catch (_) { /* consulta também falhou: segue pendente */ }
+      if (resolvida(await recuperarPelaDps(db, row, ep, cert, ctx))) return { nota: await recarregar() };
+    } catch (e) {
+      if (!(e instanceof NfseNacionalTransportError)) throw e;
+      /* consulta também falhou: segue pendente */
+    }
     return { nota: await recarregar(), aguardando: true };
   }
   breaker.recordSuccess(row.company_id);
@@ -232,12 +304,29 @@ async function transmitir(db, row, signedXml, ep, cert, ctx) {
     return { nota: await recarregar() };
   }
   if (r.kind === 'rejeitada') {
-    // E0014: esta série/número já gerou NFS-e (ex.: reenvio depois de um
-    // timeout que na verdade autorizou). Recupera a nota em vez de rejeitar.
+    // E0014 (Anexo I): "Conjunto de Série, Número, Código do Município
+    // Emissor e CNPJ/CPF informado nesta DPS já existe em uma NFS-e gerada a
+    // partir de uma DPS enviada anteriormente". Pode ser a própria nota (um
+    // timeout que na verdade autorizou) ou OUTRA DPS da empresa, de outro
+    // emissor, com a mesma série/número. Só a conferência decide.
     if (r.erros.some((e) => e.codigo === 'E0014')) {
+      let rec;
       try {
-        if (await recuperarPelaDps(db, row, ep, cert, ctx)) return { nota: await recarregar() };
-      } catch (_) { /* cai na rejeição */ }
+        rec = await recuperarPelaDps(db, row, ep, cert, ctx);
+      } catch (e) {
+        if (!(e instanceof NfseNacionalTransportError)) throw e;
+        rec = 'sem_resposta';
+      }
+      if (resolvida(rec)) return { nota: await recarregar() };
+      if (rec === 'nao_encontrada' && !reenvio) {
+        // primeiro envio desta DPS e o conjunto já virou NFS-e: o número é de outro emissor
+        await marcarNumeroJaUsado(db, row, {
+          em: agora(ctx).toISOString(), motivo: 'rejeicao_e0014', erros: r.erros, cabecalho: r.cabecalho,
+        });
+        return { nota: await recarregar() };
+      }
+      if (rec !== 'indeterminado') await repo.marcarSemConfirmacao(db, row.id, MSG_E0014_SEM_CONFERENCIA);
+      return { nota: await recarregar(), aguardando: true };
     }
     await repo.gravarRejeitada(db, row.id, { texto: textoErros(r.erros), erros: r.erros, cabecalho: r.cabecalho });
     return { nota: await recarregar() };
@@ -270,7 +359,7 @@ async function montarETransmitir(db, row, entrada, env, ctx) {
   // XML e transmitted_at ANTES do POST: se o processo cair no meio, a
   // próxima tentativa sabe que precisa consultar antes de reenviar.
   await repo.marcarTransmitindo(db, row.id, { idDps: built.idDps, xml: signedXml });
-  return transmitir(db, { ...row, dps_id: built.idDps }, signedXml, env.ep, cert, ctx);
+  return transmitir(db, { ...row, dps_id: built.idDps, xml_dps: signedXml }, signedXml, env.ep, cert, ctx);
 }
 
 /** Nota da mesma chave em 'pendente'/'erro': retoma sem renumerar. */
@@ -290,9 +379,10 @@ async function retomar(db, rowCurta, env, ctx) {
         'NACIONAL_INDISPONIVEL'
       );
     }
-    if (achou) return { nota: await repo.buscarPorId(db, row.company_id, row.id) };
+    if (achou === 'indeterminado') return { nota: await repo.buscarPorId(db, row.company_id, row.id), aguardando: true };
+    if (resolvida(achou)) return { nota: await repo.buscarPorId(db, row.company_id, row.id) };
     // A DPS não virou nota: reenvia o MESMO XML assinado (mesmo número).
-    return transmitir(db, row, row.xml_dps, ep, cert, ctx);
+    return transmitir(db, row, row.xml_dps, ep, cert, ctx, { reenvio: true });
   }
   if (!row.dps_dados) throw new NfseNacionalError('Nota sem os dados da DPS para retomar.', 'ESTADO_INVALIDO');
   const entrada = { ...row.dps_dados, dhEmi: comMargem(ctx) };
@@ -323,7 +413,9 @@ async function emitir(db, { companyId, idempotencyKey, nota = {} }, ctx = {}) {
   if (existente && existente.idempotency_fingerprint && existente.idempotency_fingerprint !== fp) {
     throw new NfseNacionalError('Esta chave de idempotência já foi usada com outros dados de nota.', 'ESTADO_INVALIDO');
   }
-  if (existente && FINAIS.has(existente.status)) return { nota: existente, replay: true };
+  // Nota morta por série/número já usados: nunca retoma com o mesmo número.
+  // Tentar de novo = chave nova (o emissor automático já faz assim).
+  if (existente && (FINAIS.has(existente.status) || temDpsNumeroJaUsado(existente))) return { nota: existente, replay: true };
 
   const { config, company, certInfo } = await repo.carregarContexto(db, companyId);
   if (!config) throw new NfseNacionalError('NFS-e não configurada nesta empresa.', 'CONFIG_MISSING');
@@ -340,6 +432,15 @@ async function emitir(db, { companyId, idempotencyKey, nota = {} }, ctx = {}) {
   }
   const env = { config, company, ep };
   if (existente) return retomar(db, existente, env, ctx);
+
+  // Série/número da loja em conflito com outro emissor (migration 443):
+  // nenhuma nota nova gasta número até a loja conferir a configuração.
+  if (config.dps_conflito_em) {
+    throw new NfseNacionalError(
+      mensagemDpsNumeroJaUsado(config.dps_conflito_serie, config.dps_conflito_numero),
+      DPS_NUMERO_JA_USADO
+    );
+  }
 
   // Serviço do estoque citado pela nota (migration 437). Só numa emissão
   // nova: a retomada usa os dados já gravados (dps_dados), então editar o
@@ -628,7 +729,7 @@ async function emitirTeste(db, { companyId, idempotencyKey }, ctx = {}) {
   let r;
   try {
     const existente = await repo.buscarPorChave(db, companyId, key);
-    if (existente && FINAIS.has(existente.status)) {
+    if (existente && (FINAIS.has(existente.status) || temDpsNumeroJaUsado(existente))) {
       r = { nota: existente, replay: true };
     } else {
       if (breaker.isOpen(companyId)) {
