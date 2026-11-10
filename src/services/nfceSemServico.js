@@ -7,21 +7,28 @@
 // na venda mista os produtos saem na NFC-e e os servicos ficam de fora
 // (vao numa NFS-e separada).
 //
+// 10/11/2026 (migration 442): a nota sai da regra unica do item
+// (services/notaDoItem.js): products.nota_fiscal escolhe; sem escolha, segue
+// o tipo (unit 'srv'), exatamente como antes.
+//
 // Funcoes puras, usadas por routes/nfce.js:
 //   - separarServicos: divide os itens da venda em produtos e servicos.
 //   - pagamentosDosProdutos: reduz os pagamentos da venda ao total da nota.
 // ============================================================
 'use strict';
 
-function isServicoUnit(unit) {
-  return String(unit == null ? '' : unit).trim().toLowerCase() === 'srv';
-}
+const { ehUnidadeServico: isServicoUnit, vaiNaNfse } = require('./notaDoItem');
 
 /**
  * Divide os itens em produtos e servicos. E servico o item cujo produto
  * (lido com a regra de visibilidade do grupo) tem unit 'srv', ou o item que
  * ja chega com unit 'srv' no corpo. Produto nao encontrado e item avulso sem
  * unit 'srv' seguem como produto — como sempre foram.
+ *
+ * Migration 442: a escolha do cadastro (products.nota_fiscal) vence o tipo.
+ * Produto 'nfse' sai da nota (vai na NFS-e); servico 'nfce' fica na nota.
+ * Produto achado no banco: vale o cadastro. Sem ele (item avulso, ou base
+ * sem a 442), vale a escolha que vier no item do corpo.
  *
  * @param {object[]} items
  * @param {Map<string, {unit?: string}>} productById
@@ -31,7 +38,9 @@ function isServicoUnit(unit) {
 function separarServicos(items, productById) {
   const ehServico = (i) => {
     const p = i && typeof i.product_id === 'string' ? productById.get(i.product_id) : null;
-    return isServicoUnit(i && i.unit) || !!(p && isServicoUnit(p.unit));
+    const tipoServico = isServicoUnit(i && i.unit) || !!(p && isServicoUnit(p.unit));
+    const escolha = p && p.nota_fiscal !== undefined ? p.nota_fiscal : (i ? i.nota_fiscal : null);
+    return vaiNaNfse({ nota_fiscal: escolha, unit: tipoServico ? 'srv' : null });
   };
   if (!items.some(ehServico)) return { produtos: items, servicos: [] };
   return {

@@ -58,6 +58,8 @@ const { ENDPOINTS: SEFAZ_SP_ENDPOINTS_65 } = require('../services/sefazSp/endpoi
 // 10/11/2026: servico (unit 'srv') fora da NFC-e; item do grupo acha o NCM.
 const { productVisibilityWhere }   = require('../utils/companyGroup');
 const { separarServicos, totaisDosItens, pagamentosDosProdutos } = require('../services/nfceSemServico');
+// products.nota_fiscal (migration 442): false = base sem a coluna.
+let temColunaNotaFiscal = true;
 
 const INSTRUCOES_NOTA = {
   nfce: 'NFC-e (Nota Fiscal do Consumidor): ideal para vendas a pessoas fisicas. O CPF do comprador e opcional. Use na maioria das vendas do balcao.',
@@ -557,6 +559,8 @@ router.post('/emit', requireAuth, requireRole('client','analyst','admin'), async
 
     // ── 10/11/2026: servico nao entra na NFC-e ───────────────────────────
     // Servico = products.unit 'srv' (ou item que ja chega com unit 'srv').
+    // Migration 442: o cadastro escolhe a nota (products.nota_fiscal) e a
+    // escolha vence o tipo — regra unica em services/notaDoItem.js.
     // A nota e de mercadoria: o servico sairia com NCM 00000000 e CFOP 5102.
     // Decisao do dono: na venda mista os produtos saem na nota e os servicos
     // ficam de fora (NFS-e separada). Venda so de servico: nada a emitir.
@@ -574,12 +578,21 @@ router.post('/emit', requireAuth, requireRole('client','analyst','admin'), async
     const productById = new Map();
     let productLookupErr = null;
     if (productIds.length > 0) {
+      // Migration 442: nota_fiscal (o item escolhe a nota). Base sem a
+      // coluna (42703) le como antes, sem ela, e memoriza.
+      const sqlProdutos = (extra) => `SELECT id, ncm, tax_profile, unit${extra} FROM products
+            WHERE id=ANY($1::uuid[]) AND ${productVisibilityWhere('$2')}`;
       try {
-        const { rows: prodRows } = await db.query(
-          `SELECT id, ncm, tax_profile, unit FROM products
-            WHERE id=ANY($1::uuid[]) AND ${productVisibilityWhere('$2')}`,
-          [productIds, req.params.id]
-        );
+        let prodRows;
+        if (temColunaNotaFiscal) {
+          try {
+            ({ rows: prodRows } = await db.query(sqlProdutos(', nota_fiscal'), [productIds, req.params.id]));
+          } catch (e) {
+            if (e.code !== '42703') throw e;
+            temColunaNotaFiscal = false;
+          }
+        }
+        if (!prodRows) ({ rows: prodRows } = await db.query(sqlProdutos(''), [productIds, req.params.id]));
         for (const p of prodRows) productById.set(p.id, p);
       } catch (lookupErr) {
         productLookupErr = lookupErr;

@@ -67,6 +67,8 @@ const {
 // cTribMun, aliquota do ISS, descricao da nota, IBS/CBS). Validacao e
 // leitura num lugar so; o emissor (services/nfseNacional) le as colunas.
 const { lerCamposNfse, camposNfseDaLinha, COLUNAS_SELECT: COLS_NFSE } = require('../services/camposNfseDoItem');
+// Migration 442 — em que nota o item sai ('nfce' | 'nfse' | null = segue o tipo).
+const { lerNotaFiscal, notaFiscalOut } = require('../services/notaDoItem');
 
 // ─── Fase 1 fornecedores (16/09/2026) ────────────────────────
 //
@@ -253,7 +255,7 @@ router.get('/', async (req, res) => {
     // dos testes de integracao, e no caminho feliz ela e pura perda.
     // 427 (De/Por): as colunas promo_* entram por fora da escada da ficha;
     // base sem a 427 cai para NULL e memoriza por 5 min (precoEfetivo.js).
-    const dataP = comColunasPromo((comPromo) => comFallbackDeFicha((colsFicha, colDuracao, colsMatcon, colCartao, colsNfse) => db.query(
+    const dataP = comColunasPromo((comPromo) => comFallbackDeFicha((colsFicha, colDuracao, colsMatcon, colCartao, colsNfse, colNota) => db.query(
       `SELECT id, name, sku, barcode, category, description, price, cost_price,
               stock_qty, stock_min, stock_max, unit, color, size, image_url, ncm,
               -- brand (migration 261) e mais antiga que a 305/342/350 acima,
@@ -262,6 +264,7 @@ router.get('/', async (req, res) => {
               ${colsMatcon}
               ${colCartao}
               ${colsNfse}
+              ${colNota}
               ${colsFicha}
               ${colDuracao}
               ${comPromo ? colunasPromo() : colunasPromoNulas()},
@@ -318,6 +321,9 @@ router.get('/', async (req, res) => {
       // Migration 437 — campos de NFS-e do servico. null = segue o padrao
       // da empresa (e tambem o valor quando a base ainda nao tem a coluna).
       ...camposNfseDaLinha(r),
+      // Migration 442 — em que nota o item sai. null = segue o tipo (produto
+      // na NFC-e, servico na NFS-e); null tambem na base sem a coluna.
+      nota_fiscal: notaFiscalOut(r.nota_fiscal),
       color: r.color || '', size: r.size || '',
       image_url: r.image_url || '',
       ncm: r.ncm || '',
@@ -586,6 +592,9 @@ router.post('/', async (req, res) => {
   // codigo errado que vira NULL em silencio so aparece como nota rejeitada.
   const nfseItem = lerCamposNfse(req.body);
   if (nfseItem.erros.length) return res.status(400).json({ error: nfseItem.erros.join(' '), detalhes: nfseItem.erros });
+  // Migration 442 — "Sai em": 'nfce' | 'nfse' | null. Valor fora disso = 400.
+  const notaItem = lerNotaFiscal(req.body);
+  if (notaItem.erro) return res.status(400).json({ error: notaItem.erro });
 
   const isGroupShared = req.body.is_group_shared !== undefined
     ? !!req.body.is_group_shared
@@ -768,6 +777,23 @@ router.post('/', async (req, res) => {
       }
     }
 
+    // 10/11/2026 (o item escolhe a nota, migration 442): UPDATE separado,
+    // mesmo motivo dos campos de NFS-e (INSERT posicional), e so com valor —
+    // null no cadastro e o padrao (segue o tipo), nada a gravar. A baixa de
+    // estoque nao depende disto. Base atras da 442 (42703): segue sem ela.
+    if (notaItem.presente && notaItem.value) {
+      try {
+        const upd = await db.query(
+          `UPDATE products SET nota_fiscal = $2 WHERE id = $1 RETURNING *`,
+          [result.rows[0].id, notaItem.value]
+        );
+        if (upd.rows[0]) result.rows[0] = upd.rows[0];
+      } catch (e) {
+        if (e.code !== '42703') throw e;
+        console.warn('[products] nota_fiscal ignorada: base sem a migration 442');
+      }
+    }
+
     const supplierOut = supplierFields.supplier_id
       ? { id: supplierFields.supplier_id, name: supplierFields.supplier_name, cnpj: supplierFields.supplier_cnpj }
       : null;
@@ -775,7 +801,7 @@ router.post('/', async (req, res) => {
     avancarSemEsperar(cid, 'produto');
     // t3-05: aviso de NCM (sem bloquear). O campo so aparece quando ha o que avisar.
     const ncmAviso = avisoDeNcm(ncm);
-    res.status(201).json({ ...result.rows[0], card_price: cardPriceOut(result.rows[0].card_price), ...camposNfseDaLinha(result.rows[0]), supplier: supplierOut, merge_suggestion, ...camposDoProduto(result.rows[0]), ...(ncmAviso ? { ncm_aviso: ncmAviso } : {}) });
+    res.status(201).json({ ...result.rows[0], card_price: cardPriceOut(result.rows[0].card_price), ...camposNfseDaLinha(result.rows[0]), nota_fiscal: notaFiscalOut(result.rows[0].nota_fiscal), supplier: supplierOut, merge_suggestion, ...camposDoProduto(result.rows[0]), ...(ncmAviso ? { ncm_aviso: ncmAviso } : {}) });
   } catch (err) { console.error('[products] create error:', err.message); res.status(500).json({ error: 'Erro ao criar produto' }); }
 });
 
@@ -807,11 +833,16 @@ async function comFallbackDeFicha(rodar) {
   // 10/11/2026 (NFS-e do servico, migration 437): quinto degrau, agora o
   // mais interno pelo mesmo motivo — base so sem a 437 custa UMA query extra.
   const NFSE = COLS_NFSE;
+  // 10/11/2026 (o item escolhe a nota, migration 442): sexto degrau, agora o
+  // mais interno — base so sem a 442 custa UMA query extra.
+  const NOTA = 'nota_fiscal,';
   const degraus = [];
   for (const matcon of [MATCON, '']) {
     for (const [ficha, duracao] of [[FICHA, DURACAO], [FICHA, ''], ['', DURACAO], ['', '']]) {
       for (const cartao of [CARTAO, '']) {
-        for (const nfse of [NFSE, '']) degraus.push([ficha, duracao, matcon, cartao, nfse]);
+        for (const nfse of [NFSE, '']) {
+          for (const nota of [NOTA, '']) degraus.push([ficha, duracao, matcon, cartao, nfse, nota]);
+        }
       }
     }
   }
@@ -897,6 +928,13 @@ router.patch('/:pid', async (req, res) => {
   if (nfseLido.erros.length) return res.status(400).json({ error: nfseLido.erros.join(' '), detalhes: nfseLido.erros });
   const nfse = nfseLido.presentes ? nfseLido.campos : null;
 
+  // Migration 442 — "Sai em" (em que nota o item sai). Fora do fieldMap pelos
+  // mesmos motivos: validacao propria (400 gentil) e degrau quando a base
+  // ainda nao tem a coluna. null/'' limpa (volta a seguir o tipo).
+  const notaLida = lerNotaFiscal(req.body);
+  if (notaLida.erro) return res.status(400).json({ error: notaLida.erro });
+  const nota = notaLida.presente ? { value: notaLida.value } : null;
+
   // Fase 1 fornecedores (16/09/2026). Fora do fieldMap porque precisa de
   // uma consulta ao banco pra validar visibilidade (mesma razao de
   // duracao/galeria acima terem saido do fieldMap). undefined = nao
@@ -927,7 +965,7 @@ router.patch('/:pid', async (req, res) => {
   // Numericos que aceitam null (limpar a conversao/peso/origem).
   const nullableNumFields = ['purchase_factor','weight_kg','origem'];
 
-  function montarUpdate(comDuracao, comCartao, comNfse) {
+  function montarUpdate(comDuracao, comCartao, comNfse, comNota) {
     const updates = [], values = []; let idx = 1;
     for (const [bodyKey, dbCol] of Object.entries(fieldMap)) {
       if (req.body[bodyKey] !== undefined) {
@@ -959,6 +997,10 @@ router.patch('/:pid', async (req, res) => {
         values.push(v); idx++;
       }
     }
+    if (comNota && nota) {
+      updates.push(`nota_fiscal = $${idx}`);
+      values.push(nota.value); idx++;
+    }
     if (galeria) {
       updates.push(`gallery_urls = $${idx}::jsonb`);
       values.push(JSON.stringify(galeria.gallery)); idx++;
@@ -985,7 +1027,7 @@ router.patch('/:pid', async (req, res) => {
     );
   }
 
-  const montado = montarUpdate(true, true, true);
+  const montado = montarUpdate(true, true, true, true);
   if (montado.updates.length === 0) return res.status(400).json({ error: 'Nenhum campo para atualizar' });
   try {
     // 42703 com duration_minutes (323), card_price (351) ou um campo de
@@ -993,19 +1035,22 @@ router.patch('/:pid', async (req, res) => {
     // pra mais pobre; a mais nova sai primeiro (437, depois 351). So entra o
     // degrau que tira algo que veio no body. Sem nenhuma delas no body, o
     // 42703 e de outra coluna e sobe como antes.
-    const degraus = [
-      [true, true, false], [true, false, true], [false, true, true],
-      [true, false, false], [false, true, false], [false, false, true],
-      [false, false, false],
-    ].filter(([d, c, n]) => (d || duracao) && (c || cartao) && (n || nfse));
+    // 442 (nota_fiscal) entrou como quarta coluna: os degraus sao todas as
+    // combinacoes, das com mais colunas para as com menos e, no mesmo
+    // tamanho, tirando a mais nova primeiro — sem a nota no body a lista e
+    // exatamente a de antes.
+    const degraus = [];
+    for (let mask = 14; mask >= 0; mask--) degraus.push([8, 4, 2, 1].map((b) => (mask & b) !== 0));
+    degraus.sort((a, b) => b.filter(Boolean).length - a.filter(Boolean).length);
+    const degrausUteis = degraus.filter(([d, c, n, t]) => (d || duracao) && (c || cartao) && (n || nfse) && (t || nota));
     let result;
     try {
       result = await rodarUpdate(montado);
     } catch (e) {
-      if (e.code !== '42703' || (!duracao && !cartao && !nfse)) throw e;
+      if (e.code !== '42703' || (!duracao && !cartao && !nfse && !nota)) throw e;
       let ultimo = e;
-      for (const [d, c, n] of degraus) {
-        const m = montarUpdate(d, c, n);
+      for (const [d, c, n, t] of degrausUteis) {
+        const m = montarUpdate(d, c, n, t);
         if (m.updates.length === 0) continue;
         try { result = await rodarUpdate(m); break; } catch (e2) {
           if (e2.code !== '42703') throw e2;
@@ -1023,7 +1068,7 @@ router.patch('/:pid', async (req, res) => {
     const ncmAviso = req.body.ncm !== undefined ? avisoDeNcm(req.body.ncm) : null;
     // 427 (De/Por): RETURNING * ja traz promo_* (base com a 427); em_promocao
     // e preco_efetivo saem pela mesma regra da listagem.
-    res.json({ ...row, card_price: cardPriceOut(row.card_price), supplier: supplierOut, ...camposDoProduto(row), ...(ncmAviso ? { ncm_aviso: ncmAviso } : {}) });
+    res.json({ ...row, card_price: cardPriceOut(row.card_price), nota_fiscal: notaFiscalOut(row.nota_fiscal), supplier: supplierOut, ...camposDoProduto(row), ...(ncmAviso ? { ncm_aviso: ncmAviso } : {}) });
   } catch (err) { console.error('[products] update error:', err.message); res.status(500).json({ error: 'Erro ao atualizar produto' }); }
 });
 

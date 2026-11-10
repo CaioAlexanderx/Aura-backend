@@ -25,7 +25,26 @@ const schemaAusente = (err) => !!(err && SCHEMA_AUSENTE.has(err.code));
 let _colunasFiscaisDoItem = null;
 const COLUNAS_FISCAIS = ', p.nfse_ctribnac, p.nfse_cnbs, p.nfse_descricao';
 
+// products.nota_fiscal (migration 442, o item escolhe a nota): um degrau
+// acima das fiscais. null = ainda não sabemos; false = ausente.
+let _colunaNotaDoItem = null;
+const COLUNA_NOTA = ', p.nota_fiscal';
+
 async function comColunasFiscais(montarSql, params) {
+  if (_colunasFiscaisDoItem !== false && _colunaNotaDoItem !== false) {
+    try {
+      const r = await db.query(montarSql(COLUNAS_FISCAIS + COLUNA_NOTA), params);
+      _colunasFiscaisDoItem = true;
+      _colunaNotaDoItem = true;
+      return r.rows;
+    } catch (err) {
+      if (err.code !== '42703') throw err;
+      // O 42703 diz qual coluna faltou: só a 442 fora = tenta as fiscais;
+      // senão faltam as da 437 e cai direto no SELECT sem elas.
+      if (/nota_fiscal/.test(String(err.message || ''))) _colunaNotaDoItem = false;
+      else _colunasFiscaisDoItem = false;
+    }
+  }
   if (_colunasFiscaisDoItem !== false) {
     try {
       const r = await db.query(montarSql(COLUNAS_FISCAIS), params);
@@ -121,7 +140,7 @@ async function gravarTomadorDaVenda(client, { companyId, saleId, tomador }) {
   }
 }
 
-/** Todos os itens da venda; `servico` = produto com unit 'srv'. */
+/** Todos os itens da venda; `servico` = notaDoItem.vaiNaNfse (nota_fiscal, ou unit 'srv'). */
 async function itensDaVenda(companyId, saleId) {
   return comColunasFiscais((extra) => `
     SELECT si.id, si.product_id, si.quantity, si.total_price, si.product_name_snapshot,
@@ -316,5 +335,5 @@ module.exports = {
   buscarRegistro, reivindicar, retomar, anotarVinculo, gravar, removerSemCodigo,
   ligarNotaAOrigem, notaPorChave, listarPorOrigens,
   schemaAusente,
-  _resetCache: () => { _colunasFiscaisDoItem = null; _colunaTomadorDaVenda = null; },
+  _resetCache: () => { _colunasFiscaisDoItem = null; _colunaNotaDoItem = null; _colunaTomadorDaVenda = null; },
 };
