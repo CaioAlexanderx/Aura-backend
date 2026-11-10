@@ -596,7 +596,7 @@ function aoReceberPagamento({ companyId, result, saleId = null }) {
  * Situação das notas de uma origem (OS com venda ligada inclui a venda).
  * Também diz se o botão "Emitir NFS-e" cabe aqui (10/11/2026):
  *   emite       a loja emite NFS-e (lojaEmite), independente da automática;
- *   tem_servico a origem tem serviço (venda: unit 'srv'; OS: item de serviço
+ *   tem_servico a origem tem item da NFS-e (venda: notaDoItem.vaiNaNfse; OS: item de serviço
  *               ou venda ligada com serviço);
  *   pode_emitir emite + tem_servico + origem que gera nota (venda não
  *               cancelada nem troca; OS entregue).
@@ -623,11 +623,11 @@ async function situacaoDaOrigem({ companyId, tipo, id }) {
   let temServico = rows.length > 0;
   if (!temServico) {
     if (tipo === 'venda') {
-      temServico = (await repo.itensDaVenda(companyId, id)).some((l) => l.unit === 'srv');
+      temServico = (await repo.itensDaVenda(companyId, id)).some(vaiNaNfse);
     } else {
       temServico = (await repo.itensDaOs(companyId, id)).map(itemDaOs).some((i) => i.servico);
       if (!temServico && os.sale_id) {
-        temServico = (await repo.itensDaVenda(companyId, os.sale_id)).some((l) => l.unit === 'srv');
+        temServico = (await repo.itensDaVenda(companyId, os.sale_id)).some(vaiNaNfse);
       }
     }
   }

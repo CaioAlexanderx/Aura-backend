@@ -199,6 +199,22 @@ describe('emissao automatica da NFS-e', () => {
   });
 });
 
+describe('situacaoDaOrigem (botao "Emitir NFS-e"): tem_servico pelo predicado', () => {
+  test('venda so do produto NFS-e tem servico; servico NFC-e nao', async () => {
+    venda([ITEM('carimbo', 30, { unit: 'un', nota_fiscal: 'nfse' })], 30);
+    expect(await auto.situacaoDaOrigem({ companyId: C1, tipo: 'venda', id: VENDA })).toMatchObject({ tem_servico: true });
+    venda([ITEM('impressao', 25, { unit: 'srv', nota_fiscal: 'nfce' })], 25);
+    expect(await auto.situacaoDaOrigem({ companyId: C1, tipo: 'venda', id: VENDA })).toMatchObject({ tem_servico: false });
+  });
+
+  test('OS ligada a venda com produto NFS-e tem servico', async () => {
+    venda([ITEM('carimbo', 30, { unit: 'un', nota_fiscal: 'nfse' })], 30);
+    mockMem.oss.set(OS, { id: OS, company_id: C1, customer_id: CLI, status: auto.STATUS_OS_QUE_EMITE, sale_id: VENDA });
+    mockMem.itensOs.set(OS, [{ id: 'i1', kind: 'peca', description: 'Almofada', quantity: 1, total_price: 5, unit: 'un' }]);
+    expect(await auto.situacaoDaOrigem({ companyId: C1, tipo: 'os', id: OS })).toMatchObject({ tem_servico: true });
+  });
+});
+
 describe('nfseAutomaticaRepo: SELECT com nota_fiscal', () => {
   const realRepo = () => jest.requireActual('../src/services/nfseAutomaticaRepo');
   const erro = (msg) => Object.assign(new Error(msg), { code: '42703' });
