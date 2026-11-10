@@ -1,6 +1,7 @@
 // ============================================================
 // AURA. — tests/helpers/xsdLite: validador XSD ENXUTO, em JS puro, para
-// os esquemas OFICIAIS da NFS-e Nacional (schemas/NFSe_v1.01).
+// os esquemas OFICIAIS da NFS-e Nacional (schemas/NFSe_v1.01 e
+// schemas/NFSe_v1.01_PRODREST_20261020).
 //
 // Por que existe: o CI não tem xmllint (as suítes xsdValidation*.test.js da
 // NFC-e/NF-e são PULADAS lá). Este validador lê os .xsd oficiais e confere

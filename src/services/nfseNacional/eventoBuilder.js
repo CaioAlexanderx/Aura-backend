@@ -3,7 +3,8 @@
 // (pedRegEvento) de CANCELAMENTO de NFS-e (código 101101) — função PURA.
 //
 // Fonte: ANEXO_II-SEFIN_ADN-PEDREGEVT_EVT-SNNFSe-v1.01-20260122 + XSD
-// pedRegEvento_v1.01 / tiposEventos_v1.01 (schemas/NFSe_v1.01/).
+// pedRegEvento_v1.01 / tiposEventos_v1.01 (schemas/NFSe_v1.01/ e
+// schemas/NFSe_v1.01_PRODREST_20261020/ — iguais nos dois ambientes).
 //   Id = "PRE" + chave de acesso (50) + código do evento (6)  (TSIdPedRegEvt, PRE[0-9]{56})
 //   infPedReg: tpAmb, verAplic, dhEvento, CNPJAutor, chNFSe, e101101
 //   e101101:   xDesc="Cancelamento de NFS-e", cMotivo (1 erro na emissão,

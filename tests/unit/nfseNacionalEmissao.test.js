@@ -175,6 +175,7 @@ describe('emissão', () => {
     const dps = ungz(post.body.dpsXmlGZipB64);
     expect(dps.startsWith('<?xml version="1.0" encoding="UTF-8"?><DPS xmlns="http://www.sped.fazenda.gov.br/nfse" versao="1.01">')).toBe(true);
     expect(dps).toContain('<tpAmb>2</tpAmb>');
+    expect(dps).toContain('<tpEmit>1</tpEmit><finNFSe>0</finNFSe><cLocEmi>'); // leiaute PRODREST-20261020 (NT 009)
     expect(dps).toContain('<dhEmi>2026-11-09T09:59:00-03:00</dhEmi>'); // 60 s de folga (E0008)
     expect(dps).toContain('Id="DPS35244022112223330001810000100000000000000');
     expect(verifyNfeSignature(dps).valid).toBe(true);
@@ -338,7 +339,9 @@ describe('configuração e certificado', () => {
     process.env.NFSE_NACIONAL_PRODUCAO = 'true';
     await nacional.emitir(db, { companyId: CID, idempotencyKey: 'p1', nota: NOTA }, { ...ctxBase, transport: t });
     expect(t.posts()[0].url).toBe('https://sefin.nfse.gov.br/SefinNacional/nfse');
-    expect(ungz(t.posts()[0].body.dpsXmlGZipB64)).toContain('<tpAmb>1</tpAmb>');
+    const dpsProd = ungz(t.posts()[0].body.dpsXmlGZipB64);
+    expect(dpsProd).toContain('<tpAmb>1</tpAmb>');
+    expect(dpsProd).not.toContain('<finNFSe>'); // produção ainda no leiaute v1.01-20260209
   });
 
   test('ambiente antigo "homologacao" vai para a produção restrita', async () => {

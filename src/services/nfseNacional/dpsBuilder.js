@@ -2,14 +2,26 @@
 // AURA. — nfseNacional/dpsBuilder: monta a DPS (Declaração de Prestação de
 // Serviço) do Sistema Nacional NFS-e, leiaute 1.01 — funções PURAS.
 //
-// Fonte de cada regra (documentação atual do gov.br/nfse, baixada 09/11/2026):
-//   XSD  NFSe-ESQUEMAS_XSD-v1.01-20260209 (DPS_v1.01, tiposComplexos_v1.01,
-//        tiposSimples_v1.01) — cópia em schemas/NFSe_v1.01/
-//   Anexo I  ANEXO_I-SEFIN_ADN-DPS_NFSe-SNNFSe-v1.01-20260209 (leiaute + RN)
+// DOIS AMBIENTES, DOIS ESQUEMAS (situação em 09/11/2026, gov.br/nfse):
+//   tpAmb=1 PRODUÇÃO           XSD NFSe-ESQUEMAS_XSD-v1.01-20260209
+//                              (Documentação atual) — schemas/NFSe_v1.01/
+//   tpAmb=2 PRODUÇÃO RESTRITA  XSD NFSe-ESQUEMAS_XSD-PRODREST-v1.01-20261020
+//                              (NT SE/CGNFS-e 009 v1.01, no ar desde
+//                              20/10/2026) — schemas/NFSe_v1.01_PRODREST_20261020/
+//   O atributo versao continua "1.01" nos dois; o que muda é o conteúdo:
+//   na produção restrita, finNFSe (=0, NFS-e regular) passou a ser filho
+//   obrigatório de infDPS logo depois de tpEmit/cMotivoEmisTI (NT 009, item
+//   2.2) e, em cServ, cNBS/cIntContrib vêm ANTES de xDescServ. A produção
+//   ainda não recebeu a NT 009 ("Atualizações e Implantações", coluna
+//   PRODUÇÃO vazia em 20/10/2026) e recusaria finNFSe em infDPS. Quando o
+//   portal anunciar a NT 009 em produção, troque LEIAUTE_POR_AMBIENTE[1].
+//   Anexo I  produção:  ANEXO_I-SEFIN_ADN-DPS_NFSe-SNNFSe-v1.01-20260209
+//            restrita:  ANEXO_I-SEFIN_ADN-DPS_NFSe-SNNFSe-PRODREST-v1.01-20261020
 //
 // O que sai daqui (TCInfDPS, na ordem do XSD):
-//   tpAmb, dhEmi, verAplic, serie, nDPS, dCompet, tpEmit=1, cLocEmi,
-//   prest (CNPJ, IM?, regTrib), toma?, serv (locPrest, cServ), valores.
+//   tpAmb, dhEmi, verAplic, serie, nDPS, dCompet, tpEmit=1, [finNFSe=0],
+//   cLocEmi, prest (CNPJ, IM?, regTrib), toma?, serv (locPrest, cServ),
+//   valores.
 // Regras do Anexo I aplicadas na montagem (as que dependem só de nós):
 //   Id (E0004) "DPS" + cLocEmi(7) + tpInsc(1: 1=CPF, 2=CNPJ) + inscrição(14)
 //        + série(5, zeros à esquerda) + nDPS(15, zeros à esquerda)
@@ -24,13 +36,19 @@
 //   totTrib: ME/EPP não usa indTotTrib (E0712); não optante não usa
 //        indTotTrib nem pTotTribSN (E0713); MEI não usa pTotTribSN (E0710)
 //   dCompet ≤ dhEmi (E0015)
+//   finNFSe: o XSD da produção restrita só aceita 0 (NFS-e regular); notas
+//        de ajuste de crédito/débito (1/2) ainda não existem no esquema
 //   texto: TSString aceita só a faixa Latin-1 sem quebra de linha — o que
 //        vier fora disso é trocado/removido antes de entrar no XML
 //
-// Fora do escopo deste PR (não monta, e recusa se pedirem): tomador no
-// exterior (NIF), intermediário, substituição, obra/evento, deduções,
-// benefício municipal, tributos federais retidos, grupo IBSCBS (opcional no
-// leiaute 1.01), tribISSQN diferente de 1 (operação tributável).
+// Grupo IBSCBS: opcional (0-1) nos dois esquemas; o Anexo I da produção
+// restrita diz que "para optantes do Simples Nacional, os grupos IBSCBS só
+// serão obrigatórios a partir de 2027". Não montamos.
+//
+// Fora do escopo (não monta, e recusa se pedirem): tomador no exterior
+// (NIF), intermediário, substituição, obra/evento, deduções, benefício
+// municipal, tributos federais retidos, grupo IBSCBS, tribISSQN diferente
+// de 1 (operação tributável).
 // ============================================================
 'use strict';
 
@@ -41,6 +59,23 @@ const { NfseNacionalError } = require('./errors');
 const NFSE_NS = 'http://www.sped.fazenda.gov.br/nfse';
 const VERSAO_LEIAUTE = '1.01';
 const VER_APLIC = 'Aura-NFSe-1.0'; // TSVerAplic: 1–20 caracteres
+
+// Diferenças de conteúdo entre os dois esquemas "1.01" (ver cabeçalho).
+const LEIAUTES = {
+  'v1.01-20260209': { id: 'v1.01-20260209', finNFSeEmInfDps: false, nbsAntesDaDescricao: false },
+  'v1.01-PRODREST-20261020': { id: 'v1.01-PRODREST-20261020', finNFSeEmInfDps: true, nbsAntesDaDescricao: true },
+};
+const LEIAUTE_POR_AMBIENTE = {
+  1: 'v1.01-20260209',          // produção: NT 009 ainda não implantada
+  2: 'v1.01-PRODREST-20261020', // produção restrita: NT 009 desde 20/10/2026
+};
+
+/** Leiaute que a Sefin Nacional valida em cada ambiente (tpAmb 1 ou 2). */
+function leiauteDoAmbiente(tpAmb) {
+  const id = LEIAUTE_POR_AMBIENTE[Number(tpAmb)];
+  if (!id) throw new NfseNacionalError('Ambiente inválido (tpAmb deve ser 1 ou 2).', 'INVALID_INPUT');
+  return LEIAUTES[id];
+}
 
 const onlyDigits = (v) => String(v == null ? '' : v).replace(/\D/g, '');
 
@@ -253,7 +288,8 @@ function totTribXml(op, v) {
 
 /**
  * Monta a DPS SEM assinatura.
- * @returns {{ xml: string, idDps: string, serie: string, nDPS: string, dhEmi: string }}
+ * O leiaute segue o ambiente (tpAmb) — ver LEIAUTE_POR_AMBIENTE.
+ * @returns {{ xml: string, idDps: string, serie: string, nDPS: string, dhEmi: string, leiaute: string }}
  */
 function buildDps(input) {
   const erros = validarEntrada(input);
@@ -273,6 +309,7 @@ function buildDps(input) {
   const nDPS = String(input.nDPS);
   const dhEmi = isoBR(input.dhEmi || new Date());
   const idDps = buildIdDps({ cLocEmi, cnpj, serie, nDPS });
+  const leiaute = leiauteDoAmbiente(input.tpAmb);
 
   // pAliq só quando o Anexo I manda informar (ME/EPP com retenção — E0621).
   const pAliq = ret === 2 && op === 3 ? money(v.pAliq) : null;
@@ -286,6 +323,8 @@ function buildDps(input) {
     + tag('nDPS', nDPS)
     + tag('dCompet', input.dCompet)
     + tag('tpEmit', 1)
+    // NT 009 (produção restrita): finalidade obrigatória; 0 = NFS-e regular
+    + (leiaute.finNFSeEmInfDps ? tag('finNFSe', 0) : '')
     + tag('cLocEmi', cLocEmi)
     + '<prest>'
     + tag('CNPJ', cnpj)
@@ -301,8 +340,9 @@ function buildDps(input) {
     + `<locPrest>${tag('cLocPrestacao', onlyDigits(s.cLocPrestacao || cLocEmi))}</locPrest>`
     + '<cServ>'
     + tag('cTribNac', s.cTribNac)
-    + tag('xDescServ', paraLatin1(s.descricao, { quebraDeLinha: true }))
-    + optTag('cNBS', s.cNBS)
+    + (leiaute.nbsAntesDaDescricao
+      ? optTag('cNBS', s.cNBS) + tag('xDescServ', paraLatin1(s.descricao, { quebraDeLinha: true }))
+      : tag('xDescServ', paraLatin1(s.descricao, { quebraDeLinha: true })) + optTag('cNBS', s.cNBS))
     + '</cServ>'
     + '</serv>'
     + '<valores>'
@@ -319,10 +359,11 @@ function buildDps(input) {
     + '</infDPS>'
     + '</DPS>';
 
-  return { xml, idDps, serie, nDPS, dhEmi };
+  return { xml, idDps, serie, nDPS, dhEmi, leiaute: leiaute.id };
 }
 
 module.exports = {
   buildDps, buildIdDps, validarEntrada, paraLatin1, normalizarSerie, hojeBR, money,
+  leiauteDoAmbiente, LEIAUTES, LEIAUTE_POR_AMBIENTE,
   NFSE_NS, VERSAO_LEIAUTE, VER_APLIC,
 };
