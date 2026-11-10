@@ -14,7 +14,10 @@
 //   - rotas: situação da origem, completar e 2ª via;
 //   - tomador junto com a venda (migration 440): o do Caixa vence o
 //     cadastro, sobrevive à queda (sales.nfse_tomador) e perde para o
-//     completado pelo app.
+//     completado pelo app;
+//   - emissão MANUAL ("Emitir NFS-e"): funciona com a automática desligada
+//     quando a loja emite (is_active + nacional + NFSE_NACIONAL_ENABLED),
+//     recusa quando não emite e nunca gera duas notas para a mesma origem.
 // ============================================================
 'use strict';
 
@@ -139,6 +142,7 @@ beforeEach(() => {
   mockMem.seq = 0;
   jest.clearAllMocks();
   process.env.NFSE_AUTOMATICA_ENABLED = 'true';
+  process.env.NFSE_NACIONAL_ENABLED = 'true';
   fila = [];
   auto._setAgendador((fn) => fila.push(fn));
   mockMem.cfg.set(C1, { company_id: C1, provider: 'nacional', is_active: true, ctribnac_padrao: '010501', cnbs_padrao: null, emissao_automatica: true, emissao_automatica_desde: '2026-11-01T00:00:00Z' });
@@ -148,6 +152,7 @@ beforeEach(() => {
 
 afterAll(() => {
   delete process.env.NFSE_AUTOMATICA_ENABLED;
+  delete process.env.NFSE_NACIONAL_ENABLED;
   auto._setAgendador(null);
 });
 
@@ -460,10 +465,10 @@ describe('rotas /nfse/automatica', () => {
     expect(r.body.estado).toBe('emitida');
   });
 
-  test('escritas respondem 404 com a flag desligada; leitura segue', async () => {
+  test('flag da automática desligada: só o opt-in (PUT /config) responde 404; leitura segue', async () => {
     process.env.NFSE_AUTOMATICA_ENABLED = 'false';
     venda({ itens: [SRV('a', 100)], total: 100 });
-    let r = await request(app()).post(`/companies/${C1}/nfse/automatica/origem/venda/${VENDA}/emitir`).send({});
+    let r = await request(app()).put(`/companies/${C1}/nfse/automatica/config`).send({ emissao_automatica: true });
     expect(r.status).toBe(404);
     expect(r.body.code).toBe('NFSE_AUTOMATICA_DESLIGADA');
     r = await request(app()).get(`/companies/${C1}/nfse/automatica/origem/venda/${VENDA}`);
@@ -567,5 +572,267 @@ describe('tomador junto com a venda do Caixa (migration 440)', () => {
     await rodarFila();
     expect(nacional.emitir.mock.calls[0][1].nota.tomador).toMatchObject({ doc: CPF, nome: 'Maria Souza' });
     expect([...mockMem.regs.values()][0].tomador).toBeNull();
+  });
+});
+
+describe('emissão manual ("Emitir NFS-e"), separada da automática', () => {
+  function app() {
+    const a = express();
+    a.use(express.json());
+    a.use('/companies/:id/nfse/automatica', require('../src/routes/nfseAutomatica'));
+    return a;
+  }
+  const base = `/companies/${C1}/nfse/automatica`;
+  const emitir = (body = {}) => request(app()).post(`${base}/origem/venda/${VENDA}/emitir`).send(body);
+
+  function semAutomatica() {
+    process.env.NFSE_AUTOMATICA_ENABLED = 'false';
+    mockMem.cfg.get(C1).emissao_automatica = false;
+  }
+
+  test('GET /config: emite (botão) separado de ativa (automática)', async () => {
+    let r = await request(app()).get(`${base}/config`);
+    expect(r.body).toMatchObject({ ativa: true, emite: true });
+
+    semAutomatica();
+    r = await request(app()).get(`${base}/config`);
+    expect(r.body).toMatchObject({ ligada_no_servidor: false, emissao_automatica: false, ativa: false, emite: true });
+
+    mockMem.cfg.get(C1).is_active = false;
+    r = await request(app()).get(`${base}/config`);
+    expect(r.body).toMatchObject({ ativa: false, emite: false });
+
+    process.env.NFSE_NACIONAL_ENABLED = 'false';
+    mockMem.cfg.get(C1).is_active = true;
+    r = await request(app()).get(`${base}/config`);
+    expect(r.body).toMatchObject({ emite: false });
+
+    mockMem.cfg.delete(C1);
+    r = await request(app()).get(`${base}/config`);
+    expect(r.body).toMatchObject({ tem_config: false, ativa: false, emite: false });
+  });
+
+  test('emite com a flag automática desligada e sem opt-in', async () => {
+    semAutomatica();
+    venda({ itens: [SRV('a', 100), PROD('b', 30)], total: 130 });
+    const r = await emitir();
+    expect(r.status).toBe(200);
+    expect(r.body).toMatchObject({ estado: 'emitida', acao: 'imprimir_2a_via', tem_nota: true });
+    expect(nacional.emitir).toHaveBeenCalledTimes(1);
+    const [, arg] = nacional.emitir.mock.calls[0];
+    expect(arg.idempotencyKey).toBe(`aura-auto-venda-${VENDA}-010501-1`);
+    expect(arg.nota).toMatchObject({ valor: 100, source_type: 'pdv_sale' });
+    expect([...mockMem.regs.values()][0]).toMatchObject({ gatilho: 'manual', status: 'emitida' });
+  });
+
+  test('venda anterior ao opt-in também emite pelo botão (o botão não olha a data)', async () => {
+    semAutomatica();
+    venda({ itens: [SRV('a', 100)], total: 100, created_at: '2026-10-01T10:00:00Z' });
+    const r = await emitir();
+    expect(r.body.estado).toBe('emitida');
+  });
+
+  test('completar e tentar de novo também funcionam sem a automática', async () => {
+    semAutomatica();
+    mockMem.clientes.get(CLI).cpf_cnpj = null;
+    venda({ itens: [SRV('a', 100)], total: 100 });
+    let r = await emitir();
+    expect(r.status).toBe(200);
+    expect(r.body).toMatchObject({ estado: 'pendente_dados', acao: 'completar_dados' });
+    expect(nacional.emitir).not.toHaveBeenCalled();
+
+    r = await request(app()).post(`${base}/origem/venda/${VENDA}/completar`).send({ tomador: { doc: CPF, nome: 'Maria Souza' } });
+    expect(r.status).toBe(200);
+    expect(r.body.estado).toBe('emitida');
+
+    // nota cancelada depois: "tentar de novo" emite outra, com tentativa nova
+    mockMem.notas.get('nfse-1').status = 'cancelada';
+    r = await request(app()).post(`${base}/origem/venda/${VENDA}/tentar-de-novo`).send({});
+    expect(r.status).toBe(200);
+    expect(nacional.emitir).toHaveBeenCalledTimes(2);
+    expect(nacional.emitir.mock.calls[1][1].idempotencyKey).toBe(`aura-auto-venda-${VENDA}-010501-2`);
+  });
+
+  test('recusa quando a loja não emite (is_active, provider, sem config): 409, nada sai', async () => {
+    semAutomatica();
+    venda({ itens: [SRV('a', 100)], total: 100 });
+
+    mockMem.cfg.get(C1).is_active = false;
+    let r = await emitir();
+    expect(r.status).toBe(409);
+    expect(r.body.code).toBe('LOJA_NAO_EMITE');
+    r = await request(app()).post(`${base}/origem/venda/${VENDA}/completar`).send({ tomador: { doc: CPF } });
+    expect(r.status).toBe(409);
+    r = await request(app()).post(`${base}/origem/venda/${VENDA}/tentar-de-novo`).send({});
+    expect(r.status).toBe(409);
+
+    mockMem.cfg.get(C1).is_active = true;
+    mockMem.cfg.get(C1).provider = 'focus';
+    r = await emitir();
+    expect(r.status).toBe(409);
+
+    mockMem.cfg.delete(C1);
+    r = await emitir();
+    expect(r.status).toBe(409);
+
+    expect(nacional.emitir).not.toHaveBeenCalled();
+    expect(mockMem.regs.size).toBe(0);
+  });
+
+  test('recusa com o emissor nacional desligado no servidor: 404', async () => {
+    process.env.NFSE_NACIONAL_ENABLED = 'false';
+    venda({ itens: [SRV('a', 100)], total: 100 });
+    const r = await emitir();
+    expect(r.status).toBe(404);
+    expect(r.body.code).toBe('NFSE_NACIONAL_DESLIGADA');
+    expect(nacional.emitir).not.toHaveBeenCalled();
+    expect(repo.carregarConfig).not.toHaveBeenCalled();
+  });
+
+  test('emitirManual (serviço) também recusa sem a loja emitir, sem ler a venda', async () => {
+    mockMem.cfg.get(C1).is_active = false;
+    venda({ itens: [SRV('a', 100)], total: 100 });
+    const r = await auto.emitirManual({ companyId: C1, tipo: 'venda', id: VENDA });
+    expect(r).toMatchObject({ acao: 'recusada', codigo: 'LOJA_NAO_EMITE' });
+    expect(repo.buscarVenda).not.toHaveBeenCalled();
+  });
+
+  test('gatilhos automáticos continuam sem disparar sem a flag, mesmo com a loja emitindo', async () => {
+    process.env.NFSE_AUTOMATICA_ENABLED = 'false';
+    venda({ itens: [SRV('a', 100)], total: 100 });
+    mockMem.oss.set(OS, { id: OS, company_id: C1, customer_id: CLI, status: 'entregue', delivered_at: '2026-11-10T15:00:00Z', sale_id: null });
+    mockMem.itensOs.set(OS, [{ id: 'oi1', kind: 'servico', quantity: 1, total_price: 80, description: 'Conserto' }]);
+    mockMem.parcelas.set('inst-1', VENDA);
+    expect(auto.aoFinalizarVenda({ companyId: C1, saleId: VENDA })).toBe(false);
+    expect(auto.aoConcluirOs({ companyId: C1, osId: OS })).toBe(false);
+    expect(auto.aoReceberPagamento({ companyId: C1, result: { covered_installments: [{ id: 'inst-1' }] } })).toBe(false);
+    expect(fila).toEqual([]);
+    expect(repo.carregarConfig).not.toHaveBeenCalled();
+    expect(nacional.emitir).not.toHaveBeenCalled();
+
+    // flag ligada, opt-in desligado: o gatilho só lê a config, não emite
+    process.env.NFSE_AUTOMATICA_ENABLED = 'true';
+    mockMem.cfg.get(C1).emissao_automatica = false;
+    auto.aoFinalizarVenda({ companyId: C1, saleId: VENDA });
+    auto.aoConcluirOs({ companyId: C1, osId: OS });
+    auto.aoReceberPagamento({ companyId: C1, result: { covered_installments: [{ id: 'inst-1' }] } });
+    await rodarFila();
+    expect(nacional.emitir).not.toHaveBeenCalled();
+    expect(mockMem.regs.size).toBe(0);
+  });
+
+  test('clicar duas vezes (em sequência) não gera duas notas', async () => {
+    semAutomatica();
+    venda({ itens: [SRV('a', 100)], total: 100 });
+    const r1 = await emitir();
+    const r2 = await emitir();
+    expect(r1.body.estado).toBe('emitida');
+    expect(r2.status).toBe(200);
+    expect(r2.body.estado).toBe('emitida');
+    expect(r2.body.notas).toHaveLength(1);
+    expect(nacional.emitir).toHaveBeenCalledTimes(1);
+    expect(mockMem.regs.size).toBe(1);
+    expect(mockMem.notas.size).toBe(1);
+  });
+
+  test('dois toques ao mesmo tempo: só um emite, o outro só vê a nota', async () => {
+    semAutomatica();
+    venda({ itens: [SRV('a', 100)], total: 100 });
+    // o emissor demora: o segundo toque chega com o primeiro ainda no ar
+    let soltar;
+    const segura = new Promise((res) => { soltar = res; });
+    const real = nacional.emitir.getMockImplementation();
+    nacional.emitir.mockImplementation(async (...args) => { await segura; return real(...args); });
+    const p1 = emitir().then((r) => r);
+    const p2 = emitir().then((r) => r);
+    await new Promise((res) => setTimeout(res, 100));
+    soltar();
+    const [r1, r2] = await Promise.all([p1, p2]);
+    expect([r1.status, r2.status]).toEqual([200, 200]);
+    expect(nacional.emitir).toHaveBeenCalledTimes(1);
+    expect(mockMem.regs.size).toBe(1);
+    expect(mockMem.notas.size).toBe(1);
+  });
+
+  test('botão depois da automática já ter emitido: não emite de novo', async () => {
+    venda({ itens: [SRV('a', 100)], total: 100 });
+    auto.aoFinalizarVenda({ companyId: C1, saleId: VENDA });
+    await rodarFila();
+    expect(nacional.emitir).toHaveBeenCalledTimes(1);
+    const r = await emitir();
+    expect(r.body.estado).toBe('emitida');
+    expect(nacional.emitir).toHaveBeenCalledTimes(1);
+    expect([...mockMem.regs.values()][0].vinculos).toEqual([expect.objectContaining({ gatilho: 'manual' })]);
+  });
+
+  test('o tomador digitado no Caixa (sales.nfse_tomador) vale no botão sem a automática', async () => {
+    semAutomatica();
+    venda({ itens: [SRV('a', 100)], total: 100, customer: null, nfse_tomador: { doc: CPF, nome: 'Joana Lima' } });
+    const r = await emitir();
+    expect(r.body.estado).toBe('emitida');
+    expect(nacional.emitir.mock.calls[0][1].nota.tomador).toMatchObject({ doc: CPF, nome: 'Joana Lima' });
+  });
+
+  test('2ª via e situação funcionam sem a automática', async () => {
+    semAutomatica();
+    venda({ itens: [SRV('a', 100)], total: 100 });
+    await emitir();
+    let r = await request(app()).get(`${base}/origem/venda/${VENDA}`);
+    expect(r.status).toBe(200);
+    expect(r.body.estado).toBe('emitida');
+    r = await request(app()).get(`${base}/origem/venda/${VENDA}/segunda-via`);
+    expect(r.status).toBe(200);
+    expect(r.body.notas).toHaveLength(1);
+  });
+});
+
+describe('situação da origem diz se o botão "Emitir NFS-e" cabe', () => {
+  test('venda com serviço e loja que emite: pode_emitir; só produto, cancelada ou loja sem NFS-e: não', async () => {
+    process.env.NFSE_AUTOMATICA_ENABLED = 'false';
+    venda({ itens: [SRV('a', 100), PROD('b', 30)], total: 130 });
+    let s = await auto.situacaoDaOrigem({ companyId: C1, tipo: 'venda', id: VENDA });
+    expect(s).toMatchObject({ estado: 'nenhuma', emite: true, tem_servico: true, pode_emitir: true });
+
+    venda({ itens: [PROD('b', 30)], total: 30 });
+    s = await auto.situacaoDaOrigem({ companyId: C1, tipo: 'venda', id: VENDA });
+    expect(s).toMatchObject({ tem_servico: false, pode_emitir: false });
+
+    venda({ itens: [SRV('a', 100)], total: 100 });
+    mockMem.vendas.get(VENDA).status = 'cancelled';
+    s = await auto.situacaoDaOrigem({ companyId: C1, tipo: 'venda', id: VENDA });
+    expect(s).toMatchObject({ tem_servico: true, pode_emitir: false });
+
+    venda({ itens: [SRV('a', 100)], total: 100 });
+    mockMem.cfg.get(C1).is_active = false;
+    s = await auto.situacaoDaOrigem({ companyId: C1, tipo: 'venda', id: VENDA });
+    expect(s).toMatchObject({ emite: false, pode_emitir: false });
+  });
+
+  test('OS: só entregue pode emitir; serviço da OS ou da venda ligada conta', async () => {
+    mockMem.oss.set(OS, { id: OS, company_id: C1, customer_id: CLI, status: 'pronta', delivered_at: null, sale_id: null });
+    mockMem.itensOs.set(OS, [{ id: 'oi1', kind: 'servico', quantity: 1, total_price: 80, description: 'Conserto' }]);
+    let s = await auto.situacaoDaOrigem({ companyId: C1, tipo: 'os', id: OS });
+    expect(s).toMatchObject({ tem_servico: true, pode_emitir: false });
+    mockMem.oss.get(OS).status = 'entregue';
+    s = await auto.situacaoDaOrigem({ companyId: C1, tipo: 'os', id: OS });
+    expect(s).toMatchObject({ pode_emitir: true });
+
+    mockMem.itensOs.set(OS, [{ id: 'oi2', kind: 'peca', quantity: 1, total_price: 20, description: 'Peça', unit: 'un' }]);
+    s = await auto.situacaoDaOrigem({ companyId: C1, tipo: 'os', id: OS });
+    expect(s).toMatchObject({ tem_servico: false, pode_emitir: false });
+    venda({ itens: [SRV('a', 100)], total: 100 });
+    mockMem.oss.get(OS).sale_id = VENDA;
+    s = await auto.situacaoDaOrigem({ companyId: C1, tipo: 'os', id: OS });
+    expect(s).toMatchObject({ tem_servico: true, pode_emitir: true });
+  });
+
+  test('com nota já registrada não relê os itens (polling leve)', async () => {
+    venda({ itens: [SRV('a', 100)], total: 100 });
+    auto.aoFinalizarVenda({ companyId: C1, saleId: VENDA });
+    await rodarFila();
+    repo.itensDaVenda.mockClear();
+    const s = await auto.situacaoDaOrigem({ companyId: C1, tipo: 'venda', id: VENDA });
+    expect(s).toMatchObject({ estado: 'emitida', tem_servico: true });
+    expect(repo.itensDaVenda).not.toHaveBeenCalled();
   });
 });

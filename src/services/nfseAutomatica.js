@@ -43,10 +43,17 @@
 //   3. o cadastro do cliente da venda/OS (customers.cpf_cnpj + nome).
 // Nenhum deles cria ou altera cadastro de cliente.
 //
-// Ligas: NFSE_AUTOMATICA_ENABLED=true no servidor E nfse_config.
+// Ligas da AUTOMÁTICA: NFSE_AUTOMATICA_ENABLED=true no servidor E nfse_config.
 // emissao_automatica=true na empresa (provider 'nacional', ativa). Com
 // qualquer uma desligada os gatilhos não fazem nem uma consulta ao banco.
 // Venda/OS anterior a nfse_config.emissao_automatica_desde não emite sozinha.
+//
+// Emissão MANUAL ("Emitir NFS-e" no Caixa, 10/11/2026): a lojista aperta o
+// botão. Não depende da automática (nem da flag, nem do opt-in): basta a
+// loja emitir NFS-e — nfse_config.is_active=true, provider 'nacional' e
+// NFSE_NACIONAL_ENABLED no servidor (lojaEmite). A idempotência é a mesma
+// da automática (UNIQUE por prestação + chave derivada da origem): o botão
+// apertado duas vezes, ou o botão depois de um gatilho, nunca gera duas notas.
 // ============================================================
 'use strict';
 
@@ -55,6 +62,7 @@ const repo = require('./nfseAutomaticaRepo');
 const nacional = require('./nfseNacional');
 const { NfseNacionalError } = require('./nfseNacional/errors');
 const { hojeBR } = require('./nfseNacional/dpsBuilder');
+const { nacionalHabilitado } = require('./nfseNacional/endpoints');
 const { isValidCpf, isValidCnpj } = require('../utils/cpfCnpj');
 const { vaiNaNfse } = require('./notaDoItem'); // migration 442: o item escolhe a nota
 
@@ -90,6 +98,15 @@ function optInAtivo(cfg) {
   return !!(cfg && cfg.emissao_automatica === true && cfg.provider === 'nacional' && cfg.is_active !== false);
 }
 
+/**
+ * A loja emite NFS-e (vale para o botão manual): NFS-e ligada na loja
+ * (is_active=true), Emissor Nacional e o emissor ligado no servidor.
+ * Independe da emissão automática.
+ */
+function lojaEmite(cfg) {
+  return !!(cfg && cfg.is_active === true && cfg.provider === 'nacional' && nacionalHabilitado());
+}
+
 // ── mensagens (chegam à tela da lojista) ─────────────────────
 const MSG = {
   SEM_TOMADOR: 'Falta o CPF/CNPJ de quem contratou o serviço. Complete os dados para emitir a NFS-e.',
@@ -98,6 +115,7 @@ const MSG = {
   SEM_CODIGO: 'Falta o código de tributação nacional do serviço. Cadastre o código no serviço (ou o código padrão em Configurações > Nota Fiscal) e tente de novo.',
   AGUARDANDO: 'Nota enviada. Estamos aguardando a confirmação do Sistema Nacional.',
   INESPERADO: 'Não conseguimos emitir a NFS-e agora. Nada foi perdido: tente de novo em instantes.',
+  LOJA_NAO_EMITE: 'A NFS-e ainda não está ligada nesta loja. Ligue em Notas fiscais > "Pronto para emitir NFS-e?" e tente de novo.',
 };
 
 function mensagemDoEmissor(err) {
@@ -507,6 +525,24 @@ async function processarPagamento({ companyId, saleIds = [], installmentIds = []
   return { acao: vendas.length ? 'processada' : 'nada', vendas };
 }
 
+// ── emissão manual (botão "Emitir NFS-e") ────────────────────
+
+/**
+ * "Emitir NFS-e" / completar / tentar de novo, pela lojista. Recusa (sem
+ * tocar no banco além da config) se a loja não emite NFS-e. Não olha a flag
+ * nem o opt-in da automática.
+ * @param p { companyId, tipo: 'venda'|'os', id, tomador?, forcar?, cfg? }
+ * @returns {{ acao, motivo?, ... }}  acao 'recusada' + codigo LOJA_NAO_EMITE
+ */
+async function emitirManual(p) {
+  const { companyId, tipo, id, tomador = null, forcar = false } = p;
+  const cfg = p.cfg !== undefined ? p.cfg : await repo.carregarConfig(companyId);
+  if (!lojaEmite(cfg)) return { acao: 'recusada', codigo: 'LOJA_NAO_EMITE', motivo: MSG.LOJA_NAO_EMITE };
+  const base = { companyId, gatilho: 'manual', manual: true, forcar, tomador, cfg };
+  if (tipo === 'os') return processarOs({ ...base, osId: id });
+  return processarVenda({ ...base, saleId: id });
+}
+
 // ── gatilhos (fire-and-forget, depois do COMMIT) ─────────────
 
 let agendar = (fn) => setImmediate(fn);
@@ -556,28 +592,61 @@ function aoReceberPagamento({ companyId, result, saleId = null }) {
 
 // ── leitura para o app ───────────────────────────────────────
 
-/** Situação das notas de uma origem (OS com venda ligada inclui a venda). */
+/**
+ * Situação das notas de uma origem (OS com venda ligada inclui a venda).
+ * Também diz se o botão "Emitir NFS-e" cabe aqui (10/11/2026):
+ *   emite       a loja emite NFS-e (lojaEmite), independente da automática;
+ *   tem_servico a origem tem serviço (venda: unit 'srv'; OS: item de serviço
+ *               ou venda ligada com serviço);
+ *   pode_emitir emite + tem_servico + origem que gera nota (venda não
+ *               cancelada nem troca; OS entregue).
+ * Com registro já existente a origem tem serviço por definição: os itens
+ * só são lidos quando ainda não há nada (o polling fica leve).
+ */
 async function situacaoDaOrigem({ companyId, tipo, id }) {
   if (!TIPOS.has(tipo)) return null;
   const origens = [{ tipo, id }];
+  let elegivel = false;
+  let os = null;
   if (tipo === 'os') {
-    const os = await repo.buscarOs(companyId, id);
+    os = await repo.buscarOs(companyId, id);
     if (!os) return null;
     if (os.sale_id) origens.push({ tipo: 'venda', id: os.sale_id });
+    elegivel = os.status === STATUS_OS_QUE_EMITE;
   } else {
     const venda = await repo.buscarVenda(companyId, id);
     if (!venda) return null;
+    elegivel = venda.status !== 'cancelled' && venda.type !== 'troca';
   }
   const rows = await repo.listarPorOrigens(companyId, origens);
-  return { origem: { tipo, id }, ...resumirOrigem(rows) };
+  const resumo = resumirOrigem(rows);
+  let temServico = rows.length > 0;
+  if (!temServico) {
+    if (tipo === 'venda') {
+      temServico = (await repo.itensDaVenda(companyId, id)).some((l) => l.unit === 'srv');
+    } else {
+      temServico = (await repo.itensDaOs(companyId, id)).map(itemDaOs).some((i) => i.servico);
+      if (!temServico && os.sale_id) {
+        temServico = (await repo.itensDaVenda(companyId, os.sale_id)).some((l) => l.unit === 'srv');
+      }
+    }
+  }
+  const emite = lojaEmite(await repo.carregarConfig(companyId));
+  return {
+    origem: { tipo, id },
+    ...resumo,
+    emite,
+    tem_servico: temServico,
+    pode_emitir: emite && temServico && elegivel,
+  };
 }
 
 module.exports = {
   // gatilhos
   aoFinalizarVenda, aoConcluirOs, aoReceberPagamento,
   // núcleo (rotas e testes)
-  processarVenda, processarOs, processarPagamento, situacaoDaOrigem,
-  ligadaNoServidor, optInAtivo,
+  processarVenda, processarOs, processarPagamento, situacaoDaOrigem, emitirManual,
+  ligadaNoServidor, optInAtivo, lojaEmite,
   STATUS_OS_QUE_EMITE, UMA_NOTA_PELO_TOTAL_NO_PRIMEIRO_GATILHO, CTRIBNAC_SEM_CODIGO,
   // regras puras
   resolverTomador, tomadorDaVendaDoCorpo, agruparPorCodigo, chaveDeIdempotencia, estadoDoRegistro, resumirOrigem,
