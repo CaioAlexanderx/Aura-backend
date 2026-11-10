@@ -6,6 +6,7 @@
 // PATCH  /companies/:id/sales/:sale_id     -> Editar venda: forma, vendedor(a), cliente (09/11/2026)
 // GET    /companies/:id/sales/:sale_id/edit-context -> travas e formas atuais para a edicao
 // POST   /companies/:id/sales/:sale_id/cancel  -> cancela venda inteira (troca-aware)
+// POST   /companies/:id/sales/:sale_id/hide    -> tira a venda CANCELADA da lista (exclusao logica, migration 439)
 //
 // 11/05/2026 — cancel deleta sale_payments (auditoria caixa).
 // 29/05/2026 — Listagem expõe s.type (sale/troca).
@@ -70,6 +71,7 @@ const AppError = require('../errors/AppError');
 const creditLedger = require('../services/creditLedger');
 const { cancelDevolucao, activeReturnsOf } = require('../services/credit/refund');
 const { hasSaleNumberColumn, saleNumberSelect } = require('../utils/saleNumber');
+const { hasSaleHiddenColumn, visibleInListCond } = require('../utils/saleHidden');
 const matconSaleHooks = require('../services/matconSaleHooks');
 const comandaSaleHooks = require('../services/comandaSaleHooks');
 const editarVenda = require('../services/editarVenda');
@@ -163,23 +165,29 @@ router.get('/', asyncHandler(async (req, res) => {
   const limitNum = Math.min(parseInt(limit) || 50, 200);
   const offsetNum = parseInt(offset) || 0;
 
+  // Matcon M1: has_pending_delivery vem dentro do listQuery. As sondagens
+  // rodam juntas e ficam em cache: nenhuma ida extra em regime.
+  // 10/11/2026 (migration 439): a venda cancelada que a pessoa excluiu
+  // (hidden_at) sai da LISTA e da contagem da paginacao. Os stats abaixo
+  // continuam com `conds` puro: excluir da lista nao muda nenhum total.
+  const [withSaleNumber, comMatcon, comOculta] = await Promise.all([
+    hasSaleNumberColumn(pool),
+    matconSaleHooks.tabelasMatconExistem(pool),
+    hasSaleHiddenColumn(pool),
+  ]);
+  const listConds = conds + visibleInListCond(comOculta);
+
   const countQuery =
     'SELECT COUNT(*)::int AS total FROM sales s ' +
     'LEFT JOIN customers c ON c.id = s.customer_id ' +
     'LEFT JOIN employees e ON e.id = s.employee_id OR e.id = s.seller_id ' +
-    'WHERE ' + conds;
+    'WHERE ' + listConds;
   const { rows: countRows } = await pool.query(countQuery, vals);
   const total = countRows[0].total;
 
   // 02/06/2026: lista expoe net_amount/returned_value pra troca (lista mostra liquido).
   // net = total_amount (novos) - SUM(troca_returned_items) quando type='troca'.
   // 24/06/2026: NULLIF(...,'NaN') no subselect — um numeric 'NaN' nao polui o returned_value.
-  // Matcon M1: has_pending_delivery vem dentro do listQuery. As duas
-  // sondagens rodam juntas e ficam em cache: nenhuma ida extra em regime.
-  const [withSaleNumber, comMatcon] = await Promise.all([
-    hasSaleNumberColumn(pool),
-    matconSaleHooks.tabelasMatconExistem(pool),
-  ]);
 
   const listQuery =
     'SELECT s.id, ' + saleNumberSelect(withSaleNumber) + ', ' +
@@ -195,7 +203,7 @@ router.get('/', asyncHandler(async (req, res) => {
     'FROM sales s ' +
     'LEFT JOIN customers c ON c.id = s.customer_id ' +
     'LEFT JOIN employees e ON e.id = s.employee_id OR e.id = s.seller_id ' +
-    'WHERE ' + conds + ' ' +
+    'WHERE ' + listConds + ' ' +
     'ORDER BY s.created_at DESC ' +
     'LIMIT $' + (vals.length + 1) + ' OFFSET $' + (vals.length + 2);
   const { rows } = await pool.query(listQuery, [...vals, limitNum, offsetNum]);
@@ -610,6 +618,62 @@ router.patch('/:sale_id', asyncHandler(async (req, res) => {
   } finally {
     client.release();
   }
+}));
+
+// POST /companies/:id/sales/:sale_id/hide  (10/11/2026, migration 439)
+//
+// "Excluir" a venda CANCELADA da lista. Exclusao LOGICA: grava hidden_at e
+// hidden_by e mais nada. Nenhum DELETE, nenhum status, estoque, lancamento,
+// nota ou comissao muda — a venda ja foi desfeita pelo /cancel; aqui ela so
+// deixa de aparecer na lista. Os stats do GET / nao filtram hidden_at, entao
+// nenhum total muda.
+//
+// Mesmo escopo e permissao do /cancel: router montado em
+// /companies/:id/sales atras de requireAuth + requireCompanyAccess, e o
+// WHERE amarra a venda a empresa da rota (no consolidado o app chama com o
+// company_id da propria venda, igual ao cancelar).
+//
+// Venda nao cancelada: 409 SALE_NOT_CANCELLED. Ja oculta: 200 idempotente.
+// Coluna ainda nao existe (backend antes da migration): 503.
+router.post('/:sale_id/hide', asyncHandler(async (req, res) => {
+  const companyId = req.params.id;
+  const saleId = req.params.sale_id;
+
+  if (!(await hasSaleHiddenColumn(pool))) {
+    return res.status(503).json({
+      error: 'Ainda não dá para excluir vendas da lista. Tente de novo em alguns minutos.',
+      code: 'SALE_HIDE_UNAVAILABLE',
+    });
+  }
+
+  const userId = req.user && req.user.id ? req.user.id : null;
+  // UPDATE com a guarda no WHERE: so a cancelada, so desta empresa, so se
+  // ainda nao saiu. Atomico — sem janela entre conferir e gravar.
+  const upd = await pool.query(
+    'UPDATE sales SET hidden_at = NOW(), hidden_by = $1 ' +
+    "WHERE id = $2 AND company_id = $3 AND status = 'cancelled' AND hidden_at IS NULL " +
+    'RETURNING id, hidden_at',
+    [userId, saleId, companyId]
+  );
+  if (upd.rows.length) {
+    return res.json({ ok: true, sale_id: saleId, hidden_at: upd.rows[0].hidden_at });
+  }
+
+  // Nada foi gravado: explica o porque.
+  const cur = await pool.query(
+    'SELECT id, status, hidden_at FROM sales WHERE id = $1 AND company_id = $2',
+    [saleId, companyId]
+  );
+  if (!cur.rows.length) throw new AppError('Venda nao encontrada', 404);
+  const sale = cur.rows[0];
+  if (sale.status !== 'cancelled') {
+    return res.status(409).json({
+      error: 'Só dá para excluir da lista uma venda cancelada. Esta venda continua valendo; se for o caso, cancele-a primeiro.',
+      code: 'SALE_NOT_CANCELLED',
+    });
+  }
+  // Ja estava fora da lista (duplo toque, outra aba): nada a fazer.
+  res.json({ ok: true, sale_id: saleId, hidden_at: sale.hidden_at, already_hidden: true });
 }));
 
 // POST /companies/:id/sales/:sale_id/cancel  (troca-aware)
