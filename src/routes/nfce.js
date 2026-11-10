@@ -27,6 +27,15 @@
 //   ser POR ENTREGA (a 2a viagem do mesmo pedido tem a sua propria nota,
 //   com outros itens), nao por venda. Sem delivery_id: nada muda.
 //   O bloco <transp> e o CSOSN por item (resto do M2) ficam fora daqui.
+//
+// 10/11/2026: servico (products.unit 'srv') NAO entra na nota. Venda mista:
+//   so os produtos, pagamentos reduzidos na proporcao (services/
+//   nfceSemServico.js) e `servicos_fora_da_nfce` na resposta. Venda so de
+//   servico: 200 { skipped: true, reason: 'somente_servicos', nfce: null },
+//   sem reservar numero. NCM/tax_profile do item compartilhado do grupo
+//   lidos com a regra de visibilidade (utils/companyGroup.js). Venda sem
+//   servico: payload, XML, escritas e resposta identicos (fixture em
+//   __tests__/fixtures/nfceSemServico/golden.json).
 // ============================================================
 
 const express = require('express');
@@ -46,6 +55,9 @@ const { cnpjRequiredBody }         = require('../services/documentoEmpresa');
 // SALVAR a config (não só na hora de emitir), se a UF da empresa já tem
 // suporte na engine própria — hoje SP, AP (SVRS) e MG (08/11/2026). Ver services/sefazSp/endpoints.js.
 const { ENDPOINTS: SEFAZ_SP_ENDPOINTS_65 } = require('../services/sefazSp/endpoints');
+// 10/11/2026: servico (unit 'srv') fora da NFC-e; item do grupo acha o NCM.
+const { productVisibilityWhere }   = require('../utils/companyGroup');
+const { separarServicos, totaisDosItens, pagamentosDosProdutos } = require('../services/nfceSemServico');
 
 const INSTRUCOES_NOTA = {
   nfce: 'NFC-e (Nota Fiscal do Consumidor): ideal para vendas a pessoas fisicas. O CPF do comprador e opcional. Use na maioria das vendas do balcao.',
@@ -543,6 +555,49 @@ router.post('/emit', requireAuth, requireRole('client','analyst','admin'), async
       }
     }
 
+    // ── 10/11/2026: servico nao entra na NFC-e ───────────────────────────
+    // Servico = products.unit 'srv' (ou item que ja chega com unit 'srv').
+    // A nota e de mercadoria: o servico sairia com NCM 00000000 e CFOP 5102.
+    // Decisao do dono: na venda mista os produtos saem na nota e os servicos
+    // ficam de fora (NFS-e separada). Venda so de servico: nada a emitir.
+    //
+    // A leitura do produto usa a regra de visibilidade do grupo
+    // (utils/companyGroup.js, a mesma do Estoque, do bipe e da venda): o
+    // item compartilhado da matriz vendido pela filial agora acha o NCM e o
+    // tax_profile. Item da propria empresa: mesma linha de antes.
+    //
+    // Esta consulta saiu de dentro do envio (la embaixo) para cá, porque a
+    // venda so de servico tem que parar ANTES de reservar numero. Se ela
+    // falhar, o erro e guardado e relancado no MESMO ponto de antes (nota em
+    // 'erro' + 502), entao nada muda para quem nao vende servico.
+    const productIds = items.map(i => i.product_id).filter(id => typeof id==='string' && id.length>0);
+    const productById = new Map();
+    let productLookupErr = null;
+    if (productIds.length > 0) {
+      try {
+        const { rows: prodRows } = await db.query(
+          `SELECT id, ncm, tax_profile, unit FROM products
+            WHERE id=ANY($1::uuid[]) AND ${productVisibilityWhere('$2')}`,
+          [productIds, req.params.id]
+        );
+        for (const p of prodRows) productById.set(p.id, p);
+      } catch (lookupErr) {
+        productLookupErr = lookupErr;
+      }
+    }
+    // Sem servico, itensNota e o proprio `items` (mesma referencia).
+    const { produtos: itensNota, servicos: itensServico } = separarServicos(items, productById);
+    const totalServicos = itensServico.length ? totaisDosItens(itensServico).total : 0;
+    if (itensNota.length === 0) {
+      // Nao e erro: nao ha mercadoria para a nota. 200 + skipped para o app
+      // nao mostrar falha ao lojista (o servico sai em nota de servico).
+      return res.status(200).json({
+        skipped: true, reason: 'somente_servicos', nfce: null, tipo,
+        message: `Venda so de servicos: nao ha ${tipo === 'nfe' ? 'NF-e' : 'NFC-e'} a emitir. Servico sai em nota de servico (NFS-e).`,
+        servicos_fora_da_nfce: { itens: itensServico.length, total: totalServicos },
+      });
+    }
+
     const { rows: configs } = await db.query('SELECT * FROM nfce_config WHERE company_id=$1', [req.params.id]);
     if (!configs.length || !configs[0].is_active) {
       // 20/10/2026: conta sem CNPJ (cadastro com CPF) nunca vai configurar a
@@ -572,14 +627,25 @@ router.post('/emit', requireAuth, requireRole('client','analyst','admin'), async
     if (!company.inscricao_estadual) return res.status(400).json({ error: 'Inscricao Estadual da empresa nao cadastrada.' });
 
     let totalProducts = 0, totalDiscount = 0;
-    for (const item of items) {
+    for (const item of itensNota) {
       totalProducts += (Number(item.quantity)||1) * (Number(item.unit_price||item.price)||0);
       totalDiscount += Number(item.discount)||0;
     }
     const totalNfce = Math.round((totalProducts - totalDiscount) * 100) / 100;
 
+    // Pagamentos da nota. Sem servico: os da venda, como sempre. Venda mista:
+    // o app manda os pagamentos da venda INTEIRA. Se a soma ja bate com o
+    // total dos produtos, vao como vieram; se bate com o total da venda,
+    // cada forma entra na proporcao total da nota / total da venda (soma
+    // fecha exata no vNF; regra e motivo em services/nfceSemServico.js).
+    let paymentsNota = payments;
     const paymentsErr = validatePayments(payments, totalNfce);
-    if (paymentsErr) return res.status(400).json(paymentsErr);
+    if (paymentsErr) {
+      if (!itensServico.length) return res.status(400).json(paymentsErr);
+      const vendaErr = validatePayments(payments, totaisDosItens(items).total);
+      if (vendaErr) return res.status(400).json(vendaErr);
+      paymentsNota = pagamentosDosProdutos(payments, totalNfce);
+    }
 
     // ── S4.2: seletor de provider + fallback engine→gateway ──────────────
     // CLASSIFICAÇÃO DE ERROS (regra de ouro):
@@ -694,9 +760,9 @@ router.post('/emit', requireAuth, requireRole('client','analyst','admin'), async
        VALUES ($1,$2,$3,$4,$5,$6,'processando',$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)
        RETURNING *`,
       [req.params.id, sale_id||null, transaction_id||null, numeroNF, serieNF, chaveAcessoTmp,
-       customer_cpf||null, customer_name||null, JSON.stringify(items),
+       customer_cpf||null, customer_name||null, JSON.stringify(itensNota),
        totalProducts, totalDiscount, totalNfce,
-       Array.isArray(payments) ? JSON.stringify(payments) : (payment_method||'dinheiro'),
+       Array.isArray(paymentsNota) ? JSON.stringify(paymentsNota) : (payment_method||'dinheiro'),
        payment_change||0, req.user.id, tipo]
     );
     const emission = created[0];
@@ -718,24 +784,19 @@ router.post('/emit', requireAuth, requireRole('client','analyst','admin'), async
       await persistProviderUsed(emission.id, providerUsed, fallbackReason);
     } else {
       try {
-        const productIds = items.map(i => i.product_id).filter(id => typeof id==='string' && id.length>0);
+        // Produtos lidos la em cima (regra de visibilidade do grupo).
+        if (productLookupErr) throw productLookupErr;
         const ncmByProductId = new Map();
         const taxProfileByProductId = new Map(); // S3.2
-        if (productIds.length > 0) {
-          const { rows: prodRows } = await db.query(
-            `SELECT id, ncm, tax_profile FROM products WHERE id=ANY($1::uuid[]) AND company_id=$2`,
-            [productIds, req.params.id]
-          );
-          for (const p of prodRows) {
-            const n = (p.ncm||'').trim();
-            if (n && n !== '00000000') ncmByProductId.set(p.id, n);
-            if (p.tax_profile) taxProfileByProductId.set(p.id, p.tax_profile);
-          }
+        for (const p of productById.values()) {
+          const n = (p.ncm||'').trim();
+          if (n && n !== '00000000') ncmByProductId.set(p.id, n);
+          if (p.tax_profile) taxProfileByProductId.set(p.id, p.tax_profile);
         }
 
         const crtCompany = company.tax_regime === 'mei' ? 4
           : (company.tax_regime === 'lucro_presumido' || company.tax_regime === 'lucro_real') ? 3 : 1;
-        const nfItems = items.map(i => {
+        const nfItems = itensNota.map(i => {
           const ncmFromItem = (i.ncm && String(i.ncm).trim()!=='00000000') ? String(i.ncm).trim() : null;
           const ncmFromDb   = ncmByProductId.get(i.product_id);
           const base = {
@@ -758,8 +819,8 @@ router.post('/emit', requireAuth, requireRole('client','analyst','admin'), async
         });
 
         // F4 (29/05/2026): crediario = indPag 1 (a prazo) automaticamente.
-        const nfPayments = Array.isArray(payments)
-          ? payments.map(p => ({
+        const nfPayments = Array.isArray(paymentsNota)
+          ? paymentsNota.map(p => ({
               method: paymentCode(p.method),
               value:  Number(p.value),
               change: p.change,
@@ -940,7 +1001,9 @@ router.post('/emit', requireAuth, requireRole('client','analyst','admin'), async
       rejeicao_amigavel: amigavel,
       contingencia: prov.status === 'contingencia',
       // S4.2: transparência do fallback pro frontend
-      provider_used: providerUsed, fallback: fallbackReason != null });
+      provider_used: providerUsed, fallback: fallbackReason != null,
+      // Venda mista: o que ficou fora da nota (vai na NFS-e). Ausente sem servico.
+      ...(itensServico.length ? { servicos_fora_da_nfce: { itens: itensServico.length, total: totalServicos } } : {}) });
 
   } catch (err) {
     console.error('nfce emit error:', err);
