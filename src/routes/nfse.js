@@ -4,8 +4,9 @@
 // Endpoints (todos sob /companies/:cid/nfse):
 //
 //   Config:
-//     GET    /config           ler config (sem decifrar api_key!)
+//     GET    /config           ler config (sem decifrar api_key!) + passo a passo
 //     PUT    /config           atualizar config (cifra api_key)
+//     POST   /teste            nota de teste em produção restrita (migration 441)
 //
 //   Notas:
 //     POST   /                 emitir NFS-e
@@ -41,7 +42,8 @@ const {
 // próprio, que lê o A1 do cofre da empresa (company_certificates). Liga
 // geral NFSE_NACIONAL_ENABLED: desligada, nada é enviado.
 const nacional = require('../services/nfseNacional');
-const { validarCamposNacional } = require('../services/nfseNacional/config');
+const { validarCamposNacional, validarRetencao } = require('../services/nfseNacional/config');
+const { producaoHabilitada, normalizarAmbiente } = require('../services/nfseNacional/endpoints');
 const { NfseNacionalError, httpStatusDe } = require('../services/nfseNacional/errors');
 
 const requireWrite = requireRole('client', 'analyst', 'admin');
@@ -49,6 +51,8 @@ const requireWrite = requireRole('client', 'analyst', 'admin');
 const NACIONAL_CAMPOS = [
   'municipio_ibge', 'ctribnac_padrao', 'cnbs_padrao', 'op_simp_nac',
   'reg_ap_trib_sn', 'reg_esp_trib', 'p_tot_trib_sn', 'next_dps_number',
+  // migration 441: passo a passo da configuração da loja
+  'prefeitura_cadastro_confirmado', 'cliente_retem_iss', 'aliquota_iss_retencao_sn',
 ];
 
 function sendNacionalError(res, where, err) {
@@ -247,7 +251,15 @@ router.get('/config', requireAuth, async (req, res) => {
   try {
     const config = await getNfseConfig(req.params.id);
     if (!config) {
-      return res.json({ config: null, has_config: false });
+      // 10/11/2026 (migration 441): a tela "Pronto para emitir NFS-e?" mostra
+      // os passos e os dados da empresa mesmo antes da primeira gravação.
+      let situacao = null;
+      try {
+        situacao = await nacional.situacaoConfig(db, req.params.id);
+      } catch (e) {
+        console.error('[nfse get config nacional]', e.message);
+      }
+      return res.json({ config: null, has_config: false, nacional: situacao });
     }
 
     // Mascara campos sensiveis
@@ -260,10 +272,12 @@ router.get('/config', requireAuth, async (req, res) => {
     safe.has_certificate = !!config.certificate_url;
 
     // Emissor nacional: diz se a empresa está apta e o que falta (sem segredo).
-    if (config.provider === 'nacional') {
+    // 10/11/2026 (migration 441): para qualquer provider — a tela "Pronto
+    // para emitir NFS-e?" grava provider 'nacional' no primeiro passo.
+    {
       try {
         safe.nacional = await nacional.situacaoConfig(db, req.params.id);
-        safe.has_certificate = !!safe.nacional.certificado;
+        if (config.provider === 'nacional') safe.has_certificate = !!safe.nacional.certificado;
       } catch (e) {
         console.error('[nfse get config nacional]', e.message);
         safe.nacional = null;
@@ -319,6 +333,7 @@ router.put('/config', requireAuth, requireWrite, async (req, res) => {
         // nacional ela é o último degrau da precedência nota → item → empresa,
         // então passa pela mesma régua do cadastro do item (0 a 5).
         if (body.default_iss_rate !== undefined) camposNac.default_iss_rate = body.default_iss_rate;
+        if (body.inscricao_municipal !== undefined) camposNac.inscricao_municipal = body.inscricao_municipal;
         if (body.certificate_url || body.certificate_pwd) {
           return res.status(400).json({
             error: 'No emissor nacional o certificado é o A1 da empresa: envie o arquivo .pfx em Configurações > Nota Fiscal.',
@@ -329,9 +344,37 @@ router.put('/config', requireAuth, requireWrite, async (req, res) => {
       const { data: nac, erros } = validarCamposNacional(camposNac);
       if (erros.length) return res.status(400).json({ error: erros.join(' '), code: 'INVALID_INPUT', detalhes: erros });
       Object.assign(data, nac);
+      // alíquota do ISSQN retido: só com cliente que retém e ME/EPP do Simples
+      const errosRet = validarRetencao(existing, data);
+      if (errosRet.length) return res.status(400).json({ error: errosRet.join(' '), code: 'INVALID_INPUT', detalhes: errosRet });
+      if (providerFinal === 'nacional' && body.serie_confirmada === true) data.serie_confirmada_em = new Date();
       // nunca nasce (nem migra de outro provider) em produção sem pedir
       if (providerFinal === 'nacional' && (!existing || existing.provider !== 'nacional') && data.ambiente === undefined) {
         data.ambiente = 'producao_restrita';
+      }
+    }
+
+    // Ligar a NFS-e (migration 441): só com a nota de teste aceita em
+    // produção restrita e os passos obrigatórios prontos. Ligar sem dizer o
+    // ambiente = produção, que continua travada no servidor sem
+    // NFSE_NACIONAL_PRODUCAO.
+    if (providerFinal === 'nacional' && data.is_active === true) {
+      const ambienteFinal = normalizarAmbiente(data.ambiente !== undefined ? data.ambiente
+        : (existing && existing.is_active ? existing.ambiente : 'producao'));
+      const jaLigada = existing && existing.is_active === true && normalizarAmbiente(existing.ambiente) === ambienteFinal;
+      if (!jaLigada) {
+        if (data.ambiente === undefined) data.ambiente = ambienteFinal;
+        const final = { ...(existing || {}), ...data, provider: 'nacional' };
+        const v = await nacional.avaliarLigar(db, req.params.id, final);
+        if (!v.ok) {
+          return res.status(409).json({ error: v.motivos.join(' '), code: 'NAO_PODE_LIGAR', detalhes: v.motivos, passos: v.passos });
+        }
+        if (ambienteFinal === 'producao' && !producaoHabilitada()) {
+          return res.status(409).json({
+            error: 'Sua loja está pronta! A Aura está liberando a emissão em produção e avisa você assim que terminar. Nada mudou na sua configuração.',
+            code: 'PRODUCAO_NAO_LIBERADA',
+          });
+        }
       }
     }
 
@@ -369,6 +412,33 @@ router.put('/config', requireAuth, requireWrite, async (req, res) => {
     if (err instanceof NfseEncryptionKeyError) return sendKeyError(res, 'put config', err);
     console.error('[nfse put config]', err.message);
     res.status(500).json({ error: 'Erro ao salvar config' });
+  }
+});
+
+// POST /teste — "Emitir nota de teste" (migration 441). Sempre em produção
+// restrita (tpAmb 2), série de teste com contador próprio, chave
+// "teste:<idempotency_key>". Não exige is_active. Responde 200 com o
+// resultado traduzido (ok, rejeitado, erro) e a situação atualizada.
+router.post('/teste', requireAuth, requireWrite, async (req, res) => {
+  const key = (req.body && req.body.idempotency_key) || req.get('Idempotency-Key');
+  try {
+    const r = await nacional.emitirTeste(db, { companyId: req.params.id, idempotencyKey: key });
+    let situacao = null;
+    try {
+      situacao = await nacional.situacaoConfig(db, req.params.id);
+    } catch (e) {
+      console.error('[nfse teste situacao]', e.message);
+    }
+    return res.json({
+      resultado: r.resultado,
+      nota: r.nota ? nacionalResposta(r.nota) : null,
+      replay: !!r.replay,
+      nacional: situacao,
+    });
+  } catch (err) {
+    if (err instanceof NfseNacionalError) return sendNacionalError(res, 'teste', err);
+    console.error('[nfse nacional teste] unexpected:', err.message);
+    return res.status(500).json({ error: 'Não conseguimos emitir a nota de teste agora. Tente de novo em instantes.' });
   }
 });
 
@@ -610,9 +680,13 @@ router.post('/', requireAuth, requireWrite, async (req, res) => {
 router.get('/', requireAuth, async (req, res) => {
   const cid = req.params.id;
   const { status, customer_id, date_from, date_to, limit = 50 } = req.query;
+  const incluirTeste = req.query.incluir_teste === '1' || req.query.incluir_teste === 'true';
+  // a nota de teste (produção restrita, sem valor fiscal) não é documento
+  // da loja: fica fora da lista e das contas, salvo ?incluir_teste=1
+  const semTeste = incluirTeste ? '' : " AND n.source_type IS DISTINCT FROM 'teste'";
 
   const params = [cid];
-  let where = 'WHERE n.company_id = $1';
+  let where = 'WHERE n.company_id = $1' + semTeste;
 
   if (status) { params.push(status); where += ` AND n.status = $${params.length}`; }
   if (customer_id) { params.push(customer_id); where += ` AND n.customer_id = $${params.length}`; }
@@ -647,7 +721,7 @@ router.get('/', requireAuth, async (req, res) => {
     // Stats agregadas
     const { rows: stats } = await db.query(
       `SELECT status, COUNT(*)::int AS count, COALESCE(SUM(service_amount), 0)::numeric AS total
-         FROM nfse WHERE company_id = $1
+         FROM nfse n WHERE n.company_id = $1${semTeste}
          GROUP BY status`,
       [cid]
     );
