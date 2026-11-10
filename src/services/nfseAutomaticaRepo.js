@@ -6,6 +6,8 @@
 // nfseNacional/repo.js). Tabela nfse_automatica e colunas novas: migration
 // 438. Colunas fiscais do item (products.nfse_*): migration 437 (PR 1) —
 // enquanto ela não estiver no banco, o item usa o código padrão da empresa.
+// Tomador informado no Caixa (sales.nfse_tomador): migration 440 — sem ela
+// a venda é lida sem a coluna e a gravação é pulada.
 //
 // Multi-CNPJ: quem emite é a empresa da venda/OS (company_id da origem). O
 // item compartilhado do grupo é lido pela MESMA regra de visibilidade do
@@ -69,13 +71,54 @@ async function gravarOptIn(companyId, ligar) {
   return rows[0] || null;
 }
 
+// sales.nfse_tomador (migration 440): null = ainda não sabemos; false = ausente.
+let _colunaTomadorDaVenda = null;
+
 async function buscarVenda(companyId, saleId) {
-  const { rows } = await db.query(
-    `SELECT id, company_id, customer_id, status, type, total_amount, created_at
-       FROM sales WHERE id = $1 AND company_id = $2`,
-    [saleId, companyId]
-  );
+  const sql = (extra) => `SELECT id, company_id, customer_id, status, type, total_amount, created_at${extra}
+       FROM sales WHERE id = $1 AND company_id = $2`;
+  if (_colunaTomadorDaVenda !== false) {
+    try {
+      const { rows } = await db.query(sql(', nfse_tomador'), [saleId, companyId]);
+      _colunaTomadorDaVenda = true;
+      return rows[0] || null;
+    } catch (err) {
+      if (err.code !== '42703') throw err;
+      _colunaTomadorDaVenda = false;
+    }
+  }
+  const { rows } = await db.query(sql(''), [saleId, companyId]);
   return rows[0] || null;
+}
+
+/**
+ * Grava o tomador informado no Caixa na própria venda, DENTRO da transação
+ * da venda (client). SAVEPOINT: coluna ausente (440 fora do banco) ou
+ * qualquer falha aqui nunca derruba a venda — o tomador ainda segue em
+ * memória para o gatilho. Nunca lança.
+ * @returns {Promise<boolean>} gravou
+ */
+async function gravarTomadorDaVenda(client, { companyId, saleId, tomador }) {
+  if (!client || !tomador || _colunaTomadorDaVenda === false) return false;
+  try {
+    await client.query('SAVEPOINT nfse_tomador');
+  } catch (err) {
+    console.warn('[nfse automatica] tomador da venda não gravou (savepoint), venda segue:', err && err.message);
+    return false;
+  }
+  try {
+    await client.query(
+      'UPDATE sales SET nfse_tomador = $1::jsonb WHERE id = $2 AND company_id = $3',
+      [JSON.stringify({ doc: tomador.doc, nome: tomador.nome || null }), saleId, companyId]
+    );
+    await client.query('RELEASE SAVEPOINT nfse_tomador');
+    return true;
+  } catch (err) {
+    try { await client.query('ROLLBACK TO SAVEPOINT nfse_tomador'); } catch (_) { /* nada */ }
+    if (err.code === '42703') _colunaTomadorDaVenda = false; // migration 440 ainda não aplicada
+    else console.warn('[nfse automatica] tomador da venda não gravou, venda segue:', err && err.message);
+    return false;
+  }
 }
 
 /** Todos os itens da venda; `servico` = produto com unit 'srv'. */
@@ -269,9 +312,9 @@ async function listarPorOrigens(companyId, origens) {
 
 module.exports = {
   carregarConfig, gravarOptIn,
-  buscarVenda, itensDaVenda, buscarOs, itensDaOs, vendasDasParcelas, buscarCliente,
+  buscarVenda, gravarTomadorDaVenda, itensDaVenda, buscarOs, itensDaOs, vendasDasParcelas, buscarCliente,
   buscarRegistro, reivindicar, retomar, anotarVinculo, gravar, removerSemCodigo,
   ligarNotaAOrigem, notaPorChave, listarPorOrigens,
   schemaAusente,
-  _resetCache: () => { _colunasFiscaisDoItem = null; },
+  _resetCache: () => { _colunasFiscaisDoItem = null; _colunaTomadorDaVenda = null; },
 };

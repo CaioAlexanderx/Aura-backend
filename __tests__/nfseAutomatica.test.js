@@ -11,7 +11,10 @@
 //   - serviço sem código → problema SEM_CODIGO, nada sai; com código, sai;
 //   - falha do emissor vira registro 'erro', nunca exceção no gatilho;
 //   - rejeitada não reemite sozinha; "tentar de novo" usa chave nova;
-//   - rotas: situação da origem, completar e 2ª via.
+//   - rotas: situação da origem, completar e 2ª via;
+//   - tomador junto com a venda (migration 440): o do Caixa vence o
+//     cadastro, sobrevive à queda (sales.nfse_tomador) e perde para o
+//     completado pelo app.
 // ============================================================
 'use strict';
 
@@ -123,8 +126,8 @@ function emissorAutoriza() {
   });
 }
 
-function venda({ itens, total, customer = CLI, created_at = '2026-11-10T13:00:00Z' }) {
-  mockMem.vendas.set(VENDA, { id: VENDA, company_id: C1, customer_id: customer, status: 'completed', type: 'sale', total_amount: total, created_at });
+function venda({ itens, total, customer = CLI, created_at = '2026-11-10T13:00:00Z', nfse_tomador = null }) {
+  mockMem.vendas.set(VENDA, { id: VENDA, company_id: C1, customer_id: customer, status: 'completed', type: 'sale', total_amount: total, created_at, nfse_tomador });
   mockMem.itensVenda.set(VENDA, itens);
 }
 
@@ -473,5 +476,96 @@ describe('rotas /nfse/automatica', () => {
     expect(r.status).toBe(400);
     r = await request(app()).get(`/companies/${C1}/nfse/automatica/origem/venda/abc`);
     expect(r.status).toBe(400);
+  });
+});
+
+describe('tomador junto com a venda do Caixa (migration 440)', () => {
+  const CNPJ = '11222333000181'; // válido
+  const CPF2 = '11144477735'; // válido
+
+  test('tomadorDaVendaDoCorpo: ausente, válido (com máscara), inválido e formato', () => {
+    expect(auto.tomadorDaVendaDoCorpo(undefined)).toEqual({ tomador: null, aviso: null });
+    expect(auto.tomadorDaVendaDoCorpo(null)).toEqual({ tomador: null, aviso: null });
+    expect(auto.tomadorDaVendaDoCorpo({ doc: '' })).toEqual({ tomador: null, aviso: null });
+    expect(auto.tomadorDaVendaDoCorpo({ doc: '11.222.333/0001-81', nome: '  Loja X Ltda ' }))
+      .toEqual({ tomador: { doc: CNPJ, nome: 'Loja X Ltda' }, aviso: null });
+    expect(auto.tomadorDaVendaDoCorpo({ doc: '529.982.247-25' })).toEqual({ tomador: { doc: CPF, nome: null }, aviso: null });
+    expect(auto.tomadorDaVendaDoCorpo({ doc: '529.982.247-24' })).toEqual({ tomador: null, aviso: 'TOMADOR_INVALIDO' });
+    expect(auto.tomadorDaVendaDoCorpo({ doc: '11111111111' })).toEqual({ tomador: null, aviso: 'TOMADOR_INVALIDO' });
+    expect(auto.tomadorDaVendaDoCorpo({ doc: '123' })).toEqual({ tomador: null, aviso: 'TOMADOR_INVALIDO' });
+    expect(auto.tomadorDaVendaDoCorpo('52998224725')).toEqual({ tomador: null, aviso: 'FORMATO' });
+    expect(auto.tomadorDaVendaDoCorpo([CPF])).toEqual({ tomador: null, aviso: 'FORMATO' });
+  });
+
+  test('o documento digitado no Caixa vence o do cadastro do cliente', async () => {
+    venda({ itens: [SRV('a', 100)], total: 100 });
+    auto.aoFinalizarVenda({ companyId: C1, saleId: VENDA, tomador: { doc: CNPJ, nome: 'Loja X Ltda' } });
+    await rodarFila();
+    expect(nacional.emitir).toHaveBeenCalledTimes(1);
+    expect(nacional.emitir.mock.calls[0][1].nota.tomador).toMatchObject({ doc: CNPJ, nome: 'Loja X Ltda' });
+    expect(repo.buscarCliente).not.toHaveBeenCalled(); // doc e nome já vieram
+    expect(mockMem.clientes.get(CLI).cpf_cnpj).toBe(CPF); // cadastro intacto
+  });
+
+  test('sem nome no Caixa: documento da venda, nome do cadastro', async () => {
+    venda({ itens: [SRV('a', 100)], total: 100 });
+    auto.aoFinalizarVenda({ companyId: C1, saleId: VENDA, tomador: { doc: CPF2, nome: null } });
+    await rodarFila();
+    expect(nacional.emitir.mock.calls[0][1].nota.tomador).toMatchObject({ doc: CPF2, nome: 'Maria Souza' });
+  });
+
+  test('venda sem cliente e com o tomador do Caixa: emite (antes ficava pendente)', async () => {
+    venda({ itens: [SRV('a', 100)], total: 100, customer: null });
+    auto.aoFinalizarVenda({ companyId: C1, saleId: VENDA, tomador: { doc: CPF2, nome: 'João Lima' } });
+    await rodarFila();
+    expect(nacional.emitir).toHaveBeenCalledTimes(1);
+    expect([...mockMem.regs.values()][0]).toMatchObject({ status: 'emitida', tomador: { doc: CPF2, nome: 'João Lima' } });
+  });
+
+  test('processo caiu antes do agendamento: o próximo gatilho lê sales.nfse_tomador', async () => {
+    mockMem.clientes.get(CLI).cpf_cnpj = null;
+    venda({ itens: [SRV('a', 100)], total: 100, nfse_tomador: { doc: CPF2, nome: 'João Lima' } });
+    // nenhum aoFinalizarVenda (o processo caiu); depois chega o recebimento
+    mockMem.parcelas.set('inst-1', VENDA);
+    auto.aoReceberPagamento({ companyId: C1, result: { covered_installments: [{ id: 'inst-1' }], transaction: { id: 'tx-1' } } });
+    await rodarFila();
+    expect(nacional.emitir).toHaveBeenCalledTimes(1);
+    expect(nacional.emitir.mock.calls[0][1].nota.tomador).toMatchObject({ doc: CPF2, nome: 'João Lima' });
+  });
+
+  test('"Emitir NFS-e" manual sem tomador também usa o da venda', async () => {
+    mockMem.clientes.get(CLI).cpf_cnpj = null;
+    venda({ itens: [SRV('a', 100)], total: 100, nfse_tomador: { doc: CNPJ, nome: 'Loja X Ltda' } });
+    await auto.processarVenda({ companyId: C1, saleId: VENDA, gatilho: 'manual', manual: true });
+    expect(nacional.emitir.mock.calls[0][1].nota.tomador.doc).toBe(CNPJ);
+  });
+
+  test('sales.nfse_tomador com dígito errado é ignorado: vale o cadastro', async () => {
+    venda({ itens: [SRV('a', 100)], total: 100, nfse_tomador: { doc: '52998224724', nome: 'X' } });
+    await auto.processarVenda({ companyId: C1, saleId: VENDA, gatilho: 'venda' });
+    expect(nacional.emitir.mock.calls[0][1].nota.tomador).toMatchObject({ doc: CPF, nome: 'Maria Souza' });
+  });
+
+  test('o completado pelo app vence o da venda', async () => {
+    // tomador do Caixa sem nome e venda sem cliente: pendente por falta de nome
+    venda({ itens: [SRV('a', 100)], total: 100, customer: null, nfse_tomador: { doc: CPF2, nome: null } });
+    auto.aoFinalizarVenda({ companyId: C1, saleId: VENDA, tomador: { doc: CPF2, nome: null } });
+    await rodarFila();
+    expect(nacional.emitir).not.toHaveBeenCalled();
+    expect([...mockMem.regs.values()][0]).toMatchObject({ status: 'pendente_dados', motivo_codigo: 'SEM_NOME', tomador: { doc: CPF2 } });
+
+    await auto.processarVenda({ companyId: C1, saleId: VENDA, gatilho: 'manual', manual: true, tomador: { doc: CPF, nome: 'Maria Souza' } });
+    expect(nacional.emitir).toHaveBeenCalledTimes(1);
+    expect(nacional.emitir.mock.calls[0][1].nota.tomador).toMatchObject({ doc: CPF, nome: 'Maria Souza' });
+    // o do app fica gravado no registro: gatilhos seguintes não voltam ao da venda
+    expect([...mockMem.regs.values()][0].tomador).toMatchObject({ doc: CPF });
+  });
+
+  test('venda sem nfse_tomador: aoFinalizarVenda de sempre, tomador do cadastro', async () => {
+    venda({ itens: [SRV('a', 100)], total: 100 });
+    auto.aoFinalizarVenda({ companyId: C1, saleId: VENDA });
+    await rodarFila();
+    expect(nacional.emitir.mock.calls[0][1].nota.tomador).toMatchObject({ doc: CPF, nome: 'Maria Souza' });
+    expect([...mockMem.regs.values()][0].tomador).toBeNull();
   });
 });
