@@ -31,6 +31,8 @@ router.use('/public/leads', require('./leadsPublic'));
 router.use('/me/companies', require('./userCompanies'));
 router.use('/me', productLinksUserRouter);
 router.use('/me', require('./meAggregates'));
+// 10/11/2026: estoque por loja na visao consolidada (GET /me/estoque/por-loja).
+router.use('/me', require('./meEstoquePorLoja'));
 // Fase 1 · consentimento (340): GET /me/whatsapp/consent/summary.
 router.use('/me', require('./customerConsent').meRouter);
 
