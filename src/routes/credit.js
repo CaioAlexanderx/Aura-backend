@@ -35,6 +35,7 @@
 // ============================================================
 const router      = require('express').Router({ mergeParams: true });
 const db          = require('../config/database');
+const { normalizarTelefone } = require('../utils/telefone');
 const creditLedger = require('../services/creditLedger');
 const { MAX_INSTALLMENTS_CEILING } = require('../services/credit/terms');
 const overdueRule  = require('../services/credit/overdue');  // .ymd: due_date das linhas de applied como 'AAAA-MM-DD' (15/09/2026)
@@ -1730,6 +1731,13 @@ router.post('/manual-entry', async (req, res) => {
     return res.status(400).json({ error: 'Informe customer_id ou new_customer.name' });
   if (!customer_id && !new_customer?.phone)
     return res.status(400).json({ error: 'Telefone do cliente e obrigatorio' });
+  // 10/11/2026: +55 sai antes de buscar/gravar; digitos a mais, 400 (nunca corta).
+  let telNovoCliente = null;
+  if (!customer_id) {
+    const tel = normalizarTelefone(String(new_customer.phone).trim());
+    if (!tel.ok) return res.status(400).json({ error: tel.error, code: tel.code, field: 'phone' });
+    telNovoCliente = tel.valor;
+  }
 
   try {
     await assertCrediarioEnabled(companyId);
@@ -1765,7 +1773,7 @@ router.post('/manual-entry', async (req, res) => {
     // 1. Resolve customer
     let custId = customer_id || null;
     if (!custId) {
-      const phoneClean = String(new_customer.phone).trim();
+      const phoneClean = telNovoCliente;
       const { rows: existing } = await client.query(
         `SELECT id FROM customers WHERE company_id = $1 AND phone = $2 LIMIT 1`,
         [companyId, phoneClean]

@@ -130,6 +130,7 @@ const documentoEmpresa = require('../services/documentoEmpresa');
 const whatsappCadastro = require('../services/whatsappCadastro');
 const signupHandshake = require('../services/signupHandshake');
 const signupLead = require('../services/signupLead');
+const { normalizarTelefoneSemRecusar } = require('../utils/telefone');
 const { datasDoAtraso } = require('../services/cobrancaAssinatura');
 const refreshDeSessao = require('../services/refreshDeSessao');
 const { buscarEmpresaComAcesso } = require('../services/empresaComAcesso');
@@ -411,9 +412,11 @@ router.post('/register', async (req, res) => {
   const celular = whatsappCadastro.validarCelular(whatsappBruto);
   const exigeWhatsapp = whatsappCadastro.exigidoNoCadastro();
   // users.phone: normalizado quando e celular valido; senao, como sempre foi.
-  const telefoneDaPessoa = celular.ok ? celular.numero : ((typeof whatsappBruto === 'string' && whatsappBruto.trim()) ? whatsappBruto : (phone || null));
+  // 10/11/2026: o "como sempre foi" tambem perde o +55 da frente quando o
+  // numero passa de 11 digitos (utils/telefone; nunca corta, nunca recusa).
+  const telefoneDaPessoa = celular.ok ? celular.numero : ((typeof whatsappBruto === 'string' && whatsappBruto.trim()) ? normalizarTelefoneSemRecusar(whatsappBruto) : (normalizarTelefoneSemRecusar(phone) || null));
   // companies.phone: telefone da loja (Receita) quando vier; senao o de antes.
-  const telefoneDaEmpresa = whatsappCadastro.telefoneDaLoja(company_phone) || phone || (celular.ok ? celular.numero : null);
+  const telefoneDaEmpresa = normalizarTelefoneSemRecusar(whatsappCadastro.telefoneDaLoja(company_phone)) || normalizarTelefoneSemRecusar(phone) || (celular.ok ? celular.numero : null);
   const dojoFederationId = (typeof federation_id === 'string') ? federation_id.trim() : '';
   if (isDojoSignup && !company_name) {
     return res.status(400).json({
