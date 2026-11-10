@@ -5,7 +5,8 @@
 // do nfseNacional) e emissor nacional trocado por um jest.fn. Cobre:
 //   - cada gatilho (venda, OS entregue, recebimento) emite uma vez;
 //   - o segundo gatilho da mesma prestação não emite de novo (só vínculo);
-//   - sem CPF/CNPJ → pendente_dados com motivo; completar emite;
+//   - tomador opcional (10/11/2026): sem CPF/CNPJ emite sem <toma>; dígito
+//     errado ou documento sem nome → pendente_dados; completar emite;
 //   - venda sem serviço → nada; flag ou opt-in desligados → nada;
 //   - uma nota por código de tributação, descrição concatenada;
 //   - serviço sem código → problema SEM_CODIGO, nada sai; com código, sai;
@@ -282,20 +283,15 @@ describe('quando nada sai', () => {
     expect(nacional.emitir).not.toHaveBeenCalled();
   });
 
-  test('sem CPF/CNPJ: pendente_dados com motivo legível; completar emite', async () => {
+  test('sem CPF/CNPJ em lugar nenhum: emite sem tomador (consumidor não identificado)', async () => {
     mockMem.clientes.get(CLI).cpf_cnpj = null;
     venda({ itens: [SRV('a', 100)], total: 100 });
     auto.aoFinalizarVenda({ companyId: C1, saleId: VENDA });
     await rodarFila();
-    expect(nacional.emitir).not.toHaveBeenCalled();
-    const reg = [...mockMem.regs.values()][0];
-    expect(reg).toMatchObject({ status: 'pendente_dados', motivo_codigo: 'SEM_TOMADOR' });
-    expect(reg.motivo).toMatch(/falta o CPF\/CNPJ de quem contratou/i);
-
-    await auto.processarVenda({ companyId: C1, saleId: VENDA, gatilho: 'manual', manual: true, tomador: { doc: '529.982.247-25', nome: 'Maria Souza' } });
     expect(nacional.emitir).toHaveBeenCalledTimes(1);
-    expect(nacional.emitir.mock.calls[0][1].nota.tomador.doc).toBe(CPF);
-    expect([...mockMem.regs.values()][0].status).toBe('emitida');
+    expect(nacional.emitir.mock.calls[0][1].nota).not.toHaveProperty('tomador');
+    const reg = [...mockMem.regs.values()][0];
+    expect(reg).toMatchObject({ status: 'emitida', motivo_codigo: null });
   });
 
   test('CPF inválido também fica pendente', async () => {
@@ -449,7 +445,7 @@ describe('rotas /nfse/automatica', () => {
   });
 
   test('completar exige CPF/CNPJ válido e emite', async () => {
-    mockMem.clientes.get(CLI).cpf_cnpj = null;
+    mockMem.clientes.get(CLI).cpf_cnpj = '11111111111'; // dígito errado: pendente
     venda({ itens: [SRV('a', 100)], total: 100 });
     auto.aoFinalizarVenda({ companyId: C1, saleId: VENDA });
     await rodarFila();
@@ -634,7 +630,8 @@ describe('emissão manual ("Emitir NFS-e"), separada da automática', () => {
 
   test('completar e tentar de novo também funcionam sem a automática', async () => {
     semAutomatica();
-    mockMem.clientes.get(CLI).cpf_cnpj = null;
+    // cadastro com CPF e sem nome: o <toma> exige xNome → pendente SEM_NOME
+    Object.assign(mockMem.clientes.get(CLI), { full_name: null, name: null });
     venda({ itens: [SRV('a', 100)], total: 100 });
     let r = await emitir();
     expect(r.status).toBe(200);
@@ -834,5 +831,100 @@ describe('situação da origem diz se o botão "Emitir NFS-e" cabe', () => {
     const s = await auto.situacaoDaOrigem({ companyId: C1, tipo: 'venda', id: VENDA });
     expect(s).toMatchObject({ estado: 'emitida', tem_servico: true });
     expect(repo.itensDaVenda).not.toHaveBeenCalled();
+  });
+});
+
+describe('tomador opcional — consumidor não identificado (decisão de 10/11/2026)', () => {
+  const CPF2 = '11144477735'; // válido
+  const CNPJ = '11222333000181'; // válido
+  const ultimaNota = () => nacional.emitir.mock.calls[nacional.emitir.mock.calls.length - 1][1].nota;
+
+  test('venda sem tomador e sem cliente emite, sem o grupo toma (gatilho e botão)', async () => {
+    venda({ itens: [SRV('a', 100)], total: 100, customer: null });
+    auto.aoFinalizarVenda({ companyId: C1, saleId: VENDA });
+    await rodarFila();
+    expect(nacional.emitir).toHaveBeenCalledTimes(1);
+    expect(ultimaNota()).not.toHaveProperty('tomador');
+    expect(ultimaNota()).toMatchObject({ valor: 100, ctribnac: '010501' });
+    expect([...mockMem.regs.values()][0]).toMatchObject({ status: 'emitida', tomador: null });
+    expect(repo.buscarCliente).toHaveBeenCalledWith(null);
+
+    // o botão "Emitir NFS-e" com a automática desligada também emite direto
+    mockMem.regs.clear(); mockMem.notas.clear(); nacional.emitir.mockClear();
+    mockMem.cfg.get(C1).emissao_automatica = false;
+    const r = await auto.emitirManual({ companyId: C1, tipo: 'venda', id: VENDA });
+    expect(r.acao).toBe('processada');
+    expect(r.grupos[0]).toMatchObject({ acao: 'emitida' });
+    expect(ultimaNota()).not.toHaveProperty('tomador');
+  });
+
+  test('cliente cadastrado sem CPF/CNPJ: emite sem tomador (o nome sozinho não entra)', async () => {
+    mockMem.clientes.get(CLI).cpf_cnpj = '';
+    venda({ itens: [SRV('a', 100)], total: 100 });
+    await auto.processarVenda({ companyId: C1, saleId: VENDA, gatilho: 'venda' });
+    expect(ultimaNota()).not.toHaveProperty('tomador');
+  });
+
+  test('CPF com nome informado no Caixa: emite com toma', async () => {
+    venda({ itens: [SRV('a', 100)], total: 100, customer: null });
+    auto.aoFinalizarVenda({ companyId: C1, saleId: VENDA, tomador: { doc: CPF2, nome: 'João Lima' } });
+    await rodarFila();
+    expect(ultimaNota().tomador).toMatchObject({ doc: CPF2, nome: 'João Lima' });
+  });
+
+  test('CPF sem nome e com cliente vinculado: usa o nome do cliente', async () => {
+    venda({ itens: [SRV('a', 100)], total: 100, nfse_tomador: { doc: CNPJ, nome: null } });
+    auto.aoFinalizarVenda({ companyId: C1, saleId: VENDA, tomador: { doc: CNPJ, nome: null } });
+    await rodarFila();
+    expect(nacional.emitir).toHaveBeenCalledTimes(1);
+    expect(ultimaNota().tomador).toMatchObject({ doc: CNPJ, nome: 'Maria Souza' });
+  });
+
+  test('CPF sem nome e sem cliente: pendente SEM_NOME, nada sai', async () => {
+    venda({ itens: [SRV('a', 100)], total: 100, customer: null });
+    auto.aoFinalizarVenda({ companyId: C1, saleId: VENDA, tomador: { doc: CPF2 } });
+    await rodarFila();
+    expect(nacional.emitir).not.toHaveBeenCalled();
+    const reg = [...mockMem.regs.values()][0];
+    expect(reg).toMatchObject({ status: 'pendente_dados', motivo_codigo: 'SEM_NOME' });
+    const sit = await auto.situacaoDaOrigem({ companyId: C1, tipo: 'venda', id: VENDA });
+    expect(sit).toMatchObject({ estado: 'pendente_dados', acao: 'completar_dados' });
+  });
+
+  test('documento com dígito errado (completado pelo app ou no cadastro): pendente TOMADOR_INVALIDO, nunca emite', async () => {
+    venda({ itens: [SRV('a', 100)], total: 100, customer: null });
+    const r = await auto.emitirManual({ companyId: C1, tipo: 'venda', id: VENDA, tomador: { doc: '52998224724', nome: 'Maria' } });
+    expect(r.grupos[0]).toMatchObject({ acao: 'pendente_dados' });
+    expect(nacional.emitir).not.toHaveBeenCalled();
+    expect([...mockMem.regs.values()][0]).toMatchObject({ status: 'pendente_dados', motivo_codigo: 'TOMADOR_INVALIDO' });
+
+    mockMem.regs.clear();
+    mockMem.clientes.get(CLI).cpf_cnpj = '123.456.789-00';
+    venda({ itens: [SRV('a', 100)], total: 100 });
+    await auto.processarVenda({ companyId: C1, saleId: VENDA, gatilho: 'venda' });
+    expect(nacional.emitir).not.toHaveBeenCalled();
+    expect([...mockMem.regs.values()][0]).toMatchObject({ motivo_codigo: 'TOMADOR_INVALIDO' });
+  });
+
+  test('pendência antiga por falta de documento: o botão agora emite sem tomador', async () => {
+    venda({ itens: [SRV('a', 100)], total: 100, customer: null });
+    const { row } = await repo.reivindicar({ companyId: C1, origemTipo: 'venda', origemId: VENDA, ctribnac: '010501', gatilho: 'venda', itens: [], valor: 100 });
+    await repo.gravar(row.id, { status: 'pendente_dados', motivo_codigo: 'SEM_TOMADOR', motivo: 'antigo' });
+    await auto.emitirManual({ companyId: C1, tipo: 'venda', id: VENDA });
+    expect(nacional.emitir).toHaveBeenCalledTimes(1);
+    expect(ultimaNota()).not.toHaveProperty('tomador');
+    expect(mockMem.regs.get(row.id).status).toBe('emitida');
+  });
+
+  test('ISSQN retido continua exigindo o tomador', () => {
+    expect(auto.resolverTomador(null, null)).toEqual({ ok: true, tomador: null });
+    expect(auto.resolverTomador(null, null, { exigir: true })).toMatchObject({ ok: false, codigo: 'SEM_TOMADOR' });
+    expect(auto.resolverTomador(null, { full_name: 'Maria', cpf_cnpj: null }, { exigir: true })).toMatchObject({ ok: false, codigo: 'SEM_TOMADOR' });
+    expect(auto.resolverTomador({ doc: CPF2, nome: 'João' }, null, { exigir: true })).toMatchObject({ ok: true, tomador: { doc: CPF2 } });
+    // dígito errado e falta de nome seguem pendentes com ou sem retenção
+    expect(auto.resolverTomador({ doc: '11111111111', nome: 'X' }, null).codigo).toBe('TOMADOR_INVALIDO');
+    expect(auto.resolverTomador({ doc: CPF2 }, null).codigo).toBe('SEM_NOME');
+    // informado só com nome não apaga o documento do cadastro
+    expect(auto.resolverTomador({ nome: 'Outro' }, { full_name: 'Maria Souza', cpf_cnpj: CPF })).toMatchObject({ ok: true, tomador: { doc: CPF, nome: 'Maria Souza' } });
   });
 });
