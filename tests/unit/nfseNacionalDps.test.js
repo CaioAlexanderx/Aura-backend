@@ -237,6 +237,12 @@ describe('DPS — validação antes de montar', () => {
   test('retenção sem alíquota válida (E0621: 1,80% a 5%)', () => {
     expect(erros({ tomador: { doc: '52998224725', nome: 'A' }, valores: { vServ: 10, tpRetISSQN: 2, pAliq: 1, pTotTribSN: 6 } }).join(' ')).toMatch(/E0621/);
   });
+  test('tomador opcional (10/11/2026): sem tomador passa; ISSQN retido sem tomador é recusado', () => {
+    expect(erros({ tomador: null })).toEqual([]);
+    const ret = erros({ tomador: null, valores: { vServ: 10, tpRetISSQN: 2, pAliq: 2, pTotTribSN: 6 } }).join(' ');
+    expect(ret).toMatch(/ISSQN retido exige o tomador identificado/);
+    expect(erros({ tomador: { doc: '52998224725', nome: '' } }).join(' ')).toMatch(/Nome do tomador obrigatório/);
+  });
   test('não optante precisa dos valores aproximados (E0713)', () => {
     const e = validarEntrada({ ...entradaBase(), prestador: { cnpj: CNPJ, opSimpNac: 1, regEspTrib: 0 }, valores: { vServ: 10, tpRetISSQN: 1 } });
     expect(e.join(' ')).toMatch(/E0713/);

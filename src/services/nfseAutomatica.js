@@ -6,8 +6,12 @@
 //      OS concluída (status 'entregue') e pagamento recebido (crediário).
 //      A MESMA prestação nunca gera duas notas: o primeiro gatilho emite e os
 //      outros só anotam o vínculo.
-//   2. Sem CPF/CNPJ válido de quem contratou, NÃO emite: o registro fica
-//      'pendente_dados' com o motivo, e o app completa e emite.
+//   2. Tomador OPCIONAL (decisão de 10/11/2026, como o Emissor Nacional
+//      permite): sem CPF/CNPJ a nota sai SEM o grupo <toma> (consumidor não
+//      identificado). Com documento: dígito errado NUNCA emite (pendente
+//      TOMADOR_INVALIDO) e sem nome nenhum (nem do cliente da venda) fica
+//      pendente SEM_NOME — o <toma> exige xNome. ISSQN retido exige o
+//      tomador (SEM_TOMADOR). Pendências o app completa e emite.
 //   3. Venda mista: só os itens da NFS-e (notaDoItem.vaiNaNfse: products.
 //      nota_fiscal, ou sem escolha unit = 'srv') vão para a NFS-e;
 //      os produtos seguem na NFC-e (outro fluxo, não mexemos aqui).
@@ -41,7 +45,8 @@
 //   2. o informado no Caixa junto com a venda (POST /pdv/sale nfse_tomador,
 //      gravado em sales.nfse_tomador na transação da venda, migration 440);
 //   3. o cadastro do cliente da venda/OS (customers.cpf_cnpj + nome).
-// Nenhum deles cria ou altera cadastro de cliente.
+// Nenhum deles cria ou altera cadastro de cliente. Nenhum com documento:
+// a nota sai sem tomador (consumidor não identificado, decisão 2).
 //
 // Ligas da AUTOMÁTICA: NFSE_AUTOMATICA_ENABLED=true no servidor E nfse_config.
 // emissao_automatica=true na empresa (provider 'nacional', ativa). Com
@@ -111,7 +116,7 @@ function lojaEmite(cfg) {
 
 // ── mensagens (chegam à tela da lojista) ─────────────────────
 const MSG = {
-  SEM_TOMADOR: 'Falta o CPF/CNPJ de quem contratou o serviço. Complete os dados para emitir a NFS-e.',
+  SEM_TOMADOR: 'Com ISS retido pelo cliente, a NFS-e precisa do CPF/CNPJ de quem contratou o serviço. Complete os dados para emitir.',
   TOMADOR_INVALIDO: 'O CPF/CNPJ de quem contratou o serviço parece incorreto. Confira e complete os dados para emitir a NFS-e.',
   SEM_NOME: 'Falta o nome de quem contratou o serviço. Complete os dados para emitir a NFS-e.',
   SEM_CODIGO: 'Falta o código de tributação nacional do serviço. Cadastre o código no serviço (ou o código padrão em Configurações > Nota Fiscal) e tente de novo.',
@@ -131,19 +136,25 @@ function mensagemDoEmissor(err) {
 
 /**
  * Tomador da nota: o informado pelo app vale mais que o cadastro do cliente.
- * @returns {{ ok: true, tomador } | { ok: false, codigo, motivo }}
+ * Opcional (10/11/2026): sem documento em lugar nenhum a nota sai sem
+ * tomador (consumidor não identificado) — salvo com ISSQN retido
+ * (opts.exigir), que exige o tomador identificado.
+ * Informado sem documento não conta: vale o cadastro do cliente inteiro.
+ * Documento sem nome usa o nome do cliente da venda/OS.
+ * @returns {{ ok: true, tomador: object|null } | { ok: false, codigo, motivo }}
  */
-function resolverTomador(informado, cliente) {
-  const fonte = informado && (informado.doc || informado.nome) ? informado : null;
+function resolverTomador(informado, cliente, opts = {}) {
+  const fonte = informado && onlyDigits(informado.doc) ? informado : null;
   const doc = onlyDigits(fonte ? fonte.doc : cliente && cliente.cpf_cnpj);
-  const nome = String(
-    fonte ? (fonte.nome || (cliente && (cliente.full_name || cliente.name)) || '')
-          : (cliente && (cliente.full_name || cliente.name)) || ''
-  ).trim();
+  const nomeDoCliente = (cliente && (cliente.full_name || cliente.name)) || '';
+  const nome = String((fonte && fonte.nome) || nomeDoCliente || '').trim();
   const email = String((fonte && fonte.email) || (cliente && cliente.email) || '').trim();
   const fone = onlyDigits((fonte && fonte.fone) || (cliente && cliente.phone));
 
-  if (!doc) return { ok: false, codigo: 'SEM_TOMADOR', motivo: MSG.SEM_TOMADOR };
+  if (!doc) {
+    if (opts.exigir) return { ok: false, codigo: 'SEM_TOMADOR', motivo: MSG.SEM_TOMADOR };
+    return { ok: true, tomador: null };
+  }
   const valido = doc.length === 11 ? isValidCpf(doc) : doc.length === 14 ? isValidCnpj(doc) : false;
   if (!valido) return { ok: false, codigo: 'TOMADOR_INVALIDO', motivo: MSG.TOMADOR_INVALIDO };
   // nome que é só o próprio documento (cadastro feito só com o CPF) não serve
@@ -340,7 +351,7 @@ async function pegarVez(p, { forcar }) {
 async function emitirGrupo(ctx, grupo) {
   const {
     companyId, origemTipo, origemId, gatilho, ref, customerId, competencia, tomadorInformado, forcar,
-    tomadorDaVenda = null,
+    tomadorDaVenda = null, issRetido = false,
   } = ctx;
   const { row, vez } = await pegarVez({
     companyId, origemTipo, origemId, ctribnac: grupo.ctribnac, gatilho,
@@ -358,10 +369,12 @@ async function emitirGrupo(ctx, grupo) {
   }
 
   // Tomador: o completado pelo app (agora ou antes) > o informado no Caixa
-  // com a venda > o cadastro do cliente.
+  // com a venda > o cadastro do cliente. Sem documento em nenhum: a nota sai
+  // sem tomador (consumidor não identificado). A automática hoje não retém
+  // ISSQN; se um dia retiver (issRetido), o tomador volta a ser obrigatório.
   const informado = tomadorInformado || row.tomador || tomadorDaVenda || null;
   const cliente = informado && informado.doc && informado.nome ? null : await repo.buscarCliente(customerId);
-  const tom = resolverTomador(informado, cliente);
+  const tom = resolverTomador(informado, cliente, { exigir: issRetido === true });
   if (!tom.ok) {
     await repo.gravar(row.id, {
       status: 'pendente_dados', motivo: tom.motivo, motivo_codigo: tom.codigo,
@@ -378,7 +391,8 @@ async function emitirGrupo(ctx, grupo) {
     cnbs: grupo.cnbs || undefined,
     customer_id: customerId || undefined,
     source_type: SOURCE_TYPE[origemTipo],
-    tomador: tom.tomador,
+    ...(tom.tomador ? { tomador: tom.tomador } : {}),
+    ...(issRetido === true ? { iss_retido: true } : {}),
   };
   // Dados mudaram desde a tentativa anterior (tomador completado, venda
   // editada): chave nova — a mesma chave com outros dados o emissor recusa.
