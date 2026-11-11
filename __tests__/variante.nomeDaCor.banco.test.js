@@ -176,9 +176,12 @@ describe('PUT /variations grava o nome da cor como veio', () => {
     }
   });
 
-  test('salvar de novo com outro nome troca o nome (o PUT reescreve as variantes)', async () => {
+  test('salvar de novo com outro nome troca o nome', async () => {
+    // 10/11/2026: tirar os tamanhos que ainda têm peças pede confirmação
+    // explícita (gradeEstoqueNaoFicaPreso.banco.test.js cobre o 409).
     await request(app).put(`${base}/${pid}/variations`).send({
       colors: [{ hex: '#1F5F6B', name: 'Petróleo' }], sizes: [], matrix: { '#1F5F6B|': 4 },
+      confirmar_remocao_com_estoque: true,
     }).expect(200);
     const rows = await variantesNoBanco(pid);
     expect(rows).toEqual([{ sku_suffix: 'PETRÓLEO', color_name: 'Petróleo', cor: '#1F5F6B', tamanho: null }]);

@@ -7,7 +7,7 @@
 //
 // Shape da API:
 //   GET  -> { colors: [{hex, name}] (name = color_name da 414, senao o tirado do sku_suffix), sizes: ["P","M"], matrix: {"#FF0000|P": 5, ...}, barcodes: {"#FF0000|P": "7891234567890", ...}, images: {"#FF0000|P": "https://..."}, mode: 'none'|'color'|'size'|'matrix' }
-//   PUT  -> recebe mesmo shape, reescreve variantes (soft-delete antigas)
+//   PUT  -> recebe mesmo shape; atualiza no lugar o que continua, cria o novo, desativa o que saiu (10/11/2026)
 //
 // Schema preservado: usa product_variants + product_variant_values
 // Cada combinacao = 1 row em product_variants + 1-2 rows em
@@ -49,12 +49,23 @@
 // divergente das variantes, limpos via data fix em 01/06). O advisory lock
 // serializa os saves por produto e fecha a corrida. O lock e liberado
 // automaticamente no COMMIT/ROLLBACK da transacao.
+//
+// 10/11/2026 (fix estoque preso): o PUT NAO reescreve mais a grade. A
+// combinacao que continua (mesmo hex, sem diferenca de caixa, e mesmo
+// tamanho) e atualizada na mesma linha; so a nova e criada e so a que sai
+// e desativada (deactivated_reason='removida_da_grade'). Sair com estoque
+// > 0 exige confirmar_remocao_com_estoque=true (senao 409). O rewrite
+// antigo deixou, so na Finesse, 8.146 variantes inativas — 2.862 com
+// stock_qty > 0 — e perdia price_override, promocao e miniatura a cada
+// Salvar. Regras em services/gradeDeVariantes.js.
 // ============================================================
 
 const router = require('express').Router({ mergeParams: true });
 const db = require('../config/database');
 // 08/09/2026 (migration 323): a galeria por cor sai no mesmo GET.
 const { agruparGaleria } = require('../services/productImageGallery');
+// 10/11/2026: a grade e atualizada no lugar, nao reescrita (ver o servico).
+const { planejarGrade } = require('../services/gradeDeVariantes');
 
 // ─── 30/06/2026: Normalizacao de cor (nome -> hex) ───────────
 // Imports/legados gravavam NOME no atributo Cor (ex.: "DARK BROWN",
@@ -261,11 +272,22 @@ router.get('/:pid/variations', async (req, res) => {
 
 // PUT /companies/:id/products/:pid/variations
 // Body: { colors: [{hex, name?}], sizes: ["P","M"], matrix: {"hex|size": stock, ...}, barcodes: {"hex|size": "ean", ...} }
-// Reescreve todas as variantes: soft-delete as ativas + cria novas.
+//       + opcionais: confirmar_remocao_com_estoque (bool), matrix_lida ({"hex|size": n})
+// Atualiza no lugar o que continua, cria o novo, desativa o que saiu.
 router.put('/:pid/variations', async (req, res) => {
   const { id: cid, pid } = req.params;
   // 21/05/2026: barcodes adicionado ao body (opcional, padrao vazio)
   const { colors = [], sizes = [], matrix = {}, barcodes = {} } = req.body || {};
+  // 10/11/2026 (fix estoque preso):
+  //  - confirmar_remocao_com_estoque: true deixa sair da grade a cor/tamanho
+  //    que ainda tem pecas (sem ele, 409 GRADE_REMOCAO_COM_ESTOQUE);
+  //  - matrix_lida: a matriz que o editor leu ao abrir. Celula com o mesmo
+  //    valor dela nao foi mexida, e o estoque do banco fica (venda feita
+  //    com o editor aberto nao volta para a prateleira).
+  const confirmarRemocao = !!(req.body && req.body.confirmar_remocao_com_estoque === true);
+  const matrizLida = req.body && req.body.matrix_lida && typeof req.body.matrix_lida === 'object'
+    ? req.body.matrix_lida : null;
+  const veioBarcodes = !!(req.body && Object.prototype.hasOwnProperty.call(req.body, 'barcodes'));
 
   // Validacoes
   if (!Array.isArray(colors) || !Array.isArray(sizes)) {
@@ -345,35 +367,32 @@ router.put('/:pid/variations', async (req, res) => {
     const parentColor = prodRows[0].color || null;
     const parentSize  = prodRows[0].size  || null;
 
-    // 23/05/2026: snapshot do mapa (color, size) -> image_url ANTES
-    // do soft-delete. Necessario porque o INSERT cria variantes com
-    // ids novos; sem isso, qualquer auto-save apagaria as fotos.
-    // Chave: buildMatrixKey(colorHex, sizeValue) (mesma do GET output).
-    const { rows: prevVariants } = await client.query(
-      `SELECT pv.image_url,
+    // 10/11/2026 (fix estoque preso): le as variantes ATIVAS com estoque e
+    // atributos. Antes daqui o PUT desativava todas e criava todas de novo
+    // a cada Salvar; agora a combinacao que continua na grade e atualizada
+    // na mesma linha (services/gradeDeVariantes.js explica as regras).
+    const { rows: atuais } = await client.query(
+      `SELECT pv.id, pv.stock_qty, pv.sku_suffix, pv.color_name,
          COALESCE(json_agg(
            json_build_object('attribute', pvv.attribute_name, 'value', pvv.value)
            ORDER BY pvv.attribute_name
          ) FILTER (WHERE pvv.id IS NOT NULL), '[]'::json) AS attributes
        FROM product_variants pv
        LEFT JOIN product_variant_values pvv ON pvv.variant_id = pv.id
-       WHERE pv.product_id = $1 AND pv.is_active = true AND pv.image_url IS NOT NULL
-       GROUP BY pv.id, pv.image_url`,
+       WHERE pv.product_id = $1 AND pv.is_active = true
+       GROUP BY pv.id, pv.stock_qty, pv.sku_suffix, pv.color_name, pv.created_at
+       ORDER BY pv.created_at ASC, pv.id ASC`,
       [pid]
     );
-    const imageByCombo = new Map();   // matrixKey -> image_url
-    for (const row of prevVariants) {
+    const existentes = atuais.map((row) => {
       const { colorHex, sizeValue } = extractAttrs(row.attributes);
-      // Normaliza hex pra uppercase (consistencia com inputs do PUT)
-      const normHex = colorHex ? String(colorHex).toUpperCase() : null;
-      imageByCombo.set(buildMatrixKey(normHex, sizeValue), row.image_url);
-    }
-
-    // Soft-delete variantes ativas atuais (preserva sale_items FK)
-    await client.query(
-      'UPDATE product_variants SET is_active = false, updated_at = NOW() WHERE product_id = $1 AND is_active = true',
-      [pid]
-    );
+      let colorName = row.color_name || null;
+      if (!colorName && colorHex && row.sku_suffix) {
+        const first = String(row.sku_suffix).split('-')[0];
+        if (first && !/^[0-9A-F]{6}$/i.test(first)) colorName = first.charAt(0) + first.slice(1).toLowerCase();
+      }
+      return { id: row.id, colorHex, sizeValue, colorName, stock: parseInt(row.stock_qty) || 0 };
+    });
 
     // Monta lista de combinacoes a criar baseado nos inputs
     // - Se tem cores E tamanhos: matriz completa (N*M combinacoes)
@@ -412,21 +431,74 @@ router.put('/:pid/variations', async (req, res) => {
       }
     }
 
+    const plano = planejarGrade({
+      existentes,
+      combinacoes: combinations,
+      matrizLida,
+      confirmarRemocao,
+    });
+
+    // Tirar da grade uma cor/tamanho que ainda tem pecas: so com
+    // confirmacao explicita. Sem ela, nada e gravado.
+    if (plano.bloqueio) {
+      await client.query('ROLLBACK');
+      client.release();
+      return res.status(409).json({
+        error: plano.bloqueio.mensagem,
+        code: 'GRADE_REMOCAO_COM_ESTOQUE',
+        removidas: plano.bloqueio.removidas.map((r) => ({
+          key: buildMatrixKey(r.colorHex, r.sizeValue),
+          color_hex: r.colorHex, color_name: r.colorName, size: r.sizeValue, stock: r.stock,
+        })),
+      });
+    }
+
+    // Sai da grade (preserva sale_items FK: soft-delete, nunca DELETE).
+    // O motivo fica gravado: inativa com estoque e motivo NULL passa a ser
+    // so o legado do rewrite antigo, que a medicao separa.
+    for (const v of plano.remover) {
+      await client.query(
+        `UPDATE product_variants SET is_active = false, deactivated_reason = 'removida_da_grade', updated_at = NOW()
+          WHERE id = $1 AND is_active = true`,
+        [v.id]
+      );
+    }
+    for (const v of plano.duplicadas) {
+      await client.query(
+        `UPDATE product_variants SET is_active = false, deactivated_reason = 'duplicada_na_grade', updated_at = NOW()
+          WHERE id = $1 AND is_active = true`,
+        [v.id]
+      );
+    }
+
     const created = [];
-    for (const combo of combinations) {
+    // Continua na grade: mesma linha, mesmo id. Foto, miniatura, preco
+    // proprio e promocao ficam onde estao (o rewrite antigo perdia os tres
+    // ultimos).
+    for (const combo of plano.atualizar) {
+      const skuSuffix = skuSuffixFromAttrs(combo.colorHex, combo.colorName, combo.sizeValue);
+      const k = buildMatrixKey(combo.colorHex, combo.sizeValue);
+      const params = [combo.id, combo.stock, skuSuffix || null];
+      let sets = 'stock_qty = $2, sku_suffix = $3';
+      // Body sem `barcodes` (cliente antigo): o codigo gravado fica.
+      if (veioBarcodes) { params.push(barcodes[k] || null); sets += ', barcode = $' + params.length; }
+      if (combo.colorHex) { params.push(combo.colorNameFull || null); sets += ', color_name = $' + params.length; }
+      await client.query(
+        `UPDATE product_variants SET ${sets}, updated_at = NOW() WHERE id = $1`,
+        params
+      );
+      created.push({ id: combo.id, sku_suffix: skuSuffix, stock: combo.stock, color: combo.colorHex, size: combo.sizeValue });
+    }
+
+    for (const combo of plano.criar) {
       const skuSuffix = skuSuffixFromAttrs(combo.colorHex, combo.colorName, combo.sizeValue);
       // 21/05/2026: persiste barcode por combinacao (lookup na chave matrixKey)
       const barcodeVal = barcodes[buildMatrixKey(combo.colorHex, combo.sizeValue)] || null;
 
-      // 23/05/2026: recupera image_url snapshotada (lookup com hex normalizado)
-      const normHex = combo.colorHex ? String(combo.colorHex).toUpperCase() : null;
-      const imageVal = imageByCombo.get(buildMatrixKey(normHex, combo.sizeValue)) || null;
-
-      // Cria variante (inclui barcode e image_url se houver)
       const { rows: variantRow } = await client.query(
-        `INSERT INTO product_variants (product_id, sku_suffix, stock_qty, barcode, image_url, color_name, is_active)
-         VALUES ($1, $2, $3, $4, $5, $6, true) RETURNING id`,
-        [pid, skuSuffix || null, combo.stock, barcodeVal, imageVal, combo.colorNameFull || null]
+        `INSERT INTO product_variants (product_id, sku_suffix, stock_qty, barcode, color_name, is_active)
+         VALUES ($1, $2, $3, $4, $5, true) RETURNING id`,
+        [pid, skuSuffix || null, combo.stock, barcodeVal, combo.colorNameFull || null]
       );
       const variantId = variantRow[0].id;
 
@@ -453,6 +525,15 @@ router.put('/:pid/variations', async (req, res) => {
         color: combo.colorHex,
         size: combo.sizeValue,
       });
+    }
+
+    // O total do pai e o que ficou gravado: celula intocada pode ter
+    // mantido o estoque do banco em vez do numero que veio no corpo.
+    const estoqueFinal = new Map();
+    for (const c of plano.atualizar) estoqueFinal.set(buildMatrixKey(c.colorHex, c.sizeValue), c.stock);
+    for (const c of combinations) {
+      const fk = buildMatrixKey(c.colorHex, c.sizeValue);
+      if (estoqueFinal.has(fk)) c.stock = estoqueFinal.get(fk);
     }
 
     // Atualiza stock_qty do produto pai como SOMA das variantes
