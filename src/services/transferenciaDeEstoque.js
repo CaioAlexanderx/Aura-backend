@@ -334,7 +334,7 @@ async function copiarCategorias(conn, destinoId, mapaProdutos) {
  * Roda DENTRO de uma transacao aberta pelo chamador (BEGIN ... COMMIT).
  * Lanca ErroDeTransferencia (4xx) sem ter escrito nada.
  */
-async function transferir(conn, { origemId, destinoId, userId, isStaff = false, itens, observacao = null }) {
+async function transferir(conn, { origemId, destinoId, userId, isStaff = false, itens, observacao = null, stockCountId = null }) {
   origemId = String(origemId).toLowerCase();
   destinoId = String(destinoId).toLowerCase();
   const lojas = await conferirLojas(conn, { origemId, destinoId, userId, isStaff });
@@ -672,13 +672,24 @@ async function transferir(conn, { origemId, destinoId, userId, isStaff = false, 
   );
   const numero = Number(seq[0].numero);
   const total = arred3(itens.reduce((s, i) => s + i.quantidade, 0));
-  const { rows: cab } = await conn.query(
-    `INSERT INTO stock_transfers
+  // 11/11/2026 (migration 446): stock_count_id so quando a transferencia
+  // sai de uma conferencia (a rota ja conferiu que e da origem). Sem ele o
+  // INSERT e o de sempre.
+  const { rows: cab } = stockCountId
+    ? await conn.query(
+      `INSERT INTO stock_transfers
+         (grupo_company_id, numero, origem_company_id, destino_company_id, criada_por, observacao, itens_count, quantidade_total, stock_count_id)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+       RETURNING id, numero, origem_company_id, destino_company_id, criada_em, criada_por, observacao, stock_count_id`,
+      [lojas.grupo, numero, origemId, destinoId, userId || null, observacao, itens.length, total, stockCountId]
+    )
+    : await conn.query(
+      `INSERT INTO stock_transfers
        (grupo_company_id, numero, origem_company_id, destino_company_id, criada_por, observacao, itens_count, quantidade_total)
      VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
      RETURNING id, numero, origem_company_id, destino_company_id, criada_em, criada_por, observacao`,
-    [lojas.grupo, numero, origemId, destinoId, userId || null, observacao, itens.length, total]
-  );
+      [lojas.grupo, numero, origemId, destinoId, userId || null, observacao, itens.length, total]
+    );
   const t = cab[0];
 
   const saida = itens.map((it) => {
@@ -731,6 +742,7 @@ async function transferir(conn, { origemId, destinoId, userId, isStaff = false, 
     total_itens: itens.length,
     total_pecas: total,
     itens: saida,
+    ...(stockCountId ? { stock_count_id: t.stock_count_id || stockCountId } : {}),
   };
 }
 
