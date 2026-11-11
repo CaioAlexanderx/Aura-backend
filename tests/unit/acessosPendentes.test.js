@@ -33,14 +33,17 @@ describe('lerExtraSeats', () => {
 describe('aplicarPendenciaDoPagamento', () => {
   const linha = { id: 'c1', plan: 'negocio', billing_cycle: 'monthly', billing_status: 'active',
     asaas_subscription_id: 'sub_1', extra_seats_granted: 5, pendente: 3, antes: 2 };
+  const PRE = "to_jsonb(c) ->> 'pending_extra_seats'";
+  const pre = (extra) => ({ rows: [{ pendente: '3', pay: 'pay_1', sub: 'sub_1', tem_temporada: true, ...extra }] });
 
   test('aplica, sincroniza e audita', async () => {
-    const db = fakeDb(async (sql) => (sql.includes('WITH alvo') ? { rows: [linha] } : { rows: [] }));
+    const db = fakeDb(async (sql) => (sql.includes(PRE) ? pre()
+      : sql.includes('WITH alvo') ? { rows: [linha] } : { rows: [] }));
     const sync = jest.fn().mockResolvedValue({ updated: false, skipped: 'value_unchanged', value: 264 });
     const r = await svc.aplicarPendenciaDoPagamento({ companyId: 'c1', payment: { id: 'pay_1', subscription: 'sub_1' } }, { db, sync });
     expect(r).toMatchObject({ aplicado: true, extra_seats_granted: 5, pendente: 3, temporada: 2 });
     expect(sync).toHaveBeenCalledWith(expect.objectContaining({ id: 'c1', extra_seats_granted: 5 }));
-    const [sql, params] = db.query.mock.calls[0];
+    const [sql, params] = db.query.mock.calls[1];
     expect(sql).toContain('FOR UPDATE');
     expect(sql).toContain('seat_passes');
     expect(params).toEqual(['c1', 'pay_1', 'sub_1']);
@@ -48,11 +51,10 @@ describe('aplicarPendenciaDoPagamento', () => {
     expect(audit[1][2]).toBe('billing.extra_seats_applied');
   });
 
-  test('sem seat_passes (42P01): refaz sem a temporada', async () => {
-    let n = 0;
+  test('sem seat_passes: aplica sem a temporada, sem query que dê erro', async () => {
     const db = fakeDb(async (sql) => {
+      if (sql.includes(PRE)) return pre({ tem_temporada: false, sub: null });
       if (sql.includes('WITH alvo')) {
-        n += 1;
         if (sql.includes('seat_passes')) throw erro('42P01');
         return { rows: [{ ...linha, extra_seats_granted: 3, antes: 0 }] };
       }
@@ -60,8 +62,17 @@ describe('aplicarPendenciaDoPagamento', () => {
     });
     const r = await svc.aplicarPendenciaDoPagamento({ companyId: 'c1', payment: { id: 'pay_1' } },
       { db, sync: async () => ({ skipped: 'no_subscription' }) });
-    expect(n).toBe(2);
     expect(r).toMatchObject({ aplicado: true, extra_seats_granted: 3, temporada: 0 });
+  });
+
+  test('pendência de outra cobrança ou sem pendência: só a conferência, nenhum UPDATE', async () => {
+    for (const p of [pre({ pay: 'pay_9', sub: 'sub_9' }), pre({ pendente: null }), { rows: [] }]) {
+      const db = fakeDb(async (sql) => (sql.includes(PRE) ? p : { rows: [linha] }));
+      const r = await svc.aplicarPendenciaDoPagamento({ companyId: 'c1', payment: { id: 'pay_1', subscription: 'sub_1' } },
+        { db, sync: jest.fn() });
+      expect(r).toEqual({ aplicado: false, motivo: 'sem_pendencia' });
+      expect(db.query).toHaveBeenCalledTimes(1);
+    }
   });
 
   test('nada pendente para esta cobrança', async () => {
@@ -82,7 +93,8 @@ describe('aplicarPendenciaDoPagamento', () => {
   });
 
   test('sync que lança não desfaz a liberação', async () => {
-    const db = fakeDb(async (sql) => (sql.includes('WITH alvo') ? { rows: [linha] } : { rows: [] }));
+    const db = fakeDb(async (sql) => (sql.includes(PRE) ? pre()
+      : sql.includes('WITH alvo') ? { rows: [linha] } : { rows: [] }));
     const r = await svc.aplicarPendenciaDoPagamento({ companyId: 'c1', payment: { id: 'pay_1' } },
       { db, sync: async () => { throw new Error('asaas fora'); } });
     expect(r.aplicado).toBe(true);

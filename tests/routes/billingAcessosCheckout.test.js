@@ -115,6 +115,10 @@ function bancoDeMentira({ company = empresa(), passes = [], codes = {}, falharTe
       c.billing_status = params[0];
       return { rows: [], rowCount: 1 };
     }
+    if (s.includes("to_jsonb(c) ->> 'pending_extra_seats'")) {
+      return { rows: [{ pendente: c.pending_extra_seats === null ? null : String(c.pending_extra_seats),
+        pay: c.pending_extra_seats_payment_id, sub: c.pending_extra_seats_subscription_id, tem_temporada: true }] };
+    }
     if (s.startsWith('WITH alvo AS')) {
       const [, payId, subId] = params;
       const casa = c.pending_extra_seats !== null && c.pending_extra_seats !== undefined && (

@@ -178,13 +178,27 @@ async function aplicarPendenciaDoPagamento({ companyId, payment }, deps = {}) {
     if (!companyId || (!paymentId && !subscriptionId)) return { aplicado: false, motivo: 'sem_referencia' };
 
     const params = [companyId, paymentId ? String(paymentId) : null, subscriptionId ? String(subscriptionId) : null];
-    let rows;
-    try {
-      ({ rows } = await db.query(APLICAR_SQL(true), params));
-    } catch (err) {
-      if (err && err.code === '42P01') ({ rows } = await db.query(APLICAR_SQL(false), params));
-      else throw err;
-    }
+
+    // Conferencia previa que NUNCA da erro de schema: to_jsonb(linha) le as
+    // colunas da 445 sem cita-las (antes da migration vem null) e
+    // to_regclass diz se seat_passes existe. Importa porque o webhook pode
+    // rodar dentro de uma transacao (testes *.banco): um 42703/42P01 ali
+    // abortaria a transacao inteira, mesmo capturado. Sem pendencia desta
+    // cobranca: nenhuma outra query.
+    const { rows: pre } = await db.query(
+      `SELECT to_jsonb(c) ->> 'pending_extra_seats' AS pendente,
+              to_jsonb(c) ->> 'pending_extra_seats_payment_id' AS pay,
+              to_jsonb(c) ->> 'pending_extra_seats_subscription_id' AS sub,
+              to_regclass('seat_passes') IS NOT NULL AS tem_temporada
+         FROM companies c WHERE c.id = $1`,
+      [companyId]
+    );
+    const p = pre && pre[0];
+    const casa = p && p.pendente !== null && p.pendente !== undefined &&
+      ((p.pay && p.pay === params[1]) || (p.sub && p.sub === params[2]));
+    if (!casa) return { aplicado: false, motivo: 'sem_pendencia' };
+
+    const { rows } = await db.query(APLICAR_SQL(p.tem_temporada !== false), params);
     if (!rows || !rows.length) return { aplicado: false, motivo: 'sem_pendencia' };
 
     const r = rows[0];
