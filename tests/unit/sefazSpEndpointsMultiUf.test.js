@@ -41,8 +41,8 @@ describe('sefazSp/endpoints — NFC-e 65 multi-UF', () => {
   });
 
   test('UF não suportada ainda lança erro claro (sem prometer "escopo: SP")', () => {
-    expect(() => getEndpoints('RJ', 'homologacao')).toThrow(/RJ.*não suportada/);
-    expect(() => getEndpoints('RJ', 'homologacao')).not.toThrow(/escopo: SP/);
+    expect(() => getEndpoints('BA', 'homologacao')).toThrow(/BA.*não suportada/);
+    expect(() => getEndpoints('BA', 'homologacao')).not.toThrow(/escopo: SP/);
   });
 
   test('MG resolve na SEFAZ própria — homologação e produção', () => {
@@ -53,8 +53,8 @@ describe('sefazSp/endpoints — NFC-e 65 multi-UF', () => {
     expect(() => getEndpoints('mg', 2)).not.toThrow();
   });
 
-  test('ENDPOINTS expõe exatamente as UFs suportadas hoje (SP, AP, MG)', () => {
-    expect(Object.keys(ENDPOINTS).sort()).toEqual(['AP', 'MG', 'SP']);
+  test('ENDPOINTS expõe exatamente as UFs suportadas hoje (SP, AP, MG, RJ)', () => {
+    expect(Object.keys(ENDPOINTS).sort()).toEqual(['AP', 'MG', 'RJ', 'SP']);
   });
 });
 
@@ -76,7 +76,7 @@ describe('sefazSp/nfe55 — endpoints multi-UF (NF-e 55 devolução)', () => {
     expect(() => getEndpoints55('MG', 'homologacao')).toThrow(/MG.*não suportada/);
   });
 
-  test('ENDPOINTS_NFE55 expõe exatamente as UFs suportadas hoje (SP, AP)', () => {
-    expect(Object.keys(ENDPOINTS_NFE55).sort()).toEqual(['AP', 'SP']);
+  test('ENDPOINTS_NFE55 expõe exatamente as UFs suportadas hoje (SP, AP, RJ)', () => {
+    expect(Object.keys(ENDPOINTS_NFE55).sort()).toEqual(['AP', 'RJ', 'SP']);
   });
 });

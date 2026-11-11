@@ -53,8 +53,11 @@ const { buildDanfeNfceHtml }       = require('../utils/buildDanfeNfceHtml');
 const { cnpjRequiredBody }         = require('../services/documentoEmpresa');
 // 06/08/2026 — Nuvem Fiscal não existe mais: precisamos validar, na hora de
 // SALVAR a config (não só na hora de emitir), se a UF da empresa já tem
-// suporte na engine própria — hoje SP, AP (SVRS) e MG (08/11/2026). Ver services/sefazSp/endpoints.js.
-const { ENDPOINTS: SEFAZ_SP_ENDPOINTS_65 } = require('../services/sefazSp/endpoints');
+// suporte na engine própria — hoje SP, AP (SVRS), MG (08/11/2026) e RJ (SVRS,
+// 11/11/2026). Ver services/sefazSp/endpoints.js.
+const {
+  ENDPOINTS: SEFAZ_SP_ENDPOINTS_65, ufSuportada, mensagemUfNaoSuportada,
+} = require('../services/sefazSp/endpoints');
 // 10/11/2026: servico (unit 'srv') fora da NFC-e; item do grupo acha o NCM.
 const { productVisibilityWhere }   = require('../utils/companyGroup');
 const { separarServicos, totaisDosItens, pagamentosDosProdutos } = require('../services/nfceSemServico');
@@ -715,6 +718,26 @@ router.post('/emit', requireAuth, requireRole('client','analyst','admin'), async
     let providerUsed = useSefazSp ? 'sefaz_sp' : 'nuvemfiscal';
     let fallbackReason = breakerOpen ? 'breaker_open' : null;
 
+    // 11/11/2026 (RJ): UF ainda sem emissão própria e sem gateway. Antes a
+    // engine estourava DEPOIS de reservar número e o lojista lia "Erro ao
+    // transmitir nota para SEFAZ-SP: sefazSp: UF RJ não suportada...". Agora
+    // responde com texto gentil ANTES de reservar número (nada a inutilizar
+    // depois) e o detalhe técnico fica só no log. Mesma UF que a engine usa.
+    const ufEngine = String(config.uf || 'SP').toUpperCase().trim();
+    if (tipo === 'nfce' && useSefazSp && !gatewayOn && !ufSuportada(ufEngine)) {
+      const motivo = mensagemUfNaoSuportada(ufEngine);
+      console.warn(`[nfce] emissão própria sem endpoints para a UF ${ufEngine} (empresa ${req.params.id}). `
+        + `UFs disponíveis: ${Object.keys(SEFAZ_SP_ENDPOINTS_65).join(', ')}.`);
+      if (sale_id) {
+        await db.query(
+          `UPDATE nfce_emissions SET error_message=$1
+            WHERE company_id=$2 AND sale_id=$3 AND tipo=$4 AND status='erro'`,
+          [motivo, req.params.id, sale_id, tipo]
+        );
+      }
+      return res.status(422).json({ error: motivo, code: 'NFCE_UF_NAO_SUPORTADA' });
+    }
+
     // ── #3 (02/06/2026): reserva ATOMICA do numero ANTES de transmitir ──
     // Retransmissao da MESMA venda+tipo apos rejeicao reusa o numero ja
     // reservado (so nota autorizada/denegada consome numero na SEFAZ).
@@ -873,7 +896,9 @@ router.post('/emit', requireAuth, requireRole('client','analyst','admin'), async
             // pro gateway na MESMA request. O número da série própria já
             // reservado fica QUEIMADO (gap aceitável, resolúvel por inutilização
             // S2.1). Reservamos um número NOVO da série do GATEWAY.
-            engineBreaker.recordFailure(req.params.id);
+            // 11/11/2026: UF sem endpoints não é defeito de infra — não abre o
+            // breaker (senão a próxima tentativa perde a mensagem gentil).
+            if (engineErr.code !== 'UF_NAO_SUPORTADA') engineBreaker.recordFailure(req.params.id);
             console.error('[nfce] engine SEFAZ-SP falhou (fallback→gateway):',
               engineErr.message, engineErr.payload || '');
 
@@ -987,10 +1012,22 @@ router.post('/emit', requireAuth, requireRole('client','analyst','admin'), async
       } catch (apiErr) {
         // Chega aqui quando: gateway puro falhou, OU o PRÓPRIO fallback falhou.
         // Em ambos, providerUsed/fallbackReason já refletem o caminho tomado.
-        const providerLabel = useSefazSp ? 'SEFAZ-SP' : 'Nuvem Fiscal';
+        // 11/11/2026: o rótulo é o da UF da nota — nada de "SEFAZ-SP" para loja
+        // de outro estado (SP continua com o texto de sempre).
+        const providerLabel = useSefazSp ? (ufEngine === 'SP' ? 'SEFAZ-SP' : `SEFAZ-${ufEngine}`) : 'Nuvem Fiscal';
         console.error(`[nfce] ${providerLabel} emit error:`, apiErr.message, apiErr.payload||'');
-        await db.query(`UPDATE nfce_emissions SET status='erro', error_message=$1 WHERE id=$2`, [apiErr.message, emission.id]);
+        // UF sem emissão própria (rede de segurança do aviso antes da reserva):
+        // texto gentil para o lojista, detalhe técnico só no log acima.
+        const msgUf = apiErr && apiErr.code === 'UF_NAO_SUPORTADA'
+          ? mensagemUfNaoSuportada(apiErr.uf || ufEngine) : null;
+        await db.query(`UPDATE nfce_emissions SET status='erro', error_message=$1 WHERE id=$2`, [msgUf || apiErr.message, emission.id]);
         await persistProviderUsed(emission.id, providerUsed, fallbackReason);
+        if (msgUf) {
+          return res.status(422).json({
+            error: msgUf, code: 'NFCE_UF_NAO_SUPORTADA', nfce_id: emission.id,
+            provider_used: providerUsed, fallback: fallbackReason != null,
+          });
+        }
         return res.status(502).json({
           error: (!useSefazSp && !gatewayOn)
             ? apiErr.message

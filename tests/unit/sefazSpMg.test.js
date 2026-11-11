@@ -84,8 +84,8 @@ describe('endpoints — MG', () => {
     }
   });
 
-  test('RJ continua fora (erro claro)', () => {
-    expect(() => getEndpoints('RJ', 2)).toThrow(/RJ.*não suportada/);
+  test('BA continua fora (erro claro)', () => {
+    expect(() => getEndpoints('BA', 2)).toThrow(/BA.*não suportada/);
   });
 
   test('soapActionFor: MG = <wsdl ns>/<operação> (nomes do ACBr); SP/AP = null', () => {

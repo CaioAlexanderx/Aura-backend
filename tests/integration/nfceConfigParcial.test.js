@@ -192,10 +192,10 @@ describe('POST /nfce/config — update parcial dos campos fiscais', () => {
   });
 
   test('provider sefaz_sp sem uf no corpo valida a UF gravada', async () => {
-    const db = makeDb({ config: { ...CONFIG_PRODUCAO, uf: 'RJ', provider: null } });
+    const db = makeDb({ config: { ...CONFIG_PRODUCAO, uf: 'BA', provider: null } });
     const res = await post(buildApp(db), { provider: 'sefaz_sp' });
     expect(res.status).toBe(400);
-    expect(res.body.error).toMatch(/UF RJ/);
+    expect(res.body.error).toMatch(/UF BA/);
     expect(res.body.error).toMatch(/MG/); // a lista de UFs vem do mapa de endpoints
     expect(db.state.config.provider).toBeNull();
   });
@@ -206,6 +206,14 @@ describe('POST /nfce/config — update parcial dos campos fiscais', () => {
     expect(res.status).toBe(200);
     expect(db.state.config.provider).toBe('sefaz_sp');
     expect(db.state.config.uf).toBe('MG');
+  });
+
+  test('11/11/2026: provider sefaz_sp no RJ é aceito (RJ entrou no mapa de endpoints, via SVRS)', async () => {
+    const db = makeDb({ config: { ...CONFIG_PRODUCAO, uf: 'RJ', provider: null } });
+    const res = await post(buildApp(db), { provider: 'sefaz_sp' });
+    expect(res.status).toBe(200);
+    expect(db.state.config.provider).toBe('sefaz_sp');
+    expect(db.state.config.uf).toBe('RJ');
   });
 });
 
