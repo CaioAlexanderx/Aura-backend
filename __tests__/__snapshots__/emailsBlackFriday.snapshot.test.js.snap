@@ -1,0 +1,344 @@
+// Jest Snapshot v1, https://goo.gl/fbAQLP
+
+exports[`e-mail 1: página Black Friday Essencial: o mesmo texto, sem a frase do carnê 1`] = `
+"<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="color-scheme" content="light dark">
+<meta name="supported-color-schemes" content="light dark">
+<title>A Black Friday da sua loja já tem uma página na Aura</title>
+<style>
+  :root { color-scheme: light dark; supported-color-schemes: light dark; }
+  @media (prefers-color-scheme: dark) {
+    .a-bg { background: #0c0a16 !important; }
+    .a-card { background: #15122a !important; border-color: #2b2650 !important; }
+    .a-ink { color: #ece9ff !important; }
+    .a-ink2 { color: #b3add8 !important; }
+    .a-line { border-color: #2b2650 !important; }
+    .a-soft { background: #1d1938 !important; border-color: #2b2650 !important; }
+    .a-btn { background: #a78bfa !important; color: #14102b !important; }
+    .a-wa { color: #6ee7b7 !important; border-color: #6ee7b7 !important; }
+    .a-link { color: #a78bfa !important; }
+    .a-sig { filter: invert(1) brightness(1.6); }
+  }
+</style>
+</head>
+<body class="a-bg" style="margin:0;padding:0;background:#f4f1fb;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;">
+<div style="display:none;max-height:0;overflow:hidden;opacity:0;mso-hide:all;">Promoção em lote e o que vai faltar, numa página só</div><table role="presentation" width="100%" cellpadding="0" cellspacing="0" class="a-bg" style="background:#f4f1fb;">
+  <tr><td align="center" style="padding:24px 12px;">
+    <table role="presentation" width="560" cellpadding="0" cellspacing="0" class="a-card" style="max-width:560px;width:100%;background:#ffffff;border:1px solid #e4def5;border-radius:14px;">
+      <tr><td class="a-line" style="padding:14px 22px;border-bottom:1px solid #e4def5;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;"><img src="https://app.getaura.com.br/email/aura-logo-v1.png" width="28" height="28" alt="Aura" style="display:inline-block;width:28px;height:28px;vertical-align:middle;border:0;margin-right:9px;"><span class="a-ink" style="font-weight:700;font-size:16px;letter-spacing:-.2px;color:#1b1736;vertical-align:middle;">Aura.</span></td></tr>
+      <tr><td style="padding:22px;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;">
+<p class="a-ink" style="margin:0 0 14px;color:#1b1736;font-size:15px;line-height:1.6;">Oi, Maria.</p>
+<p class="a-ink" style="margin:0 0 14px;color:#1b1736;font-size:15px;line-height:1.6;">Deixei tudo da Black Friday e das Festas de Fim de Ano num lugar só no seu painel, na página Black Friday, logo abaixo do Painel: colocar vários produtos em promoção de uma vez, com começo e fim; ver o que deve acabar antes da data e quanto comprar.</p>
+<p class="a-ink" style="margin:0 0 14px;color:#1b1736;font-size:15px;line-height:1.6;">Se alguma coisa não ficar clara ou faltar algo, é só me chamar no WhatsApp. Vamos trabalhar juntos para o seu negócio bater recorde de vendas na Black Friday e nas Festas de Fim de Ano!</p>
+<div style="margin:6px 0 4px;"><a class="a-btn" href="https://app.getaura.com.br/black-friday" style="display:inline-block;background:#6d28d9;color:#ffffff;font-weight:700;font-size:14px;text-decoration:none;padding:11px 18px;border-radius:10px;margin:0 10px 10px 0;">Abrir a página Black Friday</a><a class="a-wa" href="https://wa.me/5511956305269?text=Oi%2C%20Caio!%20Vi%20o%20e-mail%20da%20p%C3%A1gina%20Black%20Friday%20na%20Aura." style="display:inline-block;background:transparent;color:#0f766e;border:1.5px solid #0f766e;font-weight:700;font-size:14px;text-decoration:none;padding:9.5px 16px;border-radius:10px;margin:0 10px 10px 0;">Falar comigo no WhatsApp</a></div><table role="presentation" cellpadding="0" cellspacing="0" style="margin:4px 0 0;"><tr><td><img class="a-sig" src="https://app.getaura.com.br/email/assinatura-caio-alexander-v1.png" width="170" alt="Caio Alexander" style="display:block;width:170px;height:auto;margin:2px 0 0 -2px;border:0;"><p class="a-ink" style="margin:0;color:#1b1736;font-size:14px;">Caio Alexander, fundador da Aura</p></td></tr></table>
+      </td></tr>
+      <tr><td class="a-line a-ink2" style="padding:12px 22px;border-top:1px solid #e4def5;color:#51497f;font-size:11.5px;line-height:1.6;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;">Você recebe este e-mail porque usa a Aura com a Modas da Maria. <a class="a-link" href="https://app.getaura.com.br/configuracoes?foco=emails&amp;empresa=emp-1" style="color:#6d28d9;">Ajustar meus e-mails</a> · <a class="a-link" href="https://api.exemplo.test/api/v1/emails/descadastro/TOKEN" style="color:#6d28d9;">Parar de receber</a> · Aura. Tecnologia para negócios</td></tr>
+    </table>
+  </td></tr>
+</table>
+</body>
+</html>"
+`;
+
+exports[`e-mail 1: página Black Friday Negócio: texto inteiro, com a frase do carnê, botão para /black-friday 1`] = `
+"<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="color-scheme" content="light dark">
+<meta name="supported-color-schemes" content="light dark">
+<title>A Black Friday da sua loja já tem uma página na Aura</title>
+<style>
+  :root { color-scheme: light dark; supported-color-schemes: light dark; }
+  @media (prefers-color-scheme: dark) {
+    .a-bg { background: #0c0a16 !important; }
+    .a-card { background: #15122a !important; border-color: #2b2650 !important; }
+    .a-ink { color: #ece9ff !important; }
+    .a-ink2 { color: #b3add8 !important; }
+    .a-line { border-color: #2b2650 !important; }
+    .a-soft { background: #1d1938 !important; border-color: #2b2650 !important; }
+    .a-btn { background: #a78bfa !important; color: #14102b !important; }
+    .a-wa { color: #6ee7b7 !important; border-color: #6ee7b7 !important; }
+    .a-link { color: #a78bfa !important; }
+    .a-sig { filter: invert(1) brightness(1.6); }
+  }
+</style>
+</head>
+<body class="a-bg" style="margin:0;padding:0;background:#f4f1fb;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;">
+<div style="display:none;max-height:0;overflow:hidden;opacity:0;mso-hide:all;">Promoção em lote, o que vai faltar e o crédito para janeiro, numa página só</div><table role="presentation" width="100%" cellpadding="0" cellspacing="0" class="a-bg" style="background:#f4f1fb;">
+  <tr><td align="center" style="padding:24px 12px;">
+    <table role="presentation" width="560" cellpadding="0" cellspacing="0" class="a-card" style="max-width:560px;width:100%;background:#ffffff;border:1px solid #e4def5;border-radius:14px;">
+      <tr><td class="a-line" style="padding:14px 22px;border-bottom:1px solid #e4def5;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;"><img src="https://app.getaura.com.br/email/aura-logo-v1.png" width="28" height="28" alt="Aura" style="display:inline-block;width:28px;height:28px;vertical-align:middle;border:0;margin-right:9px;"><span class="a-ink" style="font-weight:700;font-size:16px;letter-spacing:-.2px;color:#1b1736;vertical-align:middle;">Aura.</span></td></tr>
+      <tr><td style="padding:22px;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;">
+<p class="a-ink" style="margin:0 0 14px;color:#1b1736;font-size:15px;line-height:1.6;">Oi, Maria.</p>
+<p class="a-ink" style="margin:0 0 14px;color:#1b1736;font-size:15px;line-height:1.6;">Deixei tudo da Black Friday e das Festas de Fim de Ano num lugar só no seu painel, na página Black Friday, logo abaixo do Painel: colocar vários produtos em promoção de uma vez, com começo e fim; ver o que deve acabar antes da data e quanto comprar; e, se você vende no carnê, lançar já com a primeira parcela em janeiro.</p>
+<p class="a-ink" style="margin:0 0 14px;color:#1b1736;font-size:15px;line-height:1.6;">Se alguma coisa não ficar clara ou faltar algo, é só me chamar no WhatsApp. Vamos trabalhar juntos para o seu negócio bater recorde de vendas na Black Friday e nas Festas de Fim de Ano!</p>
+<div style="margin:6px 0 4px;"><a class="a-btn" href="https://app.getaura.com.br/black-friday" style="display:inline-block;background:#6d28d9;color:#ffffff;font-weight:700;font-size:14px;text-decoration:none;padding:11px 18px;border-radius:10px;margin:0 10px 10px 0;">Abrir a página Black Friday</a><a class="a-wa" href="https://wa.me/5511956305269?text=Oi%2C%20Caio!%20Vi%20o%20e-mail%20da%20p%C3%A1gina%20Black%20Friday%20na%20Aura." style="display:inline-block;background:transparent;color:#0f766e;border:1.5px solid #0f766e;font-weight:700;font-size:14px;text-decoration:none;padding:9.5px 16px;border-radius:10px;margin:0 10px 10px 0;">Falar comigo no WhatsApp</a></div><table role="presentation" cellpadding="0" cellspacing="0" style="margin:4px 0 0;"><tr><td><img class="a-sig" src="https://app.getaura.com.br/email/assinatura-caio-alexander-v1.png" width="170" alt="Caio Alexander" style="display:block;width:170px;height:auto;margin:2px 0 0 -2px;border:0;"><p class="a-ink" style="margin:0;color:#1b1736;font-size:14px;">Caio Alexander, fundador da Aura</p></td></tr></table>
+      </td></tr>
+      <tr><td class="a-line a-ink2" style="padding:12px 22px;border-top:1px solid #e4def5;color:#51497f;font-size:11.5px;line-height:1.6;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;">Você recebe este e-mail porque usa a Aura com a Modas da Maria. <a class="a-link" href="https://app.getaura.com.br/configuracoes?foco=emails&amp;empresa=emp-1" style="color:#6d28d9;">Ajustar meus e-mails</a> · <a class="a-link" href="https://api.exemplo.test/api/v1/emails/descadastro/TOKEN" style="color:#6d28d9;">Parar de receber</a> · Aura. Tecnologia para negócios</td></tr>
+    </table>
+  </td></tr>
+</table>
+</body>
+</html>"
+`;
+
+exports[`e-mail 1: página Black Friday Negócio: texto inteiro, com a frase do carnê, botão para /black-friday 2`] = `
+"Oi, Maria.
+
+Deixei tudo da Black Friday e das Festas de Fim de Ano num lugar só no seu painel, na página Black Friday, logo abaixo do Painel: colocar vários produtos em promoção de uma vez, com começo e fim; ver o que deve acabar antes da data e quanto comprar; e, se você vende no carnê, lançar já com a primeira parcela em janeiro.
+
+Se alguma coisa não ficar clara ou faltar algo, é só me chamar no WhatsApp. Vamos trabalhar juntos para o seu negócio bater recorde de vendas na Black Friday e nas Festas de Fim de Ano!
+
+Abrir a página Black Friday: https://app.getaura.com.br/black-friday
+
+Caio Alexander, fundador da Aura
+
+Ajustar meus e-mails: https://app.getaura.com.br/configuracoes?foco=emails&empresa=emp-1
+Parar de receber: https://api.exemplo.test/api/v1/emails/descadastro/TOKEN"
+`;
+
+exports[`e-mail 2: retorno Essencial com BLACK50, o preço do Essencial e sem o carnê 1`] = `
+"<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="color-scheme" content="light dark">
+<meta name="supported-color-schemes" content="light dark">
+<title>Black Friday e Festas de Fim de Ano: a Aura quer ser seu braço direito</title>
+<style>
+  :root { color-scheme: light dark; supported-color-schemes: light dark; }
+  @media (prefers-color-scheme: dark) {
+    .a-bg { background: #0c0a16 !important; }
+    .a-card { background: #15122a !important; border-color: #2b2650 !important; }
+    .a-ink { color: #ece9ff !important; }
+    .a-ink2 { color: #b3add8 !important; }
+    .a-line { border-color: #2b2650 !important; }
+    .a-soft { background: #1d1938 !important; border-color: #2b2650 !important; }
+    .a-btn { background: #a78bfa !important; color: #14102b !important; }
+    .a-wa { color: #6ee7b7 !important; border-color: #6ee7b7 !important; }
+    .a-link { color: #a78bfa !important; }
+    .a-sig { filter: invert(1) brightness(1.6); }
+  }
+</style>
+</head>
+<body class="a-bg" style="margin:0;padding:0;background:#f4f1fb;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;">
+<div style="display:none;max-height:0;overflow:hidden;opacity:0;mso-hide:all;">Seus dados continuam guardados e a primeira mensalidade sai pela metade</div><table role="presentation" width="100%" cellpadding="0" cellspacing="0" class="a-bg" style="background:#f4f1fb;">
+  <tr><td align="center" style="padding:24px 12px;">
+    <table role="presentation" width="560" cellpadding="0" cellspacing="0" class="a-card" style="max-width:560px;width:100%;background:#ffffff;border:1px solid #e4def5;border-radius:14px;">
+      <tr><td class="a-line" style="padding:14px 22px;border-bottom:1px solid #e4def5;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;"><img src="https://app.getaura.com.br/email/aura-logo-v1.png" width="28" height="28" alt="Aura" style="display:inline-block;width:28px;height:28px;vertical-align:middle;border:0;margin-right:9px;"><span class="a-ink" style="font-weight:700;font-size:16px;letter-spacing:-.2px;color:#1b1736;vertical-align:middle;">Aura.</span></td></tr>
+      <tr><td style="padding:22px;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;">
+<p class="a-ink" style="margin:0 0 14px;color:#1b1736;font-size:15px;line-height:1.6;">Oi, Maria.</p>
+<p class="a-ink" style="margin:0 0 14px;color:#1b1736;font-size:15px;line-height:1.6;">A Black Friday e as Festas de Fim de Ano estão chegando e eu quero ver a sua loja vender mais. A Aura quer ser o seu braço direito: promoção com começo e fim, o que vai faltar no estoque.</p>
+<p class="a-ink" style="margin:0 0 14px;color:#1b1736;font-size:15px;line-height:1.6;">Seus dados continuam guardados: é só entrar. Até 30/11, ou enquanto houver cupons, a primeira mensalidade sai pela metade com o código BLACK50: R$ 44,50 (depois R$ 89), no plano mensal.</p>
+<p class="a-ink" style="margin:0 0 14px;color:#1b1736;font-size:15px;line-height:1.6;">Se travar em qualquer coisa, me chama no WhatsApp.</p>
+<div style="margin:6px 0 4px;"><a class="a-btn" href="https://app.getaura.com.br/checkout?empresa=emp-1" style="display:inline-block;background:#6d28d9;color:#ffffff;font-weight:700;font-size:14px;text-decoration:none;padding:11px 18px;border-radius:10px;margin:0 10px 10px 0;">Voltar para a Aura</a><a class="a-wa" href="https://wa.me/5511956305269?text=Oi%2C%20Caio!%20Vi%20o%20e-mail%20sobre%20a%20Black%20Friday%20e%20as%20Festas%20de%20Fim%20de%20Ano%20na%20Aura." style="display:inline-block;background:transparent;color:#0f766e;border:1.5px solid #0f766e;font-weight:700;font-size:14px;text-decoration:none;padding:9.5px 16px;border-radius:10px;margin:0 10px 10px 0;">Falar comigo no WhatsApp</a></div><table role="presentation" cellpadding="0" cellspacing="0" style="margin:4px 0 0;"><tr><td><img class="a-sig" src="https://app.getaura.com.br/email/assinatura-caio-alexander-v1.png" width="170" alt="Caio Alexander" style="display:block;width:170px;height:auto;margin:2px 0 0 -2px;border:0;"><p class="a-ink" style="margin:0;color:#1b1736;font-size:14px;">Caio Alexander, fundador da Aura</p></td></tr></table>
+      </td></tr>
+      <tr><td class="a-line a-ink2" style="padding:12px 22px;border-top:1px solid #e4def5;color:#51497f;font-size:11.5px;line-height:1.6;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;">Você recebe este e-mail porque testou a Aura com a Modas da Maria. <a class="a-link" href="https://app.getaura.com.br/configuracoes?foco=emails&amp;empresa=emp-1" style="color:#6d28d9;">Ajustar meus e-mails</a> · <a class="a-link" href="https://api.exemplo.test/api/v1/emails/descadastro/TOKEN" style="color:#6d28d9;">Parar de receber</a> · Aura. Tecnologia para negócios</td></tr>
+    </table>
+  </td></tr>
+</table>
+</body>
+</html>"
+`;
+
+exports[`e-mail 2: retorno Negócio com BLACK50 e o preço do Negócio 1`] = `
+"<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="color-scheme" content="light dark">
+<meta name="supported-color-schemes" content="light dark">
+<title>Black Friday e Festas de Fim de Ano: a Aura quer ser seu braço direito</title>
+<style>
+  :root { color-scheme: light dark; supported-color-schemes: light dark; }
+  @media (prefers-color-scheme: dark) {
+    .a-bg { background: #0c0a16 !important; }
+    .a-card { background: #15122a !important; border-color: #2b2650 !important; }
+    .a-ink { color: #ece9ff !important; }
+    .a-ink2 { color: #b3add8 !important; }
+    .a-line { border-color: #2b2650 !important; }
+    .a-soft { background: #1d1938 !important; border-color: #2b2650 !important; }
+    .a-btn { background: #a78bfa !important; color: #14102b !important; }
+    .a-wa { color: #6ee7b7 !important; border-color: #6ee7b7 !important; }
+    .a-link { color: #a78bfa !important; }
+    .a-sig { filter: invert(1) brightness(1.6); }
+  }
+</style>
+</head>
+<body class="a-bg" style="margin:0;padding:0;background:#f4f1fb;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;">
+<div style="display:none;max-height:0;overflow:hidden;opacity:0;mso-hide:all;">Seus dados continuam guardados e a primeira mensalidade sai pela metade</div><table role="presentation" width="100%" cellpadding="0" cellspacing="0" class="a-bg" style="background:#f4f1fb;">
+  <tr><td align="center" style="padding:24px 12px;">
+    <table role="presentation" width="560" cellpadding="0" cellspacing="0" class="a-card" style="max-width:560px;width:100%;background:#ffffff;border:1px solid #e4def5;border-radius:14px;">
+      <tr><td class="a-line" style="padding:14px 22px;border-bottom:1px solid #e4def5;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;"><img src="https://app.getaura.com.br/email/aura-logo-v1.png" width="28" height="28" alt="Aura" style="display:inline-block;width:28px;height:28px;vertical-align:middle;border:0;margin-right:9px;"><span class="a-ink" style="font-weight:700;font-size:16px;letter-spacing:-.2px;color:#1b1736;vertical-align:middle;">Aura.</span></td></tr>
+      <tr><td style="padding:22px;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;">
+<p class="a-ink" style="margin:0 0 14px;color:#1b1736;font-size:15px;line-height:1.6;">Oi, Maria.</p>
+<p class="a-ink" style="margin:0 0 14px;color:#1b1736;font-size:15px;line-height:1.6;">A Black Friday e as Festas de Fim de Ano estão chegando e eu quero ver a sua loja vender mais. A Aura quer ser o seu braço direito: promoção com começo e fim, o que vai faltar no estoque e o carnê já com a primeira parcela em janeiro.</p>
+<p class="a-ink" style="margin:0 0 14px;color:#1b1736;font-size:15px;line-height:1.6;">Seus dados continuam guardados: é só entrar. Até 30/11, ou enquanto houver cupons, a primeira mensalidade sai pela metade com o código BLACK50: R$ 84,50 (depois R$ 169), no plano mensal.</p>
+<p class="a-ink" style="margin:0 0 14px;color:#1b1736;font-size:15px;line-height:1.6;">Se travar em qualquer coisa, me chama no WhatsApp.</p>
+<div style="margin:6px 0 4px;"><a class="a-btn" href="https://app.getaura.com.br/checkout?empresa=emp-1" style="display:inline-block;background:#6d28d9;color:#ffffff;font-weight:700;font-size:14px;text-decoration:none;padding:11px 18px;border-radius:10px;margin:0 10px 10px 0;">Voltar para a Aura</a><a class="a-wa" href="https://wa.me/5511956305269?text=Oi%2C%20Caio!%20Vi%20o%20e-mail%20sobre%20a%20Black%20Friday%20e%20as%20Festas%20de%20Fim%20de%20Ano%20na%20Aura." style="display:inline-block;background:transparent;color:#0f766e;border:1.5px solid #0f766e;font-weight:700;font-size:14px;text-decoration:none;padding:9.5px 16px;border-radius:10px;margin:0 10px 10px 0;">Falar comigo no WhatsApp</a></div><table role="presentation" cellpadding="0" cellspacing="0" style="margin:4px 0 0;"><tr><td><img class="a-sig" src="https://app.getaura.com.br/email/assinatura-caio-alexander-v1.png" width="170" alt="Caio Alexander" style="display:block;width:170px;height:auto;margin:2px 0 0 -2px;border:0;"><p class="a-ink" style="margin:0;color:#1b1736;font-size:14px;">Caio Alexander, fundador da Aura</p></td></tr></table>
+      </td></tr>
+      <tr><td class="a-line a-ink2" style="padding:12px 22px;border-top:1px solid #e4def5;color:#51497f;font-size:11.5px;line-height:1.6;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;">Você recebe este e-mail porque testou a Aura com a Modas da Maria. <a class="a-link" href="https://app.getaura.com.br/configuracoes?foco=emails&amp;empresa=emp-1" style="color:#6d28d9;">Ajustar meus e-mails</a> · <a class="a-link" href="https://api.exemplo.test/api/v1/emails/descadastro/TOKEN" style="color:#6d28d9;">Parar de receber</a> · Aura. Tecnologia para negócios</td></tr>
+    </table>
+  </td></tr>
+</table>
+</body>
+</html>"
+`;
+
+exports[`e-mail 2: retorno Negócio com BLACK50 e o preço do Negócio 2`] = `
+"Oi, Maria.
+
+A Black Friday e as Festas de Fim de Ano estão chegando e eu quero ver a sua loja vender mais. A Aura quer ser o seu braço direito: promoção com começo e fim, o que vai faltar no estoque e o carnê já com a primeira parcela em janeiro.
+
+Seus dados continuam guardados: é só entrar. Até 30/11, ou enquanto houver cupons, a primeira mensalidade sai pela metade com o código BLACK50: R$ 84,50 (depois R$ 169), no plano mensal.
+
+Se travar em qualquer coisa, me chama no WhatsApp.
+
+Voltar para a Aura: https://app.getaura.com.br/checkout?empresa=emp-1
+
+Caio Alexander, fundador da Aura
+
+Ajustar meus e-mails: https://app.getaura.com.br/configuracoes?foco=emails&empresa=emp-1
+Parar de receber: https://api.exemplo.test/api/v1/emails/descadastro/TOKEN"
+`;
+
+exports[`e-mail 2: retorno Studio: as funções do Studio, com BLACK50 1`] = `
+"<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="color-scheme" content="light dark">
+<meta name="supported-color-schemes" content="light dark">
+<title>Black Friday e Festas de Fim de Ano: a Aura quer ser seu braço direito</title>
+<style>
+  :root { color-scheme: light dark; supported-color-schemes: light dark; }
+  @media (prefers-color-scheme: dark) {
+    .a-bg { background: #0c0a16 !important; }
+    .a-card { background: #15122a !important; border-color: #2b2650 !important; }
+    .a-ink { color: #ece9ff !important; }
+    .a-ink2 { color: #b3add8 !important; }
+    .a-line { border-color: #2b2650 !important; }
+    .a-soft { background: #1d1938 !important; border-color: #2b2650 !important; }
+    .a-btn { background: #a78bfa !important; color: #14102b !important; }
+    .a-wa { color: #6ee7b7 !important; border-color: #6ee7b7 !important; }
+    .a-link { color: #a78bfa !important; }
+    .a-sig { filter: invert(1) brightness(1.6); }
+  }
+</style>
+</head>
+<body class="a-bg" style="margin:0;padding:0;background:#f4f1fb;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;">
+<div style="display:none;max-height:0;overflow:hidden;opacity:0;mso-hide:all;">Seus dados continuam guardados e a primeira mensalidade sai pela metade</div><table role="presentation" width="100%" cellpadding="0" cellspacing="0" class="a-bg" style="background:#f4f1fb;">
+  <tr><td align="center" style="padding:24px 12px;">
+    <table role="presentation" width="560" cellpadding="0" cellspacing="0" class="a-card" style="max-width:560px;width:100%;background:#ffffff;border:1px solid #e4def5;border-radius:14px;">
+      <tr><td class="a-line" style="padding:14px 22px;border-bottom:1px solid #e4def5;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;"><img src="https://app.getaura.com.br/email/aura-logo-v1.png" width="28" height="28" alt="Aura" style="display:inline-block;width:28px;height:28px;vertical-align:middle;border:0;margin-right:9px;"><span class="a-ink" style="font-weight:700;font-size:16px;letter-spacing:-.2px;color:#1b1736;vertical-align:middle;">Aura.</span></td></tr>
+      <tr><td style="padding:22px;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;">
+<p class="a-ink" style="margin:0 0 14px;color:#1b1736;font-size:15px;line-height:1.6;">Oi, Maria.</p>
+<p class="a-ink" style="margin:0 0 14px;color:#1b1736;font-size:15px;line-height:1.6;">A Black Friday e as Festas de Fim de Ano estão chegando e eu quero ver a sua loja vender mais. A Aura quer ser o seu braço direito: orçamento com prévia da arte, fila de produção e o Caixa no mesmo lugar.</p>
+<p class="a-ink" style="margin:0 0 14px;color:#1b1736;font-size:15px;line-height:1.6;">Seus dados continuam guardados: é só entrar. Até 30/11, ou enquanto houver cupons, a primeira mensalidade sai pela metade com o código BLACK50: R$ 84,50 (depois R$ 169), no plano mensal.</p>
+<p class="a-ink" style="margin:0 0 14px;color:#1b1736;font-size:15px;line-height:1.6;">Se travar em qualquer coisa, me chama no WhatsApp.</p>
+<div style="margin:6px 0 4px;"><a class="a-btn" href="https://app.getaura.com.br/checkout?empresa=emp-1" style="display:inline-block;background:#6d28d9;color:#ffffff;font-weight:700;font-size:14px;text-decoration:none;padding:11px 18px;border-radius:10px;margin:0 10px 10px 0;">Voltar para a Aura</a><a class="a-wa" href="https://wa.me/5511956305269?text=Oi%2C%20Caio!%20Vi%20o%20e-mail%20sobre%20a%20Black%20Friday%20e%20as%20Festas%20de%20Fim%20de%20Ano%20na%20Aura." style="display:inline-block;background:transparent;color:#0f766e;border:1.5px solid #0f766e;font-weight:700;font-size:14px;text-decoration:none;padding:9.5px 16px;border-radius:10px;margin:0 10px 10px 0;">Falar comigo no WhatsApp</a></div><table role="presentation" cellpadding="0" cellspacing="0" style="margin:4px 0 0;"><tr><td><img class="a-sig" src="https://app.getaura.com.br/email/assinatura-caio-alexander-v1.png" width="170" alt="Caio Alexander" style="display:block;width:170px;height:auto;margin:2px 0 0 -2px;border:0;"><p class="a-ink" style="margin:0;color:#1b1736;font-size:14px;">Caio Alexander, fundador da Aura</p></td></tr></table>
+      </td></tr>
+      <tr><td class="a-line a-ink2" style="padding:12px 22px;border-top:1px solid #e4def5;color:#51497f;font-size:11.5px;line-height:1.6;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;">Você recebe este e-mail porque testou a Aura com a Modas da Maria. <a class="a-link" href="https://app.getaura.com.br/configuracoes?foco=emails&amp;empresa=emp-1" style="color:#6d28d9;">Ajustar meus e-mails</a> · <a class="a-link" href="https://api.exemplo.test/api/v1/emails/descadastro/TOKEN" style="color:#6d28d9;">Parar de receber</a> · Aura. Tecnologia para negócios</td></tr>
+    </table>
+  </td></tr>
+</table>
+</body>
+</html>"
+`;
+
+exports[`e-mail 2: retorno em atraso: sem código, com a frase da régua 1`] = `
+"<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="color-scheme" content="light dark">
+<meta name="supported-color-schemes" content="light dark">
+<title>Black Friday e Festas de Fim de Ano: a Aura quer ser seu braço direito</title>
+<style>
+  :root { color-scheme: light dark; supported-color-schemes: light dark; }
+  @media (prefers-color-scheme: dark) {
+    .a-bg { background: #0c0a16 !important; }
+    .a-card { background: #15122a !important; border-color: #2b2650 !important; }
+    .a-ink { color: #ece9ff !important; }
+    .a-ink2 { color: #b3add8 !important; }
+    .a-line { border-color: #2b2650 !important; }
+    .a-soft { background: #1d1938 !important; border-color: #2b2650 !important; }
+    .a-btn { background: #a78bfa !important; color: #14102b !important; }
+    .a-wa { color: #6ee7b7 !important; border-color: #6ee7b7 !important; }
+    .a-link { color: #a78bfa !important; }
+    .a-sig { filter: invert(1) brightness(1.6); }
+  }
+</style>
+</head>
+<body class="a-bg" style="margin:0;padding:0;background:#f4f1fb;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;">
+<div style="display:none;max-height:0;overflow:hidden;opacity:0;mso-hide:all;">Seus dados continuam guardados. Vamos deixar a loja pronta para as vendas de fim de ano</div><table role="presentation" width="100%" cellpadding="0" cellspacing="0" class="a-bg" style="background:#f4f1fb;">
+  <tr><td align="center" style="padding:24px 12px;">
+    <table role="presentation" width="560" cellpadding="0" cellspacing="0" class="a-card" style="max-width:560px;width:100%;background:#ffffff;border:1px solid #e4def5;border-radius:14px;">
+      <tr><td class="a-line" style="padding:14px 22px;border-bottom:1px solid #e4def5;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;"><img src="https://app.getaura.com.br/email/aura-logo-v1.png" width="28" height="28" alt="Aura" style="display:inline-block;width:28px;height:28px;vertical-align:middle;border:0;margin-right:9px;"><span class="a-ink" style="font-weight:700;font-size:16px;letter-spacing:-.2px;color:#1b1736;vertical-align:middle;">Aura.</span></td></tr>
+      <tr><td style="padding:22px;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;">
+<p class="a-ink" style="margin:0 0 14px;color:#1b1736;font-size:15px;line-height:1.6;">Oi, Maria.</p>
+<p class="a-ink" style="margin:0 0 14px;color:#1b1736;font-size:15px;line-height:1.6;">A Black Friday e as Festas de Fim de Ano estão chegando e eu quero ver a sua loja vender mais. A Aura quer ser o seu braço direito: promoção com começo e fim, o que vai faltar no estoque e o carnê já com a primeira parcela em janeiro.</p>
+<p class="a-ink" style="margin:0 0 14px;color:#1b1736;font-size:15px;line-height:1.6;">Seus dados continuam guardados. Se alguma coisa ficou pendente na assinatura, é só me chamar no WhatsApp que a gente resolve junto. Assim que o pagamento for confirmado, o acesso volta.</p>
+<div style="margin:6px 0 4px;"><a class="a-btn" href="https://app.getaura.com.br/checkout?empresa=emp-1" style="display:inline-block;background:#6d28d9;color:#ffffff;font-weight:700;font-size:14px;text-decoration:none;padding:11px 18px;border-radius:10px;margin:0 10px 10px 0;">Voltar para a Aura</a><a class="a-wa" href="https://wa.me/5511956305269?text=Oi%2C%20Caio!%20Vi%20o%20e-mail%20sobre%20a%20Black%20Friday%20e%20as%20Festas%20de%20Fim%20de%20Ano%20na%20Aura." style="display:inline-block;background:transparent;color:#0f766e;border:1.5px solid #0f766e;font-weight:700;font-size:14px;text-decoration:none;padding:9.5px 16px;border-radius:10px;margin:0 10px 10px 0;">Falar comigo no WhatsApp</a></div><table role="presentation" cellpadding="0" cellspacing="0" style="margin:4px 0 0;"><tr><td><img class="a-sig" src="https://app.getaura.com.br/email/assinatura-caio-alexander-v1.png" width="170" alt="Caio Alexander" style="display:block;width:170px;height:auto;margin:2px 0 0 -2px;border:0;"><p class="a-ink" style="margin:0;color:#1b1736;font-size:14px;">Caio Alexander, fundador da Aura</p></td></tr></table>
+      </td></tr>
+      <tr><td class="a-line a-ink2" style="padding:12px 22px;border-top:1px solid #e4def5;color:#51497f;font-size:11.5px;line-height:1.6;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;">Você recebe este e-mail porque usa a Aura com a Modas da Maria. <a class="a-link" href="https://app.getaura.com.br/configuracoes?foco=emails&amp;empresa=emp-1" style="color:#6d28d9;">Ajustar meus e-mails</a> · <a class="a-link" href="https://api.exemplo.test/api/v1/emails/descadastro/TOKEN" style="color:#6d28d9;">Parar de receber</a> · Aura. Tecnologia para negócios</td></tr>
+    </table>
+  </td></tr>
+</table>
+</body>
+</html>"
+`;
+
+exports[`e-mail 2: retorno kill switch (sem código): sem BLACK50 e sem preço 1`] = `
+"<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="color-scheme" content="light dark">
+<meta name="supported-color-schemes" content="light dark">
+<title>Black Friday e Festas de Fim de Ano: a Aura quer ser seu braço direito</title>
+<style>
+  :root { color-scheme: light dark; supported-color-schemes: light dark; }
+  @media (prefers-color-scheme: dark) {
+    .a-bg { background: #0c0a16 !important; }
+    .a-card { background: #15122a !important; border-color: #2b2650 !important; }
+    .a-ink { color: #ece9ff !important; }
+    .a-ink2 { color: #b3add8 !important; }
+    .a-line { border-color: #2b2650 !important; }
+    .a-soft { background: #1d1938 !important; border-color: #2b2650 !important; }
+    .a-btn { background: #a78bfa !important; color: #14102b !important; }
+    .a-wa { color: #6ee7b7 !important; border-color: #6ee7b7 !important; }
+    .a-link { color: #a78bfa !important; }
+    .a-sig { filter: invert(1) brightness(1.6); }
+  }
+</style>
+</head>
+<body class="a-bg" style="margin:0;padding:0;background:#f4f1fb;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;">
+<div style="display:none;max-height:0;overflow:hidden;opacity:0;mso-hide:all;">Seus dados continuam guardados. Vamos deixar a loja pronta para as vendas de fim de ano</div><table role="presentation" width="100%" cellpadding="0" cellspacing="0" class="a-bg" style="background:#f4f1fb;">
+  <tr><td align="center" style="padding:24px 12px;">
+    <table role="presentation" width="560" cellpadding="0" cellspacing="0" class="a-card" style="max-width:560px;width:100%;background:#ffffff;border:1px solid #e4def5;border-radius:14px;">
+      <tr><td class="a-line" style="padding:14px 22px;border-bottom:1px solid #e4def5;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;"><img src="https://app.getaura.com.br/email/aura-logo-v1.png" width="28" height="28" alt="Aura" style="display:inline-block;width:28px;height:28px;vertical-align:middle;border:0;margin-right:9px;"><span class="a-ink" style="font-weight:700;font-size:16px;letter-spacing:-.2px;color:#1b1736;vertical-align:middle;">Aura.</span></td></tr>
+      <tr><td style="padding:22px;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;">
+<p class="a-ink" style="margin:0 0 14px;color:#1b1736;font-size:15px;line-height:1.6;">Oi, Maria.</p>
+<p class="a-ink" style="margin:0 0 14px;color:#1b1736;font-size:15px;line-height:1.6;">A Black Friday e as Festas de Fim de Ano estão chegando e eu quero ver a sua loja vender mais. A Aura quer ser o seu braço direito: promoção com começo e fim, o que vai faltar no estoque e o carnê já com a primeira parcela em janeiro.</p>
+<p class="a-ink" style="margin:0 0 14px;color:#1b1736;font-size:15px;line-height:1.6;">Seus dados continuam guardados: é só entrar quando quiser. Se ficou alguma coisa para trás, me chama no WhatsApp que eu ajudo a deixar a loja pronta para a Black Friday e as Festas de Fim de Ano.</p>
+<div style="margin:6px 0 4px;"><a class="a-btn" href="https://app.getaura.com.br/checkout?empresa=emp-1" style="display:inline-block;background:#6d28d9;color:#ffffff;font-weight:700;font-size:14px;text-decoration:none;padding:11px 18px;border-radius:10px;margin:0 10px 10px 0;">Voltar para a Aura</a><a class="a-wa" href="https://wa.me/5511956305269?text=Oi%2C%20Caio!%20Vi%20o%20e-mail%20sobre%20a%20Black%20Friday%20e%20as%20Festas%20de%20Fim%20de%20Ano%20na%20Aura." style="display:inline-block;background:transparent;color:#0f766e;border:1.5px solid #0f766e;font-weight:700;font-size:14px;text-decoration:none;padding:9.5px 16px;border-radius:10px;margin:0 10px 10px 0;">Falar comigo no WhatsApp</a></div><table role="presentation" cellpadding="0" cellspacing="0" style="margin:4px 0 0;"><tr><td><img class="a-sig" src="https://app.getaura.com.br/email/assinatura-caio-alexander-v1.png" width="170" alt="Caio Alexander" style="display:block;width:170px;height:auto;margin:2px 0 0 -2px;border:0;"><p class="a-ink" style="margin:0;color:#1b1736;font-size:14px;">Caio Alexander, fundador da Aura</p></td></tr></table>
+      </td></tr>
+      <tr><td class="a-line a-ink2" style="padding:12px 22px;border-top:1px solid #e4def5;color:#51497f;font-size:11.5px;line-height:1.6;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;">Você recebe este e-mail porque testou a Aura com a Modas da Maria. <a class="a-link" href="https://app.getaura.com.br/configuracoes?foco=emails&amp;empresa=emp-1" style="color:#6d28d9;">Ajustar meus e-mails</a> · <a class="a-link" href="https://api.exemplo.test/api/v1/emails/descadastro/TOKEN" style="color:#6d28d9;">Parar de receber</a> · Aura. Tecnologia para negócios</td></tr>
+    </table>
+  </td></tr>
+</table>
+</body>
+</html>"
+`;
