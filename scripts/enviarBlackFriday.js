@@ -55,7 +55,11 @@ const L = require('../src/services/emailLayout');
 const SEGURADAS = Object.freeze([
   '133ec696-56ce-43cb-806d-3dcdb8fca4d2', // assinante do Studio
   'a609e806-98b0-4138-a61a-d6ce3ac967b2', // teste vigente do Studio
+  'bd2b009e-4c17-4deb-907d-14815f1c4e97', // fora da lista por pedido do Caio (11/11)
 ]);
+
+// Remetente dos dois e-mails, escolhido pelo Caio em 11/11/2026.
+const REMETENTE = 'Caio, da Aura <contato@getaura.com.br>';
 
 const CAMPANHA = Object.freeze({ 1: 'bf-2026-email1', 2: 'bf-2026-email2' });
 const TIPO_LOG = Object.freeze({ 1: 'novidades_bf_2026_email1', 2: 'novidades_bf_2026_email2' });
@@ -250,7 +254,7 @@ async function enviarTeste({ args, enviar, env, log }) {
     };
     const c = montar(args.email, alvo, { comCodigo: !args.semCodigo, env });
     try {
-      await enviar({ to: args.teste, subject: `[TESTE] ${c.assunto}`, html: c.html, text: c.text, headers: c.headers });
+      await enviar({ to: args.teste, from: REMETENTE, subject: `[TESTE] ${c.assunto}`, html: c.html, text: c.text, headers: c.headers });
       resultado.enviados += 1;
       log(`  teste ${v}: enviado`);
     } catch (err) {
@@ -335,7 +339,7 @@ async function executar({
         chave: chaveDe(args.email, a.companyId), tipo: TIPO_LOG[args.email],
         companyId: a.companyId, userId: a.userId,
         metadata: { campanha, variante: a.variante, plano: a.plano, com_codigo: a.variante !== 'atraso' && comCodigo },
-        to: a.email, subject: c.assunto, html: c.html, text: c.text, headers: c.headers,
+        to: a.email, from: REMETENTE, subject: c.assunto, html: c.html, text: c.text, headers: c.headers,
       });
       if (r.status === 'sent') resumo.enviados += 1;
       else if (r.status === 'duplicate') resumo.duplicados += 1;
@@ -377,6 +381,7 @@ if (require.main === module) main();
 
 module.exports = {
   SEGURADAS,
+  REMETENTE,
   CAMPANHA,
   TIPO_LOG,
   VARIANTES,
