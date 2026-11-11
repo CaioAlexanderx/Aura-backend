@@ -82,6 +82,8 @@ jest.mock('../../src/services/nfseNacional/repo', () => {
     gravarCancelamentoRecusado: jest.fn(async () => {}),
     atualizarXmlNfse: jest.fn(async (db, id, xml) => { find(id).xml_nfse = xml; }),
     gravarResultadoTeste: jest.fn(async () => {}),
+    anexarEvidencia: jest.fn(async (db, id, ev) => { find(id).provider_response = { ...(find(id).provider_response || {}), ...clone(ev) }; }),
+    notasDeProducao: jest.fn(async () => []),
   };
 });
 
@@ -295,7 +297,7 @@ describe('recuperação pela consulta da DPS', () => {
 
     // a loja confere a série (PUT /config limpa o conflito): volta a emitir, na série nova
     Object.assign(repo.__state.config, { dps_conflito_em: null, serie: '3', next_dps_number: 1, outro_emissor: true });
-    const t2 = sefinFalso({ postDps: () => json(201, { chaveAcesso: CHAVE_DA_AURA, nfseXmlGZipB64: gz(nfseCom('<DPS/>')) }) });
+    const t2 = sefinFalso({ postDps: (req) => json(201, { chaveAcesso: CHAVE_DA_AURA, nfseXmlGZipB64: gz(nfseCom(ungz(req.body.dpsXmlGZipB64))) }) });
     const nova = await nacional.emitir(db, { companyId: CID, idempotencyKey: 'venda-1-b', nota: incidente.VENDA_DA_AURA }, { ...ctxBase, transport: t2 });
     expect(nova.nota).toMatchObject({ status: 'autorizada', dps_serie: '3', dps_number: '1' });
     expect(t2.dpsPostada()).toContain('<serie>3</serie><nDPS>1</nDPS>');

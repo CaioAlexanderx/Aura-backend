@@ -149,15 +149,19 @@ router.put('/config', requireAuth, requireWrite, exigirLigada, async (req, res) 
 
 // ── origem ──────────────────────────────────────────────────
 
-async function responderSituacao(req, res, extra = {}) {
-  const sit = await auto.situacaoDaOrigem({ companyId: req.params.id, tipo: req.params.tipo, id: req.params.origemId });
+async function responderSituacao(req, res, extra = {}, { consultarPendentes = false } = {}) {
+  const sit = await auto.situacaoDaOrigem({
+    companyId: req.params.id, tipo: req.params.tipo, id: req.params.origemId, consultarPendentes,
+  });
   if (!sit) return res.status(404).json({ error: req.params.tipo === 'os' ? 'Ordem de serviço não encontrada' : 'Venda não encontrada' });
   return res.json({ ...sit, ...extra });
 }
 
+// GET que o app consulta em "Emitindo…": nota pendente há mais de 60 s
+// dispara uma consulta ao gov.br (situacaoDaOrigem, consultarPendentes).
 router.get('/origem/:tipo/:origemId', requireAuth, origemValida, async (req, res) => {
   try {
-    await responderSituacao(req, res);
+    await responderSituacao(req, res, {}, { consultarPendentes: true });
   } catch (err) {
     falhar(res, 'situacao', err);
   }

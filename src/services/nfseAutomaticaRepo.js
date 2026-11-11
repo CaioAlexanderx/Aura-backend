@@ -194,7 +194,7 @@ const COLS = `a.id, a.company_id, a.origem_tipo, a.origem_id, a.ctribnac, a.gati
   a.motivo, a.motivo_codigo, a.tentativa, a.idempotency_key, a.nfse_id, a.customer_id,
   a.tomador, a.nota, a.itens, a.valor, a.vinculos, a.created_at, a.updated_at`;
 const COLS_NFSE = `n.status AS nfse_status, n.nfse_number, n.chave_acesso, n.issued_at,
-  n.rejection_reason AS nfse_motivo, n.dps_number`;
+  n.rejection_reason AS nfse_motivo, n.dps_number, n.transmitted_at AS nfse_transmitted_at`;
 
 async function buscarRegistro(id) {
   const { rows } = await db.query(

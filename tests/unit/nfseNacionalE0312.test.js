@@ -3,10 +3,12 @@
 // gov.br (E0312) não trava o "Ligar".
 //
 // Caso real de 10/11/2026: loja de São Paulo capital (IBGE 3550308, ME/EPP)
-// com o cTribNac 130501, que ela já usa no ambiente de PRODUÇÃO do Emissor
-// Nacional. As três notas de teste voltaram só com o E0312 ("código de
-// tributação nacional não administrado pelo município"), sem E0084: o
-// município não parametrizou o código na produção restrita.
+// com o cTribNac 130501. As notas de teste voltaram só com o E0312 ("código
+// de tributação nacional não administrado pelo município"), sem E0084.
+// A premissa antiga ("a loja já usa o código no Emissor Nacional") era
+// falsa: o histórico dela vem do emissor da prefeitura (ambGer 1, tpEmis 2).
+// O comportamento fica (Ligar liberado com aviso), e o texto diz a verdade:
+// quem confirma o código é a primeira nota de verdade.
 //
 // Banco MOCKADO (db.query roteado pelo SQL) com o repo de verdade: o passo
 // "teste" e o gate do PUT /config (avaliarLigar) leem os error_codes da nota
@@ -183,7 +185,12 @@ describe('traduzirResultadoTeste', () => {
       status: 'aviso', passo: 'teste', codigo: 'E0312',
       mensagem: AVISO_SO_DO_AMBIENTE_DE_TESTES, aviso: AVISO_SO_DO_AMBIENTE_DE_TESTES, caminho: [],
     });
-    expect(r.mensagem).toMatch(/Pode ligar: a primeira nota de verdade confirma tudo\./);
+    expect(r.mensagem).toMatch(/Pode ligar: a primeira nota de verdade é que confirma o código\./);
+  });
+
+  test('o aviso não afirma que a loja já usa o código no Emissor Nacional (backend#988 corrigido)', () => {
+    expect(AVISO_SO_DO_AMBIENTE_DE_TESTES).not.toMatch(/já usa|já emite|habilitado pela prefeitura/i);
+    expect(AVISO_SO_DO_AMBIENTE_DE_TESTES).toMatch(/primeira nota de verdade/);
   });
 
   test('E0312 junto de outro código: rejeitado, sem aviso', () => {

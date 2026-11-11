@@ -28,7 +28,7 @@ async function buscarPorChave(db, companyId, key) {
 
 async function buscarPorId(db, companyId, nfseId) {
   const { rows } = await db.query(
-    `SELECT ${COLS}, xml_dps, dps_dados FROM nfse WHERE id = $1 AND company_id = $2`,
+    `SELECT ${COLS}, xml_dps, xml_nfse, dps_dados FROM nfse WHERE id = $1 AND company_id = $2`,
     [nfseId, companyId]
   );
   return rows[0] || null;
@@ -223,11 +223,29 @@ async function marcarNumeroJaUsado(db, row, { mensagem, evidencia, bloquearConfi
   return true;
 }
 
+/**
+ * Guarda do SQL de gravarAutorizada (incidente de 10/11/2026): só uma nota
+ * ainda aberta ('pendente'/'erro') vira autorizada, e nunca uma nota que a
+ * Aura já conferiu como de OUTRO emissor (DPS_NUMERO_JA_USADO em
+ * error_codes ou no começo de rejection_reason — mesma regra de
+ * errors.temDpsNumeroJaUsado). Assim um "Tentar de novo" com uma leitura
+ * antiga da nota não readota a NFS-e alheia nem apaga a evidência.
+ */
+const SO_NOTA_ABERTA_DA_AURA = `status IN ('pendente', 'erro')
+        AND NOT (COALESCE(error_codes, '[]'::jsonb) @> '[{"codigo":"DPS_NUMERO_JA_USADO"}]'::jsonb)
+        AND ltrim(COALESCE(rejection_reason, '')) NOT LIKE 'DPS\\_NUMERO\\_JA\\_USADO%'`;
+
+/**
+ * Grava a NFS-e como autorizada — só se a guarda deixar (SO_NOTA_ABERTA_DA_AURA).
+ * provider_response é MESCLADO (||): a evidência gravada antes fica.
+ * @returns {{ gravada: boolean, nota: object|null }} sem linha afetada não
+ *   lança: devolve a nota como está no banco
+ */
 async function gravarAutorizada(db, id, { chaveAcesso, nfseXml, alertas, cabecalho }) {
   let lido;
   try { lido = lerNfse(nfseXml); } catch (_) { lido = { valores: {} }; }
   const v = lido.valores || {};
-  await db.query(
+  const { rows } = await db.query(
     `UPDATE nfse SET
         status = 'autorizada',
         chave_acesso = $1,
@@ -240,8 +258,10 @@ async function gravarAutorizada(db, id, { chaveAcesso, nfseXml, alertas, cabecal
         net_amount = COALESCE($7, net_amount),
         rejection_reason = NULL,
         error_codes = NULL,
-        provider_response = $8::jsonb
-      WHERE id = $9`,
+        provider_response = COALESCE(provider_response, '{}'::jsonb) || $8::jsonb
+      WHERE id = $9
+        AND ${SO_NOTA_ABERTA_DA_AURA}
+      RETURNING ${COLS}`,
     [
       chaveAcesso || lido.chaveAcesso, lido.nNFSe || null, nfseXml, lido.dhProc || null,
       v.vISSQN, v.pAliqAplic, v.vLiq,
@@ -249,11 +269,15 @@ async function gravarAutorizada(db, id, { chaveAcesso, nfseXml, alertas, cabecal
       id,
     ]
   );
+  if (rows && rows[0]) return { gravada: true, nota: rows[0] };
+  const { rows: atual } = await db.query(`SELECT ${COLS} FROM nfse WHERE id = $1`, [id]);
+  return { gravada: false, nota: (atual && atual[0]) || null };
 }
 
 async function gravarRejeitada(db, id, { texto, erros, cabecalho }) {
   await db.query(
-    `UPDATE nfse SET status = 'rejeitada', rejection_reason = $1, error_codes = $2::jsonb, provider_response = $3::jsonb
+    `UPDATE nfse SET status = 'rejeitada', rejection_reason = $1, error_codes = $2::jsonb,
+            provider_response = COALESCE(provider_response, '{}'::jsonb) || $3::jsonb
       WHERE id = $4`,
     [String(texto || 'Rejeitada pelo Sistema Nacional').slice(0, 2000), JSON.stringify(erros || []), JSON.stringify({ cabecalho: cabecalho || {} }), id]
   );
@@ -288,13 +312,45 @@ async function gravarResultadoTeste(db, companyId, { status, codigo, mensagem, n
   );
 }
 
+/** XML novo da NFS-e (consulta pela chave): só de nota autorizada/cancelada. */
 async function atualizarXmlNfse(db, id, xml) {
-  await db.query('UPDATE nfse SET xml_nfse = $1 WHERE id = $2', [xml, id]);
+  await db.query(
+    "UPDATE nfse SET xml_nfse = $1 WHERE id = $2 AND status IN ('autorizada', 'cancelada')",
+    [xml, id]
+  );
+}
+
+/** Junta uma evidência em provider_response sem apagar o que já está lá. */
+async function anexarEvidencia(db, id, evidencia) {
+  await db.query(
+    `UPDATE nfse SET provider_response = COALESCE(provider_response, '{}'::jsonb) || $1::jsonb WHERE id = $2`,
+    [JSON.stringify(evidencia || {}), id]
+  );
+}
+
+/**
+ * Notas de PRODUÇÃO da loja que já saíram (sem as de teste), as mais novas
+ * primeiro — para a regra da série antes da primeira nota de verdade
+ * (config.pendenciaDaSerieAntesDaPrimeiraNota). Traz os XMLs: quem chama
+ * confere se a nota autorizada é mesmo da DPS que a Aura assinou.
+ */
+async function notasDeProducao(db, companyId, limite = 20) {
+  const { rows } = await db.query(
+    `SELECT id, status, dps_serie, dps_number, error_codes, rejection_reason, xml_dps, xml_nfse
+       FROM nfse
+      WHERE company_id = $1 AND provider = 'nacional' AND ambiente = 'producao'
+        AND source_type IS DISTINCT FROM 'teste' AND transmitted_at IS NOT NULL
+      ORDER BY created_at DESC
+      LIMIT $2`,
+    [companyId, limite]
+  );
+  return rows;
 }
 
 module.exports = {
   buscarPorChave, buscarPorId, carregarContexto, buscarItem, reservar,
   marcarTransmitindo, marcarSemConfirmacao, marcarErro, marcarNumeroJaUsado,
   gravarAutorizada, gravarRejeitada, gravarCancelada, gravarCancelamentoRecusado, atualizarXmlNfse,
-  gravarResultadoTeste,
+  gravarResultadoTeste, anexarEvidencia, notasDeProducao,
+  SO_NOTA_ABERTA_DA_AURA,
 };

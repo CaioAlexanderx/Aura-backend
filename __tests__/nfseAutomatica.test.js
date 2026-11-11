@@ -18,7 +18,11 @@
 //     completado pelo app;
 //   - emissão MANUAL ("Emitir NFS-e"): funciona com a automática desligada
 //     quando a loja emite (is_active + nacional + NFSE_NACIONAL_ENABLED),
-//     recusa quando não emite e nunca gera duas notas para a mesma origem.
+//     recusa quando não emite e nunca gera duas notas para a mesma origem;
+//   - 11/11/2026: registro em 'erro' com a nota da chave 'pendente' volta a
+//     ter a vez; a decisão da tentativa olha sempre a nota da chave
+//     anterior; o GET da situação consulta o gov.br quando a nota está
+//     pendente há mais de 60 s.
 // ============================================================
 'use strict';
 
@@ -32,7 +36,10 @@ jest.mock('../src/services/nfseAutomaticaRepo', () => {
   const comNota = (r) => {
     if (!r) return null;
     const n = r.nfse_id ? mockMem.notas.get(r.nfse_id) : null;
-    return { ...clone(r), nfse_status: n ? n.status : null, nfse_number: n ? n.nfse_number : null, nfse_motivo: n ? n.rejection_reason : null };
+    return {
+      ...clone(r), nfse_status: n ? n.status : null, nfse_number: n ? n.nfse_number : null, nfse_motivo: n ? n.rejection_reason : null,
+      nfse_transmitted_at: n ? n.transmitted_at || null : null,
+    };
   };
   const achar = (c, t, o, k) => [...mockMem.regs.values()].find((r) => r.company_id === c && r.origem_tipo === t && r.origem_id === o && r.ctribnac === k);
   return {
@@ -88,6 +95,7 @@ jest.mock('../src/services/nfseNacional', () => {
   const crypto = require('crypto');
   return {
     emitir: jest.fn(),
+    consultar: jest.fn(),
     danfse: jest.fn(async () => Buffer.from('%PDF-1.4 teste')),
     fingerprint: (n) => crypto.createHash('sha256').update(JSON.stringify(n)).digest('hex'),
   };
@@ -998,5 +1006,175 @@ describe('tomador opcional — consumidor não identificado (decisão de 10/11/2
     expect(auto.resolverTomador({ doc: CPF2 }, null).codigo).toBe('SEM_NOME');
     // informado só com nome não apaga o documento do cadastro
     expect(auto.resolverTomador({ nome: 'Outro' }, { full_name: 'Maria Souza', cpf_cnpj: CPF })).toMatchObject({ ok: true, tomador: { doc: CPF, nome: 'Maria Souza' } });
+  });
+});
+
+// ── 11/11/2026: retry preso, decisão da tentativa e pendente parado ──
+describe('blindagem de 11/11/2026 na emissão automática', () => {
+  const MSG = 'A série 1 e o número 1 da DPS já foram usados por outro emissor desta empresa. '
+    + 'Confira na configuração da NFS-e a Série da DPS e o último Número usado e tente de novo.';
+  const CHAVE1 = `aura-auto-venda-${VENDA}-010501-1`;
+  const CHAVE2 = `aura-auto-venda-${VENDA}-010501-2`;
+  const haSegundos = (s) => new Date(Date.now() - s * 1000).toISOString();
+
+  beforeEach(() => { auto._resetConsultas(); });
+
+  test('item 5: registro em erro com a nota da chave ainda pendente → o próximo gatilho pega a vez e retoma a MESMA chave', async () => {
+    venda({ itens: [SRV('a', 44)], total: 44 });
+    // 1ª tentativa: a DPS saiu (nota pendente no emissor) e a resposta caiu
+    nacional.emitir.mockImplementationOnce(async (_db, { idempotencyKey, nota }) => {
+      mockMem.notas.set('nfse-p', { id: 'nfse-p', idempotency_key: idempotencyKey, status: 'pendente', transmitted_at: haSegundos(5), nota });
+      throw new NfseNacionalError('Ainda sem confirmação do Sistema Nacional para esta nota.', 'NACIONAL_INDISPONIVEL');
+    });
+    auto.aoFinalizarVenda({ companyId: C1, saleId: VENDA });
+    await rodarFila();
+    const reg = [...mockMem.regs.values()][0];
+    expect(reg).toMatchObject({ status: 'erro', nfse_id: 'nfse-p' });
+    expect(auto.estadoDoRegistro({ ...reg, nfse_status: 'pendente' })).toBe('emitindo');
+
+    // antes: ninguém pegava a vez ('ja_existe' para sempre)
+    nacional.emitir.mockImplementationOnce(async (_db, { idempotencyKey }) => {
+      const n = mockMem.notas.get('nfse-p');
+      expect(idempotencyKey).toBe(n.idempotency_key); // o emissor retoma sem renumerar
+      n.status = 'autorizada';
+      return { nota: n };
+    });
+    const r = await auto.emitirManual({ companyId: C1, tipo: 'venda', id: VENDA });
+    expect(r.grupos[0]).toMatchObject({ acao: 'emitida' });
+    expect(nacional.emitir).toHaveBeenCalledTimes(2);
+    expect(nacional.emitir.mock.calls[1][1].idempotencyKey).toBe(CHAVE1);
+  });
+
+  test('item 6: nota da chave anterior morta por DPS_NUMERO_JA_USADO sem nfse_id no registro → chave nova', async () => {
+    venda({ itens: [SRV('a', 44)], total: 44 });
+    nacional.emitir.mockImplementationOnce(async (_db, { idempotencyKey, nota }) => {
+      mockMem.notas.set('nfse-d', {
+        id: 'nfse-d', idempotency_key: idempotencyKey, status: 'erro',
+        rejection_reason: MSG, error_codes: [{ codigo: 'DPS_NUMERO_JA_USADO', descricao: MSG }], nota,
+      });
+      throw new Error('conexão com o banco caiu');
+    });
+    // a busca da nota no catch também falha: o registro fica SEM nfse_id
+    repo.notaPorChave.mockRejectedValueOnce(new Error('conexão com o banco caiu'));
+    jest.spyOn(console, 'error').mockImplementation(() => {});
+    auto.aoFinalizarVenda({ companyId: C1, saleId: VENDA });
+    await rodarFila();
+    console.error.mockRestore();
+    expect([...mockMem.regs.values()][0]).toMatchObject({ status: 'erro', nfse_id: null, motivo_codigo: 'INESPERADO' });
+
+    // o retomar do repo zera motivo_codigo; sem nfse_id a condição antiga nunca consultava a nota
+    const r = await auto.emitirManual({ companyId: C1, tipo: 'venda', id: VENDA });
+    expect(r.grupos[0].acao).toBe('emitida');
+    expect(nacional.emitir.mock.calls[1][1].idempotencyKey).toBe(CHAVE2);
+    expect(repo.notaPorChave).toHaveBeenCalledWith(C1, CHAVE1);
+    expect([...mockMem.regs.values()][0]).toMatchObject({ status: 'emitida', tentativa: 2 });
+  });
+
+  test('item 6: nota anterior viva (pendente) → mesma chave, mesmo com o registro sem nfse_id', async () => {
+    venda({ itens: [SRV('a', 44)], total: 44 });
+    nacional.emitir.mockImplementationOnce(async (_db, { idempotencyKey, nota }) => {
+      mockMem.notas.set('nfse-v', { id: 'nfse-v', idempotency_key: idempotencyKey, status: 'pendente', nota });
+      throw new Error('conexão com o banco caiu');
+    });
+    repo.notaPorChave.mockRejectedValueOnce(new Error('conexão com o banco caiu'));
+    jest.spyOn(console, 'error').mockImplementation(() => {});
+    auto.aoFinalizarVenda({ companyId: C1, saleId: VENDA });
+    await rodarFila();
+    console.error.mockRestore();
+    await auto.emitirManual({ companyId: C1, tipo: 'venda', id: VENDA });
+    expect(nacional.emitir.mock.calls[1][1].idempotencyKey).toBe(CHAVE1);
+  });
+
+  function emitindoPendente(transmitidaHaSeg) {
+    venda({ itens: [SRV('a', 44)], total: 44 });
+    nacional.emitir.mockImplementationOnce(async (_db, { companyId, idempotencyKey, nota }) => {
+      const n = { id: 'nfse-p', company_id: companyId, idempotency_key: idempotencyKey, status: 'pendente', transmitted_at: haSegundos(transmitidaHaSeg), nota };
+      mockMem.notas.set(n.id, n);
+      return { nota: n, aguardando: true };
+    });
+  }
+
+  function app() {
+    const a = express();
+    a.use(express.json());
+    a.use('/companies/:id/nfse/automatica', require('../src/routes/nfseAutomatica'));
+    return a;
+  }
+
+  test('item 9: pendente há mais de 60 s → o GET da situação consulta o gov.br e mostra a nota', async () => {
+    emitindoPendente(90);
+    auto.aoFinalizarVenda({ companyId: C1, saleId: VENDA });
+    await rodarFila();
+    expect([...mockMem.regs.values()][0]).toMatchObject({ status: 'emitindo', motivo: auto.MSG.AGUARDANDO });
+    nacional.consultar.mockImplementationOnce(async (_db, { nfseId }) => {
+      const n = mockMem.notas.get(nfseId);
+      n.status = 'autorizada';
+      n.nfse_number = '12';
+      return { nota: n };
+    });
+    const r = await request(app()).get(`/companies/${C1}/nfse/automatica/origem/venda/${VENDA}`);
+    expect(r.status).toBe(200);
+    expect(nacional.consultar).toHaveBeenCalledTimes(1);
+    expect(nacional.consultar.mock.calls[0][1]).toEqual({ companyId: C1, nfseId: 'nfse-p' });
+    expect(r.body).toMatchObject({ estado: 'emitida', acao: 'imprimir_2a_via', tem_nota: true });
+    expect([...mockMem.regs.values()][0]).toMatchObject({ status: 'emitida', motivo: null });
+    expect(nacional.emitir).toHaveBeenCalledTimes(1); // consulta não é reenvio
+  });
+
+  test('item 9: a consulta acha a NFS-e de outro emissor → o registro mostra o erro, nada vira emitida', async () => {
+    emitindoPendente(120);
+    auto.aoFinalizarVenda({ companyId: C1, saleId: VENDA });
+    await rodarFila();
+    // o emissor conferiu (recuperarPelaDps) e marcou: nota em erro DPS_NUMERO_JA_USADO
+    nacional.consultar.mockImplementationOnce(async (_db, { nfseId }) => {
+      const n = mockMem.notas.get(nfseId);
+      Object.assign(n, { status: 'erro', rejection_reason: MSG, error_codes: [{ codigo: 'DPS_NUMERO_JA_USADO', descricao: MSG }] });
+      return { nota: n };
+    });
+    const sit = await auto.situacaoDaOrigem({ companyId: C1, tipo: 'venda', id: VENDA, consultarPendentes: true });
+    expect(sit).toMatchObject({ estado: 'erro', acao: 'tentar_de_novo', tem_nota: false });
+    expect(sit.notas[0]).toMatchObject({ estado: 'erro', motivo: MSG, motivo_codigo: 'DPS_NUMERO_JA_USADO' });
+  });
+
+  test('item 9: pendente há menos de 60 s não consulta; a mesma nota não é consultada duas vezes na janela; falha da consulta não derruba o GET', async () => {
+    emitindoPendente(10);
+    auto.aoFinalizarVenda({ companyId: C1, saleId: VENDA });
+    await rodarFila();
+    let r = await request(app()).get(`/companies/${C1}/nfse/automatica/origem/venda/${VENDA}`);
+    expect(r.status).toBe(200);
+    expect(nacional.consultar).not.toHaveBeenCalled();
+    expect(r.body.estado).toBe('emitindo');
+
+    mockMem.notas.get('nfse-p').transmitted_at = haSegundos(75);
+    nacional.consultar.mockRejectedValueOnce(new NfseNacionalError('Sem resposta', 'NACIONAL_INDISPONIVEL'));
+    jest.spyOn(console, 'warn').mockImplementation(() => {});
+    r = await request(app()).get(`/companies/${C1}/nfse/automatica/origem/venda/${VENDA}`);
+    console.warn.mockRestore();
+    expect(r.status).toBe(200);
+    expect(r.body.estado).toBe('emitindo');
+    expect(nacional.consultar).toHaveBeenCalledTimes(1);
+
+    r = await request(app()).get(`/companies/${C1}/nfse/automatica/origem/venda/${VENDA}`);
+    expect(nacional.consultar).toHaveBeenCalledTimes(1); // dentro da janela de 60 s
+  });
+
+  test('item 9: só o GET consulta — o POST de emitir e a 2ª via não disparam consulta', async () => {
+    emitindoPendente(300);
+    auto.aoFinalizarVenda({ companyId: C1, saleId: VENDA });
+    await rodarFila();
+    await request(app()).get(`/companies/${C1}/nfse/automatica/origem/venda/${VENDA}/segunda-via`);
+    await auto.situacaoDaOrigem({ companyId: C1, tipo: 'venda', id: VENDA });
+    expect(nacional.consultar).not.toHaveBeenCalled();
+  });
+
+  test('item 7: a recusa da série não respondida chega ao registro com a mensagem do emissor, sem prefixo', async () => {
+    venda({ itens: [SRV('a', 44)], total: 44 });
+    const { MSG_SERIE_ANTES_DA_PRIMEIRA_NOTA } = require('../src/services/nfseNacional/config');
+    nacional.emitir.mockRejectedValueOnce(new NfseNacionalError(MSG_SERIE_ANTES_DA_PRIMEIRA_NOTA, 'SERIE_NAO_RESPONDIDA'));
+    auto.aoFinalizarVenda({ companyId: C1, saleId: VENDA });
+    await rodarFila();
+    expect([...mockMem.regs.values()][0]).toMatchObject({
+      status: 'erro', motivo: MSG_SERIE_ANTES_DA_PRIMEIRA_NOTA, motivo_codigo: 'SERIE_NAO_RESPONDIDA',
+    });
   });
 });

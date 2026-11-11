@@ -101,12 +101,15 @@ const ungz = (b) => zlib.gunzipSync(Buffer.from(b, 'base64')).toString('utf8');
 const json = (status, body) => ({ status, headers: {}, body: Buffer.from(JSON.stringify(body)) });
 const nfseXml = () => `<NFSe xmlns="http://www.sped.fazenda.gov.br/nfse" versao="1.01"><infNFSe Id="NFS${CHAVE}"><nNFSe>1</nNFSe><cStat>100</cStat><dhProc>2026-11-10T10:00:05-03:00</dhProc><valores><vLiq>1.00</vLiq></valores></infNFSe></NFSe>`;
 
+// O 201 de verdade traz a NFS-e com a DPS que acabou de ser enviada (mesmo Id).
+const nfseDaPostada = (req) => nfseXml().replace('</infNFSe>', `${ungz(req.body.dpsXmlGZipB64).replace(/^<\?xml[^>]*\?>/, '')}</infNFSe>`);
+
 function sefinFalso(plano = {}) {
   const chamadas = [];
   const t = jest.fn(async (req) => {
     chamadas.push(req);
     const p = new URL(req.url).pathname;
-    if (req.method === 'POST' && p.endsWith('/SefinNacional/nfse')) return (plano.postDps || (() => json(201, { chaveAcesso: CHAVE, nfseXmlGZipB64: gz(nfseXml()), alertas: [] })))(req);
+    if (req.method === 'POST' && p.endsWith('/SefinNacional/nfse')) return (plano.postDps || ((r) => json(201, { chaveAcesso: CHAVE, nfseXmlGZipB64: gz(nfseDaPostada(r)), alertas: [] })))(req);
     if (req.method === 'GET' && /\/dps\//.test(p)) return json(404, { erro: { codigo: 'E2404', descricao: 'Não foi gerada' } });
     return json(500, {});
   });

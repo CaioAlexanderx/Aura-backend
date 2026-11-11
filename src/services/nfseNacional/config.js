@@ -90,6 +90,44 @@ function avaliarPendencias({ config, company, certInfo, now }) {
   return { apta: pend.length === 0, pendencias: pend };
 }
 
+// ── série respondida antes da primeira nota de verdade (11/11/2026) ──
+
+/**
+ * Incidente de 10/11/2026: a loja já emitia NFS-e pela prefeitura na série
+ * 1, a Aura mandou a DPS série 1 nº 1 e o número já era de outra nota. A
+ * primeira nota de verdade (ambiente de produção) só sai depois que a loja
+ * respondeu ao passo da série: "Já emite NFS-e por outro emissor?".
+ *
+ * Contam como resposta:
+ *   - outro_emissor preenchido (true ou false, migration 443);
+ *   - a loja já tem nota de produção autorizada PELA AURA (conferida com a
+ *     DPS que a Aura assinou — a nota adotada de outro emissor não conta);
+ *   - série trocada depois do conflito: a loja confirmou a série
+ *     (serie_confirmada_em) e ela já não é a série de uma nota de produção
+ *     que a Aura mandou antes. É o caso da loja do incidente, que passou
+ *     para a série 3 por decisão do dono, sem responder a pergunta nova.
+ *
+ * Nota de teste (produção restrita) nunca entra aqui: ela tem série própria.
+ * @param {{ config, historico }} p — historico = { notaDaAura: boolean, series: string[] }
+ *   (notas de produção da loja, sem as de teste; montado pelo orquestrador)
+ * @returns {string|null} a pendência em texto, ou null quando pode emitir
+ */
+function pendenciaDaSerieAntesDaPrimeiraNota({ config, historico }) {
+  const cfg = config || {};
+  if (cfg.outro_emissor === true || cfg.outro_emissor === false) return null;
+  const h = historico || {};
+  if (h.notaDaAura) return null;
+  const serie = normalizarSerie(cfg.serie || '1');
+  const trocouDeSerie = (h.series || []).some((s) => normalizarSerie(s) && normalizarSerie(s) !== serie);
+  if (cfg.serie_confirmada_em && trocouDeSerie) return null;
+  return MSG_SERIE_ANTES_DA_PRIMEIRA_NOTA;
+}
+
+const MSG_SERIE_ANTES_DA_PRIMEIRA_NOTA = 'Falta só uma resposta antes da primeira NFS-e de verdade: '
+  + 'conte se a loja já emite NFS-e por outro emissor (o site ou o app do gov.br, a prefeitura ou outro sistema). '
+  + 'É rapidinho: em Notas fiscais > "Pronto para emitir NFS-e?", no passo da Série da DPS. '
+  + 'Assim a numeração da Aura não repete a de lá. Nada foi enviado.';
+
 // ── passo a passo da tela "Pronto para emitir NFS-e?" (migration 441) ──
 
 /** Ordem dos passos na tela. As chaves são o contrato com o app. */
@@ -112,11 +150,16 @@ const CODIGOS_PREFEITURA = new Set(['E0084', 'E0116', 'E0120']);
  *   E0312 — "O código de tributação nacional informado não está
  *           administrado pelo município de incidência do ISSQN na data de
  *           competência". Caso real de 10/11/2026: loja de São Paulo
- *           capital (IBGE 3550308, ME/EPP) com o MESMO cTribNac (130501)
- *           que ela já usa para emitir no ambiente de PRODUÇÃO do Emissor
- *           Nacional; as três notas de teste voltaram só com o E0312 (sem
- *           E0084). O município parametrizou o código na produção e não na
- *           produção restrita.
+ *           capital (IBGE 3550308, ME/EPP) com o cTribNac 130501; as notas
+ *           de teste voltaram só com o E0312 (sem E0084).
+ *           Correção de 11/11/2026: a premissa antiga ("a loja já usa o
+ *           código no Emissor Nacional") era falsa. O histórico dessa loja
+ *           vem do emissor da PREFEITURA (a NFS-e de 22/10 traz ambGer 1 e
+ *           tpEmis 2), não do Emissor Nacional — nada prova que o código
+ *           está administrado na produção. A regra continua a mesma (o
+ *           E0312 sozinho libera o Ligar, com aviso), mas quem confirma o
+ *           código é a PRIMEIRA NOTA DE VERDADE: se ela voltar com o
+ *           E0312, a rejeição aparece na nota como qualquer outra.
  *
  * Nunca entram aqui os códigos da prefeitura (E0084, E0116, E0120): eles
  * dependem de um cadastro que a loja precisa pedir, e a nota de verdade
@@ -126,8 +169,8 @@ const CODIGOS_PREFEITURA = new Set(['E0084', 'E0116', 'E0120']);
 const ERROS_SO_DO_AMBIENTE_DE_TESTES = Object.freeze(['E0312']);
 
 const AVISO_SO_DO_AMBIENTE_DE_TESTES = 'O gov.br aceitou o certificado, os dados e o cadastro da sua empresa. '
-  + 'Só o código do serviço ainda não está habilitado pela prefeitura no ambiente de testes do governo. '
-  + 'Pode ligar: a primeira nota de verdade confirma tudo.';
+  + 'Só o código do serviço não passou no ambiente de testes do governo, e ele não tem como ser conferido por lá. '
+  + 'Pode ligar: a primeira nota de verdade é que confirma o código. Se ela voltar com aviso, ele aparece na própria nota.';
 
 /** Códigos ("E0312") de error_codes ([{ codigo, descricao }]) da nota. */
 function codigosDoErro(errorCodes) {
@@ -590,6 +633,7 @@ function validarRetencao(existing, data) {
 module.exports = {
   resolverRegime, avaliarAptidao, avaliarPassos, validarCamposNacional, validarRetencao, validarOutroEmissor,
   faltasParaLigar, faixaDaSerie, sugestaoDaEmpresa, opSimpNacDoRegime,
+  pendenciaDaSerieAntesDaPrimeiraNota, MSG_SERIE_ANTES_DA_PRIMEIRA_NOTA,
   PASSOS, CODIGOS_PREFEITURA, SERIE_TESTE,
   ERROS_SO_DO_AMBIENTE_DE_TESTES, AVISO_SO_DO_AMBIENTE_DE_TESTES, aceitoComAvisoDoAmbienteDeTestes, codigosDoErro,
 };

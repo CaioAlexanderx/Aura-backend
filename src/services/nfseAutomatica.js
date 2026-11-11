@@ -128,7 +128,7 @@ const MSG = {
 function mensagemDoEmissor(err) {
   const m = String((err && err.message) || '').trim();
   // série/número já usados por outro emissor: a mensagem do emissor já diz o que fazer
-  if (err && err.code === DPS_NUMERO_JA_USADO && m) return m;
+  if (err && (err.code === DPS_NUMERO_JA_USADO || err.code === 'SERIE_NAO_RESPONDIDA') && m) return m;
   return m ? `Não conseguimos emitir a NFS-e: ${m}` : MSG.INESPERADO;
 }
 
@@ -338,7 +338,12 @@ async function pegarVez(p, { forcar }) {
     return novo ? { row: novo, vez: true } : { row, vez: false };
   }
   if (estado === 'emitindo' || row.status === 'emitindo') {
-    const novo = await repo.retomar(row.id, { de: [], staleSeg: STALE_SEG, itens, valor });
+    // Registro parado em 'erro'/'pendente_dados' com a nota da chave ainda
+    // 'pendente' no emissor (estado vivo 'emitindo'): ninguém mais pegaria a
+    // vez. Retoma do status do registro — o emissor, com a MESMA chave,
+    // consulta a DPS (e confere) antes de qualquer reenvio.
+    const de = row.status !== 'emitindo' ? [row.status] : [];
+    const novo = await repo.retomar(row.id, { de, staleSeg: STALE_SEG, itens, valor });
     return novo ? { row: novo, vez: true } : { row, vez: false };
   }
   if (forcar && (estado === 'rejeitada' || estado === 'cancelada')) {
@@ -346,6 +351,25 @@ async function pegarVez(p, { forcar }) {
     return novo ? { row: novo, vez: true } : { row, vez: false };
   }
   return { row, vez: false }; // emitida (ou rejeitada/cancelada sem pedido explícito)
+}
+
+/** Situação da nota no emissor → status/motivo do registro da prestação. */
+function registroDaNota(n) {
+  if (n.status === 'erro' && temDpsNumeroJaUsado(n)) {
+    return {
+      status: 'erro',
+      motivo: String(n.rejection_reason || '').replace(/^DPS_NUMERO_JA_USADO[:\s-]*/, '').trim()
+        || mensagemDpsNumeroJaUsado(n.dps_serie, n.dps_number),
+      motivoCodigo: DPS_NUMERO_JA_USADO,
+    };
+  }
+  if (n.status === 'autorizada') return { status: 'emitida', motivo: null, motivoCodigo: null };
+  if (n.status === 'rejeitada') {
+    return { status: 'rejeitada', motivo: `O Sistema Nacional recusou a NFS-e: ${n.rejection_reason || 'sem detalhe'}`, motivoCodigo: null };
+  }
+  if (n.status === 'cancelada') return { status: 'cancelada', motivo: null, motivoCodigo: null };
+  if (n.status === 'erro') return { status: 'erro', motivo: mensagemDoEmissor({ message: n.rejection_reason }), motivoCodigo: null };
+  return { status: 'emitindo', motivo: MSG.AGUARDANDO, motivoCodigo: null };
 }
 
 async function emitirGrupo(ctx, grupo) {
@@ -403,17 +427,18 @@ async function emitirGrupo(ctx, grupo) {
   // Nota da chave anterior morta por série/número já usados por outro
   // emissor (DPS_NUMERO_JA_USADO): chave nova mesmo com os mesmos dados — a
   // nota nova reserva o próximo número da série configurada agora.
+  // A decisão olha SEMPRE a nota da chave anterior no emissor: o
+  // motivo_codigo do registro não serve (repo.retomar zera o campo ao pegar
+  // a vez) e o nfse_id pode faltar (a emissão anterior caiu antes de ligar).
   let tentativa = row.tentativa || 1;
   const mesmaChave = row.idempotency_key === chaveDeIdempotencia(origemTipo, origemId, grupo.ctribnac, tentativa);
   if (mesmaChave) {
     const mudou = !!row.nota && nacional.fingerprint(row.nota) !== nacional.fingerprint(nota);
-    if (mudou || row.nfse_id || row.motivo_codigo === DPS_NUMERO_JA_USADO) {
-      const anterior = await repo.notaPorChave(companyId, row.idempotency_key);
-      if (anterior && anterior.status === 'erro' && temDpsNumeroJaUsado(anterior)) tentativa += 1;
-      else if (mudou && anterior) {
-        if (['erro', 'rejeitada', 'cancelada'].includes(anterior.status)) tentativa += 1;
-        else nota = row.nota;
-      }
+    const anterior = await repo.notaPorChave(companyId, row.idempotency_key);
+    if (anterior && temDpsNumeroJaUsado(anterior)) tentativa += 1;
+    else if (mudou && anterior) {
+      if (['erro', 'rejeitada', 'cancelada'].includes(anterior.status)) tentativa += 1;
+      else nota = row.nota;
     }
   }
   const key = chaveDeIdempotencia(origemTipo, origemId, grupo.ctribnac, tentativa);
@@ -426,19 +451,7 @@ async function emitirGrupo(ctx, grupo) {
     const r = await nacional.emitir(db, { companyId, idempotencyKey: key, nota });
     const n = r.nota || {};
     if (n.id) await repo.ligarNotaAOrigem(companyId, n.id, origemId);
-    let status = 'emitindo';
-    let motivo = null;
-    let motivoCodigo = null;
-    if (n.status === 'erro' && temDpsNumeroJaUsado(n)) {
-      status = 'erro';
-      motivo = String(n.rejection_reason || '').replace(/^DPS_NUMERO_JA_USADO[:\s-]*/, '').trim()
-        || mensagemDpsNumeroJaUsado(n.dps_serie, n.dps_number);
-      motivoCodigo = DPS_NUMERO_JA_USADO;
-    } else if (n.status === 'autorizada') status = 'emitida';
-    else if (n.status === 'rejeitada') { status = 'rejeitada'; motivo = `O Sistema Nacional recusou a NFS-e: ${n.rejection_reason || 'sem detalhe'}`; }
-    else if (n.status === 'cancelada') status = 'cancelada';
-    else if (n.status === 'erro') { status = 'erro'; motivo = mensagemDoEmissor({ message: n.rejection_reason }); }
-    else motivo = MSG.AGUARDANDO;
+    const { status, motivo, motivoCodigo } = registroDaNota(n);
     await repo.gravar(row.id, { status, motivo, motivo_codigo: motivoCodigo, nfse_id: n.id || null });
     return { ctribnac: grupo.ctribnac, acao: status, registro_id: row.id, nfse_id: n.id || null, motivo };
   } catch (err) {
@@ -625,6 +638,53 @@ function aoReceberPagamento({ companyId, result, saleId = null }) {
 
 // ── leitura para o app ───────────────────────────────────────
 
+// ── pendente parado: o GET da situação pergunta ao gov.br (11/11/2026) ──
+
+// Nota 'pendente' há mais que isto (desde a transmissão) → o GET da
+// situação da origem consulta o Sistema Nacional. Sem job nem cron: quem
+// dispara é o polling do app em "Emitindo…". A consulta (nacional.consultar
+// → recuperarPelaDps) só adota a NFS-e depois da conferência com a DPS que a
+// Aura assinou.
+const PENDENTE_PARADO_MS = 60 * 1000;
+// a mesma nota não é consultada mais de uma vez por janela, por processo
+const _ultimaConsulta = new Map();
+
+function pendenteParado(r, agoraMs) {
+  if (!r || !r.nfse_id || r.nfse_status !== 'pendente' || !r.nfse_transmitted_at) return false;
+  const desde = new Date(r.nfse_transmitted_at).getTime();
+  return Number.isFinite(desde) && agoraMs - desde > PENDENTE_PARADO_MS;
+}
+
+/**
+ * Consulta no gov.br as notas pendentes paradas destas linhas e atualiza o
+ * registro quando a nota saiu de 'pendente'. Nunca lança.
+ * @returns {Promise<boolean>} true = alguma nota foi consultada
+ */
+async function consultarPendentesParados(companyId, rows, agoraMs = Date.now()) {
+  let consultou = false;
+  for (const r of rows) {
+    if (!pendenteParado(r, agoraMs)) continue;
+    const ultima = _ultimaConsulta.get(r.nfse_id);
+    if (ultima && agoraMs - ultima < PENDENTE_PARADO_MS) continue;
+    _ultimaConsulta.set(r.nfse_id, agoraMs);
+    if (_ultimaConsulta.size > 5000) {
+      for (const [k, t] of _ultimaConsulta) if (agoraMs - t > 10 * PENDENTE_PARADO_MS) _ultimaConsulta.delete(k);
+    }
+    try {
+      const c = await nacional.consultar(db, { companyId, nfseId: r.nfse_id });
+      consultou = true;
+      const n = c && c.nota;
+      if (n && n.status !== 'pendente' && ['emitindo', 'erro'].includes(r.status)) {
+        const { status, motivo, motivoCodigo } = registroDaNota(n);
+        await repo.gravar(r.id, { status, motivo, motivo_codigo: motivoCodigo });
+      }
+    } catch (err) {
+      console.warn('[nfse automatica] consulta da nota pendente falhou:', err && err.code, err && err.message);
+    }
+  }
+  return consultou;
+}
+
 /**
  * Situação das notas de uma origem (OS com venda ligada inclui a venda).
  * Também diz se o botão "Emitir NFS-e" cabe aqui (10/11/2026):
@@ -636,7 +696,7 @@ function aoReceberPagamento({ companyId, result, saleId = null }) {
  * Com registro já existente a origem tem serviço por definição: os itens
  * só são lidos quando ainda não há nada (o polling fica leve).
  */
-async function situacaoDaOrigem({ companyId, tipo, id }) {
+async function situacaoDaOrigem({ companyId, tipo, id, consultarPendentes = false }) {
   if (!TIPOS.has(tipo)) return null;
   const origens = [{ tipo, id }];
   let elegivel = false;
@@ -651,7 +711,11 @@ async function situacaoDaOrigem({ companyId, tipo, id }) {
     if (!venda) return null;
     elegivel = venda.status !== 'cancelled' && venda.type !== 'troca';
   }
-  const rows = await repo.listarPorOrigens(companyId, origens);
+  let rows = await repo.listarPorOrigens(companyId, origens);
+  // GET de "Emitindo…": nota pendente há mais de 60 s → pergunta ao gov.br
+  if (consultarPendentes && await consultarPendentesParados(companyId, rows)) {
+    rows = await repo.listarPorOrigens(companyId, origens);
+  }
   const resumo = resumirOrigem(rows);
   let temServico = rows.length > 0;
   if (!temServico) {
@@ -683,6 +747,7 @@ module.exports = {
   STATUS_OS_QUE_EMITE, UMA_NOTA_PELO_TOTAL_NO_PRIMEIRO_GATILHO, CTRIBNAC_SEM_CODIGO,
   // regras puras
   resolverTomador, tomadorDaVendaDoCorpo, agruparPorCodigo, chaveDeIdempotencia, estadoDoRegistro, resumirOrigem,
-  MSG, TIPOS,
+  MSG, TIPOS, PENDENTE_PARADO_MS,
+  _resetConsultas: () => _ultimaConsulta.clear(),
   _setAgendador: (fn) => { agendar = fn || ((f) => setImmediate(f)); },
 };
