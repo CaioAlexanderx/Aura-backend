@@ -85,6 +85,16 @@
 //   plano E ciclo batem, senao a tabela de sempre. O cupom segue como hoje,
 //   calculado sobre esse valor. GET /billing/quote devolve o valor
 //   por empresa para a tela mostrar o numero certo. Detalhes na migration 386.
+//
+// 11/11/2026 — ACESSOS DE FUNCIONARIO NO CHECKOUT (p-106, migration 445):
+//   /quote, /validate-coupon e /subscribe aceitam extra_seats opcional (0 a 10)
+//   = acessos PERMANENTES escolhidos. Sem o campo, tudo como antes
+//   (extra_seats_granted). Com o campo: plano + R$ 19 x (escolhidos + acessos
+//   de temporada ativos), cupom so no plano. O /subscribe NAO mexe em
+//   extra_seats_granted: grava a pendencia ligada a assinatura/1a cobranca e o
+//   webhook da Asaas libera no pagamento confirmado (services/acessosPendentes).
+//   Assinatura ativa e em dia, mesmo plano e ciclo, acessos diferentes: 409
+//   ASSINATURA_ATIVA (nao e' troca de plano). Valor combinado ignora o campo.
 // ============================================================
 
 const express = require('express');
@@ -113,6 +123,8 @@ const {
   recordRedemption,
 } = require('../services/checkoutCoupon');
 const subscriptionDiscount = require('../services/subscriptionDiscount');
+const acessosPendentes = require('../services/acessosPendentes');
+const { SEATS_PER_PLAN } = require('../services/memberSeats');
 const { marcarEncerramentoPedido } = require('../services/assinaturasAsaas');
 // 21/09/2026: o Asaas nao cobra cliente sem CPF/CNPJ e a maioria das empresas
 // nao tem CNPJ cadastrado. O documento agora vem do checkout (cpf_cnpj).
@@ -204,6 +216,80 @@ function karateDojoGate(c, res) {
     trial_ends_at: c.trial_ends_at || null,
     billing_status: c.billing_status || null,
   });
+}
+
+// ── Acessos de funcionário no checkout (p-106, 11/11/2026) ─────────────────
+// Sem extra_seats na requisição: exatamente o de sempre (extra_seats_granted,
+// que ja inclui os acessos de temporada). Com extra_seats: a escolha e' de
+// acessos PERMANENTES e os de temporada ativos se somam por cima (nunca
+// apagados nem cobrados em dobro). Valor combinado (pricing.custom) ignora a
+// escolha: o combinado ja inclui os acessos. Ver services/acessosPendentes.
+//
+// Devolve { pricing, acessos, resposta }:
+//   acessos.cobrados  quantos acessos entram no valor (R$ 19 cada)
+//   acessos.escolhido true quando a escolha do app vale (e vira pendencia)
+//   resposta          campos de acessos para espalhar na resposta
+async function precoComAcessos(company, plan, cycle, billingType, escolha) {
+  const granted = parseInt(company.extra_seats_granted, 10) || 0;
+  if (!escolha || !escolha.presente) {
+    return {
+      pricing: valorDaAssinatura(company, plan, cycle, billingType, granted),
+      acessos: { escolhido: false, cobrados: granted },
+      resposta: { extra_seats: granted },
+    };
+  }
+  const legado = valorDaAssinatura(company, plan, cycle, billingType, granted);
+  if (legado && legado.custom) {
+    return {
+      pricing: legado,
+      acessos: { escolhido: false, ignorado: true, cobrados: granted },
+      resposta: { extra_seats: granted, extra_seats_ignored: true },
+    };
+  }
+  const temporada = await acessosPendentes.acessosDeTemporadaAtivos(company.id);
+  const permanentes = escolha.valor;
+  const cobrados = permanentes + temporada;
+  return {
+    pricing: valorDaAssinatura(company, plan, cycle, billingType, cobrados),
+    acessos: {
+      escolhido: true,
+      permanentes,
+      temporada,
+      cobrados,
+      permanentesAtuais: Math.max(granted - temporada, 0),
+    },
+    resposta: {
+      extra_seats: permanentes,
+      season_extra_seats: temporada,
+      charged_extra_seats: cobrados,
+      seat_price: SEAT_PRICE_BRL,
+    },
+  };
+}
+
+function erroExtraSeats(res, escolha) {
+  return res.status(400).json({ error: escolha.erro, code: 'EXTRA_SEATS_INVALIDO', stage: 'extra_seats' });
+}
+
+const MSG_ASSINATURA_ATIVA =
+  'Sua assinatura já está ativa e em dia, então os acessos de funcionário não mudam pelo checkout. ' +
+  'Fale com a equipe Aura pelo WhatsApp de ajuda e a gente ajusta para você, sem precisar assinar de novo. ' +
+  'Durante a temporada, você também pode contratar o acesso de funcionário para a temporada.';
+
+// Depois que a assinatura nova existe na Asaas: grava a escolha como pendente
+// (libera so no webhook do pagamento) ou, sem escolha, limpa pendencia velha
+// de uma assinatura que o /subscribe acabou de apagar. Sem pendencia e sem
+// escolha: nenhuma escrita (o caminho de sempre nao muda).
+async function registrarPendencia(company, acessos, { subscriptionId = null, paymentId = null } = {}) {
+  if (acessos.escolhido) {
+    await acessosPendentes.gravarPendencia(company.id, { qty: acessos.permanentes, subscriptionId, paymentId });
+    console.log('[BILLING] Acessos pendentes ate o pagamento — company=' + company.id + ' permanentes=' +
+      acessos.permanentes + ' temporada=' + acessos.temporada + ' sub=' + subscriptionId + ' pay=' + paymentId);
+    return;
+  }
+  if (acessosPendentes.pendenteDe(company) !== null) {
+    await acessosPendentes.gravarPendencia(company.id, { qty: null });
+  }
 }
 
 function addDaysIso(days) {
@@ -521,12 +607,29 @@ router.get('/quote', requireAuth, async (req, res) => {
   if (!PLANS[plan]) {
     return res.status(400).json({ error: 'Plano invalido. Opcoes: ' + Object.keys(PLANS).join(', ') });
   }
+  // p-106: extra_seats opcional (0 a 10) = acessos permanentes escolhidos.
+  const escolha = acessosPendentes.lerExtraSeats(req.query.extra_seats);
+  if (escolha.erro) return erroExtraSeats(res, escolha);
   try {
     const { rows } = await db.query('SELECT * FROM companies WHERE id=$1', [req.params.id]);
     if (!rows.length) return res.status(404).json({ error: 'Empresa nao encontrada' });
     const company = rows[0];
-    const extraSeats = parseInt(company.extra_seats_granted, 10) || 0;
-    const pricing = valorDaAssinatura(company, plan, cycle, billingType, extraSeats);
+    const { pricing, resposta } = await precoComAcessos(company, plan, cycle, billingType, escolha);
+    // p-106: so com extra_seats, o que o seletor precisa (o app pode abrir
+    // com extra_seats=0 para ler current_extra_seats). Sem o campo a resposta
+    // e' exatamente a de sempre.
+    const seletor = {};
+    if (escolha.presente) {
+      const granted = parseInt(company.extra_seats_granted, 10) || 0;
+      seletor.current_extra_seats = pricing.custom
+        ? granted
+        : Math.max(granted - (resposta.season_extra_seats || 0), 0);
+      seletor.pending_extra_seats = acessosPendentes.pendenteDe(company);
+      seletor.max_extra_seats = acessosPendentes.MAX_EXTRA_SEATS;
+      seletor.seat_price = SEAT_PRICE_BRL;
+      // Acessos que o plano ja inclui, contando o do titular (1 / 3 / 5).
+      seletor.plan_included_seats = SEATS_PER_PLAN[plan] || 1;
+    }
     res.json({
       plan,
       cycle,
@@ -534,7 +637,8 @@ router.get('/quote', requireAuth, async (req, res) => {
       value: pricing.value,
       custom: pricing.custom,
       table_value: pricing.table_value,
-      extra_seats: extraSeats,
+      ...resposta,
+      ...seletor,
     });
   } catch (err) {
     console.error('[BILLING] quote error:', err.message);
@@ -548,6 +652,9 @@ router.get('/quote', requireAuth, async (req, res) => {
 // resgate repetido da mesma empresa e devolver o valor exato que sera cobrado.
 router.post('/validate-coupon', requireAuth, requireRole('client', 'admin'), async (req, res) => {
   const { code, plan, cycle = 'monthly', billing_type = 'PIX' } = req.body || {};
+  // p-106: extra_seats opcional (0 a 10) = acessos permanentes escolhidos.
+  const escolha = acessosPendentes.lerExtraSeats((req.body || {}).extra_seats);
+  if (escolha.erro) return erroExtraSeats(res, escolha);
 
   try {
     const { rows: companies } = await db.query('SELECT * FROM companies WHERE id=$1', [req.params.id]);
@@ -560,7 +667,6 @@ router.post('/validate-coupon', requireAuth, requireRole('client', 'admin'), asy
     }
 
     const selectedPlan = PLANS[plan] ? plan : (company.plan || 'essencial');
-    const extraSeats = parseInt(company.extra_seats_granted, 10) || 0;
 
     const fitError = checkCouponFits(coupon, { plan: selectedPlan, cycle });
     if (fitError) return res.json({ valid: false, error: fitError });
@@ -570,7 +676,8 @@ router.post('/validate-coupon', requireAuth, requireRole('client', 'admin'), asy
 
     // 14/10: valor combinado da empresa (quando plano e ciclo batem) substitui
     // plano + acessos extras; o cupom incide sobre ele.
-    const pricing = valorDaAssinatura(company, selectedPlan, cycle, billing_type, extraSeats);
+    // p-106: com extra_seats, plano + R$ 19 x (escolhidos + temporada); sem, o de sempre.
+    const { pricing, resposta: acessosResposta } = await precoComAcessos(company, selectedPlan, cycle, billing_type, escolha);
     const recurring = pricing.value;
     const discountAmount = couponDiscountAmount(coupon, selectedPlan, cycle, billing_type, pricing.custom ? recurring : null);
     const first = coupon.trial_days > 0 ? 0 : money(recurring - discountAmount);
@@ -598,7 +705,9 @@ router.post('/validate-coupon', requireAuth, requireRole('client', 'admin'), asy
       discounted_value: coupon.trial_days > 0 ? null : first,
       discounted_months: months,
       first_full_charge_date: months > 0 ? subscriptionDiscount.addMonthsIso(firstDue, months) : null,
-      extra_seats: extraSeats,
+      ...acessosResposta,
+      // p-106: so com extra_seats (aditivo), para o app esconder o seletor no combinado.
+      ...(escolha.presente ? { custom: pricing.custom } : {}),
     });
   } catch (err) {
     console.error('[BILLING] validate-coupon error:', err.message);
@@ -636,6 +745,9 @@ router.post('/subscribe', requireAuth, requireRole('client', 'admin'), async (re
   if (billing_type === 'CREDIT_CARD' && !credit_card_token) {
     return res.status(400).json({ error: 'credit_card_token obrigatorio para cartao' });
   }
+  // p-106: extra_seats opcional (0 a 10) = acessos permanentes escolhidos.
+  const escolha = acessosPendentes.lerExtraSeats(req.body.extra_seats);
+  if (escolha.erro) return erroExtraSeats(res, escolha);
 
   // Validacao de valor do plano (sem seats ainda — seats dependem da empresa).
   const planValue = getPlanValue(plan, cycle, billing_type);
@@ -670,9 +782,42 @@ router.post('/subscribe', requireAuth, requireRole('client', 'admin'), async (re
     // 15/06/2026: acessos extras pagos (R$19/seat) entram no valor cobrado.
     // Cliente sem seat extra → extraSeats=0 → value identico ao de antes.
     // Coluna pode nao existir pre-migration 110 → undefined → 0 (seguro).
-    const extraSeats = parseInt(company.extra_seats_granted, 10) || 0;
-    const pricing = valorDaAssinatura(company, plan, cycle, billing_type, extraSeats);
+    // 11/11/2026 (p-106): com extra_seats, os acessos cobrados sao os
+    // escolhidos + os de temporada ativos; sem, extra_seats_granted como sempre.
+    const { pricing, acessos, resposta: acessosResposta } =
+      await precoComAcessos(company, plan, cycle, billing_type, escolha);
+    const extraSeats = acessos.cobrados;
     if (!pricing) return res.status(400).json({ error: 'Erro ao calcular valor' });
+    // Com extra_seats: o app sabe se a escolha valeu (custom) e que ela so
+    // libera com o pagamento. Sem extra_seats a resposta e' a de sempre.
+    if (escolha.presente) acessosResposta.custom = pricing.custom;
+    if (acessos.escolhido) acessosResposta.extra_seats_pending = true;
+
+    if (acessos.escolhido) {
+      // Sem a coluna da pendencia (pre-migration 445) a escolha nao teria
+      // como liberar depois do pagamento: recusa ANTES de tocar a Asaas.
+      if (!acessosPendentes.pendenciaDisponivel(company)) {
+        return res.status(503).json({
+          error: 'A escolha de acessos de funcionário ainda não está disponível. Tente novamente em instantes.',
+          code: 'MIGRATION_PENDING',
+          stage: 'extra_seats',
+        });
+      }
+      // Assinatura ativa e em dia, mesmo plano e ciclo: nao e' troca de plano,
+      // e' so mudar acessos — isso tem caminho proprio (temporada ou Gestao
+      // Aura). Troca de plano/ciclo segue o fluxo de sempre, com a pendencia.
+      const emDia = company.billing_status === 'active' && !!company.asaas_subscription_id;
+      const mesmoPlano = company.plan === plan && (company.billing_cycle || 'monthly') === cycle;
+      if (emDia && mesmoPlano && acessos.permanentes !== acessos.permanentesAtuais) {
+        return res.status(409).json({
+          error: MSG_ASSINATURA_ATIVA,
+          code: 'ASSINATURA_ATIVA',
+          stage: 'extra_seats',
+          current_extra_seats: acessos.permanentesAtuais,
+          season_extra_seats: acessos.temporada,
+        });
+      }
+    }
     if (pricing.custom && pricing.value < MIN_CHARGE_BRL) {
       console.error('[BILLING] Valor combinado abaixo do minimo — company=' + company.id + ' valor=' + pricing.value);
       return res.status(400).json({
@@ -832,6 +977,8 @@ router.post('/subscribe', requireAuth, requireRole('client', 'admin'), async (re
          WHERE id=$6`,
         [plan, subscription.id, cycle, trialEndsStr, subscription.nextDueDate || trialEndsStr, company.id]
       );
+      // p-106: acessos liberam na 1a cobranca paga desta assinatura (D+N).
+      await registrarPendencia(company, acessos, { subscriptionId: subscription.id });
       // 13/10/2026: a data do cupom de dias gratis vale como esta (a primeira
       // venda nao a encurta — services/trialRegra).
       await marcarTrialFixo(company.id);
@@ -857,7 +1004,7 @@ router.post('/subscribe', requireAuth, requireRole('client', 'admin'), async (re
         subscription_id: subscription.id,
         payment_id: null,
         plan, cycle, value, billing_type: 'CREDIT_CARD',
-        extra_seats: extraSeats,
+        ...acessosResposta,
         coupon: {
           code: coupon.code, trial_days: trialDays, discount_pct: discountPct,
           // 13/10: quanto o cupom deixou de cobrar (a 1a mensalidade inteira).
@@ -965,6 +1112,8 @@ router.post('/subscribe', requireAuth, requireRole('client', 'admin'), async (re
           [plan, firstPayment.id, isPaid ? 'active' : 'pending', cycle,
            isPaid ? todayStr : null, company.id]
         );
+        // p-106: sem assinatura, a pendencia fica presa a 1a cobranca (avulsa).
+        await registrarPendencia(company, acessos, { paymentId: firstPayment.id });
         // O cupom FOI usado (a cobranca com desconto passou) — registra e nao libera.
         // Desconto de varios meses: sem assinatura nao ha o que registrar; a
         // reconciliacao manual precisa criar a assinatura ja descontada.
@@ -987,7 +1136,7 @@ router.post('/subscribe', requireAuth, requireRole('client', 'admin'), async (re
           subscription_id: null,
           payment_status: firstPayment.status,
           plan, cycle, value, billing_type: 'CREDIT_CARD',
-          extra_seats: extraSeats,
+          ...acessosResposta,
           charged_now: firstValue,
           coupon: coupon ? {
             code: coupon.code, discount_pct: discountPct, discount_value: discountValue,
@@ -1010,6 +1159,9 @@ router.post('/subscribe', requireAuth, requireRole('client', 'admin'), async (re
          isPaid ? todayStr : null,
          subscription.nextDueDate, company.id]
       );
+      // p-106: mesmo com o cartao ja aprovado, os acessos so entram pelo
+      // webhook da 1a cobranca (avulsa) ou de uma cobranca da assinatura.
+      await registrarPendencia(company, acessos, { subscriptionId: subscription.id, paymentId: firstPayment.id });
 
       let firstFullDueDate = null;
       if (coupon) {
@@ -1038,7 +1190,7 @@ router.post('/subscribe', requireAuth, requireRole('client', 'admin'), async (re
         payment_id: firstPayment.id,
         subscription_id: subscription.id,
         plan, cycle, value, billing_type: 'CREDIT_CARD',
-        extra_seats: extraSeats,
+        ...acessosResposta,
         charged_now: firstValue,
         coupon: coupon ? {
           code: coupon.code, discount_pct: discountPct, discount_value: discountValue,
@@ -1127,6 +1279,9 @@ router.post('/subscribe', requireAuth, requireRole('client', 'admin'), async (re
        WHERE id=$7`,
       [plan, subscription.id, pixStatus, cycle, subscription.nextDueDate || pixFirstDue, trialEndsStr, company.id]
     );
+    // p-106: Pix gerado nao libera nada — os acessos entram quando a Asaas
+    // confirmar a 1a cobranca desta assinatura.
+    await registrarPendencia(company, acessos, { subscriptionId: subscription.id, paymentId: firstPaymentId });
     // 13/10/2026: so quando o cupom de dias gratis escreveu trial_ends_at.
     if (trialEndsStr) await marcarTrialFixo(company.id);
 
@@ -1154,7 +1309,7 @@ router.post('/subscribe', requireAuth, requireRole('client', 'admin'), async (re
     const response = {
       subscription_id: subscription.id,
       plan, cycle, value, billing_type: 'PIX',
-      extra_seats: extraSeats,
+      ...acessosResposta,
       charged_now: trialDays > 0 ? 0 : firstValue,
       coupon: coupon ? {
         code: coupon.code, discount_pct: discountPct, discount_value: discountValue,

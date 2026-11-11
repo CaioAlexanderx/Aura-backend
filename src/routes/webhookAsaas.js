@@ -150,6 +150,7 @@ const pixAutomaticoWebhook = require('../services/pixAutomaticoWebhook');
 const appNotifications = require('../services/appNotifications');
 const cobrancaAssinatura = require('../services/cobrancaAssinatura');
 const assinaturasAsaas = require('../services/assinaturasAsaas');
+const acessosPendentes = require('../services/acessosPendentes');
 
 const ASAAS_WEBHOOK_TOKEN = process.env.ASAAS_WEBHOOK_SECRET;
 
@@ -755,6 +756,16 @@ router.post('/', async function(req, res) {
       }
     }
 
+    // p-106 (11/11/2026): acessos de funcionario escolhidos no checkout so
+    // liberam aqui, com o pagamento confirmado da 1a cobranca ou da assinatura
+    // gravadas na pendencia (services/acessosPendentes). Cobranca de outra
+    // assinatura (ex.: Pix antigo) nao casa e nao libera nada. Antes do log:
+    // "ja tem log" continua significando "ja teve efeito". Nunca lanca.
+    var acessosLiberados = null;
+    if (isPaid) {
+      acessosLiberados = await acessosPendentes.aplicarPendenciaDoPagamento({ companyId: company.id, payment: payment });
+    }
+
     await logWebhookEvent(company.id, event, payment);
     await aposEventoDaAssinatura(event, payment, statusSource, company, nextDue);
 
@@ -766,6 +777,9 @@ router.post('/', async function(req, res) {
       next_billing_date: nextDue,
       propagated_to_children: propagated,
     };
+    if (acessosLiberados && acessosLiberados.aplicado) {
+      corpo.extra_seats_applied = acessosLiberados.extra_seats_granted;
+    }
     if (vencidasRestantes && vencidasRestantes.vencidas.length) {
       corpo.overdue_remaining = vencidasRestantes.vencidas.length;
       corpo.overdue_source = vencidasRestantes.fonte;
