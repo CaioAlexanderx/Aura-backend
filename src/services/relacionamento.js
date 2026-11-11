@@ -472,6 +472,9 @@ async function voltaDoSumiu({ db, enviar, env = process.env, now = Date.now() } 
 module.exports = {
   DIAS_MAX_BOAS_VINDAS,
   DIAS_SEM_ACESSO,
+  // Filtro comum de quem pode receber (dono confirmado, fora sandbox, staff,
+  // Karatê e filial): também usado por scripts/enviarBlackFriday.js.
+  SQL_ELEGIVEL,
   SQL_SEM_VENDA,
   SQL_TERMINANDO,
   SQL_ENCERRADO,
