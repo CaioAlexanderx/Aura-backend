@@ -103,6 +103,13 @@ const ENDPOINTS_NFE55 = {
     },
   },
 };
+// 11/11/2026 — RJ: a NF-e 55 do RJ também é autorizada pela SVRS. Fonte:
+// Portal Nacional da NF-e, "Relação de Serviços Web"
+// (https://www.nfe.fazenda.gov.br/portal/webServices.aspx): "UF que utilizam
+// a SVRS ... demais serviços: AC, AL, AP, CE, DF, ES, PA, PB, PI, RJ, RN, RO,
+// RR, SC, SE, TO", com os mesmos hosts nfe.svrs.rs.gov.br do AP; e ACBr
+// [NFe_RJ_P]/[NFe_RJ_H] (Usar=NFe_SVRS_P/H). Mesmos endpoints do AP.
+ENDPOINTS_NFE55.RJ = ENDPOINTS_NFE55.AP;
 
 function getEndpoints55(uf, ambiente) {
   const ufKey = String(uf || 'SP').toUpperCase();

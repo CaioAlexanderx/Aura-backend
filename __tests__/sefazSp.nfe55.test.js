@@ -149,7 +149,7 @@ describe('nfe55 — getEndpoints55', () => {
   });
 
   it('UF fora do escopo lança erro pedindo o gateway', () => {
-    expect(() => getEndpoints55('RJ', 1)).toThrow(/não suportada/);
+    expect(() => getEndpoints55('BA', 1)).toThrow(/não suportada/);
   });
 });
 

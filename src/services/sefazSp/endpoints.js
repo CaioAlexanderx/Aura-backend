@@ -37,6 +37,36 @@
 // Authentication Root R46, que já vem nas raízes padrão do Node (não
 // precisa de .pem em ./certs, ao contrário da SP).
 //
+// 11/11/2026 — RJ entra. O Rio de Janeiro não autoriza NFC-e na própria
+// SEFAZ: usa a SVRS, como o AP — os 6 webservices são os MESMOS do AP
+// (SVRS_NFCE_WS abaixo). O que é do RJ: QR Code e urlChave. cUF 33 sai do
+// endereço da empresa (nfeHelpers.ufToCodigo).
+// Fontes, conferidas em 11/11/2026:
+//   - webservices: portal DF-e da SVRS, NFC-e > Serviços
+//     (https://dfe-portal.svrs.rs.gov.br/Nfce/Servicos), tabela "SVRS",
+//     homologação e produção — idênticos ao que o AP já usava;
+//   - RJ na SVRS: ACBr, ACBrNFeServicos.ini, [NFCe_RJ_P]/[NFCe_RJ_H]
+//     (Usar=NFCe_SVRS_P/H) e avisos da Fazenda RJ
+//     (https://portal.fazenda.rj.gov.br/dfe/avisos/);
+//   - QR Code: ENCAT, "URL por UF utilizada QR code"
+//     (https://nfce.encat.org/desenvolvedor/qrcode/), RJ em homologação E
+//     produção: https://consultadfe.fazenda.rj.gov.br/consultaNFCe/QRCode,
+//     vigente desde 19/12/2023 (o antigo www4.fazenda.rj.gov.br valeu até
+//     02/09/2024). Mesma URL no ACBr [NFCe_RJ_P]/[NFCe_RJ_H] URL-QRCode;
+//   - urlChave: ENCAT, "URL por UF utilizada para consulta chave - QR Code
+//     versão 2.0" (https://nfce.encat.org/desenvolvedor/httpnfce-encat-orgconsulte-sua-nota-qr-code-versao-2-0/),
+//     RJ homologação e produção: www.fazenda.rj.gov.br/nfce/consulta (igual
+//     ao ACBr URL-ConsultaNFCe_2.00). Vai COM https://, no padrão do AP/MG/SP
+//     e dos mapas de consulta (routes/nfce.js, buildDanfeNfceHtml.js). Se a
+//     homologação devolver 878, tirar o esquema (o literal da ENCAT é sem).
+// Campo próprio do RJ no XML: nenhum para o Simples Nacional (CRT 1/4). O
+// FECP do RJ (adicional do ICMS) do optante pelo Simples é recolhido no DAS;
+// os grupos ICMSSN102 (CSOSN 102/103/300/400) nem têm campo de FCP no XSD, e
+// o ICMSSN500 só tem os campos de ST retido, opcionais no XSD (a engine não
+// os emite em nenhuma UF). Regime normal (CRT 3, ICMS00) com FECP precisaria
+// de pFCP/vFCP — fora do escopo: a engine emite ICMS00 zerado em toda UF.
+// Sem flag nova: o RJ segue o caminho do AP (sem SOAPAction, sem infRespTec).
+//
 // Flags por UF (opcionais; ausentes = comportamento de SP/AP, intocado):
 //   soapAction  — manda o header SOAPAction "<wsdl ns>/<operação>", como o
 //                 ACBr faz em todas as UFs. SP/AP nunca precisaram dele;
@@ -46,6 +76,28 @@
 //                 respTec.js). Relatos de rejeição 972 em MG sem o grupo.
 // ============================================================
 'use strict';
+
+// Os 6 webservices da NFC-e na SVRS (Sefaz Virtual do RS), versão 4.00 —
+// valem para toda UF autorizada pela SVRS (hoje AP e RJ). Fonte:
+// https://dfe-portal.svrs.rs.gov.br/Nfce/Servicos (tabela "SVRS").
+const SVRS_NFCE_WS = {
+  homologacao: {
+    autorizacao:    'https://nfce-homologacao.svrs.rs.gov.br/ws/NfeAutorizacao/NFeAutorizacao4.asmx',
+    retAutorizacao: 'https://nfce-homologacao.svrs.rs.gov.br/ws/NfeRetAutorizacao/NFeRetAutorizacao4.asmx',
+    statusServico:  'https://nfce-homologacao.svrs.rs.gov.br/ws/NfeStatusServico/NfeStatusServico4.asmx',
+    consultaProtocolo: 'https://nfce-homologacao.svrs.rs.gov.br/ws/NfeConsulta/NfeConsulta4.asmx',
+    recepcaoEvento: 'https://nfce-homologacao.svrs.rs.gov.br/ws/recepcaoevento/recepcaoevento4.asmx',
+    inutilizacao:   'https://nfce-homologacao.svrs.rs.gov.br/ws/nfeinutilizacao/nfeinutilizacao4.asmx',
+  },
+  producao: {
+    autorizacao:    'https://nfce.svrs.rs.gov.br/ws/NfeAutorizacao/NFeAutorizacao4.asmx',
+    retAutorizacao: 'https://nfce.svrs.rs.gov.br/ws/NfeRetAutorizacao/NFeRetAutorizacao4.asmx',
+    statusServico:  'https://nfce.svrs.rs.gov.br/ws/NfeStatusServico/NfeStatusServico4.asmx',
+    consultaProtocolo: 'https://nfce.svrs.rs.gov.br/ws/NfeConsulta/NfeConsulta4.asmx',
+    recepcaoEvento: 'https://nfce.svrs.rs.gov.br/ws/recepcaoevento/recepcaoevento4.asmx',
+    inutilizacao:   'https://nfce.svrs.rs.gov.br/ws/nfeinutilizacao/nfeinutilizacao4.asmx',
+  },
+};
 
 const ENDPOINTS = {
   SP: {
@@ -76,24 +128,28 @@ const ENDPOINTS = {
   // referência ACBr (ACBrNFeServicos.ini) pras URLs de QR/consulta.
   AP: {
     homologacao: {
-      autorizacao:    'https://nfce-homologacao.svrs.rs.gov.br/ws/NfeAutorizacao/NFeAutorizacao4.asmx',
-      retAutorizacao: 'https://nfce-homologacao.svrs.rs.gov.br/ws/NfeRetAutorizacao/NFeRetAutorizacao4.asmx',
-      statusServico:  'https://nfce-homologacao.svrs.rs.gov.br/ws/NfeStatusServico/NfeStatusServico4.asmx',
-      consultaProtocolo: 'https://nfce-homologacao.svrs.rs.gov.br/ws/NfeConsulta/NfeConsulta4.asmx',
-      recepcaoEvento: 'https://nfce-homologacao.svrs.rs.gov.br/ws/recepcaoevento/recepcaoevento4.asmx',
-      inutilizacao:   'https://nfce-homologacao.svrs.rs.gov.br/ws/nfeinutilizacao/nfeinutilizacao4.asmx',
+      ...SVRS_NFCE_WS.homologacao,
       qrCodeBase:     'https://www.sefaz.ap.gov.br/nfcehml/nfce.php',
       urlConsulta:    'https://www.sefaz.ap.gov.br/nfce/consulta',
     },
     producao: {
-      autorizacao:    'https://nfce.svrs.rs.gov.br/ws/NfeAutorizacao/NFeAutorizacao4.asmx',
-      retAutorizacao: 'https://nfce.svrs.rs.gov.br/ws/NfeRetAutorizacao/NFeRetAutorizacao4.asmx',
-      statusServico:  'https://nfce.svrs.rs.gov.br/ws/NfeStatusServico/NfeStatusServico4.asmx',
-      consultaProtocolo: 'https://nfce.svrs.rs.gov.br/ws/NfeConsulta/NfeConsulta4.asmx',
-      recepcaoEvento: 'https://nfce.svrs.rs.gov.br/ws/recepcaoevento/recepcaoevento4.asmx',
-      inutilizacao:   'https://nfce.svrs.rs.gov.br/ws/nfeinutilizacao/nfeinutilizacao4.asmx',
+      ...SVRS_NFCE_WS.producao,
       qrCodeBase:     'https://www.sefaz.ap.gov.br/nfce/nfcep.php',
       urlConsulta:    'https://www.sefaz.ap.gov.br/nfce/consulta',
+    },
+  },
+  // RJ — também autorizado pela SVRS; QR Code e urlChave do RJ (ver
+  // cabeçalho: fontes de 11/11/2026). Mesmas URLs nos dois ambientes.
+  RJ: {
+    homologacao: {
+      ...SVRS_NFCE_WS.homologacao,
+      qrCodeBase:     'https://consultadfe.fazenda.rj.gov.br/consultaNFCe/QRCode',
+      urlConsulta:    'https://www.fazenda.rj.gov.br/nfce/consulta',
+    },
+    producao: {
+      ...SVRS_NFCE_WS.producao,
+      qrCodeBase:     'https://consultadfe.fazenda.rj.gov.br/consultaNFCe/QRCode',
+      urlConsulta:    'https://www.fazenda.rj.gov.br/nfce/consulta',
     },
   },
   // MG — SEFAZ própria (ver cabeçalho: fontes e flags).
@@ -159,13 +215,43 @@ function soapActionFor(endpoints, service) {
 }
 
 /**
- * @param {'SP'|'AP'|'MG'} uf
+ * UF sem endpoints na emissão própria. A mensagem é técnica (vai pro log);
+ * o lojista vê mensagemUfNaoSuportada(uf). code/uf p/ as rotas reconhecerem.
+ */
+class UfNaoSuportadaError extends Error {
+  constructor(uf) {
+    super(`sefazSp: UF ${uf} não suportada na emissão própria. UFs disponíveis: ${Object.keys(ENDPOINTS).join(', ')}.`);
+    this.name = 'UfNaoSuportadaError';
+    this.code = 'UF_NAO_SUPORTADA';
+    this.uf = uf;
+  }
+}
+
+/** A UF tem NFC-e na emissão própria? Fonte única: as chaves de ENDPOINTS. */
+function ufSuportada(uf) {
+  const ufKey = String(uf || 'SP').toUpperCase().trim();
+  return Object.prototype.hasOwnProperty.call(ENDPOINTS, ufKey);
+}
+
+/**
+ * Texto para o lojista quando a UF ainda não tem emissão própria. Não soa
+ * como recusa: a venda já está gravada e a equipe liga a UF (decisão de
+ * 11/11: NFC-e e NFS-e sempre se habilitam, nunca se bloqueiam).
+ */
+function mensagemUfNaoSuportada(uf) {
+  const ufKey = String(uf || '').toUpperCase().trim();
+  const onde = /^[A-Z]{2}$/.test(ufKey) ? `lojas de ${ufKey}` : 'lojas do seu estado';
+  return `A emissão de NFC-e para ${onde} está sendo ligada pela equipe Aura. A venda foi registrada normalmente.`;
+}
+
+/**
+ * @param {'SP'|'AP'|'MG'|'RJ'} uf
  * @param {'homologacao'|'producao'|1|2} ambiente — aceita tpAmb numérico
  */
 function getEndpoints(uf, ambiente) {
   const ufKey = String(uf || 'SP').toUpperCase();
   if (!ENDPOINTS[ufKey]) {
-    throw new Error(`sefazSp: UF ${ufKey} não suportada na emissão própria. UFs disponíveis: ${Object.keys(ENDPOINTS).join(', ')}.`);
+    throw new UfNaoSuportadaError(ufKey);
   }
   const amb = ambiente === 1 || ambiente === '1' || ambiente === 'producao' ? 'producao'
     : ambiente === 2 || ambiente === '2' || ambiente === 'homologacao' ? 'homologacao'
@@ -174,4 +260,7 @@ function getEndpoints(uf, ambiente) {
   return ENDPOINTS[ufKey][amb];
 }
 
-module.exports = { getEndpoints, WSDL_NS, ENDPOINTS, SOAP_OPERATION, soapActionFor };
+module.exports = {
+  getEndpoints, WSDL_NS, ENDPOINTS, SOAP_OPERATION, soapActionFor,
+  SVRS_NFCE_WS, UfNaoSuportadaError, ufSuportada, mensagemUfNaoSuportada,
+};
