@@ -262,4 +262,8 @@ module.exports = {
   contaGuardada,
   assinaturaCancelada,
   sumiu,
+  // Rodapé do tipo, também usado pelos e-mails da Black Friday
+  // (scripts/enviarBlackFriday.js, tipo 'novidades').
+  rodapeDoTipo,
+  comRodape,
 };
