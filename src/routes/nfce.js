@@ -63,6 +63,9 @@ const { productVisibilityWhere }   = require('../utils/companyGroup');
 const { separarServicos, totaisDosItens, pagamentosDosProdutos } = require('../services/nfceSemServico');
 // products.nota_fiscal (migration 442): false = base sem a coluna.
 let temColunaNotaFiscal = true;
+// 11/11/2026 — fiscal do produto na nota (migration 350: cest, origem,
+// icms_st_paid). Base sem as colunas (42703) le como antes e memoriza.
+let temColunasFiscais = true;
 
 const INSTRUCOES_NOTA = {
   nfce: 'NFC-e (Nota Fiscal do Consumidor): ideal para vendas a pessoas fisicas. O CPF do comprador e opcional. Use na maioria das vendas do balcao.',
@@ -585,9 +588,26 @@ router.post('/emit', requireAuth, requireRole('client','analyst','admin'), async
       // coluna (42703) le como antes, sem ela, e memoriza.
       const sqlProdutos = (extra) => `SELECT id, ncm, tax_profile, unit${extra} FROM products
             WHERE id=ANY($1::uuid[]) AND ${productVisibilityWhere('$2')}`;
+      const FISCAIS = ', cest, origem, icms_st_paid';
       try {
         let prodRows;
-        if (temColunaNotaFiscal) {
+        if (temColunaNotaFiscal && temColunasFiscais) {
+          try {
+            ({ rows: prodRows } = await db.query(sqlProdutos(', nota_fiscal' + FISCAIS), [productIds, req.params.id]));
+          } catch (e) {
+            if (e.code !== '42703') throw e;
+          }
+        }
+        if (!prodRows && temColunasFiscais) {
+          try {
+            ({ rows: prodRows } = await db.query(sqlProdutos(FISCAIS), [productIds, req.params.id]));
+            temColunaNotaFiscal = false;
+          } catch (e) {
+            if (e.code !== '42703') throw e;
+            temColunasFiscais = false;
+          }
+        }
+        if (!prodRows && temColunaNotaFiscal) {
           try {
             ({ rows: prodRows } = await db.query(sqlProdutos(', nota_fiscal'), [productIds, req.params.id]));
           } catch (e) {
@@ -844,12 +864,18 @@ router.post('/emit', requireAuth, requireRole('client','analyst','admin'), async
             barcode: i.barcode||undefined,
           };
           // S3.2: motor tributário só no caminho próprio (gateway intocado)
+          // 11/11/2026: o cadastro decide — "imposto já veio pago" (ST) vira
+          // CSOSN 500 + CFOP 5405, a origem e o CEST saem do produto.
           if (useSefazSp) {
+            const prod = productById.get(i.product_id) || {};
             const tax = taxEngine.resolveItemTax({
               taxProfile: taxProfileByProductId.get(i.product_id), crt: crtCompany,
+              icmsStPaid: prod.icms_st_paid === true, origem: prod.origem,
             });
             base.csosn = tax.csosn; base.orig = tax.orig;
             base.pisCst = tax.pisCst; base.cofinsCst = tax.cofinsCst;
+            if (!i.cfop) base.cfop = tax.cfop;
+            if (prod.cest) base.cest = prod.cest;
           }
           return base;
         });

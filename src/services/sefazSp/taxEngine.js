@@ -37,16 +37,38 @@ function icmsGroupForCsosn(csosn) {
   throw new Error(`taxEngine: CSOSN não suportado no piloto (${csosn})`);
 }
 
+/** CFOP de venda no varejo (dentro do estado) pelo CSOSN: mercadoria com o
+ *  ICMS já cobrado antes por substituição tributária sai em 5405; o resto,
+ *  revenda comum, em 5102. */
+function cfopForCsosn(csosn) {
+  return csosn === '500' ? '5405' : '5102';
+}
+
+/** Origem da mercadoria (tabela A do CST, 0–8). Fora disso → 0 (nacional). */
+function origemValida(origem) {
+  const n = Number(origem);
+  return (origem !== null && origem !== undefined && origem !== '' && Number.isInteger(n) && n >= 0 && n <= 8)
+    ? String(n) : '0';
+}
+
 /**
  * Resolve a tributação de um item.
- * @param {{ taxProfile?: string|null, crt: number }} p
- * @returns {{ csosn, icmsGroup, orig, pisCst, cofinsCst }}
+ *
+ * 11/11/2026 — o cadastro do produto passa a decidir a nota (antes tudo saía
+ * 102/5102/origem 0, porque tax_profile não tem tela):
+ *   - icms_st_paid === true ("o imposto já veio pago na nota do
+ *     fornecedor?" → Sim) vira o perfil simples_st → CSOSN 500 + CFOP 5405.
+ *     tax_profile, quando preenchido, continua mandando (é o ajuste fino).
+ *   - origem (0–8) vem do produto; vazio segue 0.
+ *
+ * @param {{ taxProfile?: string|null, crt: number, icmsStPaid?: boolean|null, origem?: number|string|null }} p
+ * @returns {{ csosn, icmsGroup, orig, cfop, pisCst, cofinsCst }}
  */
-function resolveItemTax({ taxProfile, crt }) {
+function resolveItemTax({ taxProfile, crt, icmsStPaid, origem }) {
   if (crt !== 1 && crt !== 4) {
     throw new Error('taxEngine: piloto cobre apenas Simples Nacional/MEI (CRT 1|4). Regime normal usa o gateway.');
   }
-  const profile = taxProfile || 'simples_padrao';
+  const profile = taxProfile || (icmsStPaid === true ? 'simples_st' : 'simples_padrao');
   const csosn = CSOSN_BY_PROFILE[profile];
   if (!csosn) {
     throw new Error(`taxEngine: tax_profile desconhecido ("${taxProfile}"). Válidos: ${VALID_PROFILES.join(', ')}`);
@@ -55,7 +77,8 @@ function resolveItemTax({ taxProfile, crt }) {
   return {
     csosn,
     icmsGroup: icmsGroupForCsosn(csosn),
-    orig: '0',              // nacional — origem por produto chega com o contador (S5)
+    orig: origemValida(origem),
+    cfop: cfopForCsosn(csosn),
     pisCst: pisCofinsCst,
     cofinsCst: pisCofinsCst,
   };
@@ -101,9 +124,9 @@ function envPct(name, def) {
  *   - homologação (tpAmb===2): SEMPRE inclui. A SEFAZ-SP de homologação roda
  *     as regras de 2027 e REJEITA a nota sem o grupo (cStat 1115 —
  *     "IBS/CBS não informado"), mesmo para emitente do Simples (CRT=1).
- *   - produção (tpAmb===1): inclui quando crt !== 1 (regime normal), pois o
+ *   - produção (tpAmb===1): inclui só no regime normal (CRT 3), pois o
  *     destaque de IBS/CBS passa a ser obrigatório a partir de 03/08/2026.
- *     Emitente do SIMPLES NACIONAL (CRT=1) segue DESOBRIGADO de destacar até
+ *     Emitente do SIMPLES NACIONAL (CRT=1) e o MEI (CRT=4) seguem DESOBRIGADOS de destacar até
  *     01/2027 → retorna null (não emite o grupo). Isso preserva o
  *     comportamento fiscal correto da piloto em produção enquanto homologamos.
  *
@@ -117,8 +140,11 @@ function envPct(name, def) {
  * @returns {null | {cst,cClassTrib,vBC,pIBSUF,vIBSUF,pIBSMun,vIBSMun,vIBS,pCBS,vCBS}}
  */
 function resolveItemIbsCbs({ crt, tpAmb, vBC }) {
-  const include = Number(tpAmb) === 2 || Number(crt) !== 1;
-  if (!include) return null; // produção + Simples (CRT=1): desobrigado até 2027
+  // 11/11/2026: MEI (CRT=4) também é Simples Nacional e também está
+  // desobrigado. Antes só o CRT=1 ficava de fora e o MEI destacaria IBS/CBS.
+  const simples = Number(crt) === 1 || Number(crt) === 4;
+  const include = Number(tpAmb) === 2 || !simples;
+  if (!include) return null; // produção + Simples/MEI: desobrigado até 2027
 
   const pIBSUF = envPct('NFCE_IBS_UF_PCT', 0.10);
   const pIBSMun = envPct('NFCE_IBS_MUN_PCT', 0.00);
@@ -135,4 +161,4 @@ function resolveItemIbsCbs({ crt, tpAmb, vBC }) {
   return { cst, cClassTrib, vBC: base, pIBSUF, vIBSUF, pIBSMun, vIBSMun, vIBS, pCBS, vCBS };
 }
 
-module.exports = { resolveItemTax, validateNcm, icmsGroupForCsosn, CSOSN_BY_PROFILE, VALID_PROFILES, resolveItemIbsCbs, envPct, round2 };
+module.exports = { resolveItemTax, cfopForCsosn, origemValida, validateNcm, icmsGroupForCsosn, CSOSN_BY_PROFILE, VALID_PROFILES, resolveItemIbsCbs, envPct, round2 };

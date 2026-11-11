@@ -256,6 +256,8 @@ function buildDetXml(items, { crt, tpAmb }) {
     if (ncm !== '00000000' && ncm.length !== 8) {
       throw new Error(`xmlBuilder: NCM inválido no item ${i + 1} ("${item.ncm}") — esperado 8 dígitos`);
     }
+    const cestDigits = onlyDigits(item.cest);
+    const cest = cestDigits.length === 7 ? cestDigits : '';
     const ean = (item.barcode && /^\d{8,14}$/.test(onlyDigits(item.barcode)))
       ? onlyDigits(item.barcode) : 'SEM GTIN';
 
@@ -284,6 +286,10 @@ function buildDetXml(items, { crt, tpAmb }) {
           ? XPROD_HOMOLOG
           : txt(item.name || item.description || `Item ${i + 1}`, 120))
       + tag('NCM', ncm)
+      // 11/11/2026: CEST do cadastro (7 dígitos). Pela ordem do XSD vem logo
+      // depois do NCM (NVE é opcional e não usamos). Obrigatório quando o
+      // item tem ICMS-ST (rejeição 806); sem ele no cadastro, não sai.
+      + (cest ? tag('CEST', cest) : '')
       + tag('CFOP', item.cfop || '5102')
       + tag('uCom', txt(item.unit, 6) || 'UN')
       + tag('qCom', fmtQty(qty))

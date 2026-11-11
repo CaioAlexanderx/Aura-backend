@@ -120,6 +120,19 @@ d('Validação XSD oficial (PL_010c, leiaute 4.00)', () => {
     expect(r.valid).toBe(true);
   });
 
+  test('11/11/2026 item com ST do cadastro (CSOSN 500, CFOP 5405, CEST, origem 2) + MEI: valida', () => {
+    const r = validate(buildNfe({
+      items: [
+        { name: 'Biscoito', ncm: '19053100', cest: '1705300', csosn: '500', orig: '2', cfop: '5405', quantity: 2, price: 4.5 },
+        { name: 'Capa celular', ncm: '39269090', csosn: '102', orig: '2', cfop: '5102', quantity: 1, price: 20 },
+      ],
+      payments: [{ method: '01', value: 29 }],
+      total_value: 29, serie: 1, numero: 9,
+    }));
+    expect(r.errors).toBe('');
+    expect(r.valid).toBe(true);
+  });
+
   test('quantidade fracionada e cartão: valida', () => {
     const r = validate(buildNfe({
       items: [{ name: 'Meia', ncm: '61159500', quantity: 1.5, price: 9.99 }],
