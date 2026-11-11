@@ -12,6 +12,11 @@
 //       QUANTIDADE_INVALIDA (tambem servico, unit 'srv'), ITEM_NAO_ENCONTRADO,
 //       ESTOQUE_INSUFICIENTE (itens: product_id, variant_id, disponivel),
 //       GRADE_DIFERENTE
+//     stock_count_id? (11/11/2026, migration 446): transferencia feita a
+//       partir de uma conferencia de estoque DA ORIGEM; grava em
+//       stock_transfers.stock_count_id. Outra loja ou descartada: 400
+//       CONFERENCIA_INVALIDA. Antes da migration o campo e ignorado.
+//       Sem o campo, nada muda (mesmo SQL, mesma resposta).
 //   GET  /companies/:id/estoque/transferencias?limit&offset
 //     { transferencias: [{ ..., origem_nome, destino_nome, total_pecas,
 //       total_itens, observacao, usuario_nome, itens: [{ ..., nome, rotulo }] }],
@@ -26,6 +31,8 @@
 const router = require('express').Router({ mergeParams: true });
 const db = require('../config/database');
 const svc = require('../services/transferenciaDeEstoque');
+const conferencia = require('../services/conferenciaDeEstoque');
+const { hasConferenciaSchema } = require('../utils/conferenciaSchema');
 
 function falhaDeSchema(err) {
   return err && (err.code === '42P01' || err.code === '42703');
@@ -44,9 +51,21 @@ router.post('/', async (req, res) => {
     return res.status(400).json({ error: 'A loja de destino precisa ser outra loja.', code: 'MESMA_LOJA' });
   }
 
+  const brutoConferencia = req.body && typeof req.body === 'object' ? req.body.stock_count_id : undefined;
+  const pedeConferencia = brutoConferencia !== undefined && brutoConferencia !== null && brutoConferencia !== '';
+  let comConferencia = false;
+  if (pedeConferencia) {
+    try {
+      comConferencia = await hasConferenciaSchema(db);
+    } catch (_) { comConferencia = false; }
+  }
+
   const client = await db.connect();
   try {
     await client.query('BEGIN');
+    const stockCountId = comConferencia
+      ? await conferencia.conferirConferenciaDaTransferencia(client, origemId, brutoConferencia)
+      : null;
     const transferencia = await svc.transferir(client, {
       origemId,
       destinoId: pedido.destino,
@@ -54,12 +73,14 @@ router.post('/', async (req, res) => {
       isStaff: !!(req.user && req.user.role === 'admin'),
       itens: pedido.itens,
       observacao: pedido.observacao,
+      ...(stockCountId ? { stockCountId } : {}),
     });
     await client.query('COMMIT');
     res.status(201).json({ transferencia });
   } catch (err) {
     await client.query('ROLLBACK').catch(() => {});
     if (err instanceof svc.ErroDeTransferencia) return res.status(err.status).json(err.body);
+    if (err instanceof conferencia.ErroDeConferencia) return res.status(err.status).json(err.body);
     if (falhaDeSchema(err)) {
       return res.status(503).json({ error: 'Recurso ainda não disponível. Tente de novo em alguns minutos.', code: 'SCHEMA_PENDENTE' });
     }

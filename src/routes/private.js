@@ -95,6 +95,11 @@ router.use('/products', estoqueSoConsulta);
 router.use('/categories/migration', somenteLeituraEmConsulta);
 router.use('/product-categories', somenteLeituraEmConsulta);
 router.use('/imports', somenteLeituraEmConsulta);
+// 11/11/2026 (p-108, migration 446): conferência de estoque. ANTES do
+// negarEmConsultaSemCustoNoResto de /estoque: o funcionário "estoque só
+// consulta" conta (não aplica). Acesso, custo oculto e 503 da migration são
+// conferidos dentro do router.
+router.use('/estoque/conferencias', require('./estoqueConferencias'));
 // 03/11/2026: quem só não vê custo (podeVerCusto) recebe a ruptura sem custo.
 router.use('/estoque', negarEmConsultaSemCustoNoResto);
 // 02/11/2026: o custo que ainda saia para esse perfil fora de /products.

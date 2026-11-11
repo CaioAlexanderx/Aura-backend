@@ -22,6 +22,10 @@ const MODULE_PLAN_MAP = {
   // (otica.config etc); a rota (src/routes/suppliers.js) nao gateia por
   // plano, so o app usa isto pra esconder/mostrar o item de menu.
   'estoque.fornecedores': 'essencial',
+  // 11/11/2026 — Conferência de estoque (p-108, migration 446). Chave própria
+  // (espelha o mod do app), mesmo plano do estoque: o Essencial vê a função
+  // inteira. Sem gate de rota: estoqueConferencias.js confere as permissões.
+  conferencia_estoque: 'essencial',
   configuracoes:  'essencial',
   // 18/10/2026 (f4-12) — página Black Friday do app (app#1061, rota
   // /black-friday). Chave própria, mesmo plano do estoque. Sem ela o PUT de
