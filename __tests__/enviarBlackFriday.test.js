@@ -20,7 +20,7 @@ const S = require('../scripts/enviarBlackFriday');
 const AGORA = Date.parse('2026-11-11T13:00:00Z');
 const ENV = { RESEND_API_KEY: 're_test', EMAIL_LINK_SECRET: 'segredo-teste', APP_URL: 'https://app.getaura.com.br' };
 const limpo = (s) => String(s).replace(/\s+/g, ' ').trim();
-const [SEG_STUDIO_ASSINANTE, SEG_STUDIO_TESTE] = S.SEGURADAS;
+const [SEG_STUDIO_ASSINANTE, SEG_STUDIO_TESTE, SEG_PEDIDO_CAIO] = S.SEGURADAS;
 
 let seq = 0;
 function linha(extra) {
@@ -131,7 +131,7 @@ describe('seleção dos públicos', () => {
     const db = banco();
     await S.selecionar(db, 1, { now: AGORA });
     const [, params] = db.query.mock.calls[0];
-    expect(params[0]).toEqual([SEG_STUDIO_ASSINANTE, SEG_STUDIO_TESTE]);
+    expect(params[0]).toEqual([SEG_STUDIO_ASSINANTE, SEG_STUDIO_TESTE, SEG_PEDIDO_CAIO]);
     expect(params[1]).toBe(new Date(AGORA).toISOString());
   });
 
@@ -169,6 +169,15 @@ describe('seleção dos públicos', () => {
     expect(um.alvos.map((a) => a.companyId)).not.toContain(SEG_STUDIO_TESTE);
     expect(dois.alvos.map((a) => a.companyId)).not.toContain(SEG_STUDIO_ASSINANTE);
     expect(um.fora.segurada).toBe(1);
+    expect(dois.fora.segurada).toBe(1);
+  });
+
+  test('a conta tirada pelo Caio em 11/11 fica fora do e-mail 2', async () => {
+    const tirada = 'bd2b009e-4c17-4deb-907d-14815f1c4e97';
+    expect(S.SEGURADAS).toContain(tirada);
+    const db = banco({ publico: { 2: [linha({ company_id: tirada }), linha()] } });
+    const dois = await S.selecionar(db, 2, { now: AGORA });
+    expect(dois.alvos.map((a) => a.companyId)).not.toContain(tirada);
     expect(dois.fora.segurada).toBe(1);
   });
 });
@@ -210,6 +219,10 @@ describe('envio e trava contra reenvio', () => {
     expect(envNeg.html).toContain('https://app.getaura.com.br/black-friday');
     expect(envNeg.headers['List-Unsubscribe']).toMatch(/emails\/descadastro\//);
     expect(envNeg.text).toContain('Parar de receber: ');
+    // Remetente escolhido pelo Caio (11/11) e rodapé com o nome da loja.
+    expect(envNeg.from).toBe('Caio, da Aura <contato@getaura.com.br>');
+    expect(envEss.from).toBe(S.REMETENTE);
+    expect(envNeg.html).toContain('porque usa a Aura com a Loja 1.');
 
     const b = await rodar(db, ['--email=1', '--enviar']);
     expect(b.r.pulados).toBe(2);
@@ -295,6 +308,7 @@ describe('--teste', () => {
     for (const m of msgs) {
       expect(m.to).toBe('caio@exemplo.com');
       expect(m.subject.startsWith('[TESTE] ')).toBe(true);
+      expect(m.from).toBe('Caio, da Aura <contato@getaura.com.br>');
     }
     expect(msgs[0].text).toContain('R$ 84,50');
     expect(msgs[1].text).toContain('R$ 44,50');
