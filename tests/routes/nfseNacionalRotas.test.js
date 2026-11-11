@@ -313,10 +313,28 @@ describe('nota nacional: cancelar, consultar, PDF, XML', () => {
   test('XML: o XML da NFS-e gravado na nota', async () => {
     db.query
       .mockResolvedValueOnce({ rows: [{ xml_url: null, provider: 'nacional' }] })
-      .mockResolvedValueOnce({ rows: [{ xml_nfse: '<NFSe/>' }] });
+      .mockResolvedValueOnce({ rows: [{ id: 'n1', status: 'autorizada', xml_nfse: '<NFSe/>' }] });
     const res = await request(app()).get(`${BASE}/n1/xml`).set(auth);
     expect(res.status).toBe(200);
     expect(res.text).toBe('<NFSe/>');
+  });
+
+  test('XML (11/11/2026): nota pendente, marcada DPS_NUMERO_JA_USADO ou a linha adotada do incidente → 409, nada servido', async () => {
+    const incidente = require('../fixtures/nfseDpsNumeroJaUsado');
+    const casos = [
+      [{ id: 'n1', status: 'pendente', xml_nfse: '<NFSe/>' }, 'ESTADO_INVALIDO'],
+      [{ id: 'n1', status: 'erro', xml_nfse: '<NFSe/>', error_codes: [{ codigo: 'DPS_NUMERO_JA_USADO' }] }, 'NOTA_NAO_CONFERIDA'],
+      [incidente.linhaAdotada(), 'NOTA_NAO_CONFERIDA'],
+    ];
+    for (const [linha, code] of casos) {
+      db.query
+        .mockResolvedValueOnce({ rows: [{ xml_url: null, provider: 'nacional' }] })
+        .mockResolvedValueOnce({ rows: [linha] });
+      const res = await request(app()).get(`${BASE}/n1/xml`).set(auth);
+      expect(res.status).toBe(409);
+      expect(res.body.code).toBe(code);
+      expect(res.text).not.toContain('<NFSe');
+    }
   });
 });
 

@@ -15,6 +15,10 @@
 //      (incidente de 10/11/2026) → nota em erro DPS_NUMERO_JA_USADO, nada
 //      autorizado, evidência em provider_response, conflito na config; a
 //      venda seguinte não gasta número até a loja conferir.
+//   11–15. guardas de 11/11/2026 no SQL real: gravarAutorizada só grava
+//      nota aberta e nunca a marcada DPS_NUMERO_JA_USADO (error_codes ou
+//      prefixo de rejection_reason), sem lançar; provider_response mesclado;
+//      atualizarXmlNfse só em autorizada/cancelada; notasDeProducao.
 //
 // Mesmo padrão de caixa.movimentos.banco.test.js: tudo numa transação
 // revertida no afterAll; BEGIN/COMMIT/ROLLBACK do serviço viram SAVEPOINT.
@@ -49,11 +53,15 @@ const CHAVE = ('3524402' + '2' + '2' + CNPJ + '0000000000001' + '2611' + '000000
 const gz = (s) => zlib.gzipSync(Buffer.from(s, 'utf8')).toString('base64');
 const json = (status, body) => ({ status, headers: {}, body: Buffer.from(JSON.stringify(body)) });
 const NFSE_XML = `<NFSe xmlns="http://www.sped.fazenda.gov.br/nfse" versao="1.01"><infNFSe Id="NFS${CHAVE}"><nNFSe>1</nNFSe><cStat>100</cStat><dhProc>2026-11-09T10:00:05-03:00</dhProc><valores><vLiq>199.90</vLiq></valores></infNFSe></NFSe>`;
+// O 201 de verdade traz a NFS-e com a DPS que acabou de ser enviada (mesmo Id).
+const semDeclaracao = (xml) => String(xml).replace(/^<\?xml[^>]*\?>/, '');
+const dpsDoPost = (req) => semDeclaracao(zlib.gunzipSync(Buffer.from(req.body.dpsXmlGZipB64, 'base64')).toString('utf8'));
+const nfseDaPostada = (req, chave = CHAVE) => NFSE_XML.replace(CHAVE, chave).replace('</infNFSe>', `${dpsDoPost(req)}</infNFSe>`);
 
 let plano = {};
 const transport = async (req) => {
   const p = new URL(req.url).pathname;
-  if (req.method === 'POST' && p.endsWith('/nfse')) return (plano.postDps || (() => json(201, { chaveAcesso: CHAVE, nfseXmlGZipB64: gz(NFSE_XML) })))();
+  if (req.method === 'POST' && p.endsWith('/nfse')) return (plano.postDps || ((r) => json(201, { chaveAcesso: CHAVE, nfseXmlGZipB64: gz(nfseDaPostada(r)) })))(req);
   if (req.method === 'GET' && p.includes('/dps/')) return (plano.getDps || (() => json(404, {})))();
   if (req.method === 'GET' && /\/nfse\/\d{50}$/.test(p)) return (plano.getNfse || (() => json(404, {})))();
   if (req.method === 'POST' && p.endsWith('/eventos')) return json(201, { eventoXmlGZipB64: gz('<evento>ok</evento>') });
@@ -147,7 +155,7 @@ describe('NFS-e nacional — banco real', () => {
     expect(await proximo()).toBe(2);
     const { rows } = await client.query('SELECT xml_dps, xml_nfse, transmitted_at, rps_number, recipient_name FROM nfse WHERE id = $1', [r.nota.id]);
     expect(rows[0].xml_dps).toMatch(/^<\?xml version="1.0" encoding="UTF-8"\?><DPS /);
-    expect(rows[0].xml_nfse).toBe(NFSE_XML);
+    expect(rows[0].xml_nfse).toBe(NFSE_XML.replace('</infNFSe>', `${semDeclaracao(rows[0].xml_dps)}</infNFSe>`));
     expect(rows[0].transmitted_at).not.toBeNull();
     expect(rows[0].rps_number).toBeNull();
     expect(rows[0].recipient_name).toBeNull();
@@ -180,7 +188,7 @@ describe('NFS-e nacional — banco real', () => {
     // último dígito do nNFSe (posição 35): 1 → 2 — outra chave de acesso
     const chave2 = CHAVE.slice(0, 35) + '2' + CHAVE.slice(36);
     expect(chave2).not.toBe(CHAVE);
-    plano.postDps = () => json(201, { chaveAcesso: chave2, nfseXmlGZipB64: gz(NFSE_XML.replace(CHAVE, chave2)) });
+    plano.postDps = (req) => json(201, { chaveAcesso: chave2, nfseXmlGZipB64: gz(nfseDaPostada(req, chave2)) });
     const r2 = await nacional.emitir(db, { companyId, idempotencyKey: 'pay_2', nota: NOTA }, ctx);
     expect(r2.nota.status).toBe('autorizada');
     expect(String(r2.nota.dps_number)).toBe('2');
@@ -224,7 +232,7 @@ describe('NFS-e nacional — nota de teste (migration 441), banco real', () => {
     await client.query('UPDATE nfse_config SET outro_emissor = false, serie_confirmada_em = NOW() WHERE company_id = $1', [companyId]);
     const antes = await ultimo();
     const chave3 = CHAVE.slice(0, 35) + '3' + CHAVE.slice(36);
-    plano.postDps = () => json(201, { chaveAcesso: chave3, nfseXmlGZipB64: gz(NFSE_XML.replace(CHAVE, chave3)) });
+    plano.postDps = (req) => json(201, { chaveAcesso: chave3, nfseXmlGZipB64: gz(nfseDaPostada(req, chave3)) });
     const r = await nacional.emitirTeste(db, { companyId, idempotencyKey: 'clique-1' }, ctx);
     plano = {};
     expect(r.resultado.status).toBe('ok');
@@ -289,5 +297,81 @@ describe('NFS-e nacional — DPS com número já usado (migration 443), banco re
     expect(again.nota.status).toBe('erro');
     expect(await proximo()).toBe(antes);
     expect(await contar()).toBe(notas);
+  });
+});
+
+// ── guardas de 11/11/2026 (SQL real) ──
+describe('NFS-e nacional — guardas do SQL contra a nota de outro emissor, banco real', () => {
+  const ler = async (id) => (await client.query(
+    'SELECT status, chave_acesso, xml_nfse, error_codes, rejection_reason, provider_response FROM nfse WHERE id = $1', [id]
+  )).rows[0];
+  const NFSE_ALHEIA = require('../tests/fixtures/nfseDpsNumeroJaUsado').NFSE_DA_PREFEITURA;
+
+  /** Nota nova 'pendente' reservada pelo próprio repo (série/número de verdade). */
+  async function notaAberta(key) {
+    const entrada = nacional.montarEntrada({
+      nota: NOTA, config: (await client.query('SELECT * FROM nfse_config WHERE company_id = $1', [companyId])).rows[0],
+      company: { cnpj: CNPJ }, tpAmb: 2, dhEmi: new Date(),
+    });
+    const { row } = await repo.reservar(db, { companyId, key, fp: 'x', entrada, nota: NOTA, ambiente: 'producao_restrita' });
+    return row;
+  }
+
+  test('11. nota marcada DPS_NUMERO_JA_USADO (error_codes): não vira autorizada, não lança, evidência intacta', async () => {
+    const { rows } = await client.query(`SELECT id FROM nfse WHERE company_id = $1 AND idempotency_key = 'venda_carimbo'`, [companyId]);
+    const antes = await ler(rows[0].id);
+    const g = await repo.gravarAutorizada(db, rows[0].id, { chaveAcesso: CHAVE, nfseXml: NFSE_ALHEIA, cabecalho: { recuperada_por: 'consulta_dps' } });
+    expect(g.gravada).toBe(false);
+    expect(g.nota).toMatchObject({ id: rows[0].id, status: 'erro', chave_acesso: null });
+    const depois = await ler(rows[0].id);
+    expect(depois).toEqual(antes);
+    expect(depois.provider_response.nfse_de_outro_emissor).toBeTruthy();
+  });
+
+  test('12. prefixo DPS_NUMERO_JA_USADO em rejection_reason (correção manual) também barra; nota fechada também', async () => {
+    const n = await notaAberta('guarda_prefixo');
+    await client.query(`UPDATE nfse SET rejection_reason = 'DPS_NUMERO_JA_USADO: série 1 nº 1 de outro emissor' WHERE id = $1`, [n.id]);
+    const g = await repo.gravarAutorizada(db, n.id, { chaveAcesso: CHAVE, nfseXml: NFSE_ALHEIA });
+    expect(g).toMatchObject({ gravada: false, nota: { status: 'pendente' } });
+
+    const { rows } = await client.query(`SELECT id FROM nfse WHERE company_id = $1 AND idempotency_key = 'pay_1'`, [companyId]);
+    const fechada = await ler(rows[0].id); // cancelada no teste 5
+    const g2 = await repo.gravarAutorizada(db, rows[0].id, { chaveAcesso: CHAVE, nfseXml: NFSE_ALHEIA });
+    expect(g2.gravada).toBe(false);
+    expect(await ler(rows[0].id)).toEqual(fechada);
+  });
+
+  test('13. nota aberta da Aura: grava, e provider_response é MESCLADO (a evidência anterior fica)', async () => {
+    const n = await notaAberta('guarda_mescla');
+    await client.query(`UPDATE nfse SET status = 'erro', provider_response = '{"evidencia_anterior": {"x": 1}}'::jsonb WHERE id = $1`, [n.id]);
+    // chave de acesso própria (uq_nfse_chave_acesso): último dígito do nNFSe 1 → 4
+    const chave4 = CHAVE.slice(0, 35) + '4' + CHAVE.slice(36);
+    const g = await repo.gravarAutorizada(db, n.id, { chaveAcesso: chave4, nfseXml: NFSE_XML.replace(CHAVE, chave4), cabecalho: { recuperada_por: 'consulta_dps' } });
+    expect(g.gravada).toBe(true);
+    expect(g.nota.status).toBe('autorizada');
+    const d = await ler(n.id);
+    expect(d.provider_response).toMatchObject({ evidencia_anterior: { x: 1 }, cabecalho: { recuperada_por: 'consulta_dps' } });
+
+    await repo.gravarRejeitada(db, n.id, { texto: 'x', erros: [], cabecalho: { y: 2 } });
+    expect((await ler(n.id)).provider_response).toMatchObject({ evidencia_anterior: { x: 1 }, cabecalho: { y: 2 } });
+    await repo.anexarEvidencia(db, n.id, { outra: true });
+    expect((await ler(n.id)).provider_response).toMatchObject({ evidencia_anterior: { x: 1 }, outra: true });
+  });
+
+  test('14. atualizarXmlNfse só mexe em nota autorizada/cancelada', async () => {
+    const n = await notaAberta('guarda_xml');
+    await repo.atualizarXmlNfse(db, n.id, NFSE_ALHEIA);
+    expect((await ler(n.id)).xml_nfse).toBeNull();
+  });
+
+  test('15. notasDeProducao: só produção, sem teste, já transmitidas (esta loja está na restrita)', async () => {
+    expect(await repo.notasDeProducao(db, companyId)).toEqual([]);
+    const n = await notaAberta('guarda_producao');
+    await client.query(
+      `UPDATE nfse SET ambiente = 'producao', transmitted_at = NOW(), dps_serie = '1' WHERE id = $1`, [n.id]
+    );
+    const lista = await repo.notasDeProducao(db, companyId);
+    expect(lista).toHaveLength(1);
+    expect(lista[0]).toMatchObject({ id: n.id, status: 'pendente', dps_serie: '1' });
   });
 });

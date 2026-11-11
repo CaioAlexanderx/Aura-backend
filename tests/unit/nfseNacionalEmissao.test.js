@@ -67,6 +67,8 @@ jest.mock('../../src/services/nfseNacional/repo', () => {
     gravarCancelada: jest.fn(async (db, id, { motivo, eventoXml }) => Object.assign(find(id), { status: 'cancelada', cancel_reason: motivo || find(id).cancel_reason, cancel_event_xml: eventoXml })),
     gravarCancelamentoRecusado: jest.fn(async () => {}),
     atualizarXmlNfse: jest.fn(async (db, id, xml) => { find(id).xml_nfse = xml; }),
+    anexarEvidencia: jest.fn(async (db, id, ev) => { find(id).provider_response = { ...(find(id).provider_response || {}), ...clone(ev) }; }),
+    notasDeProducao: jest.fn(async () => []),
   };
 });
 
@@ -95,6 +97,12 @@ const NOTA = { descricao: 'Licença de uso do sistema Aura - novembro/2026', val
 // só adota a nota quando ela é da DPS que a Aura assinou.
 const dpsPostada = (t, i = 0) => ungz(t.posts()[i].body.dpsXmlGZipB64).replace(/^<\?xml[^>]*\?>/, '');
 const nfseXmlCom = (dps, chave = CHAVE, n = '7') => nfseXml(chave, n).replace('</infNFSe>', `${dps}</infNFSe>`);
+// O 201 de verdade traz a NFS-e com a DPS que acabou de ser enviada (mesmo Id).
+const nfseDaPostada = (req) => nfseXmlCom(ungz(req.body.dpsXmlGZipB64).replace(/^<\?xml[^>]*\?>/, ''));
+const ultimaPostada = (chamadas) => {
+  const p = chamadas.filter((c) => c.method === 'POST' && c.url.endsWith('/nfse')).pop();
+  return p ? nfseDaPostada(p) : nfseXml();
+};
 
 /** Sefin falso: cada rota responde pelo `plano` do teste. Registra as chamadas. */
 function sefinFalso(plano = {}) {
@@ -103,11 +111,11 @@ function sefinFalso(plano = {}) {
     chamadas.push(req);
     const u = new URL(req.url);
     const p = u.pathname;
-    if (req.method === 'POST' && p.endsWith('/SefinNacional/nfse')) return (plano.postDps || (() => json(201, { chaveAcesso: CHAVE, idDps: 'x', nfseXmlGZipB64: gz(nfseXml()), alertas: [] })))(req, chamadas);
+    if (req.method === 'POST' && p.endsWith('/SefinNacional/nfse')) return (plano.postDps || ((r) => json(201, { chaveAcesso: CHAVE, idDps: 'x', nfseXmlGZipB64: gz(nfseDaPostada(r)), alertas: [] })))(req, chamadas);
     if (req.method === 'GET' && /\/dps\//.test(p)) return (plano.getDps || (() => json(404, { erro: { codigo: 'E2404', descricao: 'Não foi gerada' } })))(req);
     if (req.method === 'GET' && /\/eventos\//.test(p)) return (plano.getEvento || (() => json(404, {})))(req);
     if (req.method === 'POST' && /\/eventos$/.test(p)) return (plano.postEvento || (() => json(201, { eventoXmlGZipB64: gz('<evento/>') })))(req);
-    if (req.method === 'GET' && /\/nfse\/\d{50}$/.test(p)) return (plano.getNfse || (() => json(200, { chaveAcesso: CHAVE, nfseXmlGZipB64: gz(nfseXml()) })))(req);
+    if (req.method === 'GET' && /\/nfse\/\d{50}$/.test(p)) return (plano.getNfse || (() => json(200, { chaveAcesso: CHAVE, nfseXmlGZipB64: gz(ultimaPostada(chamadas)) })))(req);
     if (req.method === 'GET' && /\/danfse\//.test(p)) return { status: 200, headers: {}, body: Buffer.from('%PDF-1.4 teste') };
     return json(500, {});
   });
@@ -121,7 +129,7 @@ function configApta(over = {}) {
     company_id: CID, provider: 'nacional', is_active: true, ambiente: 'producao_restrita',
     municipio_ibge: '3524402', ctribnac_padrao: '010501', serie: '1', next_dps_number: 1,
     regime_tributario: 'simples_nacional', optante_simples_nacional: true, p_tot_trib_sn: 6,
-    inscricao_municipal: null, ...over,
+    inscricao_municipal: null, outro_emissor: false, ...over,
   };
 }
 
@@ -239,9 +247,9 @@ describe('emissão', () => {
   test('timeout: fica pendente; a retomada consulta a DPS e reenvia o MESMO XML com o MESMO número', async () => {
     let primeira = true;
     const t = sefinFalso({
-      postDps: () => {
+      postDps: (req) => {
         if (primeira) { primeira = false; throw new Error('timeout após 30000ms'); }
-        return json(201, { chaveAcesso: CHAVE, nfseXmlGZipB64: gz(nfseXml()) });
+        return json(201, { chaveAcesso: CHAVE, nfseXmlGZipB64: gz(nfseDaPostada(req)) });
       },
     });
     const r1 = await nacional.emitir(db, { companyId: CID, idempotencyKey: 'fatura-5', nota: NOTA }, { ...ctxBase, transport: t });

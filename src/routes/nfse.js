@@ -46,6 +46,7 @@ const { validarCamposNacional, validarRetencao, validarOutroEmissor } = require(
 const { normalizarSerie } = require('../services/nfseNacional/dpsBuilder');
 const { producaoHabilitada, normalizarAmbiente } = require('../services/nfseNacional/endpoints');
 const { NfseNacionalError, httpStatusDe } = require('../services/nfseNacional/errors');
+const { podeServirNota } = require('../services/nfseNacional/notaDaAura');
 
 const requireWrite = requireRole('client', 'analyst', 'admin');
 
@@ -969,13 +970,18 @@ router.get('/:nid/xml', requireAuth, async (req, res) => {
     `SELECT xml_url, provider FROM nfse WHERE id = $1 AND company_id = $2`,
     [req.params.nid, req.params.id]
   );
-  // Emissor nacional: o XML da NFS-e fica gravado na própria nota.
+  // Emissor nacional: o XML da NFS-e fica gravado na própria nota. Só sai
+  // de nota autorizada/cancelada e nunca o da NFS-e de outro emissor
+  // (incidente de 10/11/2026) — mesma regra do DANFSe (podeServirNota).
   if (rows[0] && rows[0].provider === 'nacional') {
     const { rows: x } = await db.query(
-      'SELECT xml_nfse FROM nfse WHERE id = $1 AND company_id = $2',
+      `SELECT id, status, xml_nfse, xml_dps, error_codes, rejection_reason
+         FROM nfse WHERE id = $1 AND company_id = $2`,
       [req.params.nid, req.params.id]
     );
     if (!x[0] || !x[0].xml_nfse) return res.status(404).json({ error: 'XML nao disponivel' });
+    const pode = podeServirNota(x[0]);
+    if (!pode.ok) return res.status(409).json({ error: pode.message, code: pode.code });
     res.set('Content-Type', 'application/xml; charset=utf-8');
     return res.send(x[0].xml_nfse);
   }

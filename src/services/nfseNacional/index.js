@@ -32,6 +32,17 @@
 //      a config fica com o conflito: nenhuma nota nova gasta número até a
 //      loja conferir a série e o último número. Nunca renumera às cegas.
 //
+// Defesas de 11/11/2026 (a nota alheia nunca vira nem age como nota da Aura):
+//   * 201 direto: a NFS-e devolvida precisa trazer a DPS com o Id que a
+//     Aura assinou; senão fica pendente e a consulta confere pelo digest;
+//   * repo.gravarAutorizada só grava nota aberta e nunca uma marcada
+//     DPS_NUMERO_JA_USADO; provider_response é sempre mesclado;
+//   * cancelar só assina o evento se a NFS-e gravada conferir 'igual' com
+//     a DPS da linha;
+//   * DANFSe, XML e consulta pela chave só valem para nota autorizada ou
+//     cancelada; nota marcada DPS_NUMERO_JA_USADO não muda nem é servida;
+//   * a primeira nota de verdade só sai com o passo da série respondido.
+//
 // Breaker por empresa (mesma semântica do engineBreaker da NFC-e, estado
 // separado): falhas de transporte seguidas abrem 15 min de recusa imediata.
 // ============================================================
@@ -56,6 +67,10 @@ const {
   NfseNacionalError, NfseNacionalTransportError, DPS_NUMERO_JA_USADO, mensagemDpsNumeroJaUsado, temDpsNumeroJaUsado,
 } = require('./errors');
 const { conferirNfseComDps } = require('./conferenciaDps');
+const { pendenciaDaSerieAntesDaPrimeiraNota } = require('./config');
+const {
+  idDaDpsEmbutida, conferirNotaGravada, podeServirNota, SERVIVEIS, MSG_NOTA_DE_OUTRO_EMISSOR, MSG_NOTA_NAO_CONFERIDA,
+} = require('./notaDaAura');
 
 const breaker = createBreaker();
 const MARGEM_RELOGIO_MS = 60 * 1000; // dhEmi ≤ dhProc (E0008): folga para relógio adiantado
@@ -243,10 +258,13 @@ async function recuperarPelaDps(db, row, ep, cert, ctx) {
   if (!n) return 'nao_encontrada';
   const conf = conferirNfseComDps({ nfseXml: n.nfseXml, dpsXml: row.xml_dps });
   if (conf.resultado === 'igual') {
-    await repo.gravarAutorizada(db, row.id, {
+    const g = await repo.gravarAutorizada(db, row.id, {
       chaveAcesso: r.chaveAcesso, nfseXml: n.nfseXml, alertas: [],
       cabecalho: { recuperada_por: 'consulta_dps', conferida_por: conf.por },
     });
+    // a guarda do SQL barrou (nota já fechada ou marcada como de outro
+    // emissor por outra requisição): vale o que está no banco
+    if (g && g.gravada === false && temDpsNumeroJaUsado(g.nota)) return 'numero_ja_usado';
     return 'adotada';
   }
   const evidencia = {
@@ -275,6 +293,19 @@ async function recuperarPelaDps(db, row, ep, cert, ctx) {
 const resolvida = (rec) => rec === 'adotada' || rec === 'numero_ja_usado';
 
 /**
+ * Notas de produção da loja → { notaDaAura, series } para a regra da série
+ * antes da primeira nota de verdade. Nota da Aura = autorizada/cancelada,
+ * sem DPS_NUMERO_JA_USADO e com a NFS-e conferida 'igual' com a DPS.
+ */
+async function historicoDeProducao(db, companyId) {
+  const notas = (await repo.notasDeProducao(db, companyId)) || [];
+  return {
+    notaDaAura: notas.some((n) => SERVIVEIS.has(n.status) && conferirNotaGravada(n).resultado === 'igual'),
+    series: [...new Set(notas.map((n) => (n.dps_serie != null ? String(n.dps_serie) : null)).filter(Boolean))],
+  };
+}
+
+/**
  * @param row   a nota com dps_id e xml_dps (a DPS assinada)
  * @param reenvio true = o MESMO XML já saiu antes (retomada depois de um
  *   timeout): um E0014 pode ser da própria nota
@@ -300,6 +331,23 @@ async function transmitir(db, row, signedXml, ep, cert, ctx, { reenvio = false }
   breaker.recordSuccess(row.company_id);
 
   if (r.kind === 'autorizada') {
+    // 201 direto: a NFS-e tem de trazer a DPS que a Aura acabou de mandar
+    // (mesmo Id). Id diferente ou ausente = não grava; fica pendente e a
+    // próxima consulta confere pela DPS (assinatura/campos) antes de adotar.
+    const idEmbutido = idDaDpsEmbutida(r.nfseXml);
+    if (!row.dps_id || idEmbutido !== row.dps_id) {
+      await repo.anexarEvidencia(db, row.id, {
+        autorizada_sem_conferencia: {
+          em: agora(ctx).toISOString(), chave_acesso: r.chaveAcesso || null,
+          id_dps_esperado: row.dps_id || null, id_dps_devolvido: idEmbutido, xml_nfse: r.nfseXml || null,
+        },
+      });
+      await repo.marcarSemConfirmacao(db, row.id, MSG_SEM_CONFERENCIA);
+      console.warn('[nfse nacional] 201 com NFS-e de outra DPS: nada gravado como autorizada', JSON.stringify({
+        nfse_id: row.id, company_id: row.company_id, esperado: row.dps_id, devolvido: idEmbutido,
+      }));
+      return { nota: await recarregar(), aguardando: true };
+    }
     await repo.gravarAutorizada(db, row.id, r);
     return { nota: await recarregar() };
   }
@@ -430,6 +478,13 @@ async function emitir(db, { companyId, idempotencyKey, nota = {} }, ctx = {}) {
       'NACIONAL_INDISPONIVEL'
     );
   }
+  // Primeira nota de verdade só com o passo da série respondido (incidente
+  // de 10/11/2026). Nota já transmitida segue: precisa consultar o gov.br.
+  if (ep.ambiente === 'producao' && !(existente && existente.transmitted_at)
+      && config.outro_emissor !== true && config.outro_emissor !== false) {
+    const pend = pendenciaDaSerieAntesDaPrimeiraNota({ config, historico: await historicoDeProducao(db, companyId) });
+    if (pend) throw new NfseNacionalError(pend, 'SERIE_NAO_RESPONDIDA');
+  }
   const env = { config, company, ep };
   if (existente) return retomar(db, existente, env, ctx);
 
@@ -482,8 +537,21 @@ async function cancelar(db, { companyId, nfseId, cMotivo = 9, xMotivo }, ctx = {
   const row = await repo.buscarPorId(db, companyId, nfseId);
   if (!row || row.provider !== 'nacional') throw new NfseNacionalError('NFS-e não encontrada.', 'NOT_FOUND');
   if (row.status === 'cancelada') return { nota: row, replay: true };
+  // Nota da série/número de outro emissor: não é da Aura, nada a cancelar.
+  if (temDpsNumeroJaUsado(row)) throw new NfseNacionalError(MSG_NOTA_DE_OUTRO_EMISSOR, 'NOTA_NAO_CONFERIDA');
   if (row.status !== 'autorizada' || !row.chave_acesso) {
     throw new NfseNacionalError(`Só dá para cancelar nota autorizada (situação atual: ${row.status}).`, 'ESTADO_INVALIDO');
+  }
+  // Antes de assinar o evento: a NFS-e gravada é mesmo da DPS que a Aura
+  // assinou? Cancelar a nota de outro emissor (incidente de 10/11/2026)
+  // cancelaria, no gov.br, a nota de verdade de outra venda.
+  const daAura = conferirNotaGravada(row);
+  if (daAura.resultado !== 'igual') {
+    console.warn('[nfse nacional] cancelamento recusado: NFS-e gravada não confere com a DPS da Aura', JSON.stringify({
+      nfse_id: row.id, company_id: row.company_id, resultado: daAura.resultado,
+      divergencias: daAura.conf ? daAura.conf.divergencias : null,
+    }));
+    throw new NfseNacionalError(MSG_NOTA_NAO_CONFERIDA, 'NOTA_NAO_CONFERIDA', { resultado: daAura.resultado });
   }
   const ep = exigirAmbiente(row.ambiente);
   const { company } = await repo.carregarContexto(db, companyId);
@@ -537,15 +605,31 @@ async function consultar(db, { companyId, nfseId }, ctx = {}) {
   const row = await repo.buscarPorId(db, companyId, nfseId);
   if (!row || row.provider !== 'nacional') throw new NfseNacionalError('NFS-e não encontrada.', 'NOT_FOUND');
   const ep = exigirAmbiente(row.ambiente);
-  if (!row.chave_acesso && !(row.transmitted_at && row.dps_id)) return { nota: row };
+  // Nota marcada como de outro emissor: a consulta nunca muda status nem XML.
+  if (temDpsNumeroJaUsado(row)) return { nota: row };
+  const pelaDps = !SERVIVEIS.has(row.status);
+  // Fora de autorizada/cancelada a consulta é só pela DPS transmitida (que
+  // confere antes de adotar); a chave de outra situação nunca é seguida.
+  if (pelaDps && !(row.transmitted_at && row.dps_id)) return { nota: row };
+  if (!pelaDps && !row.chave_acesso) return { nota: row };
+  // Autorizada/cancelada: a consulta só mexe na nota (XML novo ou o
+  // cancelamento descoberto pelo evento) se a NFS-e gravada é da DPS da Aura.
+  if (!pelaDps && conferirNotaGravada(row).resultado !== 'igual') {
+    console.warn('[nfse nacional] consulta sem efeito: NFS-e gravada não confere com a DPS da Aura', JSON.stringify({
+      nfse_id: row.id, company_id: row.company_id,
+    }));
+    return { nota: row };
+  }
   const { company } = await repo.carregarContexto(db, companyId);
   const cert = await abrirCertificado(db, companyId, company && company.cnpj);
-  if (!row.chave_acesso) {
+  if (pelaDps) {
     await recuperarPelaDps(db, row, ep, cert, ctx);
     return { nota: await repo.buscarPorId(db, companyId, row.id) };
   }
   const n = await client.consultarNfse({ sefinUrl: ep.sefin, chave: row.chave_acesso, ...transportOpts(cert, ctx) });
-  if (n) await repo.atualizarXmlNfse(db, row.id, n.nfseXml);
+  if (n && conferirNfseComDps({ nfseXml: n.nfseXml, dpsXml: row.xml_dps }).resultado === 'igual') {
+    await repo.atualizarXmlNfse(db, row.id, n.nfseXml);
+  }
   if (row.status === 'autorizada') {
     const ev = await client.consultarEvento({
       sefinUrl: ep.sefin, chave: row.chave_acesso, tipoEvento: COD_CANCELAMENTO, nSeq: 1, ...transportOpts(cert, ctx),
@@ -560,6 +644,8 @@ async function danfse(db, { companyId, nfseId }, ctx = {}) {
   exigirLigado();
   const row = await repo.buscarPorId(db, companyId, nfseId);
   if (!row || row.provider !== 'nacional') throw new NfseNacionalError('NFS-e não encontrada.', 'NOT_FOUND');
+  const pode = podeServirNota(row);
+  if (!pode.ok) throw new NfseNacionalError(pode.message, pode.code);
   if (!row.chave_acesso) throw new NfseNacionalError('A nota ainda não tem chave de acesso.', 'ESTADO_INVALIDO');
   const ep = exigirAmbiente(row.ambiente);
   const { company } = await repo.carregarContexto(db, companyId);
@@ -816,7 +902,7 @@ async function situacaoConfig(db, companyId) {
 
 module.exports = {
   emitir, cancelar, consultar, danfse, situacaoConfig, emitirTeste, traduzirResultadoTeste, avaliarLigar,
-  montarEntrada, fingerprint,
+  montarEntrada, fingerprint, podeServirNota, conferirNotaGravada,
   _breaker: breaker,
   MARGEM_RELOGIO_MS,
 };
