@@ -67,6 +67,8 @@ const {
   NfseNacionalError, NfseNacionalTransportError, DPS_NUMERO_JA_USADO, mensagemDpsNumeroJaUsado, temDpsNumeroJaUsado,
 } = require('./errors');
 const { conferirNfseComDps } = require('./conferenciaDps');
+const { lerNfse } = require('./nfseParser');
+const { gerarDanfsePdf } = require('./danfseLocal');
 const { pendenciaDaSerieAntesDaPrimeiraNota } = require('./config');
 const {
   idDaDpsEmbutida, conferirNotaGravada, podeServirNota, SERVIVEIS, MSG_NOTA_DE_OUTRO_EMISSOR, MSG_NOTA_NAO_CONFERIDA,
@@ -639,7 +641,60 @@ async function consultar(db, { companyId, nfseId }, ctx = {}) {
   return { nota: await repo.buscarPorId(db, companyId, row.id) };
 }
 
-/** PDF do DANFSe (ADN). null se ainda não disponível. */
+// ── DANFSe ─────────────────────────────────────────────────
+//
+// Primeiro o PDF do ADN. Quando o ADN não entrega (produção, 11/11/2026:
+// HTTP 503 em toda tentativa com a nota autorizada), a Aura gera o DANFSe
+// do XML autorizado gravado na nota (danfseLocal.js):
+//   * 5xx, timeout, erro de transporte ou resposta que não é PDF;
+//   * 404 ("ainda não disponível") com a nota autorizada há mais de
+//     MINUTOS_ATE_O_ADN_TER_O_PDF — antes disso devolve null (tente de novo);
+//   * certificado A1 que não abre mais (vencido depois da emissão): o ADN
+//     exige mTLS, mas o XML autorizado já está na nota.
+// A regra de quem pode ver a nota é a MESMA nos dois caminhos e vem antes
+// de tudo (podeServirNota: nunca a NFS-e de outro emissor, 10/11/2026), e
+// o XML só é usado se a chave dele for a chave gravada na nota.
+
+const MINUTOS_ATE_O_ADN_TER_O_PDF = 5;
+const DANFSE_TIMEOUT_MS = 15000;
+const DANFSE_RETRY = { attempts: 2, baseDelayMs: 500 };
+
+function autorizadaHaMinutos(row, agora) {
+  let quando = row.issued_at ? new Date(row.issued_at).getTime() : NaN; // pg devolve Date
+  if (!Number.isFinite(quando) && row.xml_nfse) {
+    try { quando = Date.parse(lerNfse(row.xml_nfse).dhProc); } catch (_) { /* sem data */ }
+  }
+  // sem data nenhuma a nota está autorizada e com XML: não há o que esperar
+  if (!Number.isFinite(quando)) return Infinity;
+  return (agora.getTime() - quando) / 60000;
+}
+
+async function danfseDaAura(row, motivo) {
+  const recusa = () => new NfseNacionalError(
+    'O DANFSe não está disponível no gov.br agora. Tente de novo em instantes.',
+    'NACIONAL_INDISPONIVEL'
+  );
+  if (!row.xml_nfse) throw recusa();
+  let chaveDoXml = null;
+  try { chaveDoXml = lerNfse(row.xml_nfse).chaveAcesso; } catch (_) { /* ilegível */ }
+  if (!chaveDoXml || chaveDoXml !== String(row.chave_acesso)) {
+    console.warn('[nfse nacional] DANFSe da Aura recusado: XML gravado sem a chave da nota', JSON.stringify({
+      nfse_id: row.id, company_id: row.company_id, motivo,
+    }));
+    throw recusa();
+  }
+  const pdf = await gerarDanfsePdf(row.xml_nfse, { cancelada: row.status === 'cancelada' });
+  console.warn('[nfse nacional] ADN sem o DANFSe: PDF gerado pela Aura do XML autorizado', JSON.stringify({
+    nfse_id: row.id, company_id: row.company_id, ambiente: row.ambiente, motivo,
+  }));
+  return pdf;
+}
+
+/**
+ * PDF do DANFSe: o do ADN, ou o gerado pela Aura do XML autorizado quando o
+ * ADN não entrega. null só no 404 logo depois da autorização.
+ * @returns {Promise<Buffer|null>}
+ */
 async function danfse(db, { companyId, nfseId }, ctx = {}) {
   exigirLigado();
   const row = await repo.buscarPorId(db, companyId, nfseId);
@@ -648,9 +703,26 @@ async function danfse(db, { companyId, nfseId }, ctx = {}) {
   if (!pode.ok) throw new NfseNacionalError(pode.message, pode.code);
   if (!row.chave_acesso) throw new NfseNacionalError('A nota ainda não tem chave de acesso.', 'ESTADO_INVALIDO');
   const ep = exigirAmbiente(row.ambiente);
-  const { company } = await repo.carregarContexto(db, companyId);
-  const cert = await abrirCertificado(db, companyId, company && company.cnpj);
-  return client.baixarDanfse({ danfseUrl: ep.danfse, chave: row.chave_acesso, ...transportOpts(cert, ctx) });
+  let motivo;
+  try {
+    const { company } = await repo.carregarContexto(db, companyId);
+    const cert = await abrirCertificado(db, companyId, company && company.cnpj);
+    const pdf = await client.baixarDanfse({
+      danfseUrl: ep.danfse, chave: row.chave_acesso,
+      ...transportOpts(cert, ctx),
+      timeoutMs: ctx.timeoutMs != null ? ctx.timeoutMs : DANFSE_TIMEOUT_MS,
+      retry: ctx.retry || DANFSE_RETRY,
+    });
+    if (pdf) return pdf;
+    const agora = typeof ctx.now === 'function' ? ctx.now() : new Date();
+    if (autorizadaHaMinutos(row, agora) < MINUTOS_ATE_O_ADN_TER_O_PDF) return null;
+    motivo = 'adn_404';
+  } catch (err) {
+    if (err instanceof NfseNacionalTransportError) motivo = err.httpStatus ? `adn_http_${err.httpStatus}` : 'adn_transporte';
+    else if (err instanceof NfseNacionalError && err.code === 'CERTIFICADO') motivo = 'certificado';
+    else throw err;
+  }
+  return danfseDaAura(row, motivo);
 }
 
 // ── nota de teste (migration 441) ──────────────────────────

@@ -254,6 +254,7 @@ router.get('/origem/:tipo/:origemId/segunda-via', requireAuth, origemValida, asy
       if (!alvo) {
         return res.status(400).json({ error: 'Esta origem tem mais de uma NFS-e: informe nfse_id.', code: 'ESCOLHA_A_NOTA' });
       }
+      // PDF do ADN ou, se ele não entrega, o gerado pela Aura do XML autorizado
       const pdf = await nacional.danfse(db, { companyId: cid, nfseId: alvo.nfse_id });
       if (!pdf) return res.status(404).json({ error: 'DANFSe ainda não disponível. Tente de novo em instantes.' });
       res.set('Content-Type', 'application/pdf');

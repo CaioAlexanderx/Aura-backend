@@ -102,4 +102,168 @@ function lerNfse(xml) {
   };
 }
 
-module.exports = { lerNfse, lerDps };
+// ── leitura completa para o DANFSe gerado pela Aura (11/11/2026) ──
+//
+// Quando o ADN não entrega o PDF (503, timeout), o DANFSe é montado a
+// partir do XML AUTORIZADO gravado na nota. Aqui só se LÊ o que o XML traz
+// (TCInfNFSe + a DPS embutida): campo ausente fica null e não aparece no
+// documento. Nada é deduzido nem completado com dado do cadastro.
+
+const vazioANull = (v) => {
+  const t = txt(v);
+  if (t == null) return null;
+  const s = t.trim();
+  return s === '' ? null : s;
+};
+
+function lerEnderecoNac(end) {
+  const e = primeiro(end);
+  if (!e || typeof e !== 'object') return null;
+  const nac = primeiro(e.endNac) || {};
+  const ext = primeiro(e.endExt) || {};
+  const r = {
+    xLgr: vazioANull(e.xLgr),
+    nro: vazioANull(e.nro),
+    xCpl: vazioANull(e.xCpl),
+    xBairro: vazioANull(e.xBairro),
+    // emit/enderNac traz cMun/UF/CEP direto; toma/end traz em endNac
+    cMun: vazioANull(e.cMun) || vazioANull(nac.cMun),
+    UF: vazioANull(e.UF),
+    CEP: vazioANull(e.CEP) || vazioANull(nac.CEP),
+    cPais: vazioANull(ext.cPais),
+    xCidade: vazioANull(ext.xCidade),
+  };
+  return Object.values(r).some((v) => v != null) ? r : null;
+}
+
+function lerPessoa(no, { enderecoEm }) {
+  const p = primeiro(no);
+  if (!p || typeof p !== 'object') return null;
+  const r = {
+    CNPJ: vazioANull(p.CNPJ),
+    CPF: vazioANull(p.CPF),
+    NIF: vazioANull(p.NIF),
+    IM: vazioANull(p.IM),
+    xNome: vazioANull(p.xNome),
+    xFant: vazioANull(p.xFant),
+    fone: vazioANull(p.fone),
+    email: vazioANull(p.email),
+    endereco: lerEnderecoNac(p[enderecoEm]),
+  };
+  return Object.values(r).some((v) => v != null) ? r : null;
+}
+
+/**
+ * Tudo o que o DANFSe mostra, lido do XML da NFS-e autorizada.
+ * Lança se o XML não tem infNFSe (igual a lerNfse).
+ */
+function lerDanfse(xml) {
+  const doc = parser.parse(String(xml || ''));
+  const nfse = doc.NFSe || {};
+  const inf = primeiro(nfse.infNFSe);
+  if (!inf) throw new Error('XML da NFS-e sem infNFSe');
+  const id = txt(inf['@_Id']) || '';
+  const m = id.match(/^NFS(\d{50})$/);
+  const valN = primeiro(inf.valores) || {};
+
+  const dpsNo = primeiro(inf.DPS) || {};
+  const infDps = primeiro(dpsNo.infDPS) || {};
+  const prest = primeiro(infDps.prest) || {};
+  const regTrib = primeiro(prest.regTrib) || {};
+  const serv = primeiro(infDps.serv) || {};
+  const locPrest = primeiro(serv.locPrest) || {};
+  const cServ = primeiro(serv.cServ) || {};
+  const infoCompl = primeiro(serv.infoCompl) || {};
+  const valD = primeiro(infDps.valores) || {};
+  const vServPrest = primeiro(valD.vServPrest) || {};
+  const desc = primeiro(valD.vDescCondIncond) || {};
+  const dedRed = primeiro(valD.vDedRed) || {};
+  const trib = primeiro(valD.trib) || {};
+  const tribMun = primeiro(trib.tribMun) || {};
+  const tribFed = primeiro(trib.tribFed) || {};
+  const piscofins = primeiro(tribFed.piscofins) || {};
+  const totTrib = primeiro(trib.totTrib) || {};
+  const vTotTrib = primeiro(totTrib.vTotTrib) || {};
+  const pTotTrib = primeiro(totTrib.pTotTrib) || {};
+
+  return {
+    chaveAcesso: m ? m[1] : null,
+    nNFSe: vazioANull(inf.nNFSe),
+    nDFSe: vazioANull(inf.nDFSe),
+    cStat: vazioANull(inf.cStat),
+    dhProc: vazioANull(inf.dhProc),
+    verAplic: vazioANull(inf.verAplic),
+    ambGer: vazioANull(inf.ambGer),
+    tpEmis: vazioANull(inf.tpEmis),
+    xLocEmi: vazioANull(inf.xLocEmi),
+    xLocPrestacao: vazioANull(inf.xLocPrestacao),
+    cLocIncid: vazioANull(inf.cLocIncid),
+    xLocIncid: vazioANull(inf.xLocIncid),
+    xTribNac: vazioANull(inf.xTribNac),
+    xTribMun: vazioANull(inf.xTribMun),
+    xNBS: vazioANull(inf.xNBS),
+    xOutInf: vazioANull(inf.xOutInf),
+    emitente: lerPessoa(inf.emit, { enderecoEm: 'enderNac' }),
+    valoresNfse: {
+      vCalcDR: num(valN.vCalcDR),
+      vCalcBM: num(valN.vCalcBM),
+      vBC: num(valN.vBC),
+      pAliqAplic: num(valN.pAliqAplic),
+      vISSQN: num(valN.vISSQN),
+      vTotalRet: num(valN.vTotalRet),
+      vLiq: num(valN.vLiq),
+    },
+    dps: {
+      tpAmb: vazioANull(infDps.tpAmb),
+      dhEmi: vazioANull(infDps.dhEmi),
+      serie: vazioANull(infDps.serie),
+      nDPS: vazioANull(infDps.nDPS),
+      dCompet: vazioANull(infDps.dCompet),
+      cLocEmi: vazioANull(infDps.cLocEmi),
+    },
+    prestador: {
+      CNPJ: vazioANull(prest.CNPJ),
+      CPF: vazioANull(prest.CPF),
+      IM: vazioANull(prest.IM),
+      opSimpNac: vazioANull(regTrib.opSimpNac),
+      regApTribSN: vazioANull(regTrib.regApTribSN),
+      regEspTrib: vazioANull(regTrib.regEspTrib),
+    },
+    tomador: lerPessoa(infDps.toma, { enderecoEm: 'end' }),
+    servico: {
+      cLocPrestacao: vazioANull(locPrest.cLocPrestacao),
+      cPaisPrestacao: vazioANull(locPrest.cPaisPrestacao),
+      cTribNac: vazioANull(cServ.cTribNac),
+      cTribMun: vazioANull(cServ.cTribMun),
+      cNBS: vazioANull(cServ.cNBS),
+      xDescServ: vazioANull(cServ.xDescServ),
+      xInfComp: vazioANull(infoCompl.xInfComp),
+    },
+    valoresDps: {
+      vReceb: num(vServPrest.vReceb),
+      vServ: num(vServPrest.vServ),
+      vDescIncond: num(desc.vDescIncond),
+      vDescCond: num(desc.vDescCond),
+      pDR: num(dedRed.pDR),
+      vDR: num(dedRed.vDR),
+      tribISSQN: vazioANull(tribMun.tribISSQN),
+      tpRetISSQN: vazioANull(tribMun.tpRetISSQN),
+      pAliq: num(tribMun.pAliq),
+      vPis: num(piscofins.vPis),
+      vCofins: num(piscofins.vCofins),
+      tpRetPisCofins: vazioANull(piscofins.tpRetPisCofins),
+      vRetCP: num(tribFed.vRetCP),
+      vRetIRRF: num(tribFed.vRetIRRF),
+      vRetCSLL: num(tribFed.vRetCSLL),
+      vTotTribFed: num(vTotTrib.vTotTribFed),
+      vTotTribEst: num(vTotTrib.vTotTribEst),
+      vTotTribMun: num(vTotTrib.vTotTribMun),
+      pTotTribFed: num(pTotTrib.pTotTribFed),
+      pTotTribEst: num(pTotTrib.pTotTribEst),
+      pTotTribMun: num(pTotTrib.pTotTribMun),
+      pTotTribSN: num(totTrib.pTotTribSN),
+    },
+  };
+}
+
+module.exports = { lerNfse, lerDps, lerDanfse };

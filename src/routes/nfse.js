@@ -947,7 +947,9 @@ router.get('/:nid/pdf', requireAuth, async (req, res) => {
     `SELECT pdf_url, provider FROM nfse WHERE id = $1 AND company_id = $2`,
     [req.params.nid, req.params.id]
   );
-  // Emissor nacional: DANFSe direto do ADN (mTLS com o A1), repassado aqui.
+  // Emissor nacional: DANFSe do ADN (mTLS com o A1), repassado aqui; se o
+  // ADN não entrega (503, timeout), o PDF gerado pela Aura do XML autorizado
+  // (nfseNacional.danfse → danfseLocal). Mesma regra de quem pode ver a nota.
   if (rows[0] && rows[0].provider === 'nacional') {
     try {
       const pdf = await nacional.danfse(db, { companyId: req.params.id, nfseId: req.params.nid });
