@@ -30,27 +30,18 @@ const db      = require('../config/database');
 const TEMPLATE_KINDS = ['photo2d', 'model3d'];
 const TEMPLATE_STATUS = ['draft', 'published', 'archived'];
 const RENDER_KINDS = ['preview', 'hd_2d', 'snapshot_3d', 'turntable_video'];
-const STAFF_DOMAIN = '@getaura.com.br';
-
-// ── Staff check (users.is_staff; fallback domínio interno) ──
+// ── Staff check: só users.is_staff (utils/equipeAura) ──
+// O domínio do e-mail não conta. Sem a coluna, ninguém é equipe.
 let staffColMissing = false; // cache module-level (padrão CLAUDE.md)
 async function isStaff(userId) {
-  if (!userId) return false;
+  if (!userId || staffColMissing) return false;
   try {
-    const { rows } = await db.query(
-      staffColMissing
-        ? 'SELECT email FROM users WHERE id = $1'
-        : 'SELECT email, is_staff FROM users WHERE id = $1',
-      [userId]
-    );
-    if (!rows.length) return false;
-    const u = rows[0];
-    if (u.is_staff === true) return true;
-    return typeof u.email === 'string' && u.email.toLowerCase().endsWith(STAFF_DOMAIN);
+    const { rows } = await db.query('SELECT is_staff FROM users WHERE id = $1', [userId]);
+    return !!rows.length && rows[0].is_staff === true;
   } catch (e) {
-    if (e.code === '42703' && !staffColMissing) {
+    if (e.code === '42703') {
       staffColMissing = true;
-      return isStaff(userId);
+      return false;
     }
     throw e;
   }

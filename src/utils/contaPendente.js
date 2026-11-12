@@ -15,8 +15,8 @@
 //   o DONO da empresa (companies.owner_id)
 //     - tem users.email_verified diferente de true (false ou nulo: o login
 //       trata os dois como "não confirmado");
-//     - não é is_staff;
-//     - não é conta interna (e-mail do dono ou da empresa @getaura.com.br);
+//     - não é is_staff (a equipe vem do banco; o domínio do e-mail não
+//       conta — utils/equipeAura);
 //   e a empresa não é de demonstração/teste (companies.is_sandbox).
 // Empresa sem dono (owner_id nulo) não é pendente.
 //
@@ -29,8 +29,6 @@
 // contagens e e-mails voltam a incluir as contas pendentes de uma vez.
 // ============================================================
 'use strict';
-
-const DOMINIO_INTERNO = '@getaura.com.br';
 
 // Alias e coluna viram SQL: só identificadores simples entram.
 const IDENT = /^[a-z_][a-z0-9_]*(\.[a-z_][a-z0-9_]*)?$/i;
@@ -48,12 +46,10 @@ function ident(v, nome) {
 function sqlContaPendente(alias = 'companies') {
   const c = ident(alias, 'alias');
   return `(${c}.is_sandbox IS NOT TRUE`
-    + ` AND lower(COALESCE(${c}.email, '')) NOT LIKE '%${DOMINIO_INTERNO}'`
     + ` AND EXISTS (SELECT 1 FROM users pend_dono`
     + ` WHERE pend_dono.id = ${c}.owner_id`
     + ` AND pend_dono.email_verified IS NOT TRUE`
-    + ` AND pend_dono.is_staff IS NOT TRUE`
-    + ` AND lower(COALESCE(pend_dono.email, '')) NOT LIKE '%${DOMINIO_INTERNO}'))`;
+    + ` AND pend_dono.is_staff IS NOT TRUE))`;
 }
 
 /** Verdadeiro para a empresa que NÃO está pendente (a que conta). */
@@ -84,8 +80,6 @@ function usuarioSemPendente(alias = 'u') {
   return `NOT ${usuarioPendente(alias)}`;
 }
 
-const interno = (email) => String(email || '').trim().toLowerCase().endsWith(DOMINIO_INTERNO);
-
 /**
  * A mesma regra em JS, para quem já leu a linha. Campos:
  *   email_verified, is_staff, owner_email (users) e
@@ -97,12 +91,10 @@ function ehContaPendente(r) {
   if (!r || r.tem_dono === false) return false;
   if (r.is_sandbox === true) return false;
   if (r.is_staff === true) return false;
-  if (interno(r.owner_email) || interno(r.company_email)) return false;
   return r.email_verified !== true;
 }
 
 module.exports = {
-  DOMINIO_INTERNO,
   sqlContaPendente,
   semPendente,
   companyIdSemPendente,

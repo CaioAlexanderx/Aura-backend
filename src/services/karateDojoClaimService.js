@@ -212,12 +212,13 @@ async function completeClaim({ token, name, password }) {
       userId = existing.rows[0].id;
     } else {
       const passwordHash = await bcrypt.hash(String(password), 12); // = auth.js
-      const isStaff = emailNorm.endsWith('@getaura.com.br');
+      // Conta nova nasce fora da equipe (is_staff = false), como no cadastro
+      // (utils/equipeAura): o dominio do e-mail nao marca equipe.
       const created = await client.query(
         `INSERT INTO users (full_name, email, password_hash, role, is_staff)
-         VALUES ($1, $2, $3, 'client', $4)
+         VALUES ($1, $2, $3, 'client', false)
          RETURNING id`,
-        [String(name).trim(), emailNorm, passwordHash, isStaff]
+        [String(name).trim(), emailNorm, passwordHash]
       );
       userId = created.rows[0].id;
       createdUser = true;

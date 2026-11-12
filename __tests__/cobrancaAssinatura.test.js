@@ -67,7 +67,6 @@ describe('recibo (2.7)', () => {
 
   test.each([
     ['conta interna (is_staff)', {}, { is_staff: true }],
-    ['e-mail @getaura.com.br', {}, { email: 'caio@getaura.com.br' }],
     ['empresa sandbox', { is_sandbox: true }, {}],
     ['empresa inativa', { is_active: false }, {}],
     ['dojô do Karatê', { vertical: 'karate_dojo' }, {}],
@@ -78,6 +77,14 @@ describe('recibo (2.7)', () => {
     const r = await evento(db, enviar, 'PAYMENT_RECEIVED', pagamento());
     expect(enviados).toHaveLength(0);
     expect(r.email).toBe('fora');
+  });
+
+  test('e-mail do domínio da Aura sem is_staff: recebe como qualquer cliente', async () => {
+    const db = banco({}, { email: 'pessoa@getaura.com.br' });
+    const { enviar, enviados } = criarEnvio();
+    await evento(db, enviar, 'PAYMENT_RECEIVED', pagamento());
+    expect(enviados).toHaveLength(1);
+    expect(enviados[0].to).toBe('pessoa@getaura.com.br');
   });
 
   test('pagamento antigo (evento atrasado/reenviado de semanas atrás): sem recibo', async () => {

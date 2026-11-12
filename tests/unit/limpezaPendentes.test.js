@@ -27,6 +27,11 @@ describe('avaliar: quem é desativado', () => {
     expect(avaliar({})).toEqual({ desativar: true, motivo: null });
   });
 
+  test('e-mail do domínio da Aura sem is_staff: desativa como qualquer pendente', () => {
+    expect(avaliar({ owner_email: 'pessoa@getaura.com.br' })).toEqual({ desativar: true, motivo: null });
+    expect(avaliar({ company_email: 'loja@getaura.com.br' })).toEqual({ desativar: true, motivo: null });
+  });
+
   test.each([
     [{ tem_venda: true }, 'tem_venda'],
     [{ tem_pagamento: true }, 'tem_pagamento'],
@@ -35,7 +40,6 @@ describe('avaliar: quem é desativado', () => {
     [{ is_sandbox: true }, 'nao_pendente'],
     [{ is_staff: true }, 'nao_pendente'],
     [{ email_verified: true }, 'nao_pendente'],
-    [{ owner_email: 'caio@getaura.com.br' }, 'nao_pendente'],
     [{ vertical: 'karate_dojo' }, 'karate'],
     [{ vertical_active: 'karate_federation' }, 'karate'],
     [{ federation_id: 'f1' }, 'karate'],
