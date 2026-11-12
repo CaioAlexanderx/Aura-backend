@@ -66,6 +66,10 @@ app.use(helmet({
   hsts: { maxAge: 31536000, includeSubDomains: true, preload: true },
   noSniff: true,
   frameguard: { action: 'deny' },
+  // RA-02 (12/11/2026): NUNCA no-referrer. O playbook da Asaas (Recebe na
+  // Aura) proibe: a Asaas confere pelo Referer de onde vem o selo dela. Esta
+  // politica manda so a origem para outro site (nunca caminho nem query, que
+  // podem ter token) e nada em http. Teste: __tests__/referrerPolicy.test.js.
   referrerPolicy: { policy: 'strict-origin-when-cross-origin' },
   xssFilter: false,
   permittedCrossDomainPolicies: { permittedPolicies: 'none' },
