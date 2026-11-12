@@ -99,6 +99,8 @@ const { normalizarTelefone } = require('../utils/telefone');
 const nfseAutomatica = require('../services/nfseAutomatica');
 // 10/11/2026 (migration 440): tomador da NFS-e (nfse_tomador) gravado na venda.
 const nfseAutomaticaRepo = require('../services/nfseAutomaticaRepo');
+// 12/11/2026: prazo do vale-troca da loja da venda (pdv_settings).
+const { prazoDoValeEmDias } = require('../utils/valeTrocaPrazo');
 
 const fmt = (v) => parseFloat(v || 0).toFixed(2);
 const SP_DATE_NOW = "(NOW() AT TIME ZONE 'America/Sao_Paulo')::date";
@@ -1255,6 +1257,10 @@ router.post('/troca/:trocaSaleId/reemitir-fiscal', async (req, res) => {
 // 19/06/2026: removido o filtro type='sale' -> uma troca nao-cancelada agora e
 // origem elegivel (cliente troca de novo um item recebido em troca anterior).
 // origin_type/is_troca_origin alimentam o aviso na UI.
+// 12/11/2026: cada venda traz `vale_troca_prazo_dias` -- o prazo do vale-troca
+// da loja QUE VENDEU (pdv_settings.vale_troca_prazo_dias, 1-365, ausente = 30).
+// No grupo multi-CNPJ a venda pode ser de outra filial, e o app nao le o
+// pdv_settings dela. Campo novo, nada renomeado; pedido da loja online nao traz.
 router.get('/sales-for-troca', async (req, res) => {
   const { q, customer_id, order_number, nfce_chave, days=90, limit=50 } = req.query;
   const winDays = Math.max(1, Math.min(parseInt(days,10)||90, 365));
@@ -1298,6 +1304,7 @@ router.get('/sales-for-troca', async (req, res) => {
               COALESCE(s.type,'sale') AS origin_type,
               (COALESCE(s.type,'sale')='troca') AS is_troca_origin,
               EXISTS (SELECT 1 FROM nfce_emissions nf WHERE nf.sale_id=s.id AND nf.tipo='nfce' AND nf.status='autorizada') AS has_nfce,
+              MAX(comp.pdv_settings->>'vale_troca_prazo_dias') AS vale_troca_prazo_raw,
               COUNT(si.id) AS item_count,
               COALESCE(json_agg(json_build_object(
                 'product_id',si.product_id,'variant_id',si.variant_id,
@@ -1315,6 +1322,10 @@ router.get('/sales-for-troca', async (req, res) => {
         ORDER BY s.created_at DESC LIMIT ${lim}`,
       vals
     );
+    for (const r of rows) {
+      r.vale_troca_prazo_dias = prazoDoValeEmDias(r.vale_troca_prazo_raw);
+      delete r.vale_troca_prazo_raw;
+    }
     // 27/10/2026: pedidos elegiveis da loja online entram na mesma lista
     // (origin_kind='digital_order'). Best-effort: falha nao derruba a busca.
     res.json(await juntarComPedidos(rows, () => buscarPedidosParaTroca(db, req.params.id, {
