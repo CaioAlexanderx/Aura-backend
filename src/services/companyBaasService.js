@@ -31,13 +31,25 @@
 // é por cliente (notificationDisabled, o mesmo que o pixAutomatico usa). A
 // subconta nasce com customer_notifications_disabled = true e todo cliente
 // criado nela deve sair de buildSubaccountCustomerPayload (RA-07).
+//
+// SITUAÇÃO EM 4 BLOCOS (RA-06, 12/11/2026, migration 447): a Asaas devolve a
+// situação cadastral da subconta em quatro blocos (GET /v3/myAccount/status/
+// com a chave DA SUBCONTA, e o mesmo objeto `accountStatus` nos eventos
+// ACCOUNT_STATUS_*): commercialInfo, documentation, bankAccountInfo e
+// general, cada um PENDING | AWAITING_APPROVAL | APPROVED | REJECTED. O
+// retrato fica em account_status (+ account_status_at). Retrato mais velho
+// nunca sobrescreve um mais novo, e o status resumido só avança
+// (shouldApplyStatus, o mesmo do dojô). Sem a coluna (447 pendente) a leitura
+// volta sem os blocos e a gravação responde 503 SCHEMA_PENDING.
 // ============================================================
 'use strict';
 
 const db = require('../config/database');
 const asaasClient = require('./asaasClient');
-const { encrypt } = require('./dojoBaasCrypto');
-const { svcError, flagOn, str, maskWallet, validateKyc, buildAccountPayload } = require('./baasShared');
+const { encrypt, decrypt } = require('./dojoBaasCrypto');
+const {
+  svcError, flagOn, str, maskWallet, validateKyc, buildAccountPayload, shouldApplyStatus,
+} = require('./baasShared');
 
 // Nome comercial em UM lugar só: a Asaas pode não aceitar este nome e ele
 // teria de mudar sem caçar texto pelo código.
@@ -55,6 +67,15 @@ const PJ_COMPANY_TYPES = ['LIMITED', 'INDIVIDUAL', 'ASSOCIATION'];
 const CUSTOMER_NOTIFICATIONS_DISABLED = true;
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+// RA-06: os quatro blocos, na ordem da tela. `field` é o nome da Asaas.
+const STATUS_BLOCKS = [
+  { key: 'dados_comerciais', field: 'commercialInfo' },
+  { key: 'documentos', field: 'documentation' },
+  { key: 'dados_bancarios', field: 'bankAccountInfo' },
+  { key: 'geral', field: 'general' },
+];
+const BLOCK_STATUSES = ['PENDING', 'AWAITING_APPROVAL', 'APPROVED', 'REJECTED'];
 
 function isEnabled() {
   return flagOn(FLAG_ENV);
@@ -110,6 +131,34 @@ function buildSubaccountCustomerPayload(customer) {
 }
 
 // O que a API devolve. Nunca a apiKey; a wallet sai mascarada.
+// Só os quatro campos conhecidos, só com valor do enum da Asaas. Nada
+// além disso entra no banco nem sai na resposta. null = nada aproveitável.
+function normalizeAccountStatus(raw) {
+  if (!raw || typeof raw !== 'object') return null;
+  const out = {};
+  let algum = false;
+  for (const b of STATUS_BLOCKS) {
+    const v = str(raw[b.field]).toUpperCase();
+    out[b.field] = BLOCK_STATUSES.includes(v) ? v : null;
+    if (out[b.field]) algum = true;
+  }
+  return algum ? out : null;
+}
+
+// Status resumido (coluna status) a partir dos blocos.
+function summaryFromBlocks(st) {
+  if (!st) return null;
+  if (st.general === 'APPROVED') return 'approved';
+  if (st.general === 'REJECTED') return 'rejected';
+  if (st.documentation === 'PENDING' || st.documentation === 'REJECTED') return 'docs_pending';
+  return 'under_review';
+}
+
+function shapeBlocks(row) {
+  const st = row ? normalizeAccountStatus(row.account_status) : null;
+  return STATUS_BLOCKS.map((b) => ({ key: b.key, status: st ? st[b.field] : null }));
+}
+
 function shape(row) {
   if (!row) {
     return {
@@ -119,6 +168,8 @@ function shape(row) {
       holder_type: null,
       onboarding_url: null,
       account: null,
+      blocks: null,
+      blocks_updated_at: null,
       created_at: null,
     };
   }
@@ -135,13 +186,34 @@ function shape(row) {
       account_digit: row.account_digit || null,
       wallet_id_masked: maskWallet(row.wallet_id),
     } : null,
+    blocks: shapeBlocks(row),
+    blocks_updated_at: row.account_status_at || null,
     created_at: row.created_at || null,
   };
 }
 
 const SELECT_COLS = `status, holder_type, onboarding_url, agency, account, account_digit, wallet_id, created_at`;
 
+// RA-06 (migration 447). Fora do RETURNING da criação de propósito: se a
+// coluna faltar, a criação da subconta não pode falhar depois de a Asaas já
+// ter criado a conta.
+const STATUS_COLS = `account_status, account_status_at`;
+let _temColunasDeStatus = null; // null = não sabe; false = 447 pendente
+
 async function loadRow(companyId) {
+  if (_temColunasDeStatus !== false) {
+    try {
+      const { rows } = await db.query(
+        `SELECT ${SELECT_COLS}, ${STATUS_COLS} FROM company_baas_accounts WHERE company_id = $1 LIMIT 1`,
+        [companyId]
+      );
+      _temColunasDeStatus = true;
+      return rows[0] || null;
+    } catch (e) {
+      if (!(e && e.code === '42703')) throw e;
+      _temColunasDeStatus = false;
+    }
+  }
   const { rows } = await db.query(
     `SELECT ${SELECT_COLS} FROM company_baas_accounts WHERE company_id = $1 LIMIT 1`,
     [companyId]
@@ -244,6 +316,90 @@ async function createAccount(companyId, body, opts = {}) {
   return { created: true, ...shape(rows[0] || null) };
 }
 
+// ── Situação em 4 blocos (RA-06; o RA-07 grava pelos avisos) ──
+// Grava o retrato dos quatro blocos. `at` = de quando é o retrato. Não
+// sobrescreve retrato mais novo (WHERE no próprio UPDATE, contra corrida) e
+// o status resumido só muda se avançar (shouldApplyStatus).
+async function saveAccountStatus(companyId, raw, at) {
+  const st = normalizeAccountStatus(raw);
+  if (!st) return { changed: false, reason: 'sem_blocos' };
+  const quando = at instanceof Date && !Number.isNaN(at.getTime()) ? at : new Date();
+
+  let cur;
+  try {
+    const { rows } = await db.query(
+      `SELECT status FROM company_baas_accounts WHERE company_id = $1 LIMIT 1`,
+      [companyId]
+    );
+    cur = rows[0] || null;
+  } catch (e) {
+    if (e && e.code === '42P01') throw schemaPendente();
+    throw e;
+  }
+  if (!cur) return { changed: false, reason: 'sem_subconta' };
+
+  const resumo = summaryFromBlocks(st);
+  const novoStatus = shouldApplyStatus(cur.status, resumo) ? resumo : cur.status;
+  try {
+    const { rows } = await db.query(
+      `UPDATE company_baas_accounts
+          SET account_status = $2::jsonb, account_status_at = $3, status = $4, updated_at = now()
+        WHERE company_id = $1
+          AND (account_status_at IS NULL OR account_status_at <= $3)
+        RETURNING status`,
+      [companyId, JSON.stringify(st), quando.toISOString(), novoStatus]
+    );
+    if (!rows[0]) return { changed: false, reason: 'retrato_mais_velho' };
+    return { changed: true, status: rows[0].status, blocks: st };
+  } catch (e) {
+    if (e && e.code === '42703') {
+      _temColunasDeStatus = false;
+      throw svcError(503, 'SCHEMA_PENDING', `O ${RECEBE_NA_AURA_NAME} ainda não está disponível (migration 447 pendente).`);
+    }
+    throw e;
+  }
+}
+
+// Lê a situação na Asaas com a chave DA SUBCONTA e grava. Nunca loga a
+// chave nem o corpo da resposta.
+async function refreshStatus(companyId) {
+  if (!isEnabled()) throw indisponivel();
+  let row;
+  try {
+    const { rows } = await db.query(
+      `SELECT status, api_key_enc FROM company_baas_accounts WHERE company_id = $1 LIMIT 1`,
+      [companyId]
+    );
+    row = rows[0] || null;
+  } catch (e) {
+    if (e && e.code === '42P01') throw schemaPendente();
+    throw e;
+  }
+  if (!row) throw svcError(404, 'RECEBE_SEM_SUBCONTA', `Esta empresa ainda não ativou o ${RECEBE_NA_AURA_NAME}.`);
+  if (!row.api_key_enc) {
+    throw svcError(409, 'RECEBE_EM_CONFERENCIA', `A conta do ${RECEBE_NA_AURA_NAME} está em conferência pela equipe da Aura.`);
+  }
+
+  let apiKey;
+  try {
+    apiKey = decrypt(row.api_key_enc);
+  } catch (e) {
+    console.error('[companyBaas] não deu para decifrar a chave da subconta:', e && e.message);
+    throw svcError(500, 'INTERNAL_ERROR', 'Erro interno');
+  }
+
+  let resp;
+  try {
+    resp = await asaasClient.asaasRequest('GET', '/myAccount/status/', null, apiKey);
+  } catch (e) {
+    console.error(`[companyBaas] falha ao ler a situação na Asaas (status ${e && e.asaasStatus ? e.asaasStatus : 'sem resposta'}):`, e && e.message);
+    throw svcError(502, 'RECEBE_ASAAS_INDISPONIVEL',
+      'Não deu para consultar a Asaas agora. Tente de novo em alguns minutos.');
+  }
+  await saveAccountStatus(companyId, resp, new Date());
+  return shape(await loadRow(companyId));
+}
+
 module.exports = {
   RECEBE_NA_AURA_NAME,
   FLAG_ENV,
@@ -253,8 +409,15 @@ module.exports = {
   isEnabled,
   getStatus,
   createAccount,
+  refreshStatus,
+  saveAccountStatus,
   buildSubaccountCustomerPayload,
+  STATUS_BLOCKS,
+  BLOCK_STATUSES,
   // exportados p/ teste
   validateHolder,
   normalizeHolderType,
+  normalizeAccountStatus,
+  summaryFromBlocks,
+  _resetCacheDeColunas: () => { _temColunasDeStatus = null; },
 };

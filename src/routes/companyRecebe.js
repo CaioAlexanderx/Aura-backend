@@ -1,7 +1,10 @@
 // ============================================================
 // AURA. — Recebe na Aura: rotas da subconta da empresa (RA-05, 10/11/2026)
 //
-//   GET  /companies/:id/recebe/status      status da subconta desta empresa
+//   GET  /companies/:id/recebe/status      status da subconta desta empresa,
+//          com a situação nos 4 blocos (RA-06): blocks[{key, status}]
+//   POST /companies/:id/recebe/status/atualizar  lê a situação na Asaas com a
+//          chave da subconta e grava (RA-06)
 //   POST /companies/:id/recebe/onboarding  cria a subconta (idempotente)
 //          body: dados do titular + holder_type ('PJ' padrão | 'PF' | 'MEI')
 //
@@ -51,6 +54,14 @@ router.get('/status', async (req, res) => {
     return res.json(await svc.getStatus(req.params.id));
   } catch (e) {
     return sendError(res, e, 'status');
+  }
+});
+
+router.post('/status/atualizar', async (req, res) => {
+  try {
+    return res.json(await svc.refreshStatus(req.params.id));
+  } catch (e) {
+    return sendError(res, e, 'status/atualizar');
   }
 });
 
