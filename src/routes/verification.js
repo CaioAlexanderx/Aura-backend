@@ -33,6 +33,7 @@ const relacionamento = require('../services/relacionamento');
 const limpezaPendentes = require('../services/limpezaPendentes');
 const { contextoDaRequisicao } = require('../middleware/auditLog');
 const { porUsuario: limitePorUsuario } = require('../middleware/limiteCorrigirEmail');
+const equipeAura = require('../utils/equipeAura');
 
 const env = validateRuntimeEnv();
 const API_URL = env.API_URL;
@@ -249,6 +250,7 @@ router.post('/verify-email', requireAuth, async (req, res) => {
     );
     console.log(`[verify] Email confirmed via OTP for user ${req.user.id}`);
     const reabertas = await reabrirSeDesativada(confirmou, req.user.id);
+    await equipeAura.promoverSeDaLista(db, req.user.id);
     aoConfirmar(confirmou, req.user.id);
     res.json({ valid: true, email_verified: true, ...(reabertas.length ? { empresa_reativada: true } : {}) });
   } catch (err) {
@@ -285,6 +287,7 @@ router.get('/confirm-email/:token', async (req, res) => {
 
     console.log(`[verify] Email confirmed for user ${vc.user_id} (${vc.full_name})`);
     await reabrirSeDesativada(confirmou, vc.user_id);
+    await equipeAura.promoverSeDaLista(db, vc.user_id);
     aoConfirmar(confirmou, vc.user_id);
     res.redirect(`${APP_URL}/?email_verified=true`);
   } catch (err) {
@@ -317,8 +320,9 @@ router.get('/confirm-email/:token', async (req, res) => {
 // por usuario (limitePorUsuario abaixo, antes do handler).
 const EMAIL_MAX = 254;
 const EMAIL_RE = /^[^\s@]+@[^\s@.]+(\.[^\s@.]+)+$/;
-// Conta interna (@getaura.com.br) ganha is_staff no cadastro e nao passa
-// pela confirmacao; nao se chega nela trocando o e-mail de conta comum.
+// Endereco do dominio da Aura fica reservado para a equipe: nao se troca o
+// e-mail de uma conta comum para ele por aqui. (O dominio nao da is_staff;
+// ver utils/equipeAura.)
 const DOMINIO_INTERNO = '@getaura.com.br';
 
 function normalizarEmail(bruto) {

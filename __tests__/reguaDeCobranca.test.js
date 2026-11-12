@@ -137,7 +137,7 @@ describe('lembretes (tq-77)', () => {
   });
 
   test('conta interna e sandbox: nada', async () => {
-    for (const cfg of [{ usuario: { is_staff: true } }, { empresa: { is_sandbox: true } }, { usuario: { email: 'x@getaura.com.br' } }]) {
+    for (const cfg of [{ usuario: { is_staff: true } }, { empresa: { is_sandbox: true } }, { usuario: { email: 'x@getaura.com.br', is_staff: true } }]) {
       const db = banco({ ...cfg, cobrancas: [cobranca()] });
       expect((await rodar(db, asaasCom({ pagamentos: { pay_1: pg() } }), '2026-11-18')).enviados).toHaveLength(0);
     }

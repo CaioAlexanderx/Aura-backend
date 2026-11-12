@@ -250,7 +250,7 @@ describe('aviso de assinatura cancelada (tq-79)', () => {
     ['migração para o Pix Automático (assinatura antiga da autorização)', { pixAuto: true }, 'pela_aura'],
     ['a empresa já aponta para outra assinatura', { linha: { assinatura_atual: 'sub_2' } }, 'nao_era_a_atual'],
     ['coluna zerada sem ser o cliente no app', { linha: { assinatura_atual: null } }, 'nao_era_a_atual'],
-    ['conta interna', { dono: { user_email: 'caio@getaura.com.br' } }, 'fora'],
+    ['conta da equipe (is_staff)', { dono: { user_email: 'equipe@getaura.com.br', is_staff: true } }, 'fora'],
   ])('%s: não avisa', async (_, opts, resultado) => {
     const { db, decisoes } = cenario(opts);
     const enviarMail = jest.fn();

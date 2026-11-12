@@ -185,7 +185,7 @@ function dojoGateEnabled() {
 // GET /billing/karate-gate para company vertical karate_dojo. Responde no
 // formato do plano dojô (required/plan/amount/seats/seat_amount/total/...).
 // required=true SÓ com a flag ligada E billing inativo/atrasado E trial
-// expirado E sem bypass de conta interna. is_staff (@getaura) NUNCA é gated
+// expirado E sem bypass de conta interna. is_staff (equipe, do banco) NUNCA é gated
 // — mesmo espírito do gate da federação, que também não gateia conta interna.
 // amount vem de billingPricing (fonte única) — mudar o preço lá reflete aqui.
 function karateDojoGate(c, res) {
@@ -198,7 +198,7 @@ function karateDojoGate(c, res) {
   const trialActive = c.trial_ends_at && new Date(c.trial_ends_at) > now;
   const active = c.billing_status === 'active';
   const overdue = c.billing_status === 'overdue';
-  const isStaff = c.is_staff === true; // conta interna @getaura — nunca gated
+  const isStaff = c.is_staff === true; // equipe Aura (users.is_staff) — nunca gated
 
   let required = false;
   if (dojoGateEnabled() && !isStaff) {

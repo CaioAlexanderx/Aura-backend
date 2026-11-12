@@ -99,14 +99,13 @@ beforeEach(() => {
 });
 
 describe('utils/contaPendente: a definição única', () => {
-  test('fragmento: dono não confirmado, sem staff, fora interna e sandbox', () => {
+  test('fragmento: dono não confirmado, sem staff e fora sandbox (domínio do e-mail não conta)', () => {
     const f = cp.sqlContaPendente('c');
     expect(f).toMatch(/c\.is_sandbox IS NOT TRUE/);
-    expect(f).toMatch(/lower\(COALESCE\(c\.email, ''\)\) NOT LIKE '%@getaura\.com\.br'/);
+    expect(f).not.toMatch(/getaura/);
     expect(f).toMatch(/pend_dono\.id = c\.owner_id/);
     expect(f).toMatch(/pend_dono\.email_verified IS NOT TRUE/);
     expect(f).toMatch(/pend_dono\.is_staff IS NOT TRUE/);
-    expect(f).toMatch(/lower\(COALESCE\(pend_dono\.email, ''\)\) NOT LIKE '%@getaura\.com\.br'/);
     expect(cp.semPendente('c')).toBe(`NOT ${f}`);
     // sem alias: a tabela pelo nome (consultas `FROM companies` sem alias)
     expect(cp.semPendente()).toMatch(/pend_dono\.id = companies\.owner_id/);
@@ -127,8 +126,9 @@ describe('utils/contaPendente: a definição única', () => {
     expect(cp.ehContaPendente({ ...p, email_verified: true })).toBe(false);
     expect(cp.ehContaPendente({ ...p, is_staff: true })).toBe(false);
     expect(cp.ehContaPendente({ ...p, is_sandbox: true })).toBe(false);
-    expect(cp.ehContaPendente({ ...p, owner_email: 'x@getaura.com.br' })).toBe(false);
-    expect(cp.ehContaPendente({ ...p, company_email: 'LOJA@GETAURA.COM.BR' })).toBe(false);
+    // e-mail do domínio da Aura sem is_staff: pendente como qualquer outra
+    expect(cp.ehContaPendente({ ...p, owner_email: 'x@getaura.com.br' })).toBe(true);
+    expect(cp.ehContaPendente({ ...p, company_email: 'LOJA@GETAURA.COM.BR' })).toBe(true);
     expect(cp.ehContaPendente({ ...p, tem_dono: false })).toBe(false);
   });
 });

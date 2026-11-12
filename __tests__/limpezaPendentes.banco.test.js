@@ -6,7 +6,7 @@
 // empresa desativada (nunca apagada). Confirmar o e-mail depois reabre.
 // O que este arquivo cobre, com o SQL de verdade:
 //   1. o job desativa SÓ a pendente com mais de 7 dias, sem venda, sem
-//      pagamento, sem assinatura, fora Karatê/sandbox/interna e única
+//      pagamento, sem assinatura, fora Karatê/sandbox/equipe e única
 //      empresa do dono;
 //   2. o lead: criado a partir do usuário quando falta; o que já existe
 //      ganha o motivo; audit_log por empresa;
@@ -70,7 +70,8 @@ const C = {
   ativa: caso('ativa', { empresa: { billing_status: 'active' } }),
   sandbox: caso('sandbox', { empresa: { is_sandbox: true } }),
   staff: caso('staff', { staff: true }),
-  interna: caso('interna', { email: `interna-${tag}@getaura.com.br` }),
+  // e-mail do domínio da Aura sem is_staff: pendente como qualquer outra
+  dominio: caso('dominio', { email: `dominio-${tag}@getaura.com.br` }),
   dojo: caso('dojo', { empresa: { vertical: 'karate_dojo' } }),
   duasLojas: caso('duaslojas'),
   manual: caso('manual'),                                     // desativada à mão: nunca reabre
@@ -180,15 +181,15 @@ describe('antes da limpeza: a definição única no Postgres', () => {
     );
     const pendentes = rows.map((r) => r.id).sort();
     const esperadas = [C.alvo, C.comLead, C.recente, C.comVenda, C.comCobranca, C.comEvento,
-      C.comAssinatura, C.ativa, C.dojo, C.duasLojas, C.manual].map((c) => c.company).sort();
-    // fora: confirmado, sandbox, staff e interna
+      C.comAssinatura, C.ativa, C.dojo, C.duasLojas, C.manual, C.dominio].map((c) => c.company).sort();
+    // fora: confirmado, sandbox e staff (o domínio do e-mail não tira ninguém)
     expect(pendentes).toEqual(esperadas);
 
     const { rows: fora } = await client.query(
       `SELECT id FROM companies WHERE id = ANY($1::uuid[]) AND ${cp.semPendente()}`, [todas]
     );
     expect(fora.map((r) => r.id).sort())
-      .toEqual([C.confirmado, C.sandbox, C.staff, C.interna].map((c) => c.company).sort());
+      .toEqual([C.confirmado, C.sandbox, C.staff].map((c) => c.company).sort());
 
     const { rows: u } = await client.query(
       `SELECT u.id FROM users u WHERE u.id = ANY($1::uuid[]) AND ${cp.usuarioPendente('u')}`,
@@ -217,13 +218,13 @@ describe('job de limpeza', () => {
     const resumo = await limpeza.rodarLimpeza({ pool: db, agora: AGORA, env: {} });
     expect(resumo.falhas).toBe(0);
 
-    for (const c of [C.alvo, C.comLead]) {
+    for (const c of [C.alvo, C.comLead, C.dominio]) {
       const e = await empresa(c.company);
       expect({ nome: c.nome, ...e, desativada_em: !!e.desativada_em })
         .toEqual({ nome: c.nome, is_active: false, desativada_por: 'conta_pendente', desativada_em: true });
     }
     for (const c of [C.recente, C.confirmado, C.comVenda, C.comCobranca, C.comEvento, C.comAssinatura,
-      C.ativa, C.sandbox, C.staff, C.interna, C.dojo, C.duasLojas]) {
+      C.ativa, C.sandbox, C.staff, C.dojo, C.duasLojas]) {
       const e = await empresa(c.company);
       expect({ nome: c.nome, is_active: e.is_active, desativada_por: e.desativada_por })
         .toEqual({ nome: c.nome, is_active: true, desativada_por: null });

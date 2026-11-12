@@ -238,8 +238,8 @@ const VERTICAIS_FORA = ['karate_dojo', 'karate_federation'];
 
 /**
  * Quem recebe o e-mail de cobrança da empresa (o dono), ou null quando a
- * empresa fica fora: inativa, sandbox, Karatê/dojô, conta interna (is_staff
- * ou @getaura.com.br) e conta pendente (tq-113: dono nunca confirmou o
+ * empresa fica fora: inativa, sandbox, Karatê/dojô, conta da equipe
+ * (users.is_staff; o domínio do e-mail não conta) e conta pendente (tq-113: dono nunca confirmou o
  * e-mail, utils/contaPendente). Sem e-mail no cadastro: o objeto vem com
  * email null.
  */
@@ -258,8 +258,6 @@ async function destinatarioDaEmpresa(db, companyId) {
   if (c.is_active === false || c.is_sandbox === true) return null;
   if (VERTICAIS_FORA.includes(c.vertical) || VERTICAIS_FORA.includes(c.vertical_active)) return null;
   if (c.is_staff === true) return null;
-  const internos = [c.user_email, c.company_email].filter(Boolean).map((e) => String(e).toLowerCase());
-  if (internos.some((e) => e.trim().endsWith('@getaura.com.br'))) return null;
   // tq-113: conta pendente não recebe e-mail de cobrança. Só decide quando a
   // linha trouxe o dono (user_id) e o campo email_verified.
   if (c.user_id && c.email_verified !== undefined && ehContaPendente({

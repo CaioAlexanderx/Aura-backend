@@ -134,6 +134,7 @@ const { normalizarTelefoneSemRecusar } = require('../utils/telefone');
 const { datasDoAtraso } = require('../services/cobrancaAssinatura');
 const refreshDeSessao = require('../services/refreshDeSessao');
 const { buscarEmpresaComAcesso } = require('../services/empresaComAcesso');
+const equipeAura = require('../utils/equipeAura');
 
 let redis = null;
 try { redis = require('../config/redis').default || require('../config/redis'); } catch (_) {}
@@ -506,7 +507,10 @@ router.post('/register', async (req, res) => {
       codigo: access_code, tipo: codeType, trialDays,
     });
 
-    const isStaff = email.toLowerCase().trim().endsWith('@getaura.com.br');
+    // O cadastro nunca marca equipe: toda conta nova nasce is_staff = false e
+    // passa pela confirmacao do e-mail. Equipe so por fonte explicita
+    // (utils/equipeAura: lista AURA_STAFF_EMAILS + e-mail confirmado).
+    const isStaff = false;
     const password_hash = await bcrypt.hash(password, 12);
 
     // Persiste aceite dos Termos: terms_accepted_at = momento exato do cadastro, terms_version = versao aceita.
@@ -727,7 +731,7 @@ router.post('/register', async (req, res) => {
     // (best-effort — nao bloqueia a resposta). A tela de espera do app
     // reaproveita este envio pela janela de idempotencia de 60s do
     // issueVerification, entao nao ha e-mail duplicado.
-    if (!user.email_verified && !isStaff) {
+    if (!user.email_verified) {
       issueVerification(user.id, user.email, user.name)
         .catch((e) => console.error('[register] verification email falhou:', e.message));
     }
@@ -743,7 +747,7 @@ router.post('/register', async (req, res) => {
       role: user.role,
       plan: company ? company.plan : 'essencial',
       company: company ? company.id : null,
-      is_staff: user.is_staff,
+      is_staff: user.is_staff === true,
       consolidated_view: false,
       federation_id: karateCtx.federation_id,
       karate_role: karateCtx.karate_role,
@@ -757,7 +761,7 @@ router.post('/register', async (req, res) => {
 
     res.status(201).json({
       token: accessToken, refresh_token: refreshToken, token_expires_in: '1h',
-      user: { id: user.id, name: user.name, email: user.email, role: user.role, is_staff: user.is_staff, email_verified: user.email_verified || false },
+      user: { id: user.id, name: user.name, email: user.email, role: user.role, is_staff: user.is_staff === true, email_verified: user.email_verified || false },
       company: company ? {
         ...company,
         module_overrides: company.module_overrides || {},
@@ -869,6 +873,13 @@ router.post('/login', async (req, res) => {
       return res.status(401).json({ error: 'Credenciais invalidas' });
     }
     if (user.totp_enabled) return res.json({ requires_2fa: true, user_id: user.id, message: 'Autenticacao de dois fatores necessaria.' });
+
+    // Equipe: o is_staff do banco vale como esta; a conta da lista
+    // AURA_STAFF_EMAILS com e-mail confirmado e promovida aqui (utils/equipeAura).
+    if (user.is_staff !== true && user.email_verified === true
+        && await equipeAura.promoverSeDaLista(db, user.id, { email: user.email })) {
+      user.is_staff = true;
+    }
 
     const ctx = await resolveDefaultContext(user.id);
     // Track G: contexto karate da primary (null em modo consolidado, alinhado com company=null).
