@@ -296,7 +296,12 @@ router.get('/config', requireAuth, async (req, res) => {
 });
 
 // PUT /config — upsert
-router.put('/config', requireAuth, requireWrite, async (req, res) => {
+//
+// 12/11/2026: o miolo virou salvarConfigNfse(companyId, body) para a Gestão
+// Aura (routes/adminAuraNotas.js, PUT /:companyId/nfse) usar as MESMAS
+// regras do lojista, sem duplicar validação. Devolve { status, json }; erro
+// de cifra (NfseEncryptionKeyError) e de banco sobem para quem chamou.
+async function salvarConfigNfse(companyId, body) {
   const ALLOWED = [
     'provider', 'ambiente',
     'inscricao_municipal', 'regime_tributario', 'regime_especial',
@@ -305,138 +310,143 @@ router.put('/config', requireAuth, requireWrite, async (req, res) => {
     'serie', 'is_active',
   ];
 
-  const body = req.body || {};
+  body = body || {};
   const data = {};
   for (const k of ALLOWED) {
     if (body[k] !== undefined) data[k] = body[k];
   }
 
+  // api_key e secret sao tratados separadamente — cifrados antes de salvar
+  // (sem chave, encrypt lanca e a rota responde 500 controlado)
+  if (body.api_key) data.api_key_encrypted = encrypt(body.api_key);
+  if (body.api_secret) data.api_secret = body.api_secret; // alguns providers nao cifram secret
+  if (body.certificate_url) data.certificate_url = body.certificate_url;
+  if (body.certificate_pwd) data.certificate_pwd = encrypt(body.certificate_pwd);
+
+  // Upsert
+  const existing = await getNfseConfig(companyId);
+
+  // Emissor nacional (09/11/2026): campos próprios, validados; ambiente só
+  // 'producao_restrita' | 'producao'. O certificado é o A1 do cofre da
+  // empresa (POST /fiscal-certificate) — URL/senha soltas aqui não servem.
+  const providerFinal = data.provider !== undefined ? data.provider : (existing && existing.provider);
+  const temCampoNacional = NACIONAL_CAMPOS.some((k) => body[k] !== undefined);
+  if (providerFinal === 'nacional' || temCampoNacional) {
+    const camposNac = {};
+    for (const k of NACIONAL_CAMPOS) if (body[k] !== undefined) camposNac[k] = body[k];
+    if (providerFinal === 'nacional') {
+      if (body.ambiente !== undefined) camposNac.ambiente = body.ambiente;
+      if (body.serie !== undefined) camposNac.serie = body.serie;
+      // alíquota padrão do ISS: já estava em ALLOWED (sem validar); no
+      // nacional ela é o último degrau da precedência nota → item → empresa,
+      // então passa pela mesma régua do cadastro do item (0 a 5).
+      if (body.default_iss_rate !== undefined) camposNac.default_iss_rate = body.default_iss_rate;
+      if (body.inscricao_municipal !== undefined) camposNac.inscricao_municipal = body.inscricao_municipal;
+      if (body.certificate_url || body.certificate_pwd) {
+        return { status: 400, json: {
+          error: 'No emissor nacional o certificado é o A1 da empresa: envie o arquivo .pfx em Configurações > Nota Fiscal.',
+          code: 'CERTIFICADO',
+        } };
+      }
+    }
+    const { data: nac, erros } = validarCamposNacional(camposNac);
+    if (erros.length) return { status: 400, json: { error: erros.join(' '), code: 'INVALID_INPUT', detalhes: erros } };
+    Object.assign(data, nac);
+    // alíquota do ISSQN retido: só com cliente que retém e ME/EPP do Simples
+    const errosRet = validarRetencao(existing, data);
+    if (errosRet.length) return { status: 400, json: { error: errosRet.join(' '), code: 'INVALID_INPUT', detalhes: errosRet } };
+    if (providerFinal === 'nacional' && body.serie_confirmada === true) {
+      data.serie_confirmada_em = new Date();
+      // App anterior à migration 443 (não manda outro_emissor): quem
+      // informou o último número da série ("continuar de onde parou")
+      // respondeu que já emite por outro emissor nesta mesma série.
+      if (body.outro_emissor === undefined && data.next_dps_number > 1) {
+        data.outro_emissor = true;
+        data.outro_emissor_serie = normalizarSerie(data.serie || (existing && existing.serie) || '1');
+        data.outro_emissor_ultimo_numero = data.next_dps_number - 1;
+      }
+    }
+    // série/último número do outro emissor: na mesma série, a Aura continua
+    // a partir do número seguinte
+    const errosOutro = validarOutroEmissor(existing, data);
+    if (errosOutro.length) return { status: 400, json: { error: errosOutro.join(' '), code: 'INVALID_INPUT', detalhes: errosOutro } };
+    // Conflito de numeração (DPS_NUMERO_JA_USADO): só sai quando a loja
+    // confirma a série respondendo sobre o outro emissor ou trocando de série.
+    if (providerFinal === 'nacional' && body.serie_confirmada === true && existing && existing.dps_conflito_em) {
+      const final = { ...existing, ...data };
+      const trocouDeSerie = normalizarSerie(final.serie || '1') !== normalizarSerie(existing.dps_conflito_serie || '');
+      if (final.outro_emissor != null || trocouDeSerie) {
+        data.dps_conflito_em = null;
+        data.dps_conflito_serie = null;
+        data.dps_conflito_numero = null;
+      }
+    }
+    // nunca nasce (nem migra de outro provider) em produção sem pedir
+    if (providerFinal === 'nacional' && (!existing || existing.provider !== 'nacional') && data.ambiente === undefined) {
+      data.ambiente = 'producao_restrita';
+    }
+  }
+
+  // Ligar a NFS-e (migration 441): só com a nota de teste aceita em
+  // produção restrita e os passos obrigatórios prontos. Ligar sem dizer o
+  // ambiente = produção, que continua travada no servidor sem
+  // NFSE_NACIONAL_PRODUCAO.
+  if (providerFinal === 'nacional' && data.is_active === true) {
+    const ambienteFinal = normalizarAmbiente(data.ambiente !== undefined ? data.ambiente
+      : (existing && existing.is_active ? existing.ambiente : 'producao'));
+    const jaLigada = existing && existing.is_active === true && normalizarAmbiente(existing.ambiente) === ambienteFinal;
+    if (!jaLigada) {
+      if (data.ambiente === undefined) data.ambiente = ambienteFinal;
+      const final = { ...(existing || {}), ...data, provider: 'nacional' };
+      const v = await nacional.avaliarLigar(db, companyId, final);
+      if (!v.ok) {
+        return { status: 409, json: { error: v.motivos.join(' '), code: 'NAO_PODE_LIGAR', detalhes: v.motivos, passos: v.passos } };
+      }
+      if (ambienteFinal === 'producao' && !producaoHabilitada()) {
+        return { status: 409, json: {
+          error: 'Sua loja está pronta! A Aura está liberando a emissão em produção e avisa você assim que terminar. Nada mudou na sua configuração.',
+          code: 'PRODUCAO_NAO_LIBERADA',
+        } };
+      }
+    }
+  }
+
+  if (existing) {
+    const fields = [];
+    const values = [];
+    let idx = 1;
+    for (const [k, v] of Object.entries(data)) {
+      // a numeração da DPS só anda pra frente (número já usado nunca volta)
+      fields.push(k === 'next_dps_number'
+        ? `next_dps_number = GREATEST(next_dps_number, $${idx++})`
+        : `${k} = $${idx++}`);
+      values.push(v);
+    }
+    if (fields.length === 0) return { status: 400, json: { error: 'Nada pra atualizar' } };
+    values.push(companyId);
+
+    const { rows } = await db.query(
+      `UPDATE nfse_config SET ${fields.join(', ')} WHERE company_id = $${idx} RETURNING id`,
+      values
+    );
+    return { status: 200, json: { ok: true, config_id: rows[0].id } };
+  } else {
+    // Insert
+    data.company_id = companyId;
+    const cols = Object.keys(data);
+    const placeholders = cols.map((_, i) => `$${i + 1}`).join(', ');
+    const { rows } = await db.query(
+      `INSERT INTO nfse_config (${cols.join(', ')}) VALUES (${placeholders}) RETURNING id`,
+      Object.values(data)
+    );
+    return { status: 201, json: { ok: true, config_id: rows[0].id } };
+  }
+}
+
+router.put('/config', requireAuth, requireWrite, async (req, res) => {
   try {
-    // api_key e secret sao tratados separadamente — cifrados antes de salvar
-    // (dentro do try: sem chave, encrypt lanca e a rota responde 500 controlado)
-    if (body.api_key) data.api_key_encrypted = encrypt(body.api_key);
-    if (body.api_secret) data.api_secret = body.api_secret; // alguns providers nao cifram secret
-    if (body.certificate_url) data.certificate_url = body.certificate_url;
-    if (body.certificate_pwd) data.certificate_pwd = encrypt(body.certificate_pwd);
-
-    // Upsert
-    const existing = await getNfseConfig(req.params.id);
-
-    // Emissor nacional (09/11/2026): campos próprios, validados; ambiente só
-    // 'producao_restrita' | 'producao'. O certificado é o A1 do cofre da
-    // empresa (POST /fiscal-certificate) — URL/senha soltas aqui não servem.
-    const providerFinal = data.provider !== undefined ? data.provider : (existing && existing.provider);
-    const temCampoNacional = NACIONAL_CAMPOS.some((k) => body[k] !== undefined);
-    if (providerFinal === 'nacional' || temCampoNacional) {
-      const camposNac = {};
-      for (const k of NACIONAL_CAMPOS) if (body[k] !== undefined) camposNac[k] = body[k];
-      if (providerFinal === 'nacional') {
-        if (body.ambiente !== undefined) camposNac.ambiente = body.ambiente;
-        if (body.serie !== undefined) camposNac.serie = body.serie;
-        // alíquota padrão do ISS: já estava em ALLOWED (sem validar); no
-        // nacional ela é o último degrau da precedência nota → item → empresa,
-        // então passa pela mesma régua do cadastro do item (0 a 5).
-        if (body.default_iss_rate !== undefined) camposNac.default_iss_rate = body.default_iss_rate;
-        if (body.inscricao_municipal !== undefined) camposNac.inscricao_municipal = body.inscricao_municipal;
-        if (body.certificate_url || body.certificate_pwd) {
-          return res.status(400).json({
-            error: 'No emissor nacional o certificado é o A1 da empresa: envie o arquivo .pfx em Configurações > Nota Fiscal.',
-            code: 'CERTIFICADO',
-          });
-        }
-      }
-      const { data: nac, erros } = validarCamposNacional(camposNac);
-      if (erros.length) return res.status(400).json({ error: erros.join(' '), code: 'INVALID_INPUT', detalhes: erros });
-      Object.assign(data, nac);
-      // alíquota do ISSQN retido: só com cliente que retém e ME/EPP do Simples
-      const errosRet = validarRetencao(existing, data);
-      if (errosRet.length) return res.status(400).json({ error: errosRet.join(' '), code: 'INVALID_INPUT', detalhes: errosRet });
-      if (providerFinal === 'nacional' && body.serie_confirmada === true) {
-        data.serie_confirmada_em = new Date();
-        // App anterior à migration 443 (não manda outro_emissor): quem
-        // informou o último número da série ("continuar de onde parou")
-        // respondeu que já emite por outro emissor nesta mesma série.
-        if (body.outro_emissor === undefined && data.next_dps_number > 1) {
-          data.outro_emissor = true;
-          data.outro_emissor_serie = normalizarSerie(data.serie || (existing && existing.serie) || '1');
-          data.outro_emissor_ultimo_numero = data.next_dps_number - 1;
-        }
-      }
-      // série/último número do outro emissor: na mesma série, a Aura continua
-      // a partir do número seguinte
-      const errosOutro = validarOutroEmissor(existing, data);
-      if (errosOutro.length) return res.status(400).json({ error: errosOutro.join(' '), code: 'INVALID_INPUT', detalhes: errosOutro });
-      // Conflito de numeração (DPS_NUMERO_JA_USADO): só sai quando a loja
-      // confirma a série respondendo sobre o outro emissor ou trocando de série.
-      if (providerFinal === 'nacional' && body.serie_confirmada === true && existing && existing.dps_conflito_em) {
-        const final = { ...existing, ...data };
-        const trocouDeSerie = normalizarSerie(final.serie || '1') !== normalizarSerie(existing.dps_conflito_serie || '');
-        if (final.outro_emissor != null || trocouDeSerie) {
-          data.dps_conflito_em = null;
-          data.dps_conflito_serie = null;
-          data.dps_conflito_numero = null;
-        }
-      }
-      // nunca nasce (nem migra de outro provider) em produção sem pedir
-      if (providerFinal === 'nacional' && (!existing || existing.provider !== 'nacional') && data.ambiente === undefined) {
-        data.ambiente = 'producao_restrita';
-      }
-    }
-
-    // Ligar a NFS-e (migration 441): só com a nota de teste aceita em
-    // produção restrita e os passos obrigatórios prontos. Ligar sem dizer o
-    // ambiente = produção, que continua travada no servidor sem
-    // NFSE_NACIONAL_PRODUCAO.
-    if (providerFinal === 'nacional' && data.is_active === true) {
-      const ambienteFinal = normalizarAmbiente(data.ambiente !== undefined ? data.ambiente
-        : (existing && existing.is_active ? existing.ambiente : 'producao'));
-      const jaLigada = existing && existing.is_active === true && normalizarAmbiente(existing.ambiente) === ambienteFinal;
-      if (!jaLigada) {
-        if (data.ambiente === undefined) data.ambiente = ambienteFinal;
-        const final = { ...(existing || {}), ...data, provider: 'nacional' };
-        const v = await nacional.avaliarLigar(db, req.params.id, final);
-        if (!v.ok) {
-          return res.status(409).json({ error: v.motivos.join(' '), code: 'NAO_PODE_LIGAR', detalhes: v.motivos, passos: v.passos });
-        }
-        if (ambienteFinal === 'producao' && !producaoHabilitada()) {
-          return res.status(409).json({
-            error: 'Sua loja está pronta! A Aura está liberando a emissão em produção e avisa você assim que terminar. Nada mudou na sua configuração.',
-            code: 'PRODUCAO_NAO_LIBERADA',
-          });
-        }
-      }
-    }
-
-    if (existing) {
-      const fields = [];
-      const values = [];
-      let idx = 1;
-      for (const [k, v] of Object.entries(data)) {
-        // a numeração da DPS só anda pra frente (número já usado nunca volta)
-        fields.push(k === 'next_dps_number'
-          ? `next_dps_number = GREATEST(next_dps_number, $${idx++})`
-          : `${k} = $${idx++}`);
-        values.push(v);
-      }
-      if (fields.length === 0) return res.status(400).json({ error: 'Nada pra atualizar' });
-      values.push(req.params.id);
-
-      const { rows } = await db.query(
-        `UPDATE nfse_config SET ${fields.join(', ')} WHERE company_id = $${idx} RETURNING id`,
-        values
-      );
-      return res.json({ ok: true, config_id: rows[0].id });
-    } else {
-      // Insert
-      data.company_id = req.params.id;
-      const cols = Object.keys(data);
-      const placeholders = cols.map((_, i) => `$${i + 1}`).join(', ');
-      const { rows } = await db.query(
-        `INSERT INTO nfse_config (${cols.join(', ')}) VALUES (${placeholders}) RETURNING id`,
-        Object.values(data)
-      );
-      return res.status(201).json({ ok: true, config_id: rows[0].id });
-    }
+    const r = await salvarConfigNfse(req.params.id, req.body);
+    return res.status(r.status).json(r.json);
   } catch (err) {
     if (err instanceof NfseEncryptionKeyError) return sendKeyError(res, 'put config', err);
     console.error('[nfse put config]', err.message);
@@ -992,5 +1002,6 @@ router.get('/:nid/xml', requireAuth, async (req, res) => {
 });
 
 module.exports = router;
+module.exports.salvarConfigNfse = salvarConfigNfse;
 // Exposto para teste (tq-101): sem chave em producao, cifrar/decifrar recusa.
 module.exports._crypto = { encrypt, decrypt, getEncryptionKey, NfseEncryptionKeyError };
