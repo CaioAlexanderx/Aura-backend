@@ -132,6 +132,11 @@ router.use('/products', require('./productsBarcodeGenerate'));
 // p-51 (30/10/2026): reajuste de preco em lote. /price-adjustments e
 // estatico e precisa vir antes do GET /:pid curinga de ./products.
 router.use('/products', require('./productPriceAdjustments'));
+// 12/11/2026 (migration 448): preencher custos em massa (conferencia de
+// estoque). /cost-fills e estatico e precisa vir antes do GET /:pid curinga
+// de ./products. Acesso (editar estoque E ver custo) e 503 da migration sao
+// conferidos dentro do router; o estoque_consulta ja leva 403 acima.
+router.use('/products', require('./productCostFills'));
 // p-84 (08/11/2026, migration 427): promocao em lote De/Por. /promotions e
 // estatico e precisa vir antes do GET /:pid curinga de ./products. O perfil
 // estoque_consulta leva 403 no estoqueSoConsulta acima (escrita e leitura).
