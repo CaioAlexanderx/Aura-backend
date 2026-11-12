@@ -17,6 +17,7 @@
 //   NUMBER: service_fee_pct, food_service_fee_pct,
 //           card_fee_credit_pct, card_fee_debit_pct, card_fee_pix_pct
 //   NUMBER OU NULL (percentual 0-100): card_price_pct
+//   INTEIRO NA FAIXA: vale_troca_prazo_dias (1-365, padrao 30)
 //   STRING (enum) OU NULL: label_size (99x21 | 30x25 | 58mm | 105x21 | 40x25),
 //                          label_design (classico | editorial)
 //   LISTA OU NULL: label_custom_specs (medidas proprias de etiqueta, ate 20)
@@ -31,6 +32,7 @@ const router = require('express').Router({ mergeParams: true });
 const pool = require('../config/database');
 const asyncHandler = require('../utils/asyncHandler');
 const AppError = require('../errors/AppError');
+const valeTrocaPrazo = require('../utils/valeTrocaPrazo');
 
 const ALLOWED_BOOL_KEYS = [
   'require_customer',
@@ -158,6 +160,15 @@ const PCT_KEYS = ['card_fee_credit_pct', 'card_fee_debit_pct', 'card_fee_pix_pct
 const ALLOWED_RANGED_KEYS = {
   label_offset_mm: { min: -8, max: 5 },
   label_cols:      { min: 1,  max: 5, integer: true },
+};
+
+// 12/11/2026 — prazo para troca do vale-troca no cupom, em dias (o cupom
+// imprime "Troca ate" = dia da venda + N). Inteiro de 1 a 365; ausente = 30
+// (utils/valeTrocaPrazo.js). Validacao ESTRITA, diferente das chaves de
+// ALLOWED_RANGED_KEYS (Number(true) === 1 passaria la): boolean, null, texto
+// nao numerico e fracao => 400 e nada e gravado. Texto numerico ("30") vale.
+const ALLOWED_STRICT_INT_KEYS = {
+  vale_troca_prazo_dias: { min: valeTrocaPrazo.PRAZO_MIN_DIAS, max: valeTrocaPrazo.PRAZO_MAX_DIAS, integer: true },
 };
 
 // 15/10/2026 — configuracao de impressao de etiqueta salva na CONTA (pedido
@@ -348,6 +359,9 @@ const DEFAULT_SETTINGS = {
   // 08/11/2026 — desligado por padrao: o vale-troca deixa de sair sozinho no
   // cupom; a lojista liga em Configuracoes se quiser. (Era true desde 13/10.)
   vale_troca_enabled:        false,
+  // 12/11/2026 — prazo do vale-troca em dias (1-365). 30 = padrao para a loja
+  // que nunca escolheu (utils/valeTrocaPrazo.js).
+  vale_troca_prazo_dias:     valeTrocaPrazo.PRAZO_PADRAO_DIAS,
   studio_enabled:            false,
   studio_kds_enabled:        false,
   studio_gallery_enabled:    false,
@@ -498,6 +512,11 @@ function validateSettings(settings) {
       }
       clean[key] = num;
     }
+  }
+
+  // Inteiros com faixa, validacao estrita (12/11/2026 — vale_troca_prazo_dias)
+  for (const key of Object.keys(ALLOWED_STRICT_INT_KEYS)) {
+    if (key in settings) clean[key] = numeroNaFaixa(key, settings[key], ALLOWED_STRICT_INT_KEYS[key]);
   }
 
   // Configuracao de impressao de etiqueta (15/10/2026)
