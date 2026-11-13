@@ -471,7 +471,9 @@ describe('item compartilhado do grupo (is_group_shared)', () => {
       return base(sql, params);
     });
     const res = await emitir({
-      items: [{ product_id: 'nao-e-uuid', product_name: 'X', quantity: 1, unit_price: 10 }],
+      // 13/11/2026: id que nao e UUID nem vai mais para a busca
+      // (descontoDaVendaNaNfce.ehUuid); a falha aqui vem do banco.
+      items: [{ product_id: P_CAMISETA, product_name: 'X', quantity: 1, unit_price: 10 }],
       payment_method: 'pix', sale_id: 'erro-1', tipo: 'nfce',
     });
     expect(res.status).toBe(502);
