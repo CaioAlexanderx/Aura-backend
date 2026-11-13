@@ -107,6 +107,12 @@ router.use('/webhooks/asaas',     require('./webhookAsaas'));
 // baixa idempotente; eventos de status de conta atualizam o onboarding;
 // PAYMENT_DELETED/estorno nunca regridem cobrança paga. Flag DOJO_BAAS_ENABLED.
 router.use('/webhooks/asaas-dojo', require('./karateDojoBaasWebhook'));
+// ── Recebe na Aura — RA-07 (público: avisos da Asaas das subcontas das lojas) ──
+// Separado do webhook das assinaturas. Token por ambiente no header
+// asaas-access-token (sem segredo configurado, recusa tudo); idempotente pelo
+// id do evento (recebe_webhook_events, migration 449). Flag desligada:
+// registra e responde 200 sem processar. Ver src/routes/webhookRecebe.js.
+router.use('/webhooks/asaas-recebe', require('./webhookRecebe'));
 router.use('/webhooks/whatsapp',  require('./webhookWhatsapp'));
 router.use('/webhooks/instagram', require('./webhookInstagram'));
 router.use('/webhooks/mp',        require('./webhookMp'));
