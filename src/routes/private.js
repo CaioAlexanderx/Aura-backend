@@ -195,6 +195,11 @@ router.use('/export', require('./exportReports'));
 // 03/11/2026 — Financeiro: vendas por produto e numeração (quantidade exata
 // por modelo/tipo/numeração, estoque de hoje, giro e reposição).
 router.use('/reports', require('./relatorioVendasPorNumeracao'));
+// 13/11/2026 (p-114): Financeiro › Relatórios › Produtos — 7 modelos, item ou
+// produto, loja ou grupo. Sem requirePlan (Essencial e Negócio iguais). O
+// custo oculto (podeVerCusto) e o 403 do estoque_consulta são feitos dentro
+// do router: os campos saem null (não somem), para a tela manter as colunas.
+router.use('/relatorios', require('./relatorioProdutos'));
 router.use('/', require('./importData'));
 router.use('/print', require('./print'));
 router.use('/sales/analytics', require('./salesAnalytics'));
