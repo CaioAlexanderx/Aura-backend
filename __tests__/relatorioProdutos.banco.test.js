@@ -225,7 +225,10 @@ describe('relatório de Produtos — banco real', () => {
     const nomes = async (q) => (await rodar({ agrupar: 'produto', ...q })).linhas.map((l) => l.nome).sort();
     expect(await nomes({ categoria: id.roupas })).toEqual(['Calça Fixture']);
     expect(await nomes({ categoria: id.calcas })).toEqual(['Calça Fixture']);
-    expect(await nomes({ categoria: 'Roupas' })).toEqual(['Calça Fixture', 'Vestido Fixture']);
+    // Pelo nome antigo (products.category): o vínculo primário reescreve o da Calça para 'Calças'
+    // (trigger da migration 259); o Vestido continua só com o texto.
+    expect(await nomes({ categoria: 'Roupas' })).toEqual(['Vestido Fixture']);
+    expect(await nomes({ categoria: 'Calças' })).toEqual(['Calça Fixture']);
     expect(await nomes({ marca: 'marca teste' })).toEqual(['Calça Fixture']);
     expect(await nomes({ busca: 'vest' })).toEqual(['Vestido Fixture']);
     expect(await nomes({ busca: 'CFX' })).toEqual(['Calça Fixture']);
