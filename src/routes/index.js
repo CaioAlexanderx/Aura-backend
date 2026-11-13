@@ -79,6 +79,9 @@ router.use('/admin', require('./adminNotifications'));
 router.use('/admin', require('./adminDispatchRequests'));
 router.use('/admin/leads', require('./adminLeads'));
 router.use('/admin/aura-notas', require('./adminAuraNotas')); // Gestão Aura — NFC-e engine própria (staff)
+// Recebe na Aura — RA-08: cobrança de TESTE na subconta, só equipe (users.is_staff
+// lido do banco) e só com RECEBE_NA_AURA_ENABLED ligada; senão 404.
+router.use('/admin/recebe', require('./adminRecebe'));
 
 router.use('/admin/cadences',   require('./adminCadences'));
 router.use('/admin/lead-goals', require('./adminLeadGoals'));
