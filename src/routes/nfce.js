@@ -36,6 +36,14 @@
 //   lidos com a regra de visibilidade (utils/companyGroup.js). Venda sem
 //   servico: payload, XML, escritas e resposta identicos (fixture em
 //   __tests__/fixtures/nfceSemServico/golden.json).
+//
+// 13/11/2026: a NFC-e ignorava o desconto da venda (cupom + manual). Com
+//   sale_id e sales.discount_amount > 0 os itens saem da venda gravada, com o
+//   desconto rateado no vDesc de cada linha (frete fora); pagamento dividido
+//   volta a fechar. Desconto que zera os produtos: 422 NFCE_DESCONTO_TOTAL
+//   antes de reservar numero. Venda sem desconto: identico (fixture em
+//   __tests__/fixtures/nfceDescontoDaVenda/golden.json, SP/AP/MG/RJ).
+//   services/descontoDaVendaNaNfce.js.
 // ============================================================
 
 const express = require('express');
@@ -61,6 +69,8 @@ const {
 // 10/11/2026: servico (unit 'srv') fora da NFC-e; item do grupo acha o NCM.
 const { productVisibilityWhere }   = require('../utils/companyGroup');
 const { separarServicos, totaisDosItens, pagamentosDosProdutos } = require('../services/nfceSemServico');
+// 13/11/2026: desconto da venda (cupom + manual) rateado nos itens da nota.
+const { itensComDescontoDaVenda, ehUuid, MENSAGEM_DESCONTO_TOTAL } = require('../services/descontoDaVendaNaNfce');
 // products.nota_fiscal (migration 442): false = base sem a coluna.
 let temColunaNotaFiscal = true;
 // 11/11/2026 — fiscal do produto na nota (migration 350: cest, origem,
@@ -518,6 +528,7 @@ router.post('/emit', requireAuth, requireRole('client','analyst','admin'), async
     sale_id, transaction_id, observacoes,
     tipo = 'nfce',
     delivery_id,
+    discount_amount,
   } = req.body;
 
   const itemsErr = validateItems(items);
@@ -580,7 +591,30 @@ router.post('/emit', requireAuth, requireRole('client','analyst','admin'), async
     // venda so de servico tem que parar ANTES de reservar numero. Se ela
     // falhar, o erro e guardado e relancado no MESMO ponto de antes (nota em
     // 'erro' + 502), entao nada muda para quem nao vende servico.
-    const productIds = items.map(i => i.product_id).filter(id => typeof id==='string' && id.length>0);
+    // ── 13/11/2026: desconto da venda na nota ────────────────────────────
+    // A venda gravada e a fonte da verdade: com sale_id e desconto gravado
+    // (sales.discount_amount = cupom + manual), os itens saem de sale_items
+    // e o desconto e rateado no vDesc de cada linha (frete fica fora), de
+    // modo que a nota fecha com o total da venda e com os pagamentos. Regra
+    // e motivo em services/descontoDaVendaNaNfce.js. Venda sem desconto:
+    // itens do corpo, exatamente como antes. NF-e da entrega (delivery_id)
+    // leva so os itens daquela viagem: fora daqui.
+    let itensDaVenda = items;
+    if (!delivery_id) {
+      const comDesconto = await itensComDescontoDaVenda(db, {
+        companyId: req.params.id, saleId: sale_id, itensDoCorpo: items, descontoDoCorpo: discount_amount,
+      });
+      if (comDesconto && comDesconto.erro) {
+        // Antes de reservar numero: nada a inutilizar depois.
+        return res.status(422).json({ error: MENSAGEM_DESCONTO_TOTAL, code: 'NFCE_DESCONTO_TOTAL' });
+      }
+      if (comDesconto) itensDaVenda = comDesconto.itens;
+    }
+
+    // So UUID vai para a busca: a linha de frete do Caixa chega com
+    // product_id 'frete', e o cast ::uuid[] derrubava a busca inteira (a nota
+    // caia em 'erro'). Sem frete, a busca e a mesma de antes.
+    const productIds = itensDaVenda.map(i => i.product_id).filter(ehUuid);
     const productById = new Map();
     let productLookupErr = null;
     if (productIds.length > 0) {
@@ -621,8 +655,8 @@ router.post('/emit', requireAuth, requireRole('client','analyst','admin'), async
         productLookupErr = lookupErr;
       }
     }
-    // Sem servico, itensNota e o proprio `items` (mesma referencia).
-    const { produtos: itensNota, servicos: itensServico } = separarServicos(items, productById);
+    // Sem servico, itensNota e o proprio `itensDaVenda` (mesma referencia).
+    const { produtos: itensNota, servicos: itensServico } = separarServicos(itensDaVenda, productById);
     const totalServicos = itensServico.length ? totaisDosItens(itensServico).total : 0;
     if (itensNota.length === 0) {
       // Nao e erro: nao ha mercadoria para a nota. 200 + skipped para o app
@@ -678,7 +712,7 @@ router.post('/emit', requireAuth, requireRole('client','analyst','admin'), async
     const paymentsErr = validatePayments(payments, totalNfce);
     if (paymentsErr) {
       if (!itensServico.length) return res.status(400).json(paymentsErr);
-      const vendaErr = validatePayments(payments, totaisDosItens(items).total);
+      const vendaErr = validatePayments(payments, totaisDosItens(itensDaVenda).total);
       if (vendaErr) return res.status(400).json(vendaErr);
       paymentsNota = pagamentosDosProdutos(payments, totalNfce);
     }
