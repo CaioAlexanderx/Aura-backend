@@ -285,12 +285,46 @@ const SQL_CATALOGO = `
             WHERE l.product_id = p.id
               AND d.company_id = raiz.company_id
               AND (d.id = raiz.id
-                   OR (raiz.path IS NOT NULL AND left(d.path, length(raiz.path) + 1) = raiz.path || '/'))))
-     AND ($3::text IS NULL OR btrim(p.category) = $3::text)
+                   OR (raiz.path IS NOT NULL AND left(d.path, length(raiz.path) + 1) = raiz.path || '/')))
+          -- 14/11/2026 (incidente: categoria no relatório): produto que ainda
+          -- não foi ligado à árvore e tem a categoria só como texto
+          -- (products.category, cadastro antigo/planilha) entra quando o texto
+          -- é o nome da categoria escolhida ou de uma subcategoria dela.
+          OR (NOT EXISTS (SELECT 1 FROM product_category_links l0 WHERE l0.product_id = p.id)
+              AND NULLIF(btrim(p.category), '') IS NOT NULL
+              AND EXISTS (
+                SELECT 1
+                  FROM product_categories d
+                  JOIN product_categories raiz ON raiz.id = $2::uuid
+                 WHERE d.company_id = raiz.company_id
+                   AND (d.id = raiz.id
+                        OR (raiz.path IS NOT NULL AND left(d.path, length(raiz.path) + 1) = raiz.path || '/'))
+                   AND lower(btrim(d.name)) = lower(btrim(p.category)))))
+     AND ($3::text IS NULL OR lower(btrim(p.category)) = lower(btrim($3::text)))
      AND ($4::text IS NULL OR lower(btrim(p.brand)) = lower($4::text))
      AND ($5::text IS NULL OR p.name ILIKE $5 OR p.sku ILIKE $5 OR p.barcode ILIKE $5
           OR EXISTS (SELECT 1 FROM product_variants x
                       WHERE x.product_id = p.id AND (x.barcode ILIKE $5 OR x.sku_suffix ILIKE $5)))`;
+
+// 14/11/2026 (incidente: categoria no relatório): categorias que só
+// existem como texto em products.category (produto sem vínculo com a
+// árvore e sem categoria de mesmo nome na árvore da loja). 55 lojas tinham
+// produtos assim; 41 delas sem nenhuma categoria na árvore — a lista do
+// "Ajustar" vinha vazia. O app oferece estas como opção; o filtro vai por
+// texto ($3 do catálogo).
+const SQL_CATEGORIAS_TEXTO = `
+  SELECT DISTINCT btrim(p.category) AS nome
+    FROM products p
+   WHERE (p.company_id = ANY($1::uuid[])
+          OR (p.is_group_shared = true AND p.company_id IN ${EMPRESAS_DO_GRUPO}))
+     AND p.is_active = true
+     AND NULLIF(btrim(p.category), '') IS NOT NULL
+     AND NOT EXISTS (SELECT 1 FROM product_category_links l WHERE l.product_id = p.id)
+     AND NOT EXISTS (SELECT 1 FROM product_categories pc
+                      WHERE pc.company_id = p.company_id
+                        AND lower(btrim(pc.name)) = lower(btrim(p.category)))
+   ORDER BY 1
+   LIMIT 300`;
 
 // $1 lojas do escopo, $2 de, $3 até (inclusivo), $4 início da leitura
 // (o mais antigo entre `de` e hoje − 365), $5 hoje.
@@ -682,8 +716,13 @@ async function relatorioProdutos({ companyId, companyIds, parametros, db = pool 
   for (const l of catalogo) aplicarRotulo(l, 'variante', ' / ');
 
   const relatorio = montarRelatorio(catalogo, vendas, dias, parametros);
+  // Lista auxiliar: nunca derruba o relatório.
+  const categoriasTexto = await db.query(SQL_CATEGORIAS_TEXTO, [empresas])
+    .then((r) => ((r && r.rows) || []).map((x) => x.nome).filter(Boolean))
+    .catch(() => []);
   return {
     ...relatorio,
+    categorias_texto: categoriasTexto,
     periodo: { de: periodo.de, ate: periodo.ate, dias: periodo.dias, hoje: periodo.hoje },
     modelo: parametros.modelo,
     agrupar: parametros.agrupar,
@@ -712,5 +751,6 @@ module.exports = {
   // exportadas para os testes conferirem a forma das consultas
   SQL_CATALOGO,
   SQL_VENDAS,
+  SQL_CATEGORIAS_TEXTO,
   SQL_DIAS,
 };
