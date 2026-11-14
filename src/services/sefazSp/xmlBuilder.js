@@ -103,7 +103,8 @@ function fmtPct(n) {
 /** Base de cálculo IBS/CBS do item = valor líquido (vProd - vDesc). */
 function itemIbsBase(item) {
   const total = round2(Number(item.quantity || 1) * Number(item.price || 0));
-  return round2(total - (Number(item.discount) || 0));
+  // Frete do item (NF-e 55 de venda) entra na base; sem frete, conta de sempre.
+  return round2(total - (Number(item.discount) || 0) + (Number(item.freight) || 0));
 }
 
 /**
@@ -299,6 +300,9 @@ function buildDetXml(items, { crt, tpAmb }) {
       + tag('uTrib', txt(item.unit, 6) || 'UN')
       + tag('qTrib', fmtQty(qty))
       + tag('vUnTrib', fmtUnit(price))
+      // 14/11/2026 (NF-e 55 de venda): frete rateado no item. Só sai quando
+      // > 0 — a NFC-e nunca manda `freight`, então o XML dela é o mesmo.
+      + (Number(item.freight) > 0 ? tag('vFrete', fmt2(item.freight)) : '')
       + (Number(item.discount) > 0 ? tag('vDesc', fmt2(item.discount)) : '')
       + tag('indTot', '1')
       + '</prod>'
@@ -327,13 +331,14 @@ function buildPisCofinsXml(tributo, cst) {
 }
 
 function buildTotalXml(items, { crt, tpAmb } = {}) {
-  let vProd = 0, vDesc = 0;
+  let vProd = 0, vDesc = 0, vFrete = 0;
   for (const it of items) {
     vProd += round2(Number(it.quantity || 1) * Number(it.price || 0));
     vDesc += Number(it.discount) || 0;
+    vFrete += Number(it.freight) || 0; // NF-e 55 de venda; NFC-e sempre 0
   }
-  vProd = round2(vProd); vDesc = round2(vDesc);
-  const vNF = round2(vProd - vDesc);
+  vProd = round2(vProd); vDesc = round2(vDesc); vFrete = round2(vFrete);
+  const vNF = round2(vProd - vDesc + vFrete);
 
   // IBS/CBS (NT 2025.002) — os tributos são "por fora": vNF (ICMSTot) NÃO os
   // inclui; o total COM os impostos por fora vai no campo próprio vNFTot.
@@ -353,7 +358,7 @@ function buildTotalXml(items, { crt, tpAmb } = {}) {
     + tag('vFCP', '0.00')
     + tag('vBCST', '0.00') + tag('vST', '0.00') + tag('vFCPST', '0.00') + tag('vFCPSTRet', '0.00')
     + tag('vProd', fmt2(vProd))
-    + tag('vFrete', '0.00') + tag('vSeg', '0.00') + tag('vDesc', fmt2(vDesc))
+    + tag('vFrete', fmt2(vFrete)) + tag('vSeg', '0.00') + tag('vDesc', fmt2(vDesc))
     + tag('vII', '0.00') + tag('vIPI', '0.00') + tag('vIPIDevol', '0.00')
     + tag('vPIS', '0.00') + tag('vCOFINS', '0.00')
     + tag('vOutro', '0.00')
@@ -509,5 +514,7 @@ module.exports = {
   buildIbsCbsItemXml, buildIbsCbsTotXml, fmtPct, itemIbsBase,
   buildPagXml, buildInfAdicXml, buildInfRespTecXml,
   esc, fmt2, fmtQty, fmtUnit,
+  // 14/11/2026: reaproveitados pela NF-e 55 de venda (sefazSp/nfe55Venda.js)
+  tag, txt, round2,
   XML_HEADER, NFE_NS, HOMOLOG_DEST_XNOME,
 };
