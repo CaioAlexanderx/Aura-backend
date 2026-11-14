@@ -110,6 +110,92 @@ const CATALOG = {
     acao: 'Tente emitir novamente. Se repetir, avise o suporte Aura com o número da venda.',
     quem: 'aura',
   },
+  // ── NF-e 55 de venda (14/11/2026): destinatário completo ──
+  '208': {
+    titulo: 'CNPJ do cliente inválido',
+    acao: 'Confira o CNPJ do cliente na nota (no cadastro do cliente ou no passo do destinatário) e emita de novo.',
+    quem: 'lojista',
+  },
+  '237': {
+    titulo: 'CPF do cliente inválido',
+    acao: 'Confira o CPF do cliente na nota e emita de novo.',
+    quem: 'lojista',
+  },
+  '210': {
+    titulo: 'Inscrição estadual (IE) do cliente inválida',
+    acao: 'Confira a IE com o cliente. Se ele não tiver IE, marque como "não contribuinte" ou "isento" e emita de novo.',
+    quem: 'lojista',
+  },
+  '232': {
+    titulo: 'Faltou a inscrição estadual (IE) do cliente',
+    acao: 'O cliente foi marcado como contribuinte, mas a nota saiu sem a IE. Informe a IE (ou marque "não contribuinte") e emita de novo.',
+    quem: 'lojista',
+  },
+  '233': {
+    titulo: 'A inscrição estadual (IE) do cliente não está cadastrada na SEFAZ',
+    acao: 'Confira a IE com o cliente. Se ela estiver baixada ou errada, peça a IE certa ou marque o cliente como não contribuinte.',
+    quem: 'lojista',
+  },
+  '234': {
+    titulo: 'A inscrição estadual (IE) não é deste CNPJ',
+    acao: 'A IE informada pertence a outra empresa. Confira o CNPJ e a IE do cliente e emita de novo.',
+    quem: 'lojista',
+  },
+  '274': {
+    titulo: 'Cidade do cliente com código inválido',
+    acao: 'Confira o CEP e a cidade do endereço do cliente e emita de novo.',
+    quem: 'lojista',
+  },
+  '275': {
+    titulo: 'A cidade do cliente não é do estado informado',
+    acao: 'O CEP ou a cidade não batem com o estado (UF) do endereço do cliente. Confira o CEP e o estado e emita de novo.',
+    quem: 'lojista',
+  },
+  '521': {
+    titulo: 'CFOP de venda dentro do estado para cliente de outro estado',
+    acao: 'Confira o estado (UF) do endereço do cliente e emita de novo. Se repetir, avise o suporte Aura.',
+    quem: 'aura',
+  },
+  '522': {
+    titulo: 'CFOP de venda dentro do estado para cliente de outro estado',
+    acao: 'Confira o estado (UF) do endereço do cliente e emita de novo. Se repetir, avise o suporte Aura.',
+    quem: 'aura',
+  },
+  '523': {
+    titulo: 'CFOP de venda para outro estado com cliente do mesmo estado',
+    acao: 'Confira o estado (UF) do endereço do cliente e emita de novo. Se repetir, avise o suporte Aura.',
+    quem: 'aura',
+  },
+  '772': {
+    titulo: 'Venda marcada como para outro estado, mas o cliente é do mesmo estado',
+    acao: 'Confira o estado (UF) do endereço do cliente e emita de novo.',
+    quem: 'lojista',
+  },
+  '773': {
+    titulo: 'Venda marcada como dentro do estado, mas o cliente é de outro estado',
+    acao: 'Confira o estado (UF) do endereço do cliente e emita de novo.',
+    quem: 'lojista',
+  },
+  '694': {
+    titulo: 'Venda para consumidor de outro estado sem o cálculo do DIFAL',
+    acao: 'A Aura ainda não emite NF-e com DIFAL. Para este cliente, emita NFC-e no balcão ou fale com o seu contador.',
+    quem: 'aura',
+  },
+  '696': {
+    titulo: 'Cliente sem inscrição estadual tem que ser consumidor final',
+    acao: 'Marque a venda como para consumidor final (ou informe a IE do cliente) e emita de novo.',
+    quem: 'lojista',
+  },
+  '206': {
+    titulo: 'Este número de NF-e já foi inutilizado',
+    acao: 'Tente emitir novamente. Se repetir, avise o suporte Aura.',
+    quem: 'aura',
+  },
+  '598': {
+    titulo: 'Nome do cliente fora do padrão da homologação',
+    acao: 'Avise o suporte Aura — em homologação o nome do cliente é fixo, é correção do nosso lado.',
+    quem: 'aura',
+  },
   '999': {
     titulo: 'Erro inesperado na SEFAZ',
     acao: 'Aguarde 1 minuto e tente de novo. Se persistir, a SEFAZ pode estar instável — a emissão entra em contingência automaticamente.',
