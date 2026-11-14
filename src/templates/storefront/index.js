@@ -26,6 +26,8 @@ const pix           = require('./parts/pix');
 const productDetail = require('./parts/product_detail');
 // tq-44: escolha da forma de pagar na entrega (so na loja que marcou as formas).
 const naEntrega     = require('./parts/na_entrega');
+// p-119b: a faixa de Black Friday e "Ofertas" (so na loja com a campanha no ar).
+const campanha      = require('./parts/campanha');
 // p-119a: o "De" riscado e a etiqueta "-N%" (so na loja com promocao no ar).
 const promocao      = require('./parts/promocao');
 const toast         = require('./parts/toast');
@@ -65,8 +67,11 @@ function detalheDoProduto(textosDaFrente) {
 
 function buildScript(storeData, escapedSlug, apiBase, textosDaFrente, opcoes) {
   const comNaEntrega = !!(opcoes && opcoes.naEntrega);
+  // A campanha ja validada (parts/campanha.js campanhaNoAr), ou null.
+  const daCampanha   = (opcoes && opcoes.campanha) || null;
   const comPromocao  = !!(opcoes && opcoes.promocao);
-  const detalhe = detalheDoProduto(textosDaFrente);
+  const detalheBase  = detalheDoProduto(textosDaFrente);
+  const detalhe      = comPromocao ? promocao.aplicarNoDetalhe(detalheBase) : detalheBase;
   return prelude(storeData, escapedSlug, apiBase)
        + init
        + stateUtils
@@ -77,16 +82,16 @@ function buildScript(storeData, escapedSlug, apiBase, textosDaFrente, opcoes) {
        + fonteDasFotos
        + fonteDoWhatsapp
        + (comPromocao ? promocao.aplicarNoCartao(card) : card)
-       + products
+       + (daCampanha ? campanha.aplicarNosProdutos(products) : products)
        + categorias
        + tiraCategorias
-       + home
+       + (daCampanha ? campanha.aplicarNaHome(home, daCampanha) : home)
        + filtros
        + sacola
        + cart
        + (comNaEntrega ? naEntrega.aplicar(checkout) : checkout)
        + pix
-       + (comPromocao ? promocao.aplicarNoDetalhe(detalhe) : detalhe)
+       + (daCampanha ? campanha.aplicarNoDetalhe(detalhe) : detalhe)
        + toast
        + bootstrap;
 }

@@ -129,6 +129,23 @@ const NA_VITRINE = `(
 )`;
 
 /**
+ * A peca tem promocao no ar (p-119b, vista "Ofertas")? A mesma regra de
+ * services/precoEfetivo.js: promo > 0, abaixo do preco base, entre o
+ * comeco e o fim. Vale a do produto ou a de uma variante com saldo (base
+ * da variante = price_override, senao o preco do produto).
+ */
+const EM_PROMOCAO_NO_AR = `(
+  (products.promo_price > 0 AND products.promo_price < products.price
+    AND products.promo_starts_at <= NOW() AND products.promo_ends_at > NOW())
+  OR EXISTS (
+    SELECT 1 FROM product_variants pv
+     WHERE pv.product_id = products.id AND pv.is_active = true AND pv.stock_qty > 0
+       AND pv.promo_price > 0 AND pv.promo_price < COALESCE(pv.price_override, products.price)
+       AND pv.promo_starts_at <= NOW() AND pv.promo_ends_at > NOW()
+  )
+)`;
+
+/**
  * O filtro de foto, ou nada.
  *
  * Devolver a string 'TRUE' em vez de montar o WHERE condicionalmente
@@ -208,6 +225,9 @@ async function paginaDoCatalogo({
   tamanhos, cores,
   // Faixa de preco (redesign 09/2026). Validada abaixo.
   precoMin, precoMax,
+  // p-119b: a vista "Ofertas" da campanha de Black Friday — so pecas com
+  // promocao no ar (De/Por, migration 427). Sem a opcao, o SQL e o de antes.
+  soPromocao,
 }) {
   const off = Math.max(0, parseInt(offset, 10) || 0);
   const lim = Math.min(LIMITE_MAXIMO, Math.max(1, parseInt(limit, 10) || POR_PAGINA));
@@ -288,6 +308,8 @@ async function paginaDoCatalogo({
     params.push(pMax);
     filtros.push(`price <= $${params.length}`);
   }
+
+  if (soPromocao === true) filtros.push(EM_PROMOCAO_NO_AR);
 
   const termos = normalizar(busca).split(/\s+/).filter(Boolean);
   for (const termo of termos) {
@@ -621,7 +643,7 @@ function janelaDePaginas(atual, totalPaginas, vizinhas = 1) {
 }
 
 module.exports = {
-  POR_PAGINA, LIMITE_MAXIMO, EM_ESTOQUE, COM_FOTO, NA_VITRINE, filtroDeFoto,
+  POR_PAGINA, LIMITE_MAXIMO, EM_ESTOQUE, COM_FOTO, NA_VITRINE, filtroDeFoto, EM_PROMOCAO_NO_AR,
   JANELA_DE_VENDAS_DIAS, VENDIDOS_RECENTES,
   arvoreDeCategorias, facetasDoCatalogo, faixaDePreco, condicaoDeCategoria,
   paginaDoCatalogo, contarPorCategoria, janelaDePaginas, normalizar, ordemSql,

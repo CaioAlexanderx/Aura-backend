@@ -26,6 +26,8 @@ const { scriptsDoHead, metatagsDeSeo } = require('../services/rastreadores');
 const { linkDeFontes } = require('./storefrontTypography');
 const buildHtmlBody = require('./storefrontHtml');
 const buildScript   = require('./storefrontScript');
+// p-119b: faixa de Black Friday (so com payload.campanha no ar).
+const campanhaDaLoja = require('./storefront/parts/campanha');
 const { temPromocaoNoPayload } = require('./storefront/parts/promocao');
 // tq-61: o numero do wa.me com o 55 — uma regra so (services/whatsappDaLoja.js).
 const { numeroDoWhatsapp } = require('../services/whatsappDaLoja');
@@ -186,8 +188,13 @@ function buildStorefrontPage(data, slug) {
   // tq-44: o checkout com a escolha da forma de pagar na entrega so entra
   // na loja que marcou as formas (a chave so existe nela).
   const formasNaEntrega = data.settings && data.settings.pay_on_delivery_methods;
+  // p-119b: a campanha so existe no payload com a campanha ligada E
+  // promocao no ar (p-118). Sem ela, corpo, CSS e script saem byte a byte
+  // iguais (parts/campanha.js).
+  const campanha = campanhaDaLoja.campanhaNoAr(data);
   const script = buildScript(storeData, escJs(slug), enderecoDaApi(), data.textos_da_frente || null, {
     naEntrega: Array.isArray(formasNaEntrega) && formasNaEntrega.length > 0,
+    campanha,
     // p-119a: o "De" riscado so entra na loja com promocao no ar. Sem
     // promocao a pagina sai byte a byte igual (parts/promocao.js).
     // tem_promocao vem do servidor sobre o catalogo inteiro (p-118): a
@@ -195,6 +202,8 @@ function buildStorefrontPage(data, slug) {
     // que chega depois pela paginacao tambem precisa do riscado.
     promocao: data.tem_promocao === true || temPromocaoNoPayload(data),
   });
+  const corpo = campanha ? campanhaDaLoja.aplicarNoCorpo(body, campanha) : body;
+  const cssDaCampanha = campanha ? `<style>${campanhaDaLoja.CSS}</style>\n` : '';
 
   const bodyClasses = [
     dark ? 'sf-dark' : 'sf-light',
@@ -252,10 +261,10 @@ ${logoUrl ? `<link rel="icon" href="${logoUrl}" type="image/png">` : ''}
 <style>
 ${css}
 </style>
-</head>
+${cssDaCampanha}</head>
 <body class="${bodyClasses}">
 
-${body}
+${corpo}
 
 ${script}
 ${inlineHelpers}

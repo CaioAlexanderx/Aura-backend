@@ -234,6 +234,8 @@ router.get('/:slug/catalogo', async (req, res) => {
       // Faixa de preco (redesign 09/2026). O servico valida.
       precoMin: req.query.preco_min,
       precoMax: req.query.preco_max,
+      // p-119b: "Ofertas" da campanha — so pecas em promocao no ar.
+      soPromocao: req.query.promo === '1',
     });
 
     // O produto sai na MESMA forma do payload embutido. Sem isto o cartao
