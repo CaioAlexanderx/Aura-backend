@@ -263,14 +263,17 @@ router.get('/:slug/catalogo', async (req, res) => {
     // o proprio filtro aplicado, escolher "38" apagaria os outros numeros
     // e a pessoa nao teria como trocar sem limpar tudo.
     const exigeFoto = cfg.require_product_image === true;
+    // p-123a: na vista "Ofertas" (promo=1) as opcoes do filtro e as faixas
+    // de preco sao das pecas em promocao, como a grade.
+    const soPromocao = req.query.promo === '1';
     const facetas = await facetasDoCatalogo({
       cid: cfg.company_id, visibilityWhere: listVisibilityWhere('$1'),
-      exigeFoto, categoria: req.query.cat,
+      exigeFoto, categoria: req.query.cat, soPromocao,
     }).catch((e) => { console.error('[storefront] facetas da categoria:', e.message); return null; });
     if (facetas) {
       facetas.preco = await faixaDePreco({
         cid: cfg.company_id, visibilityWhere: listVisibilityWhere('$1'),
-        exigeFoto, categoria: req.query.cat,
+        exigeFoto, categoria: req.query.cat, soPromocao,
       }).catch(() => null);
     }
 

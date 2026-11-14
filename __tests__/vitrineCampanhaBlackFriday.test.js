@@ -18,7 +18,7 @@ const buildPage = require('../src/templates/storefrontPage');
 const dadosEntrega = require('./fixtures/vitrineSemPagarNaEntregaNova/dados');
 const hashes = require('./fixtures/vitrineSemPagarNaEntregaNova/hashes.json');
 const db = require('../src/config/database');
-const { paginaDoCatalogo, EM_PROMOCAO_NO_AR } = require('../src/services/catalogoPaginado');
+const { paginaDoCatalogo, facetasDoCatalogo, faixaDePreco, EM_PROMOCAO_NO_AR, PRECO_NA_VITRINE } = require('../src/services/catalogoPaginado');
 
 const sha = (s) => crypto.createHash('sha256').update(s).digest('hex');
 const CAMPANHA = { ativa: true, titulo: 'Black Friday da Loja <Exemplo>', ate_pct: 40, ate_data: '2026-11-30' };
@@ -131,5 +131,68 @@ describe('catalogo: "Ofertas" filtra as promocoes no ar', () => {
     expect(EM_PROMOCAO_NO_AR).toContain('products.promo_starts_at <= NOW() AND products.promo_ends_at > NOW()');
     expect(EM_PROMOCAO_NO_AR).toContain('pv.promo_price < COALESCE(pv.price_override, products.price)');
     expect(EM_PROMOCAO_NO_AR).toContain('pv.stock_qty > 0');
+  });
+});
+
+// p-123a (QA 14/11): os filtros da vista Ofertas sao das pecas da vista.
+describe('Ofertas: filtros e faixas so das pecas em promocao', () => {
+  const express = require('express');
+  const request = require('supertest');
+  let sqls;
+  beforeEach(() => {
+    sqls = [];
+    db.query.mockReset();
+    db.query.mockImplementation(async (sql) => {
+      const s = String(sql);
+      sqls.push(s);
+      if (/FROM digital_channel_config WHERE slug/.test(s)) return { rows: [{ company_id: 'c1', slug: 'loja', is_published: true }] };
+      if (/COUNT\(\*\)::int AS n FROM products/.test(s)) return { rows: [{ n: 0 }] };
+      if (/AS atributo/.test(s)) return { rows: [{ atributo: 'Tamanho', valor: 'M', total: 2 }] };
+      if (/AS min/.test(s)) return { rows: [{ min: 59.9, max: 111.9 }] };
+      return { rows: [] };
+    });
+  });
+  const catalogo = (q) => {
+    const app = express();
+    app.use('/storefront', require('../src/routes/storefront'));
+    return request(app).get('/storefront/loja/catalogo' + q);
+  };
+  const facetaSql = () => sqls.find((s) => /AS atributo/.test(s));
+  const faixaSql = () => sqls.find((s) => /AS min/.test(s));
+
+  test('promo=1: facetas e faixa so com a promocao no ar, faixa pelo preco do cartao', async () => {
+    const res = await catalogo('?promo=1');
+    expect(res.status).toBe(200);
+    expect(facetaSql()).toContain(EM_PROMOCAO_NO_AR);
+    expect(faixaSql()).toContain(EM_PROMOCAO_NO_AR);
+    expect(faixaSql()).toContain('MIN(' + PRECO_NA_VITRINE + ')');
+    expect(res.body.facetas.preco).toEqual({ min: 59.9, max: 111.9 });
+  });
+
+  test('sem promo (grade, categoria, Novidades): o SQL de antes', async () => {
+    for (const q of ['', '?ordem=novidades', '?cat=%2Fvestidos']) {
+      sqls = [];
+      const res = await catalogo(q);
+      expect(res.status).toBe(200);
+      expect(facetaSql()).not.toContain('promo_price');
+      expect(faixaSql()).not.toContain('promo_price');
+      expect(faixaSql()).toContain('SELECT MIN(price)::float AS min, MAX(price)::float AS max');
+    }
+  });
+
+  test('promo=1 com faixa escolhida: filtra pelo preco do cartao; fora da vista, pelo preco normal', async () => {
+    await paginaDoCatalogo({ cid: 'c1', visibilityWhere: '(company_id = $1)', soPromocao: true, precoMin: 50, precoMax: 100 });
+    expect(sqls.find((s) => /COUNT\(\*\)::int AS n FROM products/.test(s))).toContain(PRECO_NA_VITRINE + ' >= $2');
+    sqls = [];
+    await paginaDoCatalogo({ cid: 'c1', visibilityWhere: '(company_id = $1)', precoMin: 50, precoMax: 100 });
+    const contagem = sqls.find((s) => /COUNT\(\*\)::int AS n FROM products/.test(s));
+    expect(contagem).toContain('price >= $2');
+    expect(contagem).not.toContain('promo_price');
+  });
+
+  test('funcoes: sem a opcao, nada de promocao no SQL', async () => {
+    await facetasDoCatalogo({ cid: 'c1', visibilityWhere: 'TRUE' });
+    await faixaDePreco({ cid: 'c1', visibilityWhere: 'TRUE' });
+    expect(sqls.some((s) => /promo_price/.test(s))).toBe(false);
   });
 });

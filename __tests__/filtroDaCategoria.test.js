@@ -53,8 +53,9 @@ describe('condicaoDeCategoria: uma fonte para as três consultas', () => {
     const src = fonte('src/services/catalogoPaginado.js');
     // paginaDoCatalogo, facetasDoCatalogo e faixaDePreco.
     expect((src.match(/condicaoDeCategoria\(/g) || []).length).toBeGreaterThanOrEqual(4);
-    expect(src).toContain('async function facetasDoCatalogo({ cid, visibilityWhere, exigeFoto, categoria })');
-    expect(src).toContain('async function faixaDePreco({ cid, visibilityWhere, exigeFoto, categoria })');
+    // p-123a: + soPromocao (a vista Ofertas), que nao e filtro de atributo.
+    expect(src).toContain('async function facetasDoCatalogo({ cid, visibilityWhere, exigeFoto, categoria, soPromocao })');
+    expect(src).toContain('async function faixaDePreco({ cid, visibilityWhere, exigeFoto, categoria, soPromocao })');
   });
 
   test('as facetas NÃO recebem tamanho/cor', () => {
@@ -66,7 +67,8 @@ describe('condicaoDeCategoria: uma fonte para as três consultas', () => {
       src.indexOf('async function facetasDoCatalogo'),
       src.indexOf(')', src.indexOf('async function facetasDoCatalogo')),
     );
-    expect(assinatura).toBe('async function facetasDoCatalogo({ cid, visibilityWhere, exigeFoto, categoria }');
+    expect(assinatura).toBe('async function facetasDoCatalogo({ cid, visibilityWhere, exigeFoto, categoria, soPromocao }');
+    expect(assinatura).not.toMatch(/tamanho|cor/i);
   });
 });
 
