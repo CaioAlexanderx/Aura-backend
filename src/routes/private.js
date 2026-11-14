@@ -170,6 +170,8 @@ router.use('/nfce', require('./nfce'));
 // 14/11/2026 (CP2): NF-e modelo 55 de VENDA pela emissão própria — prévia e
 // emissão a partir da venda gravada. Prefixo próprio (/nfe55 não casa com /nfe).
 router.use('/nfe55', require('./nfe55Venda'));
+// 14/11/2026 (CP3): DANFE A4, XML (nfeProc) e e-mail da NF-e 55 (venda e devolução).
+router.use('/nfe55', require('./nfe55Documentos'));
 router.use('/nfe', require('./nfe'));
 // 14/10/2026: o dono envia o proprio certificado A1 (mesmo certStore da Gestao
 // Aura; so o dono, CNPJ do certificado confere). Nao mexe em /nfe/certificate.

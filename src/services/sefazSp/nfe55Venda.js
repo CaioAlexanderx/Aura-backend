@@ -37,6 +37,7 @@ const soap = require('./soapClient');
 const { getEndpoints55 } = require('./nfe55');
 const { loadRespTec } = require('./respTec');
 const { cfopVenda55 } = require('./taxEngine');
+const { extrairProtNFe } = require('./nfeProc');
 const {
   ufToCodigo, isoBR, generateCNF, buildAccessKey44,
 } = require('./nfeHelpers');
@@ -320,6 +321,7 @@ async function emitNfeVenda55(company, nfeData, ctx) {
       return {
         ...base, ambiguous: true, status: 'autorizado', protocolo: consulta.protocolo || null,
         codigo_status: consulta.cStat, motivo_status: consulta.xMotivo || null,
+        prot_xml: extrairProtNFe(consulta.rawXml),
       };
     }
     return {
@@ -336,6 +338,8 @@ async function emitNfeVenda55(company, nfeData, ctx) {
     protocolo: result.protocolo || null,
     codigo_status: result.cStat || null,
     motivo_status: result.xMotivo || null,
+    // CP3: o <protNFe> da SEFAZ vai para o nfeProc (XML de guardar).
+    prot_xml: result.autorizada ? extrairProtNFe(result.rawXml) : null,
   };
 }
 

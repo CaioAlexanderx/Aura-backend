@@ -36,6 +36,7 @@ const { logAuditAction } = require('../middleware/auditLog');
 const nfe55Venda = require('../services/nfe55Venda');
 const engine = require('../services/sefazSp/nfe55Venda');
 const rejectionCatalog = require('../services/sefazSp/rejectionCatalog');
+const { extrairProtNFe } = require('../services/sefazSp/nfeProc');
 
 const MSG_FALTANTES = 'Faltam alguns dados para emitir a NF-e. Confira os campos marcados e tente de novo.';
 // Rejeição por número já usado: o número está queimado, a próxima tentativa
@@ -162,6 +163,19 @@ async function gravarResultado(emissionId, r) {
   } catch (e) {
     if (e.code !== '42703') throw e;
   }
+  // CP3: o <protNFe> da SEFAZ fica no metadata (vira o nfeProc do XML/e-mail).
+  if (r.protXml) {
+    try {
+      await db.query(
+        `UPDATE nfce_emissions
+            SET metadata = COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('prot_xml', $1::text)
+          WHERE id = $2`,
+        [r.protXml, emissionId]
+      );
+    } catch (e) {
+      if (e.code !== '42703') throw e;
+    }
+  }
 }
 
 async function reservarNumero(companyId) {
@@ -256,7 +270,10 @@ router.post('/venda/:saleId/emitir', requireAuth, requireRole('client', 'analyst
           });
         }
         if (consulta.autorizada) {
-          await gravarResultado(pendente.id, { status: 'autorizada', protocolo: consulta.protocolo, cStat: consulta.cStat });
+          await gravarResultado(pendente.id, {
+            status: 'autorizada', protocolo: consulta.protocolo, cStat: consulta.cStat,
+            protXml: extrairProtNFe(consulta.rawXml),
+          });
           const { rows: fin } = await db.query('SELECT * FROM nfce_emissions WHERE id = $1', [pendente.id]);
           logAuditAction(req.user.id, companyId, 'nfe55_venda_emitida',
             `NF-e nº ${pendente.numero} de venda autorizada (recuperada após timeout)`, { sale_id: saleId });
@@ -364,7 +381,7 @@ router.post('/venda/:saleId/emitir', requireAuth, requireRole('client', 'analyst
       : r.status === 'nao_consta' ? 'erro'
       : 'processando';
     await gravarResultado(emission.id, {
-      status, protocolo: r.protocolo, cStat: r.codigo_status, motivo: r.motivo_status,
+      status, protocolo: r.protocolo, cStat: r.codigo_status, motivo: r.motivo_status, protXml: r.prot_xml,
     });
     const { rows: fin } = await db.query('SELECT * FROM nfce_emissions WHERE id = $1', [emission.id]);
     const nota = semXml(fin[0] || { ...emission, status });
