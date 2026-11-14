@@ -55,7 +55,9 @@ function campanhaNoAr(data) {
 
 /** Texto da faixa fina, ja escapado. */
 function textoDaFaixa(c) {
-  const sep = '<span class="bf-sep" aria-hidden="true">·</span>';
+  // <wbr> depois do ponto: no celular a faixa quebra entre os trechos
+  // (cada trecho e nowrap), nunca no meio de "ate 30/11".
+  const sep = '<span class="bf-sep" aria-hidden="true">·</span><wbr>';
   return `<span>${escHtml(c.titulo)}</span>${sep}<span>até ${c.ate_pct}% OFF</span>`
     + (c.ate ? `${sep}<span>até ${c.ate}</span>` : '');
 }

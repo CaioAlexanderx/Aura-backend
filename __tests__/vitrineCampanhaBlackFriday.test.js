@@ -51,7 +51,7 @@ describe('campanha no ar', () => {
     const faixa = corpo.indexOf('<div class="bf-faixa" role="note">');
     expect(faixa).toBeGreaterThan(0);
     expect(faixa).toBeLessThan(corpo.indexOf('<header class="topbar"'));
-    expect(corpo).toContain('<span>Black Friday da Loja &lt;Exemplo&gt;</span><span class="bf-sep" aria-hidden="true">·</span><span>até 40% OFF</span><span class="bf-sep" aria-hidden="true">·</span><span>até 30/11</span>');
+    expect(corpo).toContain('<span>Black Friday da Loja &lt;Exemplo&gt;</span><span class="bf-sep" aria-hidden="true">·</span><wbr><span>até 40% OFF</span><span class="bf-sep" aria-hidden="true">·</span><wbr><span>até 30/11</span>');
   });
 
   test('faixa grande na home, depois do cabecalho e antes do banner da loja, com "Ver ofertas"', () => {
