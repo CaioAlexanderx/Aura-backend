@@ -72,7 +72,11 @@ beforeAll(async () => {
 
   // O PUT lê products.color/size, colunas que o banco de produção tem e o
   // schema montado pelas migrations não. Só nesta transação.
-  await q(`ALTER TABLE products ADD COLUMN IF NOT EXISTS color TEXT, ADD COLUMN IF NOT EXISTS size TEXT`);
+  // color/size/ncm e as listas da vitrine vieram do baseline de producao,
+  // fora das migrations do repo (ver promocaoDePor.banco.test.js). So
+  // dentro desta transacao, revertida no fim.
+  await q(`ALTER TABLE products ADD COLUMN IF NOT EXISTS color TEXT, ADD COLUMN IF NOT EXISTS size TEXT, ADD COLUMN IF NOT EXISTS ncm TEXT`);
+  await q(`ALTER TABLE digital_channel_config ADD COLUMN IF NOT EXISTS featured_product_ids JSONB, ADD COLUMN IF NOT EXISTS hidden_product_ids TEXT[]`);
 
   await q(
     `INSERT INTO users (id, email, password_hash, full_name) VALUES ($1, $2, 'x', 'Fixture Cor')`,
