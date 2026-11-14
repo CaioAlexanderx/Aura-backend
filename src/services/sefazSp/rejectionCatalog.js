@@ -191,6 +191,17 @@ const CATALOG = {
     acao: 'Tente emitir novamente. Se repetir, avise o suporte Aura.',
     quem: 'aura',
   },
+  // ── eventos da NF-e 55 (14/11/2026, CP5): cancelamento e carta de correção ──
+  '594': {
+    titulo: 'Esta nota já chegou ao limite de cartas de correção',
+    acao: 'A SEFAZ aceita até 20 cartas por nota. Fale com seu contador sobre como regularizar.',
+    quem: 'lojista',
+  },
+  '218': {
+    titulo: 'Esta nota já está cancelada na SEFAZ',
+    acao: 'Nada a fazer: o cancelamento já valeu. Atualize a lista de notas.',
+    quem: 'lojista',
+  },
   '598': {
     titulo: 'Nome do cliente fora do padrão da homologação',
     acao: 'Avise o suporte Aura — em homologação o nome do cliente é fixo, é correção do nosso lado.',
