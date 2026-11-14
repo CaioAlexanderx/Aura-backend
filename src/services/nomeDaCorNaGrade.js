@@ -113,6 +113,8 @@ function coresDoProduto(linhas) {
  * @param hex       hex da cor (#RRGGBB)
  * @param recebido  colors[].name do corpo do PUT
  * @param info      entrada de coresDoProduto para esse hex (undefined = cor nova)
+ * @param opcoes    { confirmado }: o nome foi escrito/trocado pela lojista no
+ *                  editor (colors[].name_confirmado, 14/11/2026)
  * @returns {
  *   gravar:     nome para gravar em color_name nas variantes que JÁ existem
  *               (null = não mexe no color_name delas),
@@ -121,7 +123,8 @@ function coresDoProduto(linhas) {
  *   manterSku:  true = variante existente fica com o sku_suffix que tem,
  * }
  */
-function resolverNomeDaCor(hex, recebido, info) {
+function resolverNomeDaCor(hex, recebido, info, opcoes) {
+  const confirmado = !!(opcoes && opcoes.confirmado);
   const limpo = colorNameParaGravar(recebido);
   const bruto = typeof recebido === 'string' && recebido.trim() ? recebido : null;
 
@@ -134,6 +137,13 @@ function resolverNomeDaCor(hex, recebido, info) {
   if (info.gravado) {
     if (limpo) return { gravar: limpo, paraNova: limpo, nomeDoSku: bruto, manterSku: false };
     return { gravar: null, paraNova: info.gravado, nomeDoSku: info.gravado, manterSku: true };
+  }
+
+  // 14/11/2026 (CP4a): nome escrito ou trocado pela lojista no editor novo
+  // (colors[].name_confirmado) vale mesmo que coincida com o pedaço ou com
+  // a paleta — foi ela quem escolheu. Vazio e hex continuam fora (limpo).
+  if (confirmado && limpo) {
+    return { gravar: limpo, paraNova: limpo, nomeDoSku: bruto, manterSku: false };
   }
 
   // Variante antiga (color_name NULL): eco do servidor não vira nome.
