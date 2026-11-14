@@ -6,8 +6,10 @@
 // cor x tamanho forma o estoque por combinacao. Preco unico do pai.
 //
 // Shape da API:
-//   GET  -> { colors: [{hex, name}] (name = color_name da 414, senao o tirado do sku_suffix), sizes: ["P","M"], matrix: {"#FF0000|P": 5, ...}, barcodes: {"#FF0000|P": "7891234567890", ...}, images: {"#FF0000|P": "https://..."}, mode: 'none'|'color'|'size'|'matrix' }
-//   PUT  -> recebe mesmo shape; atualiza no lugar o que continua, cria o novo, desativa o que saiu (10/11/2026)
+//   GET  -> { colors: [{hex, name, name_sugerido}] (name = SO o color_name da 414, ou null; name_sugerido = o pedaco do sku_suffix quando name e null — 14/11/2026), sizes: ["P","M"], matrix: {"#FF0000|P": 5, ...}, barcodes: {"#FF0000|P": "7891234567890", ...}, images: {"#FF0000|P": "https://..."}, mode: 'none'|'color'|'size'|'matrix' }
+//   PUT  -> recebe mesmo shape; atualiza no lugar o que continua, cria o novo, desativa o que saiu (10/11/2026).
+//           14/11/2026: name vazio ou ausente mantem o color_name gravado; em variante antiga
+//           (color_name NULL) o eco do GET (pedaco do sufixo ou nome da paleta do app) nao e gravado.
 //
 // Schema preservado: usa product_variants + product_variant_values
 // Cada combinacao = 1 row em product_variants + 1-2 rows em
@@ -66,6 +68,10 @@ const db = require('../config/database');
 const { agruparGaleria } = require('../services/productImageGallery');
 // 10/11/2026: a grade e atualizada no lugar, nao reescrita (ver o servico).
 const { planejarGrade } = require('../services/gradeDeVariantes');
+// 14/11/2026: o pedaco cortado do sku_suffix nao vira nome da cor.
+const {
+  coresDoProduto, resolverNomeDaCor, nomeSugeridoDoSufixo, chaveDoHex,
+} = require('../services/nomeDaCorNaGrade');
 
 // ─── 30/06/2026: Normalizacao de cor (nome -> hex) ───────────
 // Imports/legados gravavam NOME no atributo Cor (ex.: "DARK BROWN",
@@ -148,14 +154,8 @@ function skuSuffixFromAttrs(colorHex, colorName, sizeValue) {
 
 // 26/10/2026 (tq-55b, migration 414): o nome da cor como a lojista digitou
 // vai para product_variants.color_name, sem caixa alta nem corte (o
-// sku_suffix continua o de sempre). So tira espaco das pontas; vazio, hex
-// ou nao-texto vira NULL. Teto de 60 caracteres so para nao gravar lixo.
-function colorNameParaGravar(name) {
-  if (typeof name !== 'string') return null;
-  const t = name.trim();
-  if (!t || /^#?[0-9A-Fa-f]{6}$/.test(t)) return null;
-  return t.slice(0, 60);
-}
+// sku_suffix continua o de sempre). 14/11/2026: as regras (o que e nome,
+// o que e eco do servidor, vazio mantem) moram em services/nomeDaCorNaGrade.js.
 
 // 23/05/2026: Extrai a combinacao (color_hex, size_value) de um array
 // de attributes vindo do GET. Usado tanto pelo GET (expor images map)
@@ -205,15 +205,16 @@ router.get('/:pid/variations', async (req, res) => {
     const barcodes = {};   // matrixKey -> barcode (21/05/2026)
     const images = {};     // matrixKey -> image_url (23/05/2026)
 
+    const sugeridos = new Map();   // hex -> parte da cor do sku_suffix (14/11/2026)
     for (const v of variantRows) {
       const { colorHex, sizeValue } = extractAttrs(v.attributes);
-      // 26/10/2026 (tq-55b): o nome gravado na 414 vem primeiro; sem ele,
-      // o de sempre, tirado do sku_suffix.
-      let colorName = colorHex && v.color_name ? v.color_name : null;
-      if (!colorName && colorHex && v.sku_suffix) {
-        // Tenta extrair nome do sku_suffix (VERMELHO-P -> VERMELHO)
-        const first = v.sku_suffix.split('-')[0];
-        if (first && !/^[0-9A-F]{6}$/i.test(first)) colorName = first;
+      // 14/11/2026: colors[].name e SO o color_name gravado (migration 414),
+      // ou null. O pedaco do sku_suffix ("AZUL ESCUR", cortado em 10 letras)
+      // vai a parte em name_sugerido: devolvido como nome, o editor o
+      // mandava de volta no Salvar e o PUT o gravava como nome da cor.
+      const colorName = colorHex && v.color_name ? v.color_name : null;
+      if (colorHex && !sugeridos.get(colorHex)) {
+        sugeridos.set(colorHex, nomeSugeridoDoSufixo(v.sku_suffix, sizeValue));
       }
       if (colorHex) colorsMap.set(colorHex, colorName || colorsMap.get(colorHex) || null);
       if (sizeValue) sizesSet.add(sizeValue);
@@ -223,7 +224,12 @@ router.get('/:pid/variations', async (req, res) => {
       if (v.image_url) images[key] = v.image_url;   // 23/05/2026
     }
 
-    const colors = Array.from(colorsMap.entries()).map(([hex, name]) => ({ hex, name }));
+    const colors = Array.from(colorsMap.entries()).map(([hex, name]) => ({
+      hex,
+      name,
+      // So sugestao, nunca o nome gravado: null quando a cor tem nome.
+      name_sugerido: name ? null : (sugeridos.get(hex) || null),
+    }));
     const sizes = Array.from(sizesSet);
 
     let mode = 'none';
@@ -394,6 +400,23 @@ router.put('/:pid/variations', async (req, res) => {
       return { id: row.id, colorHex, sizeValue, colorName, stock: parseInt(row.stock_qty) || 0 };
     });
 
+    // 14/11/2026: o que fazer com o nome de cada cor (services/nomeDaCorNaGrade).
+    // Variante antiga (color_name NULL) nao ganha como nome o eco do GET — o
+    // pedaco cortado do sufixo ou o nome da paleta do app — e nome vazio nao
+    // apaga o que esta gravado.
+    const coresAtuais = coresDoProduto(atuais.map((row, i) => ({
+      colorHex: existentes[i].colorHex,
+      sizeValue: existentes[i].sizeValue,
+      sku_suffix: row.sku_suffix,
+      color_name: row.color_name,
+    })));
+    const skuAtualPorId = new Map(atuais.map((row) => [row.id, row.sku_suffix]));
+    const nomePorCor = new Map();
+    for (const c of colors) {
+      const k = chaveDoHex(c.hex);
+      if (!nomePorCor.has(k)) nomePorCor.set(k, resolverNomeDaCor(c.hex, c.name, coresAtuais.get(k)));
+    }
+
     // Monta lista de combinacoes a criar baseado nos inputs
     // - Se tem cores E tamanhos: matriz completa (N*M combinacoes)
     // - Se so tem cores: 1 variante por cor
@@ -405,7 +428,7 @@ router.put('/:pid/variations', async (req, res) => {
         for (const s of sizes) {
           const key = buildMatrixKey(c.hex, s);
           combinations.push({
-            colorHex: c.hex, colorName: c.name || null, colorNameFull: colorNameParaGravar(c.name),
+            colorHex: c.hex, colorName: c.name || null, nomeDaCor: nomePorCor.get(chaveDoHex(c.hex)),
             sizeValue: s,
             stock: parseInt(matrix[key]) || 0,
           });
@@ -415,7 +438,7 @@ router.put('/:pid/variations', async (req, res) => {
       for (const c of colors) {
         const key = buildMatrixKey(c.hex, null);
         combinations.push({
-          colorHex: c.hex, colorName: c.name || null, colorNameFull: colorNameParaGravar(c.name),
+          colorHex: c.hex, colorName: c.name || null, nomeDaCor: nomePorCor.get(chaveDoHex(c.hex)),
           sizeValue: null,
           stock: parseInt(matrix[key]) || 0,
         });
@@ -424,7 +447,7 @@ router.put('/:pid/variations', async (req, res) => {
       for (const s of sizes) {
         const key = buildMatrixKey(null, s);
         combinations.push({
-          colorHex: null, colorName: null, colorNameFull: null,
+          colorHex: null, colorName: null, nomeDaCor: null,
           sizeValue: s,
           stock: parseInt(matrix[key]) || 0,
         });
@@ -476,13 +499,20 @@ router.put('/:pid/variations', async (req, res) => {
     // proprio e promocao ficam onde estao (o rewrite antigo perdia os tres
     // ultimos).
     for (const combo of plano.atualizar) {
-      const skuSuffix = skuSuffixFromAttrs(combo.colorHex, combo.colorName, combo.sizeValue);
+      // 14/11/2026: nome que nao foi aceito (eco do servidor, vazio) deixa o
+      // sku_suffix da variante como esta; nome aceito o refaz, como sempre.
+      const nc = combo.nomeDaCor;
+      const skuAtual = skuAtualPorId.get(combo.id);
+      const skuSuffix = nc && nc.manterSku && skuAtual
+        ? skuAtual
+        : skuSuffixFromAttrs(combo.colorHex, nc ? nc.nomeDoSku : combo.colorName, combo.sizeValue);
       const k = buildMatrixKey(combo.colorHex, combo.sizeValue);
       const params = [combo.id, combo.stock, skuSuffix || null];
       let sets = 'stock_qty = $2, sku_suffix = $3';
       // Body sem `barcodes` (cliente antigo): o codigo gravado fica.
       if (veioBarcodes) { params.push(barcodes[k] || null); sets += ', barcode = $' + params.length; }
-      if (combo.colorHex) { params.push(combo.colorNameFull || null); sets += ', color_name = $' + params.length; }
+      // 14/11/2026: so grava nome aceito; sem ele o color_name fica como esta.
+      if (combo.colorHex && nc && nc.gravar) { params.push(nc.gravar); sets += ', color_name = $' + params.length; }
       await client.query(
         `UPDATE product_variants SET ${sets}, updated_at = NOW() WHERE id = $1`,
         params
@@ -491,14 +521,15 @@ router.put('/:pid/variations', async (req, res) => {
     }
 
     for (const combo of plano.criar) {
-      const skuSuffix = skuSuffixFromAttrs(combo.colorHex, combo.colorName, combo.sizeValue);
+      const nc = combo.nomeDaCor;
+      const skuSuffix = skuSuffixFromAttrs(combo.colorHex, nc ? nc.nomeDoSku : combo.colorName, combo.sizeValue);
       // 21/05/2026: persiste barcode por combinacao (lookup na chave matrixKey)
       const barcodeVal = barcodes[buildMatrixKey(combo.colorHex, combo.sizeValue)] || null;
 
       const { rows: variantRow } = await client.query(
         `INSERT INTO product_variants (product_id, sku_suffix, stock_qty, barcode, color_name, is_active)
          VALUES ($1, $2, $3, $4, $5, true) RETURNING id`,
-        [pid, skuSuffix || null, combo.stock, barcodeVal, combo.colorNameFull || null]
+        [pid, skuSuffix || null, combo.stock, barcodeVal, (nc && nc.paraNova) || null]
       );
       const variantId = variantRow[0].id;
 
