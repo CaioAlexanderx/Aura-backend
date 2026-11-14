@@ -36,6 +36,17 @@
 //    servidor devolve o pedido já criado para a mesma chave
 //    (services/pedidoOnlineIdempotente.js). Erro de rede mantém a chave — a
 //    nova tentativa não duplica; pedido criado troca a chave.
+//
+// 14/11/2026 (p-123b, QA da Black Friday na loja real): a sacola continuava
+// com o item depois que o pedido Pix nascia (selo "1 no carrinho"). Era o
+// comportamento de sempre (desde a decomposicao de 03/05 e a fase 2 do
+// cartao): a sacola so esvaziava no "Ja paguei", na confirmacao do Pix
+// (showConfirmation) ou no botao final do pagar na entrega. Agora, com o
+// pedido criado (Pix ou na entrega), FECHAR o checkout esvazia a sacola
+// (esvaziarSacolaAoFechar). Cartao fica de fora: recusado no Mercado Pago, a
+// cliente volta com a sacola. O Pix fechado sem pagar continua recuperavel
+// por 10 min: o proximo envio de pedido oferece continuar com ele (dedup do
+// aura_pending_order_).
 'use strict';
 
 module.exports = `
@@ -167,7 +178,10 @@ try {
     window.localStorage && window.localStorage.removeItem('aura_pending_order_'+SLUG);
   }
 } catch(_) {}
+// p-123b: pedido ja criado (Pix ou na entrega) esvazia a sacola ao fechar.
+if(esvaziarSacolaAoFechar){ esvaziarSacolaAoFechar=false; cart={}; updateCartUI(); renderProducts(); }
 }
+var esvaziarSacolaAoFechar=false;
 function checkoutBack(){if(checkoutStep>1&&checkoutStep<3){checkoutStep--;renderCheckoutStep();}else closeCheckout();}
 
 // Validador CPF/CNPJ mod 11 (mesmo algoritmo do backend)
@@ -727,6 +741,7 @@ function submitOrder(){
             .then(function(o){
               if(o && o.id){
                 currentOrder=Object.assign({},o,{pix:p.pix||null,card:p.card||null,payment_method:o.payment_method});
+                esvaziarSacolaAoFechar=currentOrder.payment_method!=='card';
                 if(currentOrder.payment_method==='card' && p.card && p.card.init_point){ window.location.href=p.card.init_point; return; }
                 checkoutStep=3; renderCheckoutStep();
               }
@@ -781,6 +796,8 @@ function submitOrder(){
     currentOrder=res.data; paymentMarked=false;
     // Pedido criado: a próxima compra nesta página leva chave nova.
     chaveDoPedido=null;
+    // Fechar o checkout daqui em diante esvazia a sacola (p-123b).
+    esvaziarSacolaAoFechar=currentOrder.payment_method!=='card';
     if(currentOrder.payment_method) customerData.payment_method=currentOrder.payment_method;
     saveCustomerToLocalStorage();
     // Migration 121: salva pedido em andamento pro dedup
