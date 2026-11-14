@@ -62,6 +62,8 @@ const { caminhoDaHomeDaLoja } = require('../middleware/customDomain');
 const { fotosPeloDominioProprio, fotosPeloDominioProprioNoJson } = require('../services/fotosPeloDominioProprio');
 const { paginaDoCatalogo, facetasDoCatalogo, faixaDePreco } = require('../services/catalogoPaginado');
 const { normalizarTamanho } = require('../services/tamanhosDaLoja');
+// 14/11/2026: rotulo da variante com o nome da cor (CP2a da revisao de cores).
+const { colunasDoRotulo, aplicarRotulo } = require('../services/nomeDaCor');
 const { generatePix }     = require('../services/pixService');
 // p-85 (427): preco efetivo (De/Por) no pedido da loja online.
 const {
@@ -743,12 +745,18 @@ router.post('/:slug/order', async (req, res) => {
       const { rows: varRows } = await comColunasPromo((com) => db.query(`
         SELECT pv.id, pv.product_id, pv.price_override, pv.stock_qty, pv.is_active,
                ${com ? colunasPromo('pv') : colunasPromoNulas()},
-               COALESCE(string_agg(pvv.attribute_name || ': ' || pvv.value, ' / ' ORDER BY pvv.attribute_name), '') AS label
+               ''::text AS label, ${colunasDoRotulo('pv.id')}
         FROM product_variants pv
-        LEFT JOIN product_variant_values pvv ON pvv.variant_id = pv.id
         WHERE pv.id = ANY($1::uuid[])
-        GROUP BY pv.id
       `, [variantIds]));
+      // 14/11/2026 (CP2a da revisao de cores): o item do pedido sai com o nome
+      // da cor, o mesmo do Caixa e do cupom ("Vestido (Off White · M)"), e
+      // nao com "Cor: #FAF9F6 / Tamanho: M". Variante sem atributo: sem rotulo.
+      for (const v of varRows) {
+        const temAtributo = Array.isArray(v._rotulo_attrs) && v._rotulo_attrs.length > 0;
+        aplicarRotulo(v, 'label', ' · ');
+        if (!temAtributo) v.label = '';
+      }
       variantMap = Object.fromEntries(varRows.map(v => [v.id, v]));
     }
 

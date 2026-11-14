@@ -33,41 +33,14 @@
 const SO_HEX = /^#?[0-9A-Fa-f]{5,6}$/;
 const HEX6 = /^[0-9A-F]{6}$/i;
 
-/**
- * Paleta do app (utils/colorNames.ts, NAMED_COLORS): é o nome que o editor
- * antigo põe na cor quando o GET não devolve nome. Mesmos 26 tons e a
- * mesma distância (RGB euclidiana), para reconhecer o eco.
- */
-const PALETA_DO_APP = [
-  ['Preto', 0, 0, 0], ['Branco', 255, 255, 255], ['Cinza', 128, 128, 128],
-  ['Cinza claro', 200, 200, 200], ['Cinza escuro', 64, 64, 64],
-  ['Vermelho', 239, 68, 68], ['Vinho', 128, 0, 32], ['Rosa', 236, 72, 153],
-  ['Rosa claro', 255, 182, 193], ['Laranja', 249, 115, 22], ['Amarelo', 234, 179, 8],
-  ['Marrom', 139, 69, 19], ['Caramelo', 189, 113, 0], ['Bege', 245, 222, 179],
-  ['Nude', 240, 235, 223], ['Verde', 34, 197, 94], ['Verde escuro', 0, 100, 0],
-  ['Verde agua', 139, 232, 179], ['Azul', 59, 130, 246], ['Azul escuro', 0, 0, 139],
-  ['Azul claro', 173, 216, 230], ['Azul marinho', 0, 0, 80], ['Roxo', 139, 92, 246],
-  ['Violeta', 109, 40, 217], ['Dourado', 218, 165, 32], ['Prata', 192, 192, 192],
-];
+// A paleta do app (o hexToName de utils/colorNames.ts) mora em
+// services/nomeDaCor.js desde o CP2a (14/11/2026): é o nome que o editor
+// antigo põe na cor quando o GET não devolve nome — reconhecê-lo é saber
+// que é eco.
+const { nomeDaPaleta: nomeDaPaletaDoApp } = require('./nomeDaCor');
 
 function semAcento(s) {
   return String(s || '').normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase().trim();
-}
-
-/** Nome da paleta do app para o hex (o hexToName de utils/colorNames.ts), ou null. */
-function nomeDaPaletaDoApp(hex) {
-  const limpo = String(hex || '').replace('#', '').trim();
-  if (!HEX6.test(limpo)) return null;
-  const r = parseInt(limpo.slice(0, 2), 16);
-  const g = parseInt(limpo.slice(2, 4), 16);
-  const b = parseInt(limpo.slice(4, 6), 16);
-  let melhor = null;
-  let menor = Infinity;
-  for (const [nome, cr, cg, cb] of PALETA_DO_APP) {
-    const d = (r - cr) * (r - cr) + (g - cg) * (g - cg) + (b - cb) * (b - cb);
-    if (d < menor) { menor = d; melhor = nome; }
-  }
-  return melhor;
 }
 
 /**

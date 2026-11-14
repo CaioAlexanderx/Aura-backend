@@ -33,6 +33,7 @@
 const SEM_NUMERACAO = 'Sem numeração';
 const ATRIBUTOS_DE_NUMERACAO = ['tamanho', 'tamanhos', 'numeracao', 'numero', 'num', 'tam', 'tamanho/numeracao'];
 const ATRIBUTOS_DE_COR = ['cor', 'cores', 'color'];
+const { nomeDaCorDaVariante, nomeGravadoQueAparece } = require('./nomeDaCor');
 // Ordem das letras de roupa (depois dos números).
 const ORDEM_LETRAS = ['RN', 'PP', 'P', 'M', 'G', 'GG', 'XG', 'XGG', 'EG', 'EGG', 'EXG', 'G1', 'G2', 'G3', 'G4', 'G5', 'U', 'UN', 'UNICO', 'TAMANHO UNICO'];
 const CALCADO = /cal[cç]ad|t[eê]nis|sand[aá]li|\bbotas?\b|chinel|sapat|tamanc|rasteir|scarpin|mocassim|papete|mule|slide|sapatilh/i;
@@ -118,15 +119,24 @@ function numeracaoDaVariante(valores) {
   return null;
 }
 
-function corDaVariante(valores, colorName) {
+// 14/11/2026 (CP2a da revisão de cores): o nome da cor é o mesmo do Caixa,
+// do cupom e da vitrine (services/nomeDaCor.js). Antes, hex sem color_name
+// saía como o próprio hex ("#1F2A44") e o nome cortado ("AZUL ESCUR") saía
+// como estava.
+function corDaVariante(valores, colorName, skuSuffix) {
   for (const { a, v } of valores || []) {
     if (ATRIBUTOS_DE_COR.includes(semAcento(a))) {
       const t = String(v || '').trim();
       if (!t) continue;
-      return HEX.test(t) ? (String(colorName || '').trim() || t.toUpperCase()) : t;
+      if (!HEX.test(t)) return t;
+      return nomeDaCorDaVariante({
+        color_name: colorName,
+        sku_suffix: skuSuffix,
+        attributes: (valores || []).map((x) => ({ attribute: x.a, value: x.v })),
+      }) || t.toUpperCase();
     }
   }
-  return String(colorName || '').trim() || null;
+  return nomeGravadoQueAparece(colorName);
 }
 
 /** Ordem de vitrine: números (34, 34/35, 37.5), letras de roupa, o resto, "Sem numeração". */
@@ -221,7 +231,7 @@ function montarRelatorio({ produtos, variantes, vendas, opts }) {
     if (!p.is_active || !passa(p)) continue;
     const vs = (varsDoProduto.get(String(p.id)) || []).filter((v) => v.is_active);
     const linhas = vs.length
-      ? vs.map((v) => ({ n: numeracaoDaVariante(v.valores) || limparNumeracao(p.size) || SEM_NUMERACAO, cor: corDaVariante(v.valores, v.color_name), q: Number(v.stock_qty) || 0 }))
+      ? vs.map((v) => ({ n: numeracaoDaVariante(v.valores) || limparNumeracao(p.size) || SEM_NUMERACAO, cor: corDaVariante(v.valores, v.color_name, v.sku_suffix), q: Number(v.stock_qty) || 0 }))
       : [{ n: limparNumeracao(p.size) || SEM_NUMERACAO, cor: null, q: Number(p.stock_qty) || 0 }];
     for (const l of linhas) {
       const k = chaveModelo(p.id, l.cor);
@@ -242,7 +252,7 @@ function montarRelatorio({ produtos, variantes, vendas, opts }) {
     if (p ? !passa(p) : (category || busca)) continue;
     const v = s.variant_id ? varPorId.get(String(s.variant_id)) : null;
     const n = (v && numeracaoDaVariante(v.valores)) || (p && limparNumeracao(p.size)) || SEM_NUMERACAO;
-    const cor = v ? corDaVariante(v.valores, v.color_name) : null;
+    const cor = v ? corDaVariante(v.valores, v.color_name, v.sku_suffix) : null;
     const qtd = Number(s.qtd) || 0;
     const m = modelo(p, cor, { id: s.product_id, nome: s.snapshot });
     m.vendidos += qtd;
@@ -373,7 +383,7 @@ async function vendasPorNumeracao(db, { companyId, companyIds, periodo, porCor, 
   const { rows: variantes } = await db.query(
     // Um JOIN agregado (não subconsulta por variante): product_variant_values
     // não tinha índice nenhum em 03/11/2026 (migration 425 cria).
-    `SELECT v.id, v.product_id, v.stock_qty, v.is_active, v.color_name,
+    `SELECT v.id, v.product_id, v.stock_qty, v.is_active, v.color_name, v.sku_suffix,
             COALESCE(json_agg(json_build_object('a', vv.attribute_name, 'v', vv.value))
                        FILTER (WHERE vv.variant_id IS NOT NULL), '[]'::json) AS valores
        FROM product_variants v

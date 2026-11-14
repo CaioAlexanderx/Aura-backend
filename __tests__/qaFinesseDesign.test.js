@@ -58,7 +58,8 @@ describe('nome da cor com a primeira letra maiuscula', () => {
   });
   test('a pagina do produto usa o helper na bolinha e no rotulo escolhido', () => {
     const src = parts('product_detail.js');
-    expect(src).toContain("var rotulo=primeiraMaiuscula(ehHex?(nomeDaCor(val)||'Cor'):val);");
+    // 14/11/2026: nomeDaCorNaPeca usa o nome da variante (o do Caixa) antes da paleta.
+    expect(src).toContain("var rotulo=primeiraMaiuscula(ehHex?(nomeDaCorNaPeca(p,val)||'Cor'):val);");
     expect(src).toContain('if(cor) escolhidoRotulo=primeiraMaiuscula(escolhidoRotulo);');
   });
 });

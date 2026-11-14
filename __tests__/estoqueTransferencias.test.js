@@ -230,7 +230,7 @@ describe('POST /estoque/transferencias', () => {
     expect(svc.rotuloDaVariante({ color_name: 'Azul', sku_suffix: 'AZUL-M' },
       [{ attribute_name: 'Cor', value: '#3B82F6' }, { attribute_name: 'Tamanho', value: 'm' }])).toBe('Azul / M');
     expect(svc.rotuloDaVariante({ sku_suffix: 'X' }, [{ attribute_name: 'Cor', value: 'Verde' }])).toBe('Verde');
-    expect(svc.rotuloDaVariante({ sku_suffix: 'PRETO-G' }, [{ attribute_name: 'Cor', value: '#000000' }, { attribute_name: 'Tamanho', value: 'g' }])).toBe('G');
+    expect(svc.rotuloDaVariante({ sku_suffix: 'PRETO-G' }, [{ attribute_name: 'Cor', value: '#000000' }, { attribute_name: 'Tamanho', value: 'g' }])).toBe('Preto / G');
     expect(svc.rotuloDaVariante({ sku_suffix: 'PRETO-G' }, [])).toBe('PRETO-G');
   });
 

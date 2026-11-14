@@ -30,6 +30,7 @@
 
 const { camposDoProduto, camposDaVariante } = require('./precoEfetivo');
 const { productVisibilityWhere } = require('../utils/companyGroup');
+const { colunasDoRotulo, aplicarRotulo } = require('./nomeDaCor');
 
 const NOVA_TENTATIVA_MS = 5 * 60 * 1000;
 let presentes = false;
@@ -206,11 +207,8 @@ async function resumoDosVendidos(q, { companyIds, desde, ate, productId = null }
   const { rows: porItem } = await q(
     `SELECT si.product_id, si.variant_id,
             COALESCE(MAX(p.name), MAX(si.product_name_snapshot)) AS nome,
-            (SELECT COALESCE(
-                      (SELECT string_agg(pvv.value, ' / ' ORDER BY pvv.attribute_name)
-                         FROM product_variant_values pvv WHERE pvv.variant_id = pv.id),
-                      pv.sku_suffix)
-               FROM product_variants pv WHERE pv.id = si.variant_id) AS variant_label,
+            (SELECT pv.sku_suffix FROM product_variants pv WHERE pv.id = si.variant_id) AS variant_label,
+            ${colunasDoRotulo('si.variant_id')},
             ${SOMAS}
        FROM sale_items si
        JOIN sales s ON s.id = si.sale_id
@@ -221,7 +219,8 @@ async function resumoDosVendidos(q, { companyIds, desde, ate, productId = null }
       LIMIT ${MAX_ITENS}`,
     params
   );
-  const items = porItem.map((r) => ({
+  // 14/11/2026: rótulo com o nome da cor (services/nomeDaCor.js).
+  const items = porItem.map((r) => aplicarRotulo(r, 'variant_label', ' / ')).map((r) => ({
     product_id: r.product_id,
     variant_id: r.variant_id || null,
     nome: r.nome || null,

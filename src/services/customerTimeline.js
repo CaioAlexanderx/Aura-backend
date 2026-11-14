@@ -34,6 +34,7 @@
 
 const crypto = require('crypto');
 const db = require('../config/database');
+const { colunasDoRotulo, aplicarRotulo } = require('./nomeDaCor');
 const { decodeCursor, encodeCursor } = require('../utils/timelineCursor');
 const { hasSaleNumberColumn, saleNumberSelect } = require('../utils/saleNumber');
 const { phoneMatchCandidates } = require('../utils/phone');
@@ -525,7 +526,10 @@ const sources = {
 };
 
 // ── enriquecimento da página ─────────────────────────────────
+// 14/11/2026 (CP2a da revisão de cores): o rótulo sai com o nome da cor
+// ("Off White / M"), não com o hex cru (services/nomeDaCor.js).
 function variantLabel(r) {
+  aplicarRotulo(r, 'variant_values', ' / ');
   return r.variant_values || r.sku_suffix || null;
 }
 
@@ -539,8 +543,7 @@ async function fetchSaleItems(saleIds) {
     ({ rows } = await db.query(
       `-- tl:itens
        SELECT si.sale_id, si.product_id, si.variant_id, ${nameExpr} AS product_name,
-              (SELECT string_agg(pvv.value, ' / ' ORDER BY pvv.attribute_name)
-                 FROM product_variant_values pvv WHERE pvv.variant_id = si.variant_id) AS variant_values,
+              NULL::text AS variant_values, ${colunasDoRotulo('si.variant_id')},
               pv.sku_suffix, si.quantity, si.unit_price, si.total_price
          FROM sale_items si
          LEFT JOIN products p ON p.id = si.product_id
@@ -579,8 +582,7 @@ async function fetchReturnedItems(trocaIds) {
       `-- tl:itens-devolvidos
        SELECT tri.troca_sale_id, tri.product_id, tri.variant_id,
               COALESCE(NULLIF(TRIM(tri.product_name_snapshot), ''), p.name, 'Produto removido') AS product_name,
-              (SELECT string_agg(pvv.value, ' / ' ORDER BY pvv.attribute_name)
-                 FROM product_variant_values pvv WHERE pvv.variant_id = tri.variant_id) AS variant_values,
+              NULL::text AS variant_values, ${colunasDoRotulo('tri.variant_id')},
               pv.sku_suffix, tri.quantity, tri.unit_price
          FROM troca_returned_items tri
          LEFT JOIN products p ON p.id = tri.product_id

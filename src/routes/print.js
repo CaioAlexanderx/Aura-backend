@@ -18,6 +18,8 @@
 // 22/10/2026: cupom não fiscal do Caixa mostra a logo da loja (companies.logo_url)
 //   no canto superior esquerdo quando cadastrada. Sem logo o HTML é idêntico
 //   ao de antes (travado por __tests__/cupom.logoDaLoja.test.js).
+// 14/11/2026: a variante no cupom sai com o nome da cor e o tamanho
+//   ("Off White · M", services/nomeDaCor.js), nao com o sku_suffix.
 // 09/11/2026: papel de entrega (utils/buildDeliverySlipHtml.js).
 //   - /receipt/:saleId e /preview com ?entrega=1 acrescentam o papel depois
 //     do cupom, separado por uma linha de corte. Sem o parametro a rota e a
@@ -37,6 +39,8 @@ const { autoPrintScript } = require('../utils/autoPrintScript');
 const { findOwnerScopedCustomer, CUSTOMER_NOT_FOUND_BODY } = require('../utils/customerScope');
 const { qrInlineSvg } = require('../utils/qrInline');
 const { buildServiceOrderHtml } = require('../utils/buildServiceOrderHtml');
+// 14/11/2026: nome da cor da variante no cupom (CP2a da revisao de cores).
+const { rotuloDaVariante } = require('../services/nomeDaCor');
 const { buildWarrantyHtml } = require('../utils/buildWarrantyHtml');
 const { buildCarneA4Html, classifyInstallments } = require('../utils/buildCarneA4Html');
 const { purchasesByGroup, NO_ACCOUNT_KEY } = require('../services/credit/carnePurchases');
@@ -90,7 +94,8 @@ function receiptHTML({ company, sale, items, payments, installments = [], option
   const date = new Date(sale.created_at).toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo' });
 
   const itemsHTML = items.map(i => {
-    const variantLabel = i.variant_label ? ` <small>(${i.variant_label})</small>` : '';
+    // 14/11/2026: o rotulo agora traz o nome que a lojista escreveu: escapado.
+    const variantLabel = i.variant_label ? ` <small>(${esc(i.variant_label)})</small>` : '';
     const itemDiscount = parseFloat(i.discount || 0);
     return `<tr>
       <td>${i.product_name || i.product_name_snapshot}${variantLabel}</td>
@@ -278,15 +283,29 @@ async function _loadSaleData(saleId, companyId) {
      WHERE s.id=$1 AND s.company_id=$2`, [saleId, companyId]
   );
   if (!saleRows.length) return null;
-  const { rows: items } = await db.query(
+  const { rows: itensLidos } = await db.query(
     `SELECT si.*,
             COALESCE(p.name, si.product_name_snapshot) AS product_name,
-            pv.sku_suffix AS variant_label
+            pv.sku_suffix AS variant_label,
+            pv.color_name AS variant_color_name,
+            (SELECT json_agg(json_build_object('attribute', pvv.attribute_name, 'value', pvv.value)
+                             ORDER BY pvv.attribute_name)
+               FROM product_variant_values pvv WHERE pvv.variant_id = pv.id) AS variant_attrs
      FROM sale_items si
      LEFT JOIN products p ON p.id=si.product_id
      LEFT JOIN product_variants pv ON pv.id=si.variant_id
      WHERE si.sale_id=$1`, [saleId]
   );
+  // 14/11/2026 (decisao do Caio): o cupom sai com o NOME da cor ("Off White
+  // · M"), o mesmo do Caixa, da nota e da vitrine (services/nomeDaCor.js),
+  // e nao com o sku_suffix ("OFF WHITE-M"). Variante sem atributo segue com o
+  // sufixo, como sempre.
+  const items = itensLidos.map((i) => {
+    const { variant_color_name, variant_attrs, ...resto } = i;
+    if (!i.variant_id || !Array.isArray(variant_attrs) || !variant_attrs.length) return resto;
+    const rotulo = rotuloDaVariante({ color_name: variant_color_name, sku_suffix: i.variant_label, attributes: variant_attrs });
+    return rotulo ? { ...resto, variant_label: rotulo } : resto;
+  });
   const { rows: payments } = await db.query(
     `SELECT method, amount FROM sale_payments WHERE sale_id=$1`, [saleId]
   );

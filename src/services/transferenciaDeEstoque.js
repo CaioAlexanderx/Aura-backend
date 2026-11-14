@@ -43,6 +43,7 @@
 'use strict';
 
 const { randomUUID } = require('crypto');
+const { nomeDaCorDaVariante, nomeGravadoQueAparece } = require('./nomeDaCor');
 
 const LIMITE_ITENS = 1000;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -213,14 +214,22 @@ function _limparCacheDeColunas() { colunasCache = null; }
 const q = (c) => `"${c}"`;
 
 // ─── rotulo da variante ──────────────────────────────────────
-// "Azul / M": nome da cor (a Cor guarda o hex; o nome fica em color_name)
-// e depois os outros atributos; tamanho curto em maiuscula. Sem nada
-// legivel, o sku_suffix ("AZUL-M").
+// "Azul / M": nome da cor e depois os outros atributos; tamanho curto em
+// maiuscula. Sem nada legivel, o sku_suffix ("AZUL-M").
+// 14/11/2026 (CP2a da revisao de cores): o nome da cor e o mesmo do Caixa e
+// do cupom (services/nomeDaCor.js). Antes, a cor sem color_name sumia do
+// rotulo ("M") e o nome cortado ("AZUL ESCUR") aparecia como estava.
 function rotuloDaVariante(v, valores) {
   const lista = valores || [];
   const partes = [];
   const cor = lista.find((x) => norm(x.attribute_name) === 'cor');
-  const corLegivel = txt(v && v.color_name) || (cor && !txt(cor.value).startsWith('#') ? txt(cor.value) : '');
+  const corLegivel = cor
+    ? (nomeDaCorDaVariante({
+        color_name: v && v.color_name,
+        sku_suffix: v && v.sku_suffix,
+        attributes: lista.map((x) => ({ attribute: x.attribute_name, value: x.value })),
+      }) || '')
+    : (nomeGravadoQueAparece(v && v.color_name) || '');
   if (corLegivel) partes.push(corLegivel);
   for (const x of lista) {
     if (x === cor) continue;

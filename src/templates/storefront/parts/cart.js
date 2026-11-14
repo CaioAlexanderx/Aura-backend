@@ -29,10 +29,26 @@ function nomeDoItem(p,v){
   if(!v) return p.name;
   var vlabel=(v.values||[]).map(function(x){
     var val=String(x.value==null?'':x.value);
-    if(typeof atributoDeCor==='function'&&atributoDeCor(x.attribute)&&/^#/.test(val)&&typeof nomeDaCor==='function') return primeiraMaiuscula(nomeDaCor(val)||val);
+    if(typeof atributoDeCor==='function'&&atributoDeCor(x.attribute)&&/^#/.test(val)) return v.nome_da_cor||primeiraMaiuscula(nomeDaCorNaPeca(p,val)||val);
     return primeiraMaiuscula(val);
   }).join(' / ');
   return vlabel?p.name+' ('+vlabel+')':p.name;
+}
+/**
+ * 14/11/2026: o nome da cor e o mesmo do Caixa, do cupom e da etiqueta: vem
+ * pronto em variante.nome_da_cor (services/nomeDaCor.js). Sem ele (pagina
+ * gerada antes), a paleta da vitrine, como sempre.
+ */
+function nomeDaCorNaPeca(p,hex){
+  var vs=(p&&p.variants)||[];
+  for(var i=0;i<vs.length;i++){
+    if(!vs[i].nome_da_cor) continue;
+    var vals=vs[i].values||[];
+    for(var j=0;j<vals.length;j++){
+      if(vals[j].value===hex&&(typeof atributoDeCor!=='function'||atributoDeCor(vals[j].attribute))) return vs[i].nome_da_cor;
+    }
+  }
+  return typeof nomeDaCor==='function'?nomeDaCor(hex):null;
 }
 function addToCart(productId,variantId,opcoes){
   variantId = variantId || null;

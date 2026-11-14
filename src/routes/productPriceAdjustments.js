@@ -27,6 +27,7 @@ const router = require('express').Router({ mergeParams: true });
 const db = require('../config/database');
 const { logAuditAction, contextoDaRequisicao } = require('../middleware/auditLog');
 const { lerPedido, montarPrevia, itemPublico } = require('../services/reajusteDePreco');
+const { colunasDoRotulo, aplicarRotulo } = require('../services/nomeDaCor');
 
 // Mesma regra de listVisibilityWhere de products.js (copia, como fazem
 // productImage/productImages/productsVariations), com alias de tabela.
@@ -67,16 +68,14 @@ async function lerLinhas(q, cid, ids, travar) {
   if (!products.length) return { products, variants: [] };
   const { rows: variants } = await q(
     `SELECT pv.id, pv.product_id, pv.price_override, pv.sku_suffix,
-            COALESCE(
-              (SELECT string_agg(pvv.value, ' / ' ORDER BY pvv.attribute_name)
-                 FROM product_variant_values pvv WHERE pvv.variant_id = pv.id),
-              pv.sku_suffix
-            ) AS label
+            pv.sku_suffix AS label, ${colunasDoRotulo('pv.id')}
        FROM product_variants pv
       WHERE pv.product_id = ANY($1::uuid[]) AND pv.is_active = true AND pv.price_override IS NOT NULL
       ${travar ? 'FOR UPDATE OF pv' : ''}`,
     [products.map((p) => p.id)]
   );
+  // 14/11/2026: rótulo com o nome da cor (services/nomeDaCor.js).
+  for (const v of variants) aplicarRotulo(v, 'label', ' / ');
   return { products, variants };
 }
 
