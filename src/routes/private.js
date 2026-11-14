@@ -141,6 +141,10 @@ router.use('/products', require('./productCostFills'));
 // estatico e precisa vir antes do GET /:pid curinga de ./products. O perfil
 // estoque_consulta leva 403 no estoqueSoConsulta acima (escrita e leitura).
 router.use('/products', require('./productPromotions'));
+// 14/11/2026 (CP5 da revisao de cores): /cores-para-conferir e estatico e
+// precisa vir antes do GET /:pid curinga de ./products. estoque_consulta
+// leva 403 no estoqueSoConsulta acima.
+router.use('/products', require('./productColorNames'));
 router.use('/products', require('./productsVariations'));
 // F0 Bloco B1 (30/07/2026): productLinksRouter expoe /products/unclassified
 // e /products/categories/bulk (estaticas) -- tem que montar ANTES de

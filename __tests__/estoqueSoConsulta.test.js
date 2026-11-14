@@ -199,6 +199,7 @@ describe('escrita', () => {
     ['post', '/products/price-adjustments'],
     ['post', '/products/brand/apply'],
     ['post', '/products/merge-as-variants'],
+    ['post', '/products/cores-para-conferir/confirmar'],
     ['put', `/products/${PID}/variations`],
     ['post', `/products/${PID}/variants`],
     ['post', `/products/${PID}/image`],
@@ -232,6 +233,7 @@ describe('leituras com valor', () => {
     `/products/${PID}/label/print`,
     '/products/labels/batch',
     '/products/unclassified',
+    '/products/cores-para-conferir',
     '/estoque/ruptura',
   ])('GET %s volta 403 para consulta', async (caminho) => {
     banco({ papel: 'Estoque', permissions: { estoque_consulta: true, pdv: true } });
