@@ -26,6 +26,7 @@ const { scriptsDoHead, metatagsDeSeo } = require('../services/rastreadores');
 const { linkDeFontes } = require('./storefrontTypography');
 const buildHtmlBody = require('./storefrontHtml');
 const buildScript   = require('./storefrontScript');
+const { temPromocaoNoPayload } = require('./storefront/parts/promocao');
 // tq-61: o numero do wa.me com o 55 — uma regra so (services/whatsappDaLoja.js).
 const { numeroDoWhatsapp } = require('../services/whatsappDaLoja');
 
@@ -187,6 +188,12 @@ function buildStorefrontPage(data, slug) {
   const formasNaEntrega = data.settings && data.settings.pay_on_delivery_methods;
   const script = buildScript(storeData, escJs(slug), enderecoDaApi(), data.textos_da_frente || null, {
     naEntrega: Array.isArray(formasNaEntrega) && formasNaEntrega.length > 0,
+    // p-119a: o "De" riscado so entra na loja com promocao no ar. Sem
+    // promocao a pagina sai byte a byte igual (parts/promocao.js).
+    // tem_promocao vem do servidor sobre o catalogo inteiro (p-118): a
+    // pagina so carrega a primeira pagina de pecas, e uma peca em promocao
+    // que chega depois pela paginacao tambem precisa do riscado.
+    promocao: data.tem_promocao === true || temPromocaoNoPayload(data),
   });
 
   const bodyClasses = [
