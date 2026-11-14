@@ -71,6 +71,8 @@ const { productVisibilityWhere }   = require('../utils/companyGroup');
 const { separarServicos, totaisDosItens, pagamentosDosProdutos } = require('../services/nfceSemServico');
 // 13/11/2026: desconto da venda (cupom + manual) rateado nos itens da nota.
 const { itensComDescontoDaVenda, ehUuid, MENSAGEM_DESCONTO_TOTAL } = require('../services/descontoDaVendaNaNfce');
+// 14/11/2026: trava "uma nota de produtos por venda" (NF-e 55 de venda).
+const { nfeDeVendaQueTrava }       = require('../services/nfe55Venda');
 // products.nota_fiscal (migration 442): false = base sem a coluna.
 let temColunaNotaFiscal = true;
 // 11/11/2026 — fiscal do produto na nota (migration 350: cest, origem,
@@ -571,6 +573,24 @@ router.post('/emit', requireAuth, requireRole('client','analyst','admin'), async
       if (existing.length) {
         const e = existing[0];
         return res.status(200).json({ nfce: e, tipo, pdf_url: e.pdf_url, xml_url: e.xml_url, qr_code: e.qr_code, url_consulta: e.url_consulta, idempotent: true });
+      }
+      // 14/11/2026 (NF-e 55 de venda, CP2): uma nota de PRODUTOS por venda.
+      // Se a venda ja tem NF-e de venda autorizada (ou em processamento, que
+      // pode estar autorizada na SEFAZ), a NFC-e nao sai. A devolucao 55
+      // (finalidade 4) nao conta. Sem NF-e de venda: nada muda aqui.
+      if (tipo === 'nfce') {
+        // Falha na leitura nunca trava o Caixa: segue como antes.
+        const nfeVenda = await nfeDeVendaQueTrava(db, req.params.id, sale_id).catch((e) => {
+          console.error('[nfce] conferencia da NF-e de venda falhou (segue):', e.message);
+          return null;
+        });
+        if (nfeVenda) {
+          return res.status(409).json({
+            error: `Esta venda ja tem a NF-e no ${nfeVenda.numero} (${nfeVenda.status}). Cada venda tem uma nota de produtos so.`,
+            code: 'NOTA_DE_PRODUTOS_JA_EXISTE',
+            nota: { id: nfeVenda.id, tipo: nfeVenda.tipo, numero: nfeVenda.numero, serie: nfeVenda.serie, status: nfeVenda.status, chave_acesso: nfeVenda.chave_acesso || null },
+          });
+        }
       }
     }
 

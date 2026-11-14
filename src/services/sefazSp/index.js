@@ -225,7 +225,14 @@ async function emitNfce(company, nfceData, ctx) {
  */
 async function queryNfce({ chave, config, db, companyId, transport }) {
   const tpAmb = resolveTpAmb(config);
-  const endpoints = getEndpoints(config.uf || 'SP', tpAmb);
+  // 14/11/2026 (NF-e 55 de venda): a nota 'processando' da 55 também passa
+  // pelo job de retry (jobs/nfceRefreshJob) e pelo "Atualizar" da lista. A
+  // 55 é consultada no host da NF-e (nfe.fazenda...), não no da NFC-e —
+  // consultar a chave 55 no serviço da NFC-e devolveria um cStat de recusa
+  // e a nota viraria 'rejeitada' por engano. Modelo = posições 21-22 da chave.
+  const endpoints = String(chave || '').slice(20, 22) === '55'
+    ? require('./nfe55').getEndpoints55(config.uf || 'SP', tpAmb)
+    : getEndpoints(config.uf || 'SP', tpAmb);
   const { pfx, password } = await loadCertificate(db, companyId);
   const r = await soap.consultarChave({ chave, tpAmb, endpoints, pfx, passphrase: password, transport });
   const aindaPendente = r.naoConsta || String(r.cStat) === '101';

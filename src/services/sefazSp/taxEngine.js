@@ -44,6 +44,16 @@ function cfopForCsosn(csosn) {
   return csosn === '500' ? '5405' : '5102';
 }
 
+/** CFOP da NF-e 55 de VENDA (14/11/2026) pelo CSOSN e pelo destino:
+ *  mesma UF 5102 / ST 5405; outra UF 6102 / ST 6404 (6.404 = venda de
+ *  mercadoria com o ICMS já retido antes por ST, a irmã interestadual da
+ *  5.405). A NFC-e continua em cfopForCsosn (sempre dentro do estado). */
+function cfopVenda55(csosn, { interestadual = false } = {}) {
+  const st = String(csosn) === '500';
+  if (interestadual) return st ? '6404' : '6102';
+  return st ? '5405' : '5102';
+}
+
 /** Origem da mercadoria (tabela A do CST, 0–8). Fora disso → 0 (nacional). */
 function origemValida(origem) {
   const n = Number(origem);
@@ -161,4 +171,4 @@ function resolveItemIbsCbs({ crt, tpAmb, vBC }) {
   return { cst, cClassTrib, vBC: base, pIBSUF, vIBSUF, pIBSMun, vIBSMun, vIBS, pCBS, vCBS };
 }
 
-module.exports = { resolveItemTax, cfopForCsosn, origemValida, validateNcm, icmsGroupForCsosn, CSOSN_BY_PROFILE, VALID_PROFILES, resolveItemIbsCbs, envPct, round2 };
+module.exports = { resolveItemTax, cfopForCsosn, cfopVenda55, origemValida, validateNcm, icmsGroupForCsosn, CSOSN_BY_PROFILE, VALID_PROFILES, resolveItemIbsCbs, envPct, round2 };
