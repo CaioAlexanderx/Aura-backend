@@ -6,7 +6,11 @@
 // GET /   estado da campanha para a pagina Black Friday do painel:
 //         { loja_online{existe,publicada,slug}, ativa, titulo, titulos[],
 //           no_ar, agendada, promocoes{no_ar,agendadas,ate_pct,ate_data,
-//           comeca_em}, pode_ligar, periodo_padrao{inicio,fim} }
+//           comeca_em,fora_da_loja}, pode_ligar, periodo_padrao{inicio,fim} }
+//         promocoes conta SO o que a loja online mostra; fora_da_loja diz
+//         quantas pecas em promocao a vitrine nao mostra (p-123a).
+// GET /fora-da-loja  as pecas que a loja online nao mostra, com o motivo,
+//         para o assistente marcar: { produtos: [{id, motivo}], limite }.
 // PUT /   { ativa?: boolean, titulo?: 'black_friday' |
 //           'black_friday_da_loja' | 'ofertas_de_novembro' }
 //         Ligar exige ao menos uma promocao no ar ou agendada (409
@@ -26,7 +30,7 @@ const { requireRole } = require('../middleware/auth');
 const { logAuditAction, contextoDaRequisicao } = require('../middleware/auditLog');
 const { esquecerPagina } = require('../services/cacheDaPaginaDaLoja');
 const { listVisibilityWhere } = require('../services/storefrontBuilder');
-const { TITULOS, resumoDasPromocoes, estadoParaOPainel } = require('../services/campanhaDaLoja');
+const { TITULOS, resumoDasPromocoes, estadoParaOPainel, pecasForaDaLoja, LIMITE_FORA_DA_LOJA } = require('../services/campanhaDaLoja');
 
 const MIGRATION_PENDING = {
   error: 'A campanha de Black Friday ainda está sendo instalada. Tente de novo em alguns minutos.',
@@ -40,6 +44,22 @@ const SEM_LOJA_ONLINE = {
   error: 'Configure a loja online antes de ligar a campanha.',
   code: 'SEM_LOJA_ONLINE',
 };
+/**
+ * O 409 de ligar sem promocao na loja. Com promocao so em peca que a loja
+ * nao mostra, diz isso (QA 14/11: a lojista tinha 3 itens no ar no Caixa e
+ * nao entendia por que a chave nao ligava).
+ */
+function semPromocaoNaLoja(foraDaLoja) {
+  const n = Number(foraDaLoja) || 0;
+  if (n <= 0) return SEM_PROMOCAO;
+  const pecas = n === 1 ? 'O seu produto em promoção não aparece' : `Os seus ${n} produtos em promoção não aparecem`;
+  return {
+    ...SEM_PROMOCAO,
+    error: `${pecas} na loja online (estão fora da vitrine ou sem foto). Mostre pelo menos um na loja para ligar a campanha.`,
+    fora_da_loja: n,
+  };
+}
+
 const faltaMigration = (err) => err && (err.code === '42703' || err.code === '42P01');
 
 async function lerConfig(cid) {
@@ -79,6 +99,23 @@ router.get('/', async (req, res) => {
   }
 });
 
+router.get('/fora-da-loja', async (req, res) => {
+  const cid = req.params.id;
+  try {
+    const config = await lerConfig(cid);
+    const produtos = await pecasForaDaLoja({
+      cid,
+      visibilidade: listVisibilityWhere('$1'),
+      exigeFoto: !!(config && config.require_product_image === true),
+    });
+    res.json({ produtos, limite: LIMITE_FORA_DA_LOJA });
+  } catch (err) {
+    if (faltaMigration(err)) return res.status(503).json(MIGRATION_PENDING);
+    console.error('[campanha] fora da loja:', err.message);
+    res.status(500).json({ error: 'Não deu para ver o que a loja mostra agora. Tente de novo.' });
+  }
+});
+
 /** Corpo do PUT validado, ou { erro }. */
 function lerCorpo(body) {
   const b = body || {};
@@ -105,7 +142,7 @@ router.put('/', requireRole('client', 'analyst', 'admin'), async (req, res) => {
 
     if (pedido.ativa === true && config.bf_ativa !== true) {
       const atual = await estado(cid, config);
-      if (!atual.pode_ligar) return res.status(409).json(SEM_PROMOCAO);
+      if (!atual.pode_ligar) return res.status(409).json(semPromocaoNaLoja(atual.promocoes.fora_da_loja));
     }
 
     const { rows } = await db.query(

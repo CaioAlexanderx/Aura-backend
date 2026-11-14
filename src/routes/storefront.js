@@ -69,6 +69,9 @@ const { generatePix }     = require('../services/pixService');
 const {
   colunasPromo, colunasPromoNulas, comColunasPromo, precoEfetivoDoProduto, precoEfetivoDaVariante,
 } = require('../services/precoEfetivo');
+// p-123a (migration 452): o item do pedido guarda se saiu na promocao, como
+// o item do Caixa (sale_items, 428) — "Vendas na promocao" conta a loja.
+const vendaNaPromocao = require('../services/vendaNaPromocao');
 const { uploadToR2 }      = require('../utils/r2Storage');
 const { onOrderConfirmed } = require('../services/digitalOrderConfirmation');
 const { createMpPixPayment, createMpPreference } = require('../services/mpService');
@@ -784,6 +787,7 @@ router.post('/:slug/order', async (req, res) => {
       let effectivePrice = precoEfetivoDoProduto(p, agora);
       let variantId      = item.variant_id || null;
       let variantLabel   = null;
+      let marcacao       = vendaNaPromocao.marcacaoDoItem(p, null, agora);
 
       if (productHasVariants[p.id]) {
         if (!variantId) {
@@ -805,6 +809,7 @@ router.post('/:slug/order', async (req, res) => {
         // produto (variante sem preco proprio segue o produto).
         effectivePrice = precoEfetivoDaVariante(variant, p, agora);
         variantLabel = variant.label;
+        marcacao = vendaNaPromocao.marcacaoDoItem(p, variant, agora);
       } else {
         variantId = null;
         if (p.stock_qty < item.quantity) {
@@ -824,6 +829,8 @@ router.post('/:slug/order', async (req, res) => {
         quantity:      item.quantity,
         subtotal:      itemSubtotal,
         variant_id:    variantId,
+        preco_lista:   marcacao.preco_lista,
+        em_promocao:   marcacao.em_promocao,
       });
     }
 
@@ -953,7 +960,20 @@ router.post('/:slug/order', async (req, res) => {
         newOrder.discount_amount = discount_amount;
       }
       order = newOrder;
+      // Base sem a 452: o item grava como antes (leitura que nao aborta a
+      // transacao, guardada no processo).
+      const comMarcacao = await vendaNaPromocao.colunasDoPedidoPresentes((sql, p) => client.query(sql, p));
       for (const item of orderItems) {
+        if (comMarcacao) {
+          await client.query(`
+            INSERT INTO digital_order_items
+              (order_id, product_id, product_name, product_image, unit_price, quantity, subtotal, variant_id, preco_lista, em_promocao)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+          `, [order.id, item.product_id, item.product_name, item.product_image,
+              item.unit_price, item.quantity, item.subtotal, item.variant_id || null,
+              item.preco_lista, item.em_promocao]);
+          continue;
+        }
         await client.query(`
           INSERT INTO digital_order_items
             (order_id, product_id, product_name, product_image, unit_price, quantity, subtotal, variant_id)

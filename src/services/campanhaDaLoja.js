@@ -26,7 +26,7 @@
 'use strict';
 
 const db = require('../config/database');
-const { EM_ESTOQUE, NA_VITRINE, filtroDeFoto } = require('./catalogoPaginado');
+const { EM_ESTOQUE, NA_VITRINE, COM_FOTO, filtroDeFoto } = require('./catalogoPaginado');
 
 const TITULOS = ['black_friday', 'black_friday_da_loja', 'ofertas_de_novembro'];
 const TITULO_PADRAO = 'black_friday';
@@ -52,56 +52,97 @@ function periodoPadrao(agora = new Date()) {
   return { inicio: `${ano}-11-27`, fim: `${ano}-11-30` };
 }
 
-const SEM_PROMOCAO = Object.freeze({ no_ar: 0, agendadas: 0, ate_pct: 0, ate_data: null, comeca_em: null });
+const SEM_PROMOCAO = Object.freeze({ no_ar: 0, agendadas: 0, ate_pct: 0, ate_data: null, comeca_em: null, fora_da_loja: 0 });
 
 /**
- * As promocoes que a loja online mostra, num SELECT so. `cid` vai em $1
- * porque NA_VITRINE e a visibilidade leem $1.
+ * As promocoes da empresa, num SELECT so, separando o que a loja online
+ * MOSTRA (mesma regra da grade: com saldo, foto quando a loja exige,
+ * destaques e ocultas) do que ela nao mostra. `cid` vai em $1 porque
+ * NA_VITRINE e a visibilidade leem $1.
  *
- *   no_ar      pecas (produto) com promocao valendo agora
- *   agendadas  pecas com promocao que ainda vai comecar
- *   ate_pct    maior desconto, para baixo, entre as no ar (0 sem nenhuma)
- *   ate_data   'YYYY-MM-DD' do ultimo fim entre as no ar, em Brasilia
- *   comeca_em  'YYYY-MM-DD' da primeira agendada, em Brasilia
+ *   no_ar         pecas NA LOJA com promocao valendo agora
+ *   agendadas     pecas NA LOJA com promocao que ainda vai comecar
+ *   ate_pct       maior desconto, para baixo, entre as no ar na loja
+ *   ate_data      'YYYY-MM-DD' do ultimo fim entre as no ar, em Brasilia
+ *   comeca_em     'YYYY-MM-DD' da primeira agendada, em Brasilia
+ *   fora_da_loja  pecas com promocao (no ar ou agendada) que a loja online
+ *                 NAO mostra: valem no Caixa, mas nao aparecem na vitrine
+ *                 (QA 14/11, p-123a: a secao dizia "nenhum produto em
+ *                 promocao" e a Promocao em lote, "3 itens no ar")
+ *
+ * So a peca que tem alguma promocao gravada passa pelos filtros da
+ * vitrine: o resto do catalogo nao custa nada.
  */
 function sqlDoResumo(visibilidade, exigeFoto) {
   return `
-    WITH vis AS (
-      SELECT id, price, promo_price, promo_starts_at, promo_ends_at
+    WITH todos AS (
+      SELECT id, price, promo_price, promo_starts_at, promo_ends_at,
+             (${EM_ESTOQUE} AND ${filtroDeFoto(exigeFoto)} AND ${NA_VITRINE}) AS na_loja
         FROM products
        WHERE ${visibilidade}
          AND is_active IS NOT FALSE
-         AND ${EM_ESTOQUE}
-         AND ${filtroDeFoto(exigeFoto)}
-         AND ${NA_VITRINE}
+         AND (promo_price IS NOT NULL OR EXISTS (
+               SELECT 1 FROM product_variants pvp
+                WHERE pvp.product_id = products.id AND pvp.promo_price IS NOT NULL))
     ),
     linhas AS (
-      SELECT vis.id AS pid, vis.price::numeric AS base, vis.promo_price::numeric AS promo,
-             vis.promo_starts_at AS ini, vis.promo_ends_at AS fim
-        FROM vis
-       WHERE vis.promo_price IS NOT NULL
+      SELECT t.id AS pid, t.na_loja, t.price::numeric AS base, t.promo_price::numeric AS promo,
+             t.promo_starts_at AS ini, t.promo_ends_at AS fim
+        FROM todos t
+       WHERE t.promo_price IS NOT NULL
       UNION ALL
-      SELECT vis.id, COALESCE(v.price_override, vis.price)::numeric, v.promo_price::numeric,
+      SELECT t.id, t.na_loja, COALESCE(v.price_override, t.price)::numeric, v.promo_price::numeric,
              v.promo_starts_at, v.promo_ends_at
         FROM product_variants v
-        JOIN vis ON vis.id = v.product_id
+        JOIN todos t ON t.id = v.product_id
        WHERE v.is_active = true AND v.stock_qty > 0 AND v.promo_price IS NOT NULL
     ),
     marcadas AS (
-      SELECT pid, base, promo, ini, fim,
+      SELECT pid, na_loja, base, promo, ini, fim,
              (promo > 0 AND promo < base AND ini <= $2::timestamptz AND fim > $2::timestamptz) AS ativa,
              (promo > 0 AND promo < base AND ini > $2::timestamptz AND fim > ini) AS agendada
         FROM linhas
        WHERE base > 0 AND ini IS NOT NULL AND fim IS NOT NULL
     )
     SELECT
-      COUNT(DISTINCT pid) FILTER (WHERE ativa)::int AS no_ar,
-      COUNT(DISTINCT pid) FILTER (WHERE agendada AND NOT ativa)::int AS agendadas,
-      COALESCE(MAX(FLOOR((1 - promo / base) * 100)) FILTER (WHERE ativa), 0)::int AS ate_pct,
-      to_char((MAX(fim) FILTER (WHERE ativa) - interval '1 millisecond') AT TIME ZONE 'America/Sao_Paulo', 'YYYY-MM-DD') AS ate_data,
-      to_char(MIN(ini) FILTER (WHERE agendada) AT TIME ZONE 'America/Sao_Paulo', 'YYYY-MM-DD') AS comeca_em
+      COUNT(DISTINCT pid) FILTER (WHERE ativa AND na_loja)::int AS no_ar,
+      COUNT(DISTINCT pid) FILTER (WHERE agendada AND NOT ativa AND na_loja)::int AS agendadas,
+      COALESCE(MAX(FLOOR((1 - promo / base) * 100)) FILTER (WHERE ativa AND na_loja), 0)::int AS ate_pct,
+      to_char((MAX(fim) FILTER (WHERE ativa AND na_loja) - interval '1 millisecond') AT TIME ZONE 'America/Sao_Paulo', 'YYYY-MM-DD') AS ate_data,
+      to_char(MIN(ini) FILTER (WHERE agendada AND na_loja) AT TIME ZONE 'America/Sao_Paulo', 'YYYY-MM-DD') AS comeca_em,
+      COUNT(DISTINCT pid) FILTER (WHERE (ativa OR agendada) AND NOT na_loja)::int AS fora_da_loja
     FROM marcadas
   `;
+}
+
+/**
+ * As pecas da empresa que a loja online NAO mostra, com o motivo, para o
+ * assistente "Montar descontos da loja online" marcar (p-123a). Ativas e
+ * visiveis para a empresa (grupo incluido), como a grade. Motivo, na ordem:
+ * 'fora_da_vitrine' (oculta ou fora dos destaques), 'sem_foto' (a loja
+ * exige foto), 'sem_estoque'. Ate LIMITE_FORA_DA_LOJA pecas.
+ */
+const LIMITE_FORA_DA_LOJA = 5000;
+
+function sqlForaDaLoja(visibilidade, exigeFoto) {
+  return `
+    SELECT id, CASE
+             WHEN NOT ${NA_VITRINE} THEN 'fora_da_vitrine'
+             WHEN ${exigeFoto === true ? `NOT ${COM_FOTO}` : 'FALSE'} THEN 'sem_foto'
+             ELSE 'sem_estoque'
+           END AS motivo
+      FROM products
+     WHERE ${visibilidade}
+       AND is_active IS NOT FALSE
+       AND NOT (${EM_ESTOQUE} AND ${filtroDeFoto(exigeFoto)} AND ${NA_VITRINE})
+     ORDER BY id
+     LIMIT ${LIMITE_FORA_DA_LOJA}
+  `;
+}
+
+async function pecasForaDaLoja({ cid, visibilidade, exigeFoto = false, q = db.query.bind(db) }) {
+  const { rows } = await q(sqlForaDaLoja(visibilidade, exigeFoto), [cid]);
+  return (rows || []).map((r) => ({ id: r.id, motivo: r.motivo }));
 }
 
 /**
@@ -121,6 +162,7 @@ async function resumoDasPromocoes({ cid, visibilidade, exigeFoto = false, agora 
       ate_pct: Number(r.ate_pct) || 0,
       ate_data: r.ate_data || null,
       comeca_em: r.comeca_em || null,
+      fora_da_loja: Number(r.fora_da_loja) || 0,
     };
   } catch (e) {
     if (e && (e.code === '42703' || e.code === '42P01')) return { ...SEM_PROMOCAO };
@@ -181,4 +223,5 @@ module.exports = {
   TITULOS, TITULO_PADRAO, SEM_PROMOCAO,
   textoDoTitulo, opcoesDeTitulo, periodoPadrao,
   sqlDoResumo, resumoDasPromocoes, chavesDoPayload, estadoParaOPainel,
+  sqlForaDaLoja, pecasForaDaLoja, LIMITE_FORA_DA_LOJA,
 };

@@ -63,6 +63,37 @@ async function colunasPresentes(q) {
   return false;
 }
 
+// p-123a (migration 452): as mesmas 2 colunas no item do pedido online.
+let pedidoPresentes = false;
+let pedidoAusenteAte = 0;
+const SQL_COLUNAS_DO_PEDIDO = `
+  SELECT COUNT(*)::int AS n
+    FROM information_schema.columns
+   WHERE table_schema = ANY (current_schemas(false))
+     AND table_name = 'digital_order_items' AND column_name IN ('preco_lista', 'em_promocao')`;
+
+/**
+ * digital_order_items tem preco_lista/em_promocao (452)? Mesma leitura que
+ * nunca falha e nao aborta a transacao, guardada no processo como a da 428.
+ */
+async function colunasDoPedidoPresentes(q) {
+  if (pedidoPresentes) return true;
+  if (Date.now() < pedidoAusenteAte) return false;
+  let n = 0;
+  try {
+    const r = await q(SQL_COLUNAS_DO_PEDIDO, []);
+    n = Number(r && r.rows && r.rows[0] && r.rows[0].n) || 0;
+  } catch (_) {
+    n = 0;
+  }
+  if (n >= 2) {
+    pedidoPresentes = true;
+    return true;
+  }
+  pedidoAusenteAte = Date.now() + NOVA_TENTATIVA_MS;
+  return false;
+}
+
 const NULO = Object.freeze({ preco_lista: null, em_promocao: null });
 
 const numero = (v) => {
@@ -146,29 +177,59 @@ async function marcarItens(q, itens, { visiveis, companyId, agora = new Date() }
 // So os itens com em_promocao = true. Venda cancelada fora; devolucao
 // (type 'devolucao') fora; venda e troca contam (na troca, sale_items so
 // tem os itens NOVOS, que sairam da loja).
+//
+// p-123a (14/11/2026, migration 452): o pedido da LOJA ONLINE conta junto,
+// quando confirmado (pago ou aceito: confirmed, preparing, ready,
+// out_for_delivery, delivered) e com o item marcado na hora do pedido. A
+// data e a da confirmacao (confirmed_at; sem ela, a do pedido). Pedido
+// pendente, recusado ou cancelado fica fora. Base sem a 452: so o Caixa.
 //   itens_vendidos = soma da quantidade
-//   faturamento    = soma do total da linha (sale_items.total_price: ja com
-//                    o desconto do lapis do item; sem o cupom/desconto da
-//                    venda inteira, que nao e por item)
+//   faturamento    = soma do total da linha (Caixa: sale_items.total_price,
+//                    ja com o desconto do lapis do item, sem o cupom da
+//                    venda inteira; loja: digital_order_items.subtotal, sem
+//                    o frete)
 //   desconto_dado  = soma de (preco_lista - unit_price) x quantidade, nunca
 //                    negativo por linha (Caixa que mandou o preco normal na
 //                    promocao conta o item, com desconto 0)
-//   vendas         = vendas distintas com algum item na promocao
+//   vendas         = vendas e pedidos distintos com algum item na promocao
 // Nenhum dado de cliente.
 
-const FILTRO = `
-       s.company_id = ANY($1::uuid[])
-   AND s.created_at >= $2::timestamptz AND s.created_at <= $3::timestamptz
-   AND COALESCE(s.status, 'completed') <> 'cancelled'
-   AND COALESCE(s.type, 'sale') IN ('sale', 'troca')
-   AND si.em_promocao = true
-   AND ($4::uuid IS NULL OR si.product_id = $4::uuid)`;
+const STATUS_DO_PEDIDO_CONFIRMADO = ['confirmed', 'preparing', 'ready', 'out_for_delivery', 'delivered'];
+
+const LINHAS_DO_CAIXA = `
+  SELECT s.company_id, 'caixa:' || s.id::text AS venda, 'caixa' AS canal,
+         si.product_id, si.variant_id, si.quantity, si.total_price AS total,
+         si.unit_price, si.preco_lista, si.product_name_snapshot AS nome_snapshot
+    FROM sale_items si JOIN sales s ON s.id = si.sale_id
+   WHERE s.company_id = ANY($1::uuid[])
+     AND s.created_at >= $2::timestamptz AND s.created_at <= $3::timestamptz
+     AND COALESCE(s.status, 'completed') <> 'cancelled'
+     AND COALESCE(s.type, 'sale') IN ('sale', 'troca')
+     AND si.em_promocao = true
+     AND ($4::uuid IS NULL OR si.product_id = $4::uuid)`;
+
+const LINHAS_DA_LOJA = `
+  SELECT o.company_id, 'loja:' || o.id::text AS venda, 'loja' AS canal,
+         oi.product_id, oi.variant_id, oi.quantity, oi.subtotal AS total,
+         oi.unit_price, oi.preco_lista, oi.product_name AS nome_snapshot
+    FROM digital_order_items oi JOIN digital_orders o ON o.id = oi.order_id
+   WHERE o.company_id = ANY($1::uuid[])
+     AND COALESCE(o.confirmed_at, o.created_at) >= $2::timestamptz
+     AND COALESCE(o.confirmed_at, o.created_at) <= $3::timestamptz
+     AND o.status::text IN (${STATUS_DO_PEDIDO_CONFIRMADO.map((x) => `'${x}'`).join(', ')})
+     AND oi.em_promocao = true
+     AND ($4::uuid IS NULL OR oi.product_id = $4::uuid)`;
+
+/** O CTE com as linhas vendidas na promocao: Caixa e, com a 452, a loja. */
+const comLinhas = (comLoja) => `WITH l AS (${LINHAS_DO_CAIXA}${comLoja ? `
+  UNION ALL${LINHAS_DA_LOJA}` : ''}
+)`;
 
 const SOMAS = `
-       COALESCE(SUM(si.quantity), 0) AS itens_vendidos,
-       COALESCE(SUM(si.total_price), 0) AS faturamento,
-       COALESCE(SUM(GREATEST(COALESCE(si.preco_lista, si.unit_price) - si.unit_price, 0) * si.quantity), 0) AS desconto_dado,
-       COUNT(DISTINCT s.id)::int AS vendas`;
+       COALESCE(SUM(l.quantity), 0) AS itens_vendidos,
+       COALESCE(SUM(l.total), 0) AS faturamento,
+       COALESCE(SUM(GREATEST(COALESCE(l.preco_lista, l.unit_price) - l.unit_price, 0) * l.quantity), 0) AS desconto_dado,
+       COUNT(DISTINCT l.venda)::int AS vendas`;
 
 const MAX_ITENS = 500;
 
@@ -191,31 +252,39 @@ function resumoVazio() {
 /**
  * q(sql, params). companyIds: lojas somadas (1 = a loja; varias = o
  * consolidado). desde/ate: Date. productId: opcional.
- * Devolve { resumo, items, por_loja }.
+ * Devolve { resumo, items, por_loja, pedidos_loja_online, conta_loja_online }.
+ *   pedidos_loja_online  quantos dos `vendas` sao pedidos da loja online
+ *   conta_loja_online    a base ja conta a loja online (452 aplicada)
  */
 async function resumoDosVendidos(q, { companyIds, desde, ate, productId = null }) {
   const params = [companyIds, desde.toISOString(), ate.toISOString(), productId];
+  const comLoja = await colunasDoPedidoPresentes(q);
+  const cte = comLinhas(comLoja);
   const { rows: tot } = await q(
-    `SELECT ${SOMAS}
-       FROM sale_items si JOIN sales s ON s.id = si.sale_id
-      WHERE ${FILTRO}`,
+    `${cte}
+     SELECT ${SOMAS},
+            COUNT(DISTINCT l.venda) FILTER (WHERE l.canal = 'loja')::int AS pedidos_loja_online
+       FROM l`,
     params
   );
   const resumo = somas(tot[0]);
-  if (!resumo.vendas) return { resumo, items: [], por_loja: [] };
+  const extra = {
+    pedidos_loja_online: (tot[0] && Number(tot[0].pedidos_loja_online)) || 0,
+    conta_loja_online: comLoja,
+  };
+  if (!resumo.vendas) return { resumo, items: [], por_loja: [], ...extra };
 
   const { rows: porItem } = await q(
-    `SELECT si.product_id, si.variant_id,
-            COALESCE(MAX(p.name), MAX(si.product_name_snapshot)) AS nome,
-            (SELECT pv.sku_suffix FROM product_variants pv WHERE pv.id = si.variant_id) AS variant_label,
-            ${colunasDoRotulo('si.variant_id')},
+    `${cte}
+     SELECT l.product_id, l.variant_id,
+            COALESCE(MAX(p.name), MAX(l.nome_snapshot)) AS nome,
+            (SELECT pv.sku_suffix FROM product_variants pv WHERE pv.id = l.variant_id) AS variant_label,
+            ${colunasDoRotulo('l.variant_id')},
             ${SOMAS}
-       FROM sale_items si
-       JOIN sales s ON s.id = si.sale_id
-       LEFT JOIN products p ON p.id = si.product_id
-      WHERE ${FILTRO}
-      GROUP BY si.product_id, si.variant_id
-      ORDER BY faturamento DESC, nome, si.product_id, si.variant_id NULLS FIRST
+       FROM l
+       LEFT JOIN products p ON p.id = l.product_id
+      GROUP BY l.product_id, l.variant_id
+      ORDER BY faturamento DESC, nome, l.product_id, l.variant_id NULLS FIRST
       LIMIT ${MAX_ITENS}`,
     params
   );
@@ -231,24 +300,23 @@ async function resumoDosVendidos(q, { companyIds, desde, ate, productId = null }
   let por_loja = [];
   if (companyIds.length > 1) {
     const { rows: lojas } = await q(
-      `SELECT s.company_id, MAX(COALESCE(c.trade_name, c.legal_name)) AS nome, ${SOMAS}
-         FROM sale_items si
-         JOIN sales s ON s.id = si.sale_id
-         JOIN companies c ON c.id = s.company_id
-        WHERE ${FILTRO}
-        GROUP BY s.company_id
-        ORDER BY faturamento DESC, s.company_id`,
+      `${cte}
+       SELECT l.company_id, MAX(COALESCE(c.trade_name, c.legal_name)) AS nome, ${SOMAS}
+         FROM l
+         JOIN companies c ON c.id = l.company_id
+        GROUP BY l.company_id
+        ORDER BY faturamento DESC, l.company_id`,
       params
     );
     por_loja = lojas.map((r) => ({ company_id: r.company_id, nome: r.nome || null, ...somas(r) }));
   }
-  return { resumo, items, por_loja };
+  return { resumo, items, por_loja, ...extra };
 }
 
-function _resetarParaTeste() { presentes = false; ausenteAte = 0; }
+function _resetarParaTeste() { presentes = false; ausenteAte = 0; pedidoPresentes = false; pedidoAusenteAte = 0; }
 
 module.exports = {
-  colunasPresentes, marcacaoDoItem, marcarItens, NULO,
+  colunasPresentes, colunasDoPedidoPresentes, marcacaoDoItem, marcarItens, NULO,
   resumoDosVendidos, resumoVazio, MAX_ITENS,
   _resetarParaTeste,
 };

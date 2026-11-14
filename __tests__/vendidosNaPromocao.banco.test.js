@@ -115,6 +115,7 @@ afterAll(async () => {
   if (!pool) return;
   await new Promise((r) => setTimeout(r, 300)); // tarefas da venda sem await
   const limpar = [
+    `DELETE FROM digital_orders WHERE company_id = ANY($1)`,
     `DELETE FROM transactions WHERE company_id = ANY($1)`,
     `DELETE FROM sale_payments WHERE company_id = ANY($1)`,
     `DELETE FROM stock_movements WHERE company_id = ANY($1)`,
@@ -271,5 +272,47 @@ describe('GET /products/promotions/vendidos', () => {
     expect(res.status).toBe(403);
     expect(res.body.code).toBe('SEM_PERMISSAO_RELATORIO');
     expect(res.body.resumo).toBeUndefined();
+  });
+});
+
+// p-123a (14/11/2026, migration 452): o pedido da loja online confirmado a
+// preco promocional entra no placar. Pendente e item sem promocao, nao.
+// Roda por ultimo: os numeros de cima sao so do Caixa.
+describe('loja online no placar (452)', () => {
+  let nPedido = 0;
+  async function pedido(status, itens) {
+    const id = uuid();
+    nPedido += 1;
+    await pool.query(
+      `INSERT INTO digital_orders
+         (id, company_id, order_number, customer_name, customer_phone, subtotal, total, status, payment_status, payment_method, stock_deducted, confirmed_at)
+       VALUES ($1, $2, $3, 'Cliente Fixture', '11999990000', 0, 0, $4, $5, 'pix', TRUE, $6)`,
+      [id, matriz, 'BF-' + String(nPedido).padStart(4, '0'), status,
+        status === 'pending_payment' ? 'pending' : 'paid', status === 'pending_payment' ? null : new Date()]
+    );
+    for (const it of itens) {
+      await pool.query(
+        `INSERT INTO digital_order_items
+           (order_id, product_id, product_name, unit_price, quantity, subtotal, preco_lista, em_promocao)
+         VALUES ($1, $2, 'Fixture', $3, $4, $3 * $4, $5, $6)`,
+        [id, it.product_id, it.unit_price, it.quantity, it.preco_lista, it.em_promocao]
+      );
+    }
+  }
+
+  test('confirmado conta; pendente e item fora da promocao, nao', async () => {
+    await pedido('confirmed', [
+      { product_id: ids.promo, unit_price: 80, quantity: 2, preco_lista: 100, em_promocao: true },
+      { product_id: ids.normal, unit_price: 50, quantity: 1, preco_lista: null, em_promocao: false },
+    ]);
+    await pedido('pending_payment', [{ product_id: ids.promo, unit_price: 80, quantity: 9, preco_lista: 100, em_promocao: true }]);
+
+    const res = await vendidos(matriz);
+    expect(res.status).toBe(200);
+    // Caixa (5 itens, 500, 100, 3 vendas) + o pedido confirmado (2 x 80, De 100).
+    expect(res.body.resumo).toEqual({ itens_vendidos: 7, faturamento: 660, desconto_dado: 140, vendas: 4 });
+    expect(res.body).toMatchObject({ pedidos_loja_online: 1, conta_loja_online: true });
+    const promo = res.body.items.find((i) => i.product_id === ids.promo && !i.variant_id);
+    expect(promo).toMatchObject({ itens_vendidos: 6, faturamento: 500, vendas: 4 });
   });
 });
