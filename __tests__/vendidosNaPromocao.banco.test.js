@@ -294,7 +294,7 @@ describe('loja online no placar (452)', () => {
       await pool.query(
         `INSERT INTO digital_order_items
            (order_id, product_id, product_name, unit_price, quantity, subtotal, preco_lista, em_promocao)
-         VALUES ($1, $2, 'Fixture', $3, $4, $3 * $4, $5, $6)`,
+         VALUES ($1, $2, 'Fixture', $3, $4, $3::numeric * $4::numeric, $5, $6)`,
         [id, it.product_id, it.unit_price, it.quantity, it.preco_lista, it.em_promocao]
       );
     }
