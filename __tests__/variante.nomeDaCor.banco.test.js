@@ -11,8 +11,12 @@
 //      espaço das pontas) e o sku_suffix continua o de sempre
 //   2. GET /variations devolve o nome inteiro em colors[].name
 //   3. GET /products/:pid/variants devolve color_name por variante
-//   4. variante antiga (color_name NULL) segue com o nome tirado do sufixo
+//   4. variante antiga (color_name NULL): o GET devolve name null e o
+//      pedaço do sufixo em name_sugerido (14/11/2026)
 //   5. nome vazio ou hex vira NULL; produto só com tamanho fica NULL
+//   6. salvar a grade não grava o pedaço cortado do sufixo nem o nome da
+//      paleta como nome de variante antiga; nome vazio não apaga o gravado
+//      (14/11/2026, services/nomeDaCorNaGrade.js)
 //
 // Mesmo padrão de produto.excluirNuncaNegado.banco.test.js: tudo dentro de
 // UMA transação revertida no afterAll.
@@ -160,8 +164,8 @@ describe('PUT /variations grava o nome da cor como veio', () => {
     // ordem entre cores nao e o que se mede aqui.
     const cores = [...r.body.colors].sort((a, b) => a.hex.localeCompare(b.hex));
     expect(cores).toEqual([
-      { hex: '#1F5F6B', name: 'Azul petróleo' },
-      { hex: '#F4F1EA', name: 'Off' },
+      { hex: '#1F5F6B', name: 'Azul petróleo', name_sugerido: null },
+      { hex: '#F4F1EA', name: 'Off', name_sugerido: null },
     ]);
     expect(r.body.mode).toBe('matrix');
   });
@@ -218,7 +222,7 @@ describe('sem nome para gravar', () => {
 });
 
 describe('variante antiga (gravada antes da 414)', () => {
-  test('color_name NULL: o GET /variations segue tirando o nome do sufixo', async () => {
+  test('color_name NULL: o GET /variations devolve name null e o pedaço do sufixo em name_sugerido', async () => {
     const pid = await produto('Blusa antiga');
     const { rows } = await q(
       `INSERT INTO product_variants (product_id, sku_suffix, stock_qty) VALUES ($1, 'VERMELHO-P', 2) RETURNING id`,
@@ -229,9 +233,112 @@ describe('variante antiga (gravada antes da 414)', () => {
       [rows[0].id]
     );
     const r = await request(app).get(`${base}/${pid}/variations`);
-    expect(r.body.colors).toEqual([{ hex: '#EF4444', name: 'VERMELHO' }]);
+    // 14/11/2026: o pedaço do sufixo não é mais devolvido como nome (o
+    // editor o mandava de volta e o PUT o gravava como nome da cor).
+    expect(r.body.colors).toEqual([{ hex: '#EF4444', name: null, name_sugerido: 'VERMELHO' }]);
     const v = await request(app).get(`${base}/${pid}/variants`);
     expect(v.body.variants[0].color_name).toBeNull();
     expect(v.body.variants[0].sku_suffix).toBe('VERMELHO-P');
+  });
+});
+
+// ─── 14/11/2026: o pedaço do SKU não vira nome ao salvar a grade ─────────
+async function varianteAntiga(pid, { sku, hex, tamanho, colorName = null, estoque = 1 }) {
+  const { rows } = await q(
+    `INSERT INTO product_variants (product_id, sku_suffix, stock_qty, color_name) VALUES ($1, $2, $3, $4) RETURNING id`,
+    [pid, sku, estoque, colorName]
+  );
+  await q(`INSERT INTO product_variant_values (variant_id, attribute_name, value) VALUES ($1, 'Cor', $2)`, [rows[0].id, hex]);
+  if (tamanho) {
+    await q(`INSERT INTO product_variant_values (variant_id, attribute_name, value) VALUES ($1, 'Tamanho', $2)`, [rows[0].id, tamanho]);
+  }
+  return rows[0].id;
+}
+
+describe('salvar a grade de variante antiga (color_name NULL)', () => {
+  test('o pedaço "OFF WHITE" que o GET devolvia não é gravado; o sufixo fica', async () => {
+    const pid = await produto('Vestido antigo');
+    await varianteAntiga(pid, { sku: 'OFF WHITE-M', hex: '#FAF9F6', tamanho: 'M', estoque: 2 });
+    await request(app).put(`${base}/${pid}/variations`).send({
+      colors: [{ hex: '#FAF9F6', name: 'OFF WHITE' }], sizes: ['M'], matrix: { '#FAF9F6|M': 3 },
+    }).expect(200);
+    expect(await variantesNoBanco(pid)).toEqual([
+      { sku_suffix: 'OFF WHITE-M', color_name: null, cor: '#FAF9F6', tamanho: 'M' },
+    ]);
+  });
+
+  test('o nome da paleta que o app antigo põe (name null no GET) também não é gravado', async () => {
+    const pid = await produto('Saia antiga');
+    await varianteAntiga(pid, { sku: 'OFF WHITE-M', hex: '#FAF9F6', tamanho: 'M' });
+    await request(app).put(`${base}/${pid}/variations`).send({
+      colors: [{ hex: '#FAF9F6', name: 'Branco' }], sizes: ['M'], matrix: { '#FAF9F6|M': 1 },
+    }).expect(200);
+    expect(await variantesNoBanco(pid)).toEqual([
+      { sku_suffix: 'OFF WHITE-M', color_name: null, cor: '#FAF9F6', tamanho: 'M' },
+    ]);
+  });
+
+  test('"OFF-WHITE" cortado no hífen: "OFF" não é gravado e o sufixo não encolhe', async () => {
+    const pid = await produto('Calça antiga');
+    await varianteAntiga(pid, { sku: 'OFF-WHITE-M', hex: '#F3EFE7', tamanho: 'M' });
+    const g = await request(app).get(`${base}/${pid}/variations`).expect(200);
+    expect(g.body.colors).toEqual([{ hex: '#F3EFE7', name: null, name_sugerido: 'OFF-WHITE' }]);
+    await request(app).put(`${base}/${pid}/variations`).send({
+      colors: [{ hex: '#F3EFE7', name: 'OFF' }], sizes: ['M'], matrix: { '#F3EFE7|M': 1 },
+    }).expect(200);
+    expect(await variantesNoBanco(pid)).toEqual([
+      { sku_suffix: 'OFF-WHITE-M', color_name: null, cor: '#F3EFE7', tamanho: 'M' },
+    ]);
+  });
+
+  test('hex de 5 dígitos do lote antigo ("FFFFF") não é gravado', async () => {
+    const pid = await produto('Top antigo');
+    await varianteAntiga(pid, { sku: 'FFFFF-P', hex: '#FFFFFF', tamanho: 'P' });
+    await request(app).put(`${base}/${pid}/variations`).send({
+      colors: [{ hex: '#FFFFFF', name: 'FFFFF' }], sizes: ['P'], matrix: { '#FFFFFF|P': 1 },
+    }).expect(200);
+    const rows = await variantesNoBanco(pid);
+    expect(rows.map((v) => v.color_name)).toEqual([null]);
+  });
+
+  test('tamanho novo numa cor antiga: nasce sem nome e com a cor do sufixo de sempre', async () => {
+    const pid = await produto('Blusa antiga com tamanho novo');
+    await varianteAntiga(pid, { sku: 'AZUL ESCUR-M', hex: '#1F2A44', tamanho: 'M', estoque: 4 });
+    await request(app).put(`${base}/${pid}/variations`).send({
+      colors: [{ hex: '#1F2A44', name: 'AZUL ESCUR' }], sizes: ['M', 'G'], matrix: { '#1F2A44|M': 4, '#1F2A44|G': 2 },
+    }).expect(200);
+    const rows = await variantesNoBanco(pid);
+    expect(rows.map((v) => [v.tamanho, v.sku_suffix, v.color_name]).sort()).toEqual([
+      ['G', 'AZUL ESCUR-G', null],
+      ['M', 'AZUL ESCUR-M', null],
+    ]);
+  });
+
+  test('nome que a lojista escreveu é gravado (e o sufixo segue o nome)', async () => {
+    const pid = await produto('Vestido renomeado');
+    await varianteAntiga(pid, { sku: 'OFF WHITE-M', hex: '#FAF9F6', tamanho: 'M' });
+    await request(app).put(`${base}/${pid}/variations`).send({
+      colors: [{ hex: '#FAF9F6', name: 'Off White' }], sizes: ['M'], matrix: { '#FAF9F6|M': 1 },
+    }).expect(200);
+    expect(await variantesNoBanco(pid)).toEqual([
+      { sku_suffix: 'OFF WHITE-M', color_name: 'Off White', cor: '#FAF9F6', tamanho: 'M' },
+    ]);
+  });
+});
+
+describe('nome vazio não apaga o nome gravado', () => {
+  test('name vazio, ausente ou null mantém color_name e o sufixo', async () => {
+    const pid = await produto('Camisa Caqui');
+    await varianteAntiga(pid, { sku: 'CAQUI-M', hex: '#C3B091', tamanho: 'M', colorName: 'Caqui' });
+    for (const cor of [{ hex: '#C3B091', name: '' }, { hex: '#C3B091' }, { hex: '#C3B091', name: null }]) {
+      await request(app).put(`${base}/${pid}/variations`).send({
+        colors: [cor], sizes: ['M', 'G'], matrix: { '#C3B091|M': 1, '#C3B091|G': 0 },
+      }).expect(200);
+    }
+    const rows = await variantesNoBanco(pid);
+    expect(rows.map((v) => [v.tamanho, v.sku_suffix, v.color_name]).sort()).toEqual([
+      ['G', 'CAQUI-G', 'Caqui'],
+      ['M', 'CAQUI-M', 'Caqui'],
+    ]);
   });
 });
