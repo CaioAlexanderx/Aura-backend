@@ -56,6 +56,7 @@ const { signInfNfe } = require('./signer');
 const { openPfx, assertValidity } = require('./pfx');
 const { loadCertificate } = require('./certStore');
 const soap = require('./soapClient');
+const { extrairProtNFe } = require('./nfeProc');
 const {
   ufToCodigo, isoBR, generateCNF, buildAccessKey44,
 } = require('./nfeHelpers');
@@ -373,7 +374,7 @@ async function emitNfeDevolucao55(company, params, ctx) {
         result = {
           cStat: consulta.cStat, xMotivo: consulta.xMotivo,
           protocolo: consulta.protocolo, chNFe: built.chave,
-          autorizada: true, rejeitada: false,
+          autorizada: true, rejeitada: false, rawXml: consulta.rawXml,
         };
       } else {
         err.message += ' (consulta pós-timeout: cStat ' + consulta.cStat +
@@ -395,6 +396,9 @@ async function emitNfeDevolucao55(company, params, ctx) {
     protocolo: result.protocolo || null,
     codigo_status: result.cStat || null,
     motivo_status: result.xMotivo || null,
+    // CP3 (14/11/2026): o <protNFe> da SEFAZ vai no metadata da emissão
+    // (trocaDevolucao55 grava o resultado inteiro) e alimenta o nfeProc.
+    prot_xml: result.autorizada ? extrairProtNFe(result.rawXml) : null,
     xml_signed: nfeXml,
     tp_emis: 1,
     provider: 'sefaz_sp',
