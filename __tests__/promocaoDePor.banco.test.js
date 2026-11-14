@@ -193,7 +193,9 @@ test('loja sem promocao: GET /products e variantes iguais, so com os campos novo
     'ibscbs_cst', 'ibscbs_cclasstrib', 'ibscbs_cindop'];
   // migration 442: "Sai em" (null = segue o tipo)
   const NOTA = ['nota_fiscal'];
-  expect(Object.keys(p).sort()).toEqual([...ANTES, ...NOVOS, ...NFSE, ...NOTA].sort());
+  // 14/11/2026 (CP6 da revisao de cores): os nomes de cor das variantes, para a busca
+  const CORES = ['variant_color_names'];
+  expect(Object.keys(p).sort()).toEqual([...ANTES, ...NOVOS, ...NFSE, ...NOTA, ...CORES].sort());
   expect(p.nota_fiscal).toBeNull();
   expect(p).toMatchObject({ price: 59.9, promo_price: null, promo_starts_at: null, promo_ends_at: null, em_promocao: false, preco_efetivo: 59.9 });
 
