@@ -141,6 +141,10 @@ router.use('/products', require('./productCostFills'));
 // estatico e precisa vir antes do GET /:pid curinga de ./products. O perfil
 // estoque_consulta leva 403 no estoqueSoConsulta acima (escrita e leitura).
 router.use('/products', require('./productPromotions'));
+// 14/11/2026 (CP5 da revisao de cores): /cores-para-conferir e estatico e
+// precisa vir antes do GET /:pid curinga de ./products. estoque_consulta
+// leva 403 no estoqueSoConsulta acima.
+router.use('/products', require('./productColorNames'));
 router.use('/products', require('./productsVariations'));
 // F0 Bloco B1 (30/07/2026): productLinksRouter expoe /products/unclassified
 // e /products/categories/bulk (estaticas) -- tem que montar ANTES de
@@ -300,6 +304,9 @@ router.use('/birthday', requirePlan('negocio', 'expansao'), require('./birthday'
 router.use('/employees', requirePlan('negocio', 'expansao'), require('./payslipEmail'));
 router.use('/employees', requirePlan('negocio', 'expansao'), require('./commission'));
 router.use('/appointments', requirePlan('negocio', 'expansao'), require('./appointments'));
+// p-118 (14/11/2026, migration 451): campanha de Black Friday da loja
+// online (GET/PUT /digital-channel/campanha). Por empresa, mesmo plano.
+router.use('/digital-channel/campanha', requirePlan('negocio', 'expansao'), require('./campanhaDaLoja'));
 router.use('/digital-channel', requirePlan('negocio', 'expansao'), require('./digitalChannel'));
 router.use('/digital-channel/orders', requirePlan('negocio', 'expansao'), require('./digitalOrders'));
 router.use('/digital-channel/asaas', requirePlan('negocio', 'expansao'), require('./asaasSubconta'));

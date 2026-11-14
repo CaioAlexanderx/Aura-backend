@@ -57,7 +57,7 @@ describe('GET /companies/:id/relatorios/produtos — loja', () => {
     const res = await get();
     expect(res.status).toBe(200);
     expect(Object.keys(res.body).sort()).toEqual([
-      'agrupar', 'cobertura_custo', 'direcao', 'empresas', 'escopo', 'filtros', 'linhas', 'modelo',
+      'agrupar', 'categorias_texto', 'cobertura_custo', 'direcao', 'empresas', 'escopo', 'filtros', 'linhas', 'modelo',
       'ordem', 'paginacao', 'periodo', 'pode_ver_custo', 'totais', 'total_linhas', 'truncado',
     ]);
     expect(res.body).toMatchObject({

@@ -106,6 +106,20 @@ describe('resolverNomeDaCor', () => {
     }
   });
 
+  test('variante antiga + nome confirmado no editor (CP4a): grava mesmo o da paleta ou o pedaço', () => {
+    const info = antiga('OFF WHITE-M');
+    expect(resolverNomeDaCor('#FAF9F6', 'Branco', info, { confirmado: true }))
+      .toEqual({ gravar: 'Branco', paraNova: 'Branco', nomeDoSku: 'Branco', manterSku: false });
+    expect(resolverNomeDaCor('#FAF9F6', 'OFF WHITE', info, { confirmado: true }).gravar).toBe('OFF WHITE');
+  });
+
+  test('confirmado não abre a porta para vazio nem hex', () => {
+    const info = antiga('OFF WHITE-M');
+    expect(resolverNomeDaCor('#FAF9F6', '', info, { confirmado: true }).gravar).toBeNull();
+    expect(resolverNomeDaCor('#FAF9F6', '#FAF9F6', info, { confirmado: true }).gravar).toBeNull();
+    expect(resolverNomeDaCor('#FAF9F6', 'FFFFF', info, { confirmado: true }).gravar).toBeNull();
+  });
+
   test('cor com nome gravado: nome novo troca', () => {
     const info = coresDoProduto([{ colorHex: '#C3B091', sizeValue: 'M', sku_suffix: 'CAQUI-M', color_name: 'Caqui' }]).get('#C3B091');
     expect(resolverNomeDaCor('#C3B091', 'Areia', info).gravar).toBe('Areia');

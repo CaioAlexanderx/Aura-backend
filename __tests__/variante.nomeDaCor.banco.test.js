@@ -377,3 +377,26 @@ describe('a grade lê o nome da cor pela paleta única', () => {
     expect(r.body.error).toContain('Rosa chiclete');
   });
 });
+
+// ─── 14/11/2026 (CP4a): nome confirmado no editor ────────────────────────
+describe('nome escrito no editor (name_confirmado)', () => {
+  test('numa cor antiga, o nome da paleta confirmado é gravado', async () => {
+    const pid = await produto('Renomeada no editor');
+    await varianteAntiga(pid, { sku: 'OFF WHITE-M', hex: '#FAF9F6', tamanho: 'M' });
+    await request(app).put(`${base}/${pid}/variations`).send({
+      colors: [{ hex: '#FAF9F6', name: 'Branco', name_confirmado: true }], sizes: ['M'], matrix: { '#FAF9F6|M': 1 },
+    }).expect(200);
+    const rows = await variantesNoBanco(pid);
+    expect(rows.map((v) => [v.color_name, v.sku_suffix])).toEqual([['Branco', 'BRANCO-M']]);
+  });
+
+  test('sem name_confirmado, o mesmo nome continua descartado (app antigo)', async () => {
+    const pid = await produto('Eco sem confirmar');
+    await varianteAntiga(pid, { sku: 'OFF WHITE-M', hex: '#FAF9F6', tamanho: 'M' });
+    await request(app).put(`${base}/${pid}/variations`).send({
+      colors: [{ hex: '#FAF9F6', name: 'Branco' }], sizes: ['M'], matrix: { '#FAF9F6|M': 1 },
+    }).expect(200);
+    const rows = await variantesNoBanco(pid);
+    expect(rows.map((v) => [v.color_name, v.sku_suffix])).toEqual([[null, 'OFF WHITE-M']]);
+  });
+});

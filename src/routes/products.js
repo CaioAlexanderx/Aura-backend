@@ -57,6 +57,7 @@ const { avancarSemEsperar } = require('../services/onboardingProgress');
 const { avisoDeNcm } = require('../services/ncmTable');
 // 24/10/2026: exclusao confirmada nunca e negada (anula historico ou arquiva).
 const { excluirProdutoComHistorico } = require('../services/excluirProduto');
+const { respostaDeBarcodeDuplicado } = require('../services/barcodeDuplicado');
 // p-84 (08/11/2026, migration 427): De/Por. Campos novos em toda resposta de
 // produto e variante: promo_price, promo_starts_at, promo_ends_at,
 // em_promocao, preco_efetivo. `price` segue sendo o preco normal ("De").
@@ -802,7 +803,12 @@ router.post('/', async (req, res) => {
     // t3-05: aviso de NCM (sem bloquear). O campo so aparece quando ha o que avisar.
     const ncmAviso = avisoDeNcm(ncm);
     res.status(201).json({ ...result.rows[0], card_price: cardPriceOut(result.rows[0].card_price), ...camposNfseDaLinha(result.rows[0]), nota_fiscal: notaFiscalOut(result.rows[0].nota_fiscal), supplier: supplierOut, merge_suggestion, ...camposDoProduto(result.rows[0]), ...(ncmAviso ? { ncm_aviso: ncmAviso } : {}) });
-  } catch (err) { console.error('[products] create error:', err.message); res.status(500).json({ error: 'Erro ao criar produto' }); }
+  } catch (err) {
+    // 14/11/2026: código de barras repetido vira 409 com o nome do produto.
+    const dup = await respostaDeBarcodeDuplicado(db, err, { companyId: cid, barcode });
+    if (dup) return res.status(dup.status).json(dup.body);
+    console.error('[products] create error:', err.message); res.status(500).json({ error: 'Erro ao criar produto' });
+  }
 });
 
 // ─── PATCH /:pid ────────────────────────────────
@@ -1069,7 +1075,11 @@ router.patch('/:pid', async (req, res) => {
     // 427 (De/Por): RETURNING * ja traz promo_* (base com a 427); em_promocao
     // e preco_efetivo saem pela mesma regra da listagem.
     res.json({ ...row, card_price: cardPriceOut(row.card_price), nota_fiscal: notaFiscalOut(row.nota_fiscal), supplier: supplierOut, ...camposDoProduto(row), ...(ncmAviso ? { ncm_aviso: ncmAviso } : {}) });
-  } catch (err) { console.error('[products] update error:', err.message); res.status(500).json({ error: 'Erro ao atualizar produto' }); }
+  } catch (err) {
+    const dup = await respostaDeBarcodeDuplicado(db, err, { companyId: cid, barcode: req.body.barcode, exceptId: pid });
+    if (dup) return res.status(dup.status).json(dup.body);
+    console.error('[products] update error:', err.message); res.status(500).json({ error: 'Erro ao atualizar produto' });
+  }
 });
 
 // ─── DELETE /:pid ───────────────────────────────

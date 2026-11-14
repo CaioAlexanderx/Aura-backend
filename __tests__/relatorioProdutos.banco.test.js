@@ -223,8 +223,11 @@ describe('relatório de Produtos — banco real', () => {
 
   test('filtros no banco: categoria com subárvore, marca, busca, inativos e serviço fora', async () => {
     const nomes = async (q) => (await rodar({ agrupar: 'produto', ...q })).linhas.map((l) => l.nome).sort();
-    expect(await nomes({ categoria: id.roupas })).toEqual(['Calça Fixture']);
+    // 14/11/2026 (incidente): o Vestido não tem vínculo, mas o texto dele é
+    // 'Roupas' — entra quando a categoria Roupas (árvore) é escolhida.
+    expect(await nomes({ categoria: id.roupas })).toEqual(['Calça Fixture', 'Vestido Fixture']);
     expect(await nomes({ categoria: id.calcas })).toEqual(['Calça Fixture']);
+    expect(await nomes({ categoria: 'roupas' })).toEqual(['Vestido Fixture']);
     // Pelo nome antigo (products.category): o vínculo primário reescreve o da Calça para 'Calças'
     // (trigger da migration 259); o Vestido continua só com o texto.
     expect(await nomes({ categoria: 'Roupas' })).toEqual(['Vestido Fixture']);
@@ -234,6 +237,21 @@ describe('relatório de Produtos — banco real', () => {
     expect(await nomes({ busca: 'CFX' })).toEqual(['Calça Fixture']);
     expect(await nomes({ so_ativos: '0' })).toContain('Inativo Fixture');
     expect(await nomes({ so_ativos: '0' })).not.toContain('Ajuste Fixture');
+  });
+
+  test('categorias só em texto: listadas à parte e filtráveis (incidente 14/11)', async () => {
+    // Na Matriz o texto 'Roupas' é nome de categoria da árvore: não aparece à parte.
+    expect((await rodar({})).categorias_texto).toEqual([]);
+    // Loja sem árvore, produto com a categoria só como texto.
+    const acessorio = await produto(C, { name: 'Brinco de Fora', price: 30, cost_price: 10, stock_qty: 4, category: ' Acessórios ' });
+    try {
+      const r = await rodar({ agrupar: 'produto' }, { empresas: [C] });
+      expect(r.categorias_texto).toEqual(['Acessórios']);
+      const f = await rodar({ agrupar: 'produto', categoria: 'Acessórios' }, { empresas: [C] });
+      expect(f.linhas.map((l) => l.nome)).toEqual(['Brinco de Fora']);
+    } finally {
+      await client.query('DELETE FROM products WHERE id = $1', [acessorio]);
+    }
   });
 
   test('quem não vê custo: os mesmos números de venda, custo em null', async () => {

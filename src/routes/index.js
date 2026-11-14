@@ -48,6 +48,7 @@ router.use('/me/credit', require('./creditResumoVencimento').meRouter);
 // Telas visitadas: o app envia em lotes (POST /usage/screens) e o painel da
 // Gestão Aura lê em screen_views. Empresa e usuário vêm do token.
 router.use('/usage', require('./usageScreens'));
+router.use('/usage', require('./usageConexao'));
 
 // 18/10/2026 (t3-05): GET /fiscal/ncm/:codigo — o NCM existe na tabela da Receita?
 router.use('/fiscal', require('./fiscalNcm'));

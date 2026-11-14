@@ -78,6 +78,9 @@ const { montarHome, capasDasCategorias, ehNovo } = require('./homeDaLoja');
 const { agruparGaleria } = require('./productImageGallery');
 // Textos fixos da vitrine pela frente da conta (tq-58).
 const { textosDaFrente } = require('./textosDaFrente');
+// p-118 (14/11/2026, migration 451): campanha de Black Friday da loja e o
+// sinal tem_promocao sobre o catalogo inteiro.
+const { resumoDasPromocoes, chavesDoPayload } = require('./campanhaDaLoja');
 
 /**
  * Os selos padrao, DERIVADOS do que a lojista ligou (decisao 7, 02/09/2026).
@@ -1066,9 +1069,26 @@ async function buildStorefront(config) {
   const alwaysOpen = config.always_open === true;
   const { is_open_now, next_open_text, next_open_when } = computeOpenState(businessHours, alwaysOpen);
 
+  const nomeDaLoja = config.site_name || company.trade_name || company.legal_name || 'Loja';
+
+  // p-118: promocao no ar no catalogo INTEIRO (a pagina so carrega a
+  // primeira pagina de pecas) e a campanha de Black Friday. As chaves so
+  // entram quando valem: loja sem promocao no ar recebe o payload de antes.
+  // Loja que esconde os precos nao mostra riscado nem faixa: nem pergunta.
+  let chavesDaCampanha = {};
+  if (mostrarPrecos) {
+    try {
+      const resumo = await resumoDasPromocoes({ cid, visibilidade: listVisibilityWhere('$1'), exigeFoto });
+      chavesDaCampanha = chavesDoPayload(config, resumo, nomeDaLoja);
+    } catch (e) {
+      // A loja abre sem a faixa; o erro aparece no log.
+      console.error('[storefront] resumo das promocoes (' + e.code + '):', e.message);
+    }
+  }
+
   return {
     site: {
-      name:          config.site_name || company.trade_name || company.legal_name || 'Loja',
+      name:          nomeDaLoja,
       tagline:       config.tagline       || '',
       description:   config.description   || '',
       primary_color: config.primary_color || '#7c3aed',
@@ -1202,6 +1222,8 @@ async function buildStorefront(config) {
     // URL canônica da loja — custom domain quando ativo, senão loja.getaura.com.br/slug.
     // Consumida pelo aura-app (TabMeuSite) para exibir o link correto ao operador.
     storefront_url: urlDaLoja(config),
+    // p-118: tem_promocao e campanha, so quando valem (services/campanhaDaLoja.js).
+    ...chavesDaCampanha,
   };
 }
 

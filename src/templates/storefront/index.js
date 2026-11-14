@@ -28,6 +28,8 @@ const productDetail = require('./parts/product_detail');
 const naEntrega     = require('./parts/na_entrega');
 // p-119b: a faixa de Black Friday e "Ofertas" (so na loja com a campanha no ar).
 const campanha      = require('./parts/campanha');
+// p-119a: o "De" riscado e a etiqueta "-N%" (so na loja com promocao no ar).
+const promocao      = require('./parts/promocao');
 const toast         = require('./parts/toast');
 const bootstrap     = require('./parts/bootstrap');
 // Regra da capa sem foto (iniciais + degrau do gradiente) — definida uma
@@ -67,7 +69,9 @@ function buildScript(storeData, escapedSlug, apiBase, textosDaFrente, opcoes) {
   const comNaEntrega = !!(opcoes && opcoes.naEntrega);
   // A campanha ja validada (parts/campanha.js campanhaNoAr), ou null.
   const daCampanha   = (opcoes && opcoes.campanha) || null;
+  const comPromocao  = !!(opcoes && opcoes.promocao);
   const detalheBase  = detalheDoProduto(textosDaFrente);
+  const detalhe      = comPromocao ? promocao.aplicarNoDetalhe(detalheBase) : detalheBase;
   return prelude(storeData, escapedSlug, apiBase)
        + init
        + stateUtils
@@ -77,7 +81,7 @@ function buildScript(storeData, escapedSlug, apiBase, textosDaFrente, opcoes) {
        + fonteDasFaixas
        + fonteDasFotos
        + fonteDoWhatsapp
-       + card
+       + (comPromocao ? promocao.aplicarNoCartao(card) : card)
        + (daCampanha ? campanha.aplicarNosProdutos(products) : products)
        + categorias
        + tiraCategorias
@@ -87,7 +91,7 @@ function buildScript(storeData, escapedSlug, apiBase, textosDaFrente, opcoes) {
        + cart
        + (comNaEntrega ? naEntrega.aplicar(checkout) : checkout)
        + pix
-       + (daCampanha ? campanha.aplicarNoDetalhe(detalheBase) : detalheBase)
+       + (daCampanha ? campanha.aplicarNoDetalhe(detalhe) : detalhe)
        + toast
        + bootstrap;
 }

@@ -424,7 +424,8 @@ router.put('/:pid/variations', async (req, res) => {
     const nomePorCor = new Map();
     for (const c of colors) {
       const k = chaveDoHex(c.hex);
-      if (!nomePorCor.has(k)) nomePorCor.set(k, resolverNomeDaCor(c.hex, c.name, coresAtuais.get(k)));
+      // 14/11/2026 (CP4a): name_confirmado = a lojista escreveu/trocou o nome no editor.
+      if (!nomePorCor.has(k)) nomePorCor.set(k, resolverNomeDaCor(c.hex, c.name, coresAtuais.get(k), { confirmado: c.name_confirmado === true }));
     }
 
     // Monta lista de combinacoes a criar baseado nos inputs
