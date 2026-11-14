@@ -23,6 +23,8 @@ function bd() { return require('../config/database'); }
 const { agruparPorFamilia } = require('./coresDaLoja');
 const { colunasPromo, colunasPromoNulas, comColunasPromo } = require('./precoEfetivo');
 const { agruparTamanhos } = require('./tamanhosDaLoja');
+// 14/11/2026 (CP6): a busca acha a peça pelo nome da cor da variante.
+const { grafiasDaMesmaCor } = require('./paletaDeCores');
 
 /** Quantos produtos por página. */
 const POR_PAGINA = 24;
@@ -294,11 +296,23 @@ async function paginaDoCatalogo({
     // unaccent não está garantido em toda base; lower + translate cobre
     // os acentos do português sem depender de extensão.
     params.push(`%${termo}%`);
+    const pTermo = params.length;
+    // 14/11/2026 (CP6 da revisão de cores): o termo também acha a peça pelo
+    // NOME DA COR de uma variante (color_name), e "preta" acha "Preto" (as
+    // grafias da mesma cor na paleta única). Só entra quando há busca: a
+    // vitrine sem busca segue com a consulta de sempre.
+    params.push(grafiasDaMesmaCor(termo).map((g) => `%${g}%`));
+    const pCores = params.length;
     filtros.push(
-      `translate(lower(coalesce(name,'') || ' ' || coalesce(description,'')),
+      `(translate(lower(coalesce(name,'') || ' ' || coalesce(description,'')),
                  'áàâãäéèêëíìîïóòôõöúùûüçÁÀÂÃÄÉÈÊËÍÌÎÏÓÒÔÕÖÚÙÛÜÇ',
                  'aaaaaeeeeiiiiooooouuuucAAAAAEEEEIIIIOOOOOUUUUC')
-       LIKE $${params.length}`,
+       LIKE $${pTermo}
+       OR EXISTS (SELECT 1 FROM product_variants pvc
+                   WHERE pvc.product_id = products.id AND pvc.is_active = true
+                     AND replace(translate(lower(coalesce(pvc.color_name, '')),
+                                  'áàâãäéèêëíìîïóòôõöúùûüç', 'aaaaaeeeeiiiiooooouuuuc'), '-', ' ')
+                         LIKE ANY ($${pCores}::text[])))`,
     );
   }
 

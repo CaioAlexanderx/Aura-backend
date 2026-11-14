@@ -245,7 +245,25 @@ function aplicarRotulo(row, campo, separador) {
   return row;
 }
 
+/**
+ * 14/11/2026 (CP6): os nomes de cor das variantes de um produto, para a
+ * busca do Caixa e do Estoque: o nome da regra (o que a tela mostra) e o
+ * color_name como foi gravado (quem lembra "AZUL ESCUR" também acha).
+ * @param variantes [{ color_name, sku_suffix, attributes }] (ou null)
+ */
+function nomesDeCorDasVariantes(variantes) {
+  const out = new Set();
+  for (const v of Array.isArray(variantes) ? variantes : []) {
+    const n = nomeDaCorDaVariante(v || {});
+    if (n) out.add(n);
+    const g = v && typeof v.color_name === 'string' ? v.color_name.trim() : '';
+    if (g && !SO_HEX.test(g)) out.add(g);
+  }
+  return Array.from(out);
+}
+
 module.exports = {
+  nomesDeCorDasVariantes,
   colunasDoRotulo,
   COLUNAS_DO_ROTULO_NULAS,
   aplicarRotulo,
