@@ -73,6 +73,8 @@ const { separarServicos, totaisDosItens, pagamentosDosProdutos } = require('../s
 const { itensComDescontoDaVenda, ehUuid, MENSAGEM_DESCONTO_TOTAL } = require('../services/descontoDaVendaNaNfce');
 // 14/11/2026: trava "uma nota de produtos por venda" (NF-e 55 de venda).
 const { nfeDeVendaQueTrava }       = require('../services/nfe55Venda');
+// 14/11/2026 (CP5): cancelamento da NF-e 55 pelo evento da 55, não o da NFC-e.
+const eventos55                    = require('../services/nfe55Eventos');
 // products.nota_fiscal (migration 442): false = base sem a coluna.
 let temColunaNotaFiscal = true;
 // 11/11/2026 — fiscal do produto na nota (migration 350: cest, origem,
@@ -1278,6 +1280,22 @@ router.post('/:nfceId/cancel', requireAuth, requireRole('client','analyst','admi
     if (ownRows.length) {
       const own = ownRows[0];
       if (own.status === 'cancelada') return res.json({ nfce: own, idempotent: true });
+      // 14/11/2026 (NF-e 55, CP5): a NF-e modelo 55 (venda ou devolução) NÃO
+      // cancela pelo caminho da NFC-e (endpoint da NFC-e e 30 min): vai ao
+      // evento da 55, com o prazo de 24 h (services/nfe55Eventos.js). Mesmo
+      // serviço do POST /nfe55/:id/cancelar. A NFC-e segue abaixo, igual.
+      if (eventos55.ehModelo55(own.chave_acesso)) {
+        try {
+          const r = await eventos55.cancelarNfe55(db, own, { justificativa: reason, userId: req.user && req.user.id });
+          logAuditAction(req.user.id, req.params.id, 'nfe55_cancelada',
+            `NF-e nº ${own.numero} cancelada na SEFAZ (evento ${r.evento.protocolo || r.evento.cStat}): ${reason}`);
+          const { xml_signed, ...nota } = r.nota; // eslint-disable-line no-unused-vars
+          return res.json({ nfce: nota, evento: { cStat: r.evento.cStat, protocolo: r.evento.protocolo, ja_cancelada: !!r.evento.ja_cancelada }, cancelavel_ate: r.prazo.ate });
+        } catch (e) {
+          if (e && e.code && e.status) return res.status(e.status).json({ error: e.message, code: e.code, ...(e.extra || {}) });
+          throw e;
+        }
+      }
       if (own.status !== 'autorizada') {
         return res.status(400).json({ error: `Nota não pode ser cancelada (status: ${own.status})` });
       }

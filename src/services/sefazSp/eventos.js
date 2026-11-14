@@ -130,11 +130,12 @@ function buildInfEventoCancelamento({ chave, cnpj, tpAmb, cOrgao = 35, protocolo
 }
 
 /**
- * Envia o cancelamento. Sucesso: cStat 135 (vinculado) ou 136 (registrado).
- * 573 = duplicidade de evento (já cancelada) — tratado como sucesso idempotente.
+ * Assina e envia um evento (envEvento, um evento por lote). Devolve o
+ * retorno lido + o <evento> assinado e o <retEvento> cru, para montar o
+ * procEventoNFe (o XML "de guardar" do evento). 14/11/2026 (NF-e 55, CP5):
+ * comum ao cancelamento e à carta de correção.
  */
-async function cancelarNfce({ chave, cnpj, tpAmb, cOrgao, protocolo, justificativa, endpoints, cert, ...opts }) {
-  const { infEventoXml } = buildInfEventoCancelamento({ chave, cnpj, tpAmb, cOrgao, protocolo, justificativa });
+async function enviarEvento({ infEventoXml, endpoints, cert, ...opts }) {
   const eventoWrapper = `<evento xmlns="${NFE_NS}" versao="1.00">${infEventoXml}</evento>`;
   const signatureXml = signElement(eventoWrapper, 'infEvento', cert);
   const eventoXml = `<evento xmlns="${NFE_NS}" versao="1.00">${infEventoXml}${signatureXml}</evento>`;
@@ -149,16 +150,118 @@ async function cancelarNfce({ chave, cnpj, tpAmb, cOrgao, protocolo, justificati
   const infEvento = retEvento ? retEvento.infEvento : null;
   const cStat = infEvento ? String(infEvento.cStat ?? '') : String(ret.cStat ?? '');
   const xMotivo = (infEvento && infEvento.xMotivo) || ret.xMotivo || null;
-  const sucesso = cStat === '135' || cStat === '136';
-  const jaCancelada = cStat === '573';
-
   return {
-    sucesso: sucesso || jaCancelada,
     cStat, xMotivo,
     protocoloEvento: infEvento && infEvento.nProt != null ? String(infEvento.nProt) : null,
     dhRegEvento: infEvento ? (infEvento.dhRegEvento || null) : null,
-    jaCancelada,
+    eventoXml,
+    retEventoXml: extrairRetEvento(rawXml),
     rawXml,
+  };
+}
+
+/** <retEvento> cru do retorno SOAP, sem prefixo nem xmlns próprio. */
+function extrairRetEvento(rawXml) {
+  const m = String(rawXml || '').match(/<(?:\w+:)?retEvento\b[\s\S]*?<\/(?:\w+:)?retEvento>/);
+  if (!m) return null;
+  return m[0].replace(/<(\/?)\w+:/g, '<$1').replace(/\sxmlns(:\w+)?="[^"]*"/g, '');
+}
+
+/** procEventoNFe = evento assinado + retEvento (o arquivo de guardar do evento). */
+function montarProcEvento(eventoXml, retEventoXml) {
+  if (!eventoXml || !retEventoXml) return null;
+  return `<?xml version="1.0" encoding="UTF-8"?><procEventoNFe xmlns="${NFE_NS}" versao="1.00">`
+    + eventoXml.replace(` xmlns="${NFE_NS}"`, '') + retEventoXml + '</procEventoNFe>';
+}
+
+/**
+ * Envia o cancelamento. Sucesso: cStat 135 (vinculado) ou 136 (registrado).
+ * 573 = duplicidade de evento (já cancelada) — tratado como sucesso idempotente.
+ */
+async function cancelarNfce({ chave, cnpj, tpAmb, cOrgao, protocolo, justificativa, endpoints, cert, ...opts }) {
+  const { infEventoXml } = buildInfEventoCancelamento({ chave, cnpj, tpAmb, cOrgao, protocolo, justificativa });
+  const r = await enviarEvento({ infEventoXml, endpoints, cert, ...opts });
+  const sucesso = r.cStat === '135' || r.cStat === '136';
+  const jaCancelada = r.cStat === '573';
+
+  return {
+    sucesso: sucesso || jaCancelada,
+    cStat: r.cStat, xMotivo: r.xMotivo,
+    protocoloEvento: r.protocoloEvento,
+    dhRegEvento: r.dhRegEvento,
+    jaCancelada,
+    rawXml: r.rawXml,
+    // CP5 (14/11/2026): o procEventoNFe, guardado no metadata da NF-e 55
+    procEventoXml: sucesso ? montarProcEvento(r.eventoXml, r.retEventoXml) : null,
+  };
+}
+
+// ---------- Carta de correção (evento 110110) ----------
+
+const TP_EVENTO_CCE = '110110';
+
+// Condição de uso da CC-e: texto FIXO exigido pelo leiaute (schema
+// e110110_v1.00.xsd, enumeração única de xCondUso; Manual de Orientação do
+// Contribuinte, evento Carta de Correção). Sem acentos, como no schema.
+const X_COND_USO_CCE = 'A Carta de Correcao e disciplinada pelo paragrafo 1o-A do art. 7o do Convenio S/N, '
+  + 'de 15 de dezembro de 1970 e pode ser utilizada para regularizacao de erro ocorrido na emissao de '
+  + 'documento fiscal, desde que o erro nao esteja relacionado com: I - as variaveis que determinam o '
+  + 'valor do imposto tais como: base de calculo, aliquota, diferenca de preco, quantidade, valor da '
+  + 'operacao ou da prestacao; II - a correcao de dados cadastrais que implique mudanca do remetente '
+  + 'ou do destinatario; III - a data de emissao ou de saida.';
+
+/** Texto livre no charset do leiaute (Latin-1, uma linha só). */
+function textoDoEvento(s) {
+  return String(s || '')
+    .replace(/[–—]/g, '-').replace(/[‘’]/g, "'").replace(/[“”]/g, '"').replace(/…/g, '...')
+    .replace(/[^ -ÿ]/g, ' ')
+    .replace(/\s+/g, ' ').trim();
+}
+
+/**
+ * infEvento da carta de correção (sem assinatura). nSeqEvento 1..20; cada
+ * nova carta substitui a anterior (vale a de maior sequência).
+ */
+function buildInfEventoCartaCorrecao({ chave, cnpj, tpAmb, cOrgao = 35, nSeqEvento, correcao, dhEvento }) {
+  if (!/^\d{44}$/.test(String(chave))) throw new Error('carta de correção: chave deve ter 44 dígitos');
+  const cnpjClean = onlyDigits(cnpj);
+  if (cnpjClean.length !== 14) throw new Error('carta de correção: CNPJ inválido');
+  const seqN = Number(nSeqEvento);
+  if (!Number.isInteger(seqN) || seqN < 1 || seqN > 20) throw new Error('carta de correção: nSeqEvento deve ser de 1 a 20');
+  const xCorrecao = textoDoEvento(correcao);
+  if (xCorrecao.length < 15 || xCorrecao.length > 1000) {
+    throw new Error('carta de correção: o texto deve ter entre 15 e 1000 caracteres');
+  }
+  const idEvento = `ID${TP_EVENTO_CCE}${chave}${String(seqN).padStart(2, '0')}`;
+  const infEventoXml = `<infEvento Id="${idEvento}">`
+    + `<cOrgao>${cOrgao}</cOrgao>`
+    + `<tpAmb>${Number(tpAmb)}</tpAmb>`
+    + `<CNPJ>${cnpjClean}</CNPJ>`
+    + `<chNFe>${chave}</chNFe>`
+    + `<dhEvento>${dhEvento || isoBR()}</dhEvento>`
+    + `<tpEvento>${TP_EVENTO_CCE}</tpEvento>`
+    + `<nSeqEvento>${seqN}</nSeqEvento>`
+    + '<verEvento>1.00</verEvento>'
+    + '<detEvento versao="1.00">'
+    + '<descEvento>Carta de Correcao</descEvento>'
+    + `<xCorrecao>${esc(xCorrecao)}</xCorrecao>`
+    + `<xCondUso>${X_COND_USO_CCE}</xCondUso>`
+    + '</detEvento>'
+    + '</infEvento>';
+  return { infEventoXml, idEvento, xCorrecao };
+}
+
+/** Envia a carta de correção. Sucesso: cStat 135/136. */
+async function enviarCartaCorrecao({ chave, cnpj, tpAmb, cOrgao, nSeqEvento, correcao, endpoints, cert, ...opts }) {
+  const { infEventoXml, xCorrecao } = buildInfEventoCartaCorrecao({ chave, cnpj, tpAmb, cOrgao, nSeqEvento, correcao });
+  const r = await enviarEvento({ infEventoXml, endpoints, cert, ...opts });
+  const sucesso = r.cStat === '135' || r.cStat === '136';
+  return {
+    sucesso, cStat: r.cStat, xMotivo: r.xMotivo,
+    protocoloEvento: r.protocoloEvento, dhRegEvento: r.dhRegEvento,
+    xCorrecao,
+    procEventoXml: sucesso ? montarProcEvento(r.eventoXml, r.retEventoXml) : null,
+    rawXml: r.rawXml,
   };
 }
 
@@ -223,7 +326,8 @@ async function inutilizar({ tpAmb, cUF, ano2, cnpj, serie, nIni, nFin, justifica
 }
 
 module.exports = {
-  cancelarNfce, inutilizar,
-  buildInfEventoCancelamento, buildInfInut, signElement,
-  TP_EVENTO_CANCELAMENTO,
+  cancelarNfce, inutilizar, enviarCartaCorrecao, enviarEvento,
+  buildInfEventoCancelamento, buildInfEventoCartaCorrecao, buildInfInut, signElement,
+  extrairRetEvento, montarProcEvento,
+  TP_EVENTO_CANCELAMENTO, TP_EVENTO_CCE, X_COND_USO_CCE,
 };
