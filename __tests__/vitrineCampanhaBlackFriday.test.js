@@ -133,3 +133,42 @@ describe('catalogo: "Ofertas" filtra as promocoes no ar', () => {
     expect(EM_PROMOCAO_NO_AR).toContain('pv.stock_qty > 0');
   });
 });
+
+// p-122 (14/11/2026): o texto escrito pela loja. Sem ele, a pagina com a
+// campanha sai byte a byte igual a de antes (hashes gerados com origin/main
+// antes deste card, com CAMPANHA acima).
+describe('texto da faixa escrito pela loja (p-122)', () => {
+  const ANTES = {
+    so_pix: { bytes: 311930, sha256: 'e51a0b53913219855e1dc8f68500acec5e484b58047daabd26d2cf2cde742e5d' },
+    na_entrega_legado: { bytes: 312044, sha256: '36ca8bf0b51153f7593760e87f8a52a374296ce24879c49795ac33e324e12521' },
+  };
+
+  test.each(Object.keys(ANTES))('campanha sem texto escrito (%s): HTML byte a byte igual ao de antes', (nome) => {
+    const html = buildPage({ ...dadosEntrega[nome](), campanha: CAMPANHA }, 'loja-exemplo');
+    expect({ bytes: Buffer.byteLength(html), sha256: sha(html) }).toEqual(ANTES[nome]);
+    // frase vazia ou so espacos = o texto padrao
+    expect(buildPage({ ...dadosEntrega[nome](), campanha: { ...CAMPANHA, frase: '   ' } }, 'loja-exemplo')).toBe(html);
+  });
+
+  test('titulo de 28 W: na faixa fina, na faixa grande e na pagina do produto, escapado', () => {
+    const W28 = 'W'.repeat(28);
+    const html = buildPage({ ...dadosEntrega.so_pix(), campanha: { ...CAMPANHA, titulo: W28 } }, 'loja-exemplo');
+    expect(html).toContain('<div class="bf-faixa" role="note"><span>' + W28 + '</span>');
+    expect(html).toContain('<div class="bf-hero-k">' + W28 + '</div>');
+    // Palavra sem espaco desse tamanho quebra no meio em vez de passar da tela.
+    expect(html).toContain('.bf-faixa>span:first-child{white-space:normal;overflow-wrap:anywhere}');
+    expect(html).toContain('.bf-hero-k{overflow-wrap:anywhere}');
+    // Titulo com espacos (os prontos, ou o escrito com palavras normais): sem a regra.
+    const normal = buildPage({ ...dadosEntrega.so_pix(), campanha: { ...CAMPANHA, titulo: 'Semana da Moda Aurora Fashion' } }, 'loja-exemplo');
+    expect(normal).not.toContain('overflow-wrap:anywhere');
+    expect(html).toContain('var FAIXA_DA_CAMPANHA="\\u003cdiv class=\\"bf-faixa\\" role=\\"note\\">\\u003cspan>' + W28);
+  });
+
+  test('frase da faixa grande: escapada, no lugar do texto padrao', () => {
+    const frase = 'Leve <b>2</b> & pague "menos" — só na \'Aurora\' até domingo, enquanto durar o estoque!';
+    const html = buildPage({ ...dadosEntrega.so_pix(), campanha: { ...CAMPANHA, frase } }, 'loja-exemplo');
+    expect(html).toContain('<p class="bf-hero-p">Leve &lt;b&gt;2&lt;/b&gt; &amp; pague &quot;menos&quot; — só na &#39;Aurora&#39; até domingo, enquanto durar o estoque!</p>');
+    expect(html).not.toContain('Os melhores achados');
+    expect(html).not.toContain('<b>2</b>');
+  });
+});

@@ -203,7 +203,7 @@ function buildStorefrontPage(data, slug) {
     promocao: data.tem_promocao === true || temPromocaoNoPayload(data),
   });
   const corpo = campanha ? campanhaDaLoja.aplicarNoCorpo(body, campanha) : body;
-  const cssDaCampanha = campanha ? `<style>${campanhaDaLoja.CSS}</style>\n` : '';
+  const cssDaCampanha = campanha ? `<style>${campanhaDaLoja.cssDe(campanha)}</style>\n` : '';
 
   const bodyClasses = [
     dark ? 'sf-dark' : 'sf-light',
