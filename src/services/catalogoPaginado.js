@@ -148,6 +148,18 @@ const EM_PROMOCAO_NO_AR = `(
 )`;
 
 /**
+ * O preco que a cliente ve no cartao: o promocional quando a promocao do
+ * produto vale agora, senao o normal (a regra de services/precoEfetivo.js).
+ * So a vista "Ofertas" (p-123a) filtra e desenha as faixas por ele: la
+ * todo cartao mostra o "Por", e faixa pelo "De" prometeria "ate R$ 100" e
+ * traria peca de R$ 79,90 cortada. Fora dela o SQL segue o de antes.
+ */
+const PRECO_NA_VITRINE = `(CASE
+  WHEN products.promo_price > 0 AND products.promo_price < products.price
+   AND products.promo_starts_at <= NOW() AND products.promo_ends_at > NOW()
+  THEN products.promo_price ELSE products.price END)`;
+
+/**
  * O filtro de foto, ou nada.
  *
  * Devolver a string 'TRUE' em vez de montar o WHERE condicionalmente
@@ -302,13 +314,15 @@ async function paginaDoCatalogo({
   // esvazia a grade por causa de um "abc" na URL e pior que filtro nenhum.
   const pMin = Number(precoMin);
   const pMax = Number(precoMax);
+  // p-123a: na vista Ofertas o cartao mostra o "Por"; a faixa e por ele.
+  const naOferta = soPromocao === true;
   if (Number.isFinite(pMin) && pMin > 0) {
     params.push(pMin);
-    filtros.push(`price >= $${params.length}`);
+    filtros.push(naOferta ? `${PRECO_NA_VITRINE} >= $${params.length}` : `price >= $${params.length}`);
   }
   if (Number.isFinite(pMax) && pMax > 0) {
     params.push(pMax);
-    filtros.push(`price <= $${params.length}`);
+    filtros.push(naOferta ? `${PRECO_NA_VITRINE} <= $${params.length}` : `price <= $${params.length}`);
   }
 
   if (soPromocao === true) filtros.push(EM_PROMOCAO_NO_AR);
@@ -522,9 +536,13 @@ function condicaoDeCategoria(categoria, params) {
  * numeros da regua e a pessoa nao teria como trocar de tamanho sem
  * limpar tudo.
  */
-async function facetasDoCatalogo({ cid, visibilityWhere, exigeFoto, categoria }) {
+async function facetasDoCatalogo({ cid, visibilityWhere, exigeFoto, categoria, soPromocao }) {
   const params = [cid];
   const condCat = condicaoDeCategoria(categoria, params);
+  // p-123a (QA 14/11): na vista "Ofertas" as opcoes e as contagens sao das
+  // pecas da vista. Sem isso o tamanho 42 do catalogo aparecia e levava a
+  // "Nenhum produto encontrado". Fora da vista, o SQL e o de antes.
+  const condPromo = soPromocao === true ? `\n       AND ${EM_PROMOCAO_NO_AR}` : '';
   const sql = `
     SELECT av.attribute_name AS atributo,
            av.value          AS valor,
@@ -540,7 +558,7 @@ async function facetasDoCatalogo({ cid, visibilityWhere, exigeFoto, categoria })
        AND ${filtroDeFoto(exigeFoto)}
        AND btrim(COALESCE(av.value, '')) <> ''
        AND ${NA_VITRINE}
-       ${condCat ? 'AND ' + condCat : ''}
+       ${condCat ? 'AND ' + condCat : ''}${condPromo}
      GROUP BY av.attribute_name, av.value`;
   try {
     const { rows } = await bd().query(sql, params);
@@ -588,9 +606,33 @@ async function facetasDoCatalogo({ cid, visibilityWhere, exigeFoto, categoria })
  * loja de bijuteria as tres faixas cairiam na primeira. Devolve null
  * quando nao ha peca com preco.
  */
-async function faixaDePreco({ cid, visibilityWhere, exigeFoto, categoria }) {
+async function faixaDePreco({ cid, visibilityWhere, exigeFoto, categoria, soPromocao }) {
   const params = [cid];
   const condCat = condicaoDeCategoria(categoria, params);
+  // p-123a: na vista Ofertas, so as pecas em promocao e pelo preco que o
+  // cartao mostra (o "Por"). Fora dela, o SQL de antes.
+  if (soPromocao === true) {
+    const sqlOfertas = `
+    SELECT MIN(${PRECO_NA_VITRINE})::float AS min, MAX(${PRECO_NA_VITRINE})::float AS max
+      FROM products
+     WHERE ${visibilityWhere}
+       AND is_active IS NOT FALSE
+       AND ${EM_ESTOQUE}
+       AND ${filtroDeFoto(exigeFoto)}
+       AND price IS NOT NULL AND price > 0
+       AND ${NA_VITRINE}
+       ${condCat ? 'AND ' + condCat : ''}
+       AND ${EM_PROMOCAO_NO_AR}`;
+    try {
+      const { rows } = await bd().query(sqlOfertas, params);
+      const r = rows[0];
+      if (!r || r.min == null || r.max == null) return null;
+      return { min: r.min, max: r.max };
+    } catch (e) {
+      console.error('[faixa-de-preco] ofertas: consulta falhou (' + e.code + '):', e.message);
+      return null;
+    }
+  }
   const sql = `
     SELECT MIN(price)::float AS min, MAX(price)::float AS max
       FROM products
@@ -657,7 +699,7 @@ function janelaDePaginas(atual, totalPaginas, vizinhas = 1) {
 }
 
 module.exports = {
-  POR_PAGINA, LIMITE_MAXIMO, EM_ESTOQUE, COM_FOTO, NA_VITRINE, filtroDeFoto, EM_PROMOCAO_NO_AR,
+  POR_PAGINA, LIMITE_MAXIMO, EM_ESTOQUE, COM_FOTO, NA_VITRINE, filtroDeFoto, EM_PROMOCAO_NO_AR, PRECO_NA_VITRINE,
   JANELA_DE_VENDAS_DIAS, VENDIDOS_RECENTES,
   arvoreDeCategorias, facetasDoCatalogo, faixaDePreco, condicaoDeCategoria,
   paginaDoCatalogo, contarPorCategoria, janelaDePaginas, normalizar, ordemSql,
