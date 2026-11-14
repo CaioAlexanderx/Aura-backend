@@ -75,6 +75,20 @@ function maisPerto(hex) {
   return melhor;
 }
 
+/**
+ * 14/11/2026 (CP6, busca por cor): as grafias que contam como a MESMA cor
+ * para a busca — o termo e, quando ele é nome ou apelido da paleta, o nome
+ * e os apelidos dela ("preta" → preta, preto, black, negro, negra). Sem
+ * acento e em minúsculas, prontas para comparar com texto normalizado.
+ */
+function grafiasDaMesmaCor(termo) {
+  const k = chaveDoNome(termo);
+  if (!k) return [];
+  const c = corPeloNome(termo);
+  const todas = c ? [k, chaveDoNome(c.nome), ...c.apelidos.map(chaveDoNome)] : [k];
+  return Array.from(new Set(todas.filter(Boolean)));
+}
+
 /** As cores agrupadas, na ordem das famílias: [{ familia, cores: [...] }]. */
 function porFamilia() {
   return FAMILIAS.map((f) => ({ familia: f, cores: PALETA.filter((c) => c.familia === f) }));
@@ -88,4 +102,5 @@ module.exports = {
   hexPeloNome,
   maisPerto,
   porFamilia,
+  grafiasDaMesmaCor,
 };

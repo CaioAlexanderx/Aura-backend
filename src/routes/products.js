@@ -53,6 +53,9 @@ const { normalizeGallery } = require('../services/productGallery');
 const { companyGroupWhere, productVisibilityWhere } = require('../utils/companyGroup');
 const db = require('../config/database');
 const { avancarSemEsperar } = require('../services/onboardingProgress');
+// 14/11/2026 (CP6 da revisao de cores): busca pelo nome da cor.
+const { grafiasDaMesmaCor } = require('../services/paletaDeCores');
+const { nomesDeCorDasVariantes } = require('../services/nomeDaCor');
 // t3-05 (18/10/2026): NCM fora da tabela da Receita so AVISA (ncm_aviso), nunca bloqueia.
 const { avisoDeNcm } = require('../services/ncmTable');
 // 24/10/2026: exclusao confirmada nunca e negada (anula historico ou arquiva).
@@ -240,8 +243,19 @@ router.get('/', async (req, res) => {
             AND pv.is_active = true
             AND pv.barcode ILIKE $${params.length + 1}
         )
+        OR EXISTS (
+          -- 14/11/2026 (CP6 da revisao de cores): pelo nome da cor da
+          -- variante; "preta" acha "Preto" (grafias da mesma cor na paleta).
+          SELECT 1 FROM product_variants pvc
+          WHERE pvc.product_id = products.id
+            AND pvc.is_active = true
+            AND replace(translate(lower(coalesce(pvc.color_name, '')),
+                        'áàâãäéèêëíìîïóòôõöúùûüç', 'aaaaaeeeeiiiiooooouuuuc'), '-', ' ')
+                LIKE ANY ($${params.length + 2}::text[])
+        )
       )`;
       params.push(`%${search}%`);
+      params.push(grafiasDaMesmaCor(search).map((g) => `%${g}%`));
     }
 
     // 23/09/2026: contagem e lista saem JUNTAS. Antes uma esperava a outra, e
@@ -293,7 +307,15 @@ router.get('/', async (req, res) => {
                    AND pv.is_active = true
                    AND pv.barcode IS NOT NULL),
                 ARRAY[]::TEXT[]
-              ) AS variant_barcodes
+              ) AS variant_barcodes,
+              -- 14/11/2026 (CP6): a cor de cada variante ativa, para a busca
+              -- do Caixa e do Estoque achar pelo nome (variant_color_names).
+              (SELECT json_agg(json_build_object(
+                        'color_name', pv.color_name, 'sku_suffix', pv.sku_suffix,
+                        'attributes', (SELECT json_agg(json_build_object('attribute', x.attribute_name, 'value', x.value))
+                                         FROM product_variant_values x WHERE x.variant_id = pv.id)))
+                 FROM product_variants pv
+                WHERE pv.product_id = products.id AND pv.is_active = true) AS variant_cores
        FROM products ${where} ORDER BY name ASC LIMIT $${params.length + 1} OFFSET $${params.length + 2}`,
       [...params, limit, offset]
     )));
@@ -348,6 +370,8 @@ router.get('/', async (req, res) => {
       // 19/05/2026: novos campos pra UI lidar com variants
       variants_stock_total: parseInt(r.variants_stock_total) || 0,
       variant_barcodes: Array.isArray(r.variant_barcodes) ? r.variant_barcodes : [],
+      // 14/11/2026 (CP6): os nomes de cor das variantes, para a busca local.
+      variant_color_names: nomesDeCorDasVariantes(r.variant_cores),
       // 427 (De/Por): sem promocao, promo_* nulos e preco_efetivo = price.
       ...camposDoProduto(r, agora),
     }));
