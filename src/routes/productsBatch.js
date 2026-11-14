@@ -23,11 +23,16 @@ function getPlanLimit(plan) {
   }
 }
 
+// 14/11/2026 (CP3 da revisao de cores): o cadastro rapido aceita o NOME
+// da cor ("Preta", "Caqui", "Off White"), como a importacao por planilha
+// ja aceitava em products.color. Antes, nome que nao fosse hex sumia sem
+// aviso. Hex segue como hex; nome sai sem espaco nas pontas, ate 60.
 function normalizeHexColor(val) {
   if (!val || typeof val !== 'string') return null;
   const trimmed = val.trim();
   if (/^#[0-9A-Fa-f]{6}$/.test(trimmed)) return trimmed;
-  return null;
+  if (/^#?[0-9A-Fa-f]{5,6}$/.test(trimmed)) return null;
+  return trimmed ? trimmed.slice(0, 60) : null;
 }
 
 // POST /companies/:id/products/batch-create
