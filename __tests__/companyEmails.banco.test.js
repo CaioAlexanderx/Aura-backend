@@ -285,13 +285,16 @@ describe('scheduler: conta criada depois do fim do período fica fora (hotfix 26
     await q(`INSERT INTO users (id, email, password_hash, full_name, email_verified) VALUES ($1, $2, 'x', 'Dono Novo', true), ($3, $4, 'x', 'Dono Grupo', true)`,
       [donoNovo, `novo-${donoNovo.slice(0, 8)}@example.test`, donoGrupo, `grupo-${donoGrupo.slice(0, 8)}@example.test`]);
     const fim = `'${fimLocal.toISOString()}'::timestamptz`;
-    await criar('criadaAgora', donoNovo, 'NOW()');
+    // 14/11/2026: era NOW(). No fim de semana/madrugada o período semanal
+    // ainda não acabou e NOW() cai DENTRO dele (o teste falhava pela hora do
+    // CI). O que se quer provar é "criada depois do fim": 1 h depois do fim.
+    await criar('criadaAgora', donoNovo, `${fim} + interval '1 hour'`);
     await criar('criadaNoFim', donoNovo, fim);
     await criar('criadaAntes', donoNovo, `${fim} - interval '1 minute'`);
     await criar('criadaNaSemana', donoNovo, `${fim} - interval '3 days'`);
     await criar('grupoMatriz', donoGrupo, `NOW() - interval '60 days'`, true);
     await criar('grupoFilialAntiga', donoGrupo, `${fim} - interval '2 days'`);
-    await criar('grupoFilialNova', donoGrupo, 'NOW()');
+    await criar('grupoFilialNova', donoGrupo, `${fim} + interval '1 hour'`);
   });
 
   test('criada depois do fim do período não recebe; criada antes (inclusive 1 min antes da meia-noite) recebe', async () => {
