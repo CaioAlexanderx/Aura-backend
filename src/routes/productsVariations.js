@@ -68,6 +68,8 @@ const db = require('../config/database');
 const { agruparGaleria } = require('../services/productImageGallery');
 // 10/11/2026: a grade e atualizada no lugar, nao reescrita (ver o servico).
 const { planejarGrade } = require('../services/gradeDeVariantes');
+// 14/11/2026 (CP3): a paleta unica le nome de cor ("Caqui", "Preta").
+const { hexPeloNome } = require('../services/paletaDeCores');
 // 14/11/2026: o pedaco cortado do sku_suffix nao vira nome da cor.
 const {
   coresDoProduto, resolverNomeDaCor, nomeSugeridoDoSufixo, chaveDoHex,
@@ -110,7 +112,10 @@ function coerceColorHex(raw) {
   const t = String(raw).trim();
   if (/^#[0-9A-Fa-f]{6}$/.test(t)) return t;          // ja e hex: passthrough
   if (/^[0-9A-Fa-f]{6}$/.test(t)) return '#' + t;     // hex sem '#'
-  return COLOR_NAME_TO_HEX[colorNorm(t)] || null;     // nome conhecido
+  // 14/11/2026 (CP3): a tabela de sempre primeiro (o hex de quem ja gravava
+  // "azul" nao muda); depois a paleta unica, com acentos e apelidos
+  // ("Caqui", "Preta", "Off white", "Verde-agua"), que antes davam 400.
+  return COLOR_NAME_TO_HEX[colorNorm(t)] || hexPeloNome(t) || null;
 }
 
 // ─── Visibilidade de grupo (BIDIRECIONAL) ────────────────
@@ -323,6 +328,11 @@ router.put('/:pid/variations', async (req, res) => {
     if (c.hex !== hex) {
       if (c.hex != null && c.hex !== hex) colorKeyRemap.push({ from: c.hex, to: hex });
       c.hex = hex;
+      // 14/11/2026 (CP3): a cor chegou como NOME ("Preta", de importacao)
+      // e virou amostra: sem outro nome, o que ela escreveu vira o nome.
+      const escrito = typeof original === 'string' ? original.trim() : '';
+      const semNome = !(typeof c.name === 'string' && c.name.trim());
+      if (semNome && escrito && !/^#?[0-9A-Fa-f]{6}$/.test(escrito)) c.name = escrito;
     }
   }
   // Reescreve chaves de matrix/barcodes que usavam o token de cor antigo.
