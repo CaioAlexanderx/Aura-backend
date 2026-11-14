@@ -342,3 +342,38 @@ describe('nome vazio não apaga o nome gravado', () => {
     ]);
   });
 });
+
+// ─── 14/11/2026 (CP3): nome de cor que chega como cor ────────────────────
+describe('a grade lê o nome da cor pela paleta única', () => {
+  test('"Preta" e "Caqui" viram amostra e o nome escrito fica', async () => {
+    const pid = await produto('Importado com nome');
+    await request(app).put(`${base}/${pid}/variations`).send({
+      colors: [{ hex: 'Preta' }, { hex: 'Caqui', name: null }, { hex: null, name: 'Off white' }],
+      sizes: [], matrix: { 'Preta|': 1, 'Caqui|': 2, '|': 0 },
+    }).expect(200);
+    const rows = await variantesNoBanco(pid);
+    expect(rows.map((v) => [v.cor, v.color_name]).sort()).toEqual([
+      ['#111111', 'Preta'],
+      ['#C3B091', 'Caqui'],
+      ['#F3EFE7', 'Off white'],
+    ]);
+  });
+
+  test('o nome que a tabela de sempre já conhecia segue com o hex de sempre', async () => {
+    const pid = await produto('Legado azul');
+    await request(app).put(`${base}/${pid}/variations`).send({
+      colors: [{ hex: 'azul' }], sizes: [], matrix: { 'azul|': 1 },
+    }).expect(200);
+    const rows = await variantesNoBanco(pid);
+    expect(rows.map((v) => v.cor)).toEqual(['#3B82F6']);
+  });
+
+  test('nome desconhecido continua recusado com a cor no texto', async () => {
+    const pid = await produto('Cor inventada');
+    const r = await request(app).put(`${base}/${pid}/variations`).send({
+      colors: [{ hex: 'Rosa chiclete' }], sizes: [], matrix: {},
+    });
+    expect(r.status).toBe(400);
+    expect(r.body.error).toContain('Rosa chiclete');
+  });
+});
