@@ -304,6 +304,9 @@ router.use('/birthday', requirePlan('negocio', 'expansao'), require('./birthday'
 router.use('/employees', requirePlan('negocio', 'expansao'), require('./payslipEmail'));
 router.use('/employees', requirePlan('negocio', 'expansao'), require('./commission'));
 router.use('/appointments', requirePlan('negocio', 'expansao'), require('./appointments'));
+// p-118 (14/11/2026, migration 451): campanha de Black Friday da loja
+// online (GET/PUT /digital-channel/campanha). Por empresa, mesmo plano.
+router.use('/digital-channel/campanha', requirePlan('negocio', 'expansao'), require('./campanhaDaLoja'));
 router.use('/digital-channel', requirePlan('negocio', 'expansao'), require('./digitalChannel'));
 router.use('/digital-channel/orders', requirePlan('negocio', 'expansao'), require('./digitalOrders'));
 router.use('/digital-channel/asaas', requirePlan('negocio', 'expansao'), require('./asaasSubconta'));
