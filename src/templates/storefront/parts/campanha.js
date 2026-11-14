@@ -80,18 +80,20 @@ function htmlDaFaixaGrande(c) {
 
 const CSS = `
 .bf-faixa{background:${PRETO};color:${DOURADO};text-align:center;padding:9px 14px;font-weight:800;font-size:12px;letter-spacing:.16em;text-transform:uppercase;line-height:1.4}
+.bf-faixa span{white-space:nowrap}
 .bf-faixa .bf-sep{color:#fff;font-weight:500;margin:0 10px}
-.bf-hero{position:relative;overflow:hidden;background:${PRETO};color:#fff;display:flex;align-items:center;gap:24px;padding:40px max(20px,calc((100% - 1280px)/2 + 32px))}
+.bf-hero{position:relative;overflow:hidden;background:${PRETO};color:#fff;font-family:"DM Sans",system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;display:flex;align-items:center;gap:24px;padding:40px max(20px,calc((100% - 1280px)/2 + 32px))}
 .bf-hero::before{content:"";position:absolute;inset:0;pointer-events:none;background:radial-gradient(ellipse 60% 120% at 90% 0%,rgba(245,197,66,.28),transparent 60%),repeating-linear-gradient(135deg,rgba(255,255,255,.035) 0 2px,transparent 2px 14px)}
 .bf-hero>*{position:relative}
 .bf-hero-k{color:${DOURADO};font-weight:800;font-size:13px;letter-spacing:.3em;text-transform:uppercase}
-.bf-hero-h{margin:8px 0 6px;font-weight:800;font-size:clamp(34px,6vw,66px);line-height:.95;letter-spacing:-.04em;color:#fff}
+.bf-hero-h{margin:8px 0 6px;font-family:inherit;font-weight:800;font-size:clamp(34px,6vw,66px);line-height:.95;letter-spacing:-.04em;color:#fff}
 .bf-hero-h em{font-style:normal;color:${DOURADO}}
 .bf-hero-p{margin:0;color:#c9c9d6;font-size:14px;max-width:52ch}
 .bf-hero-cta{margin-left:auto;flex:none;background:${DOURADO};color:${PRETO};border:0;border-radius:999px;padding:14px 26px;font:inherit;font-weight:800;font-size:14px;cursor:pointer;white-space:nowrap}
 .bf-hero-cta:focus-visible{outline:2px solid #fff;outline-offset:3px}
 body:not(.home) .bf-hero{display:none}
 .topnav-item.bf-ofertas,.drawer-item.bf-ofertas{color:${DOURADO};background:${PRETO};border-radius:999px;padding-left:12px;padding-right:12px;font-weight:700}
+.drawer-item.bf-ofertas{margin:4px 14px;padding-left:16px;padding-right:16px;width:calc(100% - 28px)}
 @media(max-width:700px){
   .bf-faixa{font-size:10.5px;letter-spacing:.12em;padding:8px 10px}
   .bf-faixa .bf-sep{margin:0 6px}
