@@ -67,6 +67,15 @@ describe('quando a loja tem promocao no ar', () => {
     expect(promocao.temPromocaoNoPayload({ products: [], produto_inicial: emPromo })).toBe(true);
   });
 
+  test('o sinal do servidor (tem_promocao, catalogo inteiro) liga mesmo sem peca em promocao na pagina 1', () => {
+    const d = dadosEntrega.so_pix();
+    const sem = buildPage(d, 'loja-exemplo');
+    expect(sem).not.toContain('function estiloDaPromocao()');
+    const com = buildPage({ ...d, tem_promocao: true }, 'loja-exemplo');
+    expect(com).toContain('function estiloDaPromocao()');
+    expect(com).toContain("'<div class=\"product-price-row\">'+deRiscado(p)+");
+  });
+
   test('a pagina ganha o riscado e o script continua valido', () => {
     const d = dadosEntrega.so_pix();
     d.products = [emPromo, semPromo];

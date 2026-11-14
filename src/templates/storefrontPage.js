@@ -190,7 +190,10 @@ function buildStorefrontPage(data, slug) {
     naEntrega: Array.isArray(formasNaEntrega) && formasNaEntrega.length > 0,
     // p-119a: o "De" riscado so entra na loja com promocao no ar. Sem
     // promocao a pagina sai byte a byte igual (parts/promocao.js).
-    promocao: temPromocaoNoPayload(data),
+    // tem_promocao vem do servidor sobre o catalogo inteiro (p-118): a
+    // pagina so carrega a primeira pagina de pecas, e uma peca em promocao
+    // que chega depois pela paginacao tambem precisa do riscado.
+    promocao: data.tem_promocao === true || temPromocaoNoPayload(data),
   });
 
   const bodyClasses = [
