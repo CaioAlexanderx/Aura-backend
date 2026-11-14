@@ -38,6 +38,7 @@ const {
 } = require('./descontoDaVendaNaNfce');
 const { separarServicos, pagamentosDosProdutos } = require('./nfceSemServico');
 const { ibgePeloCep } = require('./ibgePeloCep');
+const { CNPJ_REQUIRED_CODE, CNPJ_REQUIRED_MSG } = require('./documentoEmpresa');
 
 function onlyDigits(s) { return String(s == null ? '' : s).replace(/\D/g, ''); }
 function texto(v) {
@@ -430,7 +431,7 @@ async function montarNotaDaVenda(db, { companyId, saleId, body, buscarIbge = ibg
   const company = await lerEmpresa(db, companyId);
   if (!company) return bloqueio(404, 'EMPRESA_NAO_ENCONTRADA', 'Empresa não encontrada.');
   if (!company.cnpj) {
-    return bloqueio(422, 'CNPJ_REQUIRED', 'Para emitir nota fiscal a empresa precisa de CNPJ.');
+    return bloqueio(422, CNPJ_REQUIRED_CODE, CNPJ_REQUIRED_MSG);
   }
   if (!company.inscricao_estadual && config.inscricao_estadual) company.inscricao_estadual = config.inscricao_estadual;
   if (company.tax_regime === 'lucro_presumido' || company.tax_regime === 'lucro_real') {
