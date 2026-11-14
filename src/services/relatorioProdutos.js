@@ -63,6 +63,8 @@
 
 const pool = require('../config/database');
 const { projetar, diasDeVendaFuturos, hojeBRT } = require('./ruptura');
+// 14/11/2026: rótulo da variante com o nome da cor (CP2a da revisão de cores).
+const { colunasDoRotulo, aplicarRotulo } = require('./nomeDaCor');
 
 const TZ = 'America/Sao_Paulo';
 const DIA = /^\d{4}-\d{2}-\d{2}$/;
@@ -245,11 +247,8 @@ const SQL_CATALOGO = `
          p.is_group_shared,
          p.is_active,
          p.name AS nome,
-         COALESCE(
-           (SELECT string_agg(pvv.value, ' / ' ORDER BY pvv.attribute_name)
-              FROM product_variant_values pvv WHERE pvv.variant_id = pv.id),
-           NULLIF(pv.sku_suffix, '')
-         ) AS variante,
+         NULLIF(pv.sku_suffix, '') AS variante,
+         ${colunasDoRotulo('pv.id')},
          NULLIF(p.sku, '') AS sku,
          NULLIF(pv.sku_suffix, '') AS sku_suffix,
          NULLIF(p.barcode, '') AS barcode_produto,
@@ -679,6 +678,8 @@ async function relatorioProdutos({ companyId, companyIds, parametros, db = pool 
     db.query(SQL_VENDAS, [empresas, periodo.de, periodo.ate, inicioDaLeitura, periodo.hoje]),
     db.query(SQL_DIAS, [empresas, periodo.de, periodo.ate]),
   ]).then((rs) => rs.map((r) => (r && r.rows) || []));
+  // 14/11/2026: "Azul escuro / M", não "#1F2A44 / M" (services/nomeDaCor.js).
+  for (const l of catalogo) aplicarRotulo(l, 'variante', ' / ');
 
   const relatorio = montarRelatorio(catalogo, vendas, dias, parametros);
   return {

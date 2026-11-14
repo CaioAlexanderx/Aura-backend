@@ -1,14 +1,14 @@
 {
   "so_pix": {
-    "bytes": 307464,
-    "sha256": "7228d6df74298d5858290fcffa05032a8cb6a6b4861ecabd7ead9250870ddb99"
+    "bytes": 308090,
+    "sha256": "17bcd4bc3b98db571ae2c5d282dce97de19d7b53f7c86a827e12d8391de1cde4"
   },
   "na_entrega_legado": {
-    "bytes": 307578,
-    "sha256": "cbf6367e40de9c4cd69ee87fe728b4940a72f87a4c0e1b344a516cf958931425"
+    "bytes": 308204,
+    "sha256": "699410ebb04fa4a242d6b8fde2cae9b85d457814f1729b4f25db06ef03ea3de4"
   },
   "so_na_entrega": {
-    "bytes": 307481,
-    "sha256": "7b5ef82536133f41cd6623074e2b7168f60ff52edd8f11772c447d3bb9c423d1"
+    "bytes": 308107,
+    "sha256": "c33d64ff43c383627d770ef7e333df7162f284cdfd8a1effd0699f5d0fb4265d"
   }
 }

@@ -109,7 +109,10 @@ describe('acabamentos vistos na Finesse no ar', () => {
   test('cor em hex vira o nome da cor na sacola', () => {
     const src = semComentarios(parts('cart.js'));
     // QA 02/09: o rotulo ganhou primeira letra maiuscula e virou nomeDoItem.
-    expect(src).toContain('return primeiraMaiuscula(nomeDaCor(val)||val);');
+    // 14/11/2026 (CP2a da revisao de cores): o nome vem pronto da variante
+    // (o mesmo do Caixa); sem ele, a paleta da vitrine, como antes.
+    expect(src).toContain('return v.nome_da_cor||primeiraMaiuscula(nomeDaCorNaPeca(p,val)||val);');
+    expect(src).toContain('return typeof nomeDaCor===\'function\'?nomeDaCor(hex):null;');
   });
   test('no celular o resumo tem um botao pra abrir os itens', () => {
     const src = semComentarios(parts('sacola.js'));

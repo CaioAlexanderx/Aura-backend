@@ -53,6 +53,8 @@
 'use strict';
 
 const db = require('../config/database');
+// 14/11/2026: nome da cor da variante (CP2a da revisao de cores).
+const { nomeDaCor, nomeGravadoQueAparece } = require('./nomeDaCor');
 
 // ─── Vínculo de transferência (tabela da outra PR) ─────────────
 // Colunas de stock_transfer_items na migration 444 (transferência entre
@@ -429,15 +431,16 @@ function ordemDoAtributo(nome) {
   return 2;
 }
 
-/** "Preto (#000000)" → "Preto"; "#000000" → nome gravado ou o do sku_suffix. */
-function valorDeCor(valor, colorName, skuSuffix) {
+/**
+ * "Preto (#000000)" → "Preto"; "#000000" → o nome da cor do Caixa e do
+ * cupom (services/nomeDaCor.js, 14/11/2026): o color_name, o lido do
+ * sku_suffix ou a paleta — nunca o pedaço cortado ("AZUL ESCUR").
+ */
+function valorDeCor(valor, colorName, skuSuffix, tamanho) {
   const v = String(valor || '').trim();
   const semHex = v.replace(/\(?\s*#[0-9a-fA-F]{6}\s*\)?/g, '').trim();
   if (semHex) return semHex;
-  if (colorName && String(colorName).trim()) return String(colorName).trim();
-  const primeiro = String(skuSuffix || '').split('-')[0];
-  if (primeiro && !/^[0-9A-F]{6}$/i.test(primeiro)) return primeiro;
-  return v;
+  return nomeDaCor({ hex: v, colorName, skuSuffix, tamanho }) || v;
 }
 
 /**
@@ -451,15 +454,16 @@ function rotuloDaVariante(v) {
     .sort((a, b) => ordemDoAtributo(a.attribute) - ordemDoAtributo(b.attribute)
       || normalizarNome(a.attribute).localeCompare(normalizarNome(b.attribute)));
   if (!attrs.length) {
-    const r = (v.color_name && String(v.color_name).trim()) || (v.sku_suffix && String(v.sku_suffix).trim()) || 'Variante';
+    const r = nomeGravadoQueAparece(v.color_name) || (v.sku_suffix && String(v.sku_suffix).trim()) || 'Variante';
     return { rotulo: r, chave: `rotulo:${normalizarNome(r)}` };
   }
   const partes = [];
   const chave = [];
+  const tam = attrs.find((a) => ordemDoAtributo(a.attribute) === 1);
   for (const a of attrs) {
     const ehCor = ordemDoAtributo(a.attribute) === 0;
     const bruto = String(a.value).trim();
-    partes.push(ehCor ? valorDeCor(bruto, v.color_name, v.sku_suffix) : bruto);
+    partes.push(ehCor ? valorDeCor(bruto, v.color_name, v.sku_suffix, tam ? String(tam.value).trim() : null) : bruto);
     const hex = ehCor ? bruto.match(HEX) : null;
     const tipo = ehCor ? 'cor' : (ordemDoAtributo(a.attribute) === 1 ? 'tamanho' : normalizarNome(a.attribute));
     chave.push(`${tipo}=${hex ? `#${hex[1].toLowerCase()}` : normalizarNome(bruto)}`);

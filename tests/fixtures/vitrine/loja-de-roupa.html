@@ -3468,10 +3468,26 @@ function nomeDoItem(p,v){
   if(!v) return p.name;
   var vlabel=(v.values||[]).map(function(x){
     var val=String(x.value==null?'':x.value);
-    if(typeof atributoDeCor==='function'&&atributoDeCor(x.attribute)&&/^#/.test(val)&&typeof nomeDaCor==='function') return primeiraMaiuscula(nomeDaCor(val)||val);
+    if(typeof atributoDeCor==='function'&&atributoDeCor(x.attribute)&&/^#/.test(val)) return v.nome_da_cor||primeiraMaiuscula(nomeDaCorNaPeca(p,val)||val);
     return primeiraMaiuscula(val);
   }).join(' / ');
   return vlabel?p.name+' ('+vlabel+')':p.name;
+}
+/**
+ * 14/11/2026: o nome da cor e o mesmo do Caixa, do cupom e da etiqueta: vem
+ * pronto em variante.nome_da_cor (services/nomeDaCor.js). Sem ele (pagina
+ * gerada antes), a paleta da vitrine, como sempre.
+ */
+function nomeDaCorNaPeca(p,hex){
+  var vs=(p&&p.variants)||[];
+  for(var i=0;i<vs.length;i++){
+    if(!vs[i].nome_da_cor) continue;
+    var vals=vs[i].values||[];
+    for(var j=0;j<vals.length;j++){
+      if(vals[j].value===hex&&(typeof atributoDeCor!=='function'||atributoDeCor(vals[j].attribute))) return vs[i].nome_da_cor;
+    }
+  }
+  return typeof nomeDaCor==='function'?nomeDaCor(hex):null;
 }
 function addToCart(productId,variantId,opcoes){
   variantId = variantId || null;
@@ -4702,7 +4718,7 @@ function showDetail(id,opts){
       // O rotulo mostra o NOME da cor, nao o hex cadastrado ("Cor — #92400E"
       // nao diz nada a cliente; a bolinha ja tem o nome embaixo).
       var escolhidoRotulo=escolhido;
-      if(escolhido&&cor&&/^#([0-9A-Fa-f]{3}|[0-9A-Fa-f]{6})$/.test(String(escolhido).trim())) escolhidoRotulo=nomeDaCor(escolhido)||escolhido;
+      if(escolhido&&cor&&/^#([0-9A-Fa-f]{3}|[0-9A-Fa-f]{6})$/.test(String(escolhido).trim())) escolhidoRotulo=nomeDaCorNaPeca(p,escolhido)||escolhido;
       if(cor) escolhidoRotulo=primeiraMaiuscula(escolhidoRotulo);
       var opcoes=attrs[a].map(function(val){
         var ok=possivel(a,val), sel=escolhido===val;
@@ -4710,7 +4726,7 @@ function showDetail(id,opts){
         var attrs2=' data-attr="'+esc(a)+'" data-val="'+esc(val)+'" data-ok="'+(ok?'1':'0')+'"';
         if(hex){
           var ehHex=/^#([0-9A-Fa-f]{3}|[0-9A-Fa-f]{6})$/.test(String(val).trim());
-          var rotulo=primeiraMaiuscula(ehHex?(nomeDaCor(val)||'Cor'):val);
+          var rotulo=primeiraMaiuscula(ehHex?(nomeDaCorNaPeca(p,val)||'Cor'):val);
           return '<button type="button" class="op-cor'+(sel?' sel':'')+(ok?'':' off')+'"'+attrs2+' title="'+esc(rotulo)+'" aria-label="'+esc(a+': '+rotulo)+'">'
             +'<span class="op-cor-bola" style="background:'+hex+';">'
             +(sel?'<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="'+tintaSobreCor(hex)+'" stroke-width="3.4" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>':'')
@@ -4789,7 +4805,7 @@ function showDetail(id,opts){
       var v=selecionado[a];
       if(!v) continue;
       var ehHex=/^#([0-9A-Fa-f]{3}|[0-9A-Fa-f]{6})$/.test(String(v).trim());
-      return primeiraMaiuscula(ehHex?(nomeDaCor(v)||'Cor'):v);
+      return primeiraMaiuscula(ehHex?(nomeDaCorNaPeca(p,v)||'Cor'):v);
     }
     return '';
   }

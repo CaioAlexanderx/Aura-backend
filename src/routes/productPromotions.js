@@ -33,6 +33,8 @@ const router = require('express').Router({ mergeParams: true });
 const db = require('../config/database');
 const { logAuditAction, contextoDaRequisicao } = require('../middleware/auditLog');
 const { productVisibilityWhere } = require('../utils/companyGroup');
+// 14/11/2026: rótulo da variante com o nome da cor (CP2a da revisão de cores).
+const { colunasDoRotulo, COLUNAS_DO_ROTULO_NULAS, aplicarRotulo } = require('../services/nomeDaCor');
 const {
   lerPedido, lerPedidoEncerrar, montarPrevia, montarEncerrar, itemPublico, lerData,
 } = require('../services/promocaoEmLote');
@@ -71,16 +73,14 @@ async function lerLinhas(q, cid, alvos, travar) {
   const { rows: variants } = await q(
     `SELECT pv.id, pv.product_id, pv.price_override, pv.sku_suffix,
             pv.promo_price, pv.promo_starts_at, pv.promo_ends_at,
-            COALESCE(
-              (SELECT string_agg(pvv.value, ' / ' ORDER BY pvv.attribute_name)
-                 FROM product_variant_values pvv WHERE pvv.variant_id = pv.id),
-              pv.sku_suffix
-            ) AS label
+            pv.sku_suffix AS label, ${colunasDoRotulo('pv.id')}
        FROM product_variants pv
       WHERE pv.product_id = ANY($1::uuid[]) AND pv.is_active = true
       ${travar ? 'FOR UPDATE OF pv' : ''}`,
     [products.map((p) => p.id)]
   );
+  // 14/11/2026: rótulo com o nome da cor (services/nomeDaCor.js).
+  for (const v of variants) aplicarRotulo(v, 'label', ' / ');
   return { products, variants };
 }
 
@@ -268,15 +268,16 @@ router.get('/promotions', async (req, res) => {
   const linhas = `
     SELECT p.id AS product_id, NULL::uuid AS variant_id, p.name AS nome, NULL::text AS variant_label,
            p.sku, p.price AS preco_de, p.promo_price AS preco_por, p.promo_starts_at, p.promo_ends_at,
-           p.cost_price, p.is_group_shared, p.company_id, ${STATUS_SQL('p')} AS status
+           p.cost_price, p.is_group_shared, p.company_id, ${STATUS_SQL('p')} AS status,
+           ${COLUNAS_DO_ROTULO_NULAS}
       FROM products p
      WHERE p.is_active = true AND p.promo_price IS NOT NULL AND ${productVisibilityWhere('$1', 'p.')}
     UNION ALL
     SELECT p.id, pv.id, p.name,
-           COALESCE((SELECT string_agg(pvv.value, ' / ' ORDER BY pvv.attribute_name)
-                       FROM product_variant_values pvv WHERE pvv.variant_id = pv.id), pv.sku_suffix),
+           pv.sku_suffix,
            p.sku, COALESCE(pv.price_override, p.price), pv.promo_price, pv.promo_starts_at, pv.promo_ends_at,
-           p.cost_price, p.is_group_shared, p.company_id, ${STATUS_SQL('pv')}
+           p.cost_price, p.is_group_shared, p.company_id, ${STATUS_SQL('pv')},
+           ${colunasDoRotulo('pv.id')}
       FROM product_variants pv
       JOIN products p ON p.id = pv.product_id
      WHERE p.is_active = true AND pv.is_active = true AND pv.promo_price IS NOT NULL
@@ -300,7 +301,8 @@ router.get('/promotions', async (req, res) => {
       params
     );
     const num = (v) => (v === null || v === undefined ? null : Number(v));
-    const items = rows.map((r) => {
+    // 14/11/2026: rotulo com o nome da cor; a linha do produto (sem variante) fica null.
+    const items = rows.map((r) => aplicarRotulo(r, 'variant_label', ' / ')).map((r) => {
       const de = num(r.preco_de);
       const por = num(r.preco_por);
       return {

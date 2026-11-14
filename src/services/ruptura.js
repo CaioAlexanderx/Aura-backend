@@ -57,6 +57,7 @@
 'use strict';
 
 const pool = require('../config/database');
+const { colunasDoRotulo, aplicarRotulo } = require('./nomeDaCor');
 
 const TZ = 'America/Sao_Paulo';
 const ATE_PADRAO = '2026-11-30';
@@ -308,11 +309,8 @@ const sqlItens = (escopo) => `
          COALESCE(c.trade_name, c.legal_name) AS loja,
          p.is_group_shared,
          p.name AS nome,
-         COALESCE(
-           (SELECT string_agg(pvv.value, ' / ' ORDER BY pvv.attribute_name)
-              FROM product_variant_values pvv WHERE pvv.variant_id = pv.id),
-           NULLIF(pv.sku_suffix, '')
-         ) AS variante,
+         NULLIF(pv.sku_suffix, '') AS variante,
+         ${colunasDoRotulo('pv.id')},
          NULLIF(p.sku, '') AS sku,
          NULLIF(pv.sku_suffix, '') AS sku_suffix,
          COALESCE(NULLIF(pv.barcode, ''), NULLIF(p.barcode, '')) AS barcode,
@@ -350,7 +348,9 @@ const SQL_DIAS = `
 
 async function consultar(db, sql, params) {
   const { rows } = await db.query(sql, params);
-  return rows || [];
+  // 14/11/2026: rótulo da variante com o nome da cor (services/nomeDaCor.js).
+  // Linha sem as colunas de apoio (SQL_DIAS) passa como veio.
+  return (rows || []).map((l) => aplicarRotulo(l, 'variante', ' / '));
 }
 
 async function carregar({ db, sqlDosItens, empresas, hoje, janelaDias }) {

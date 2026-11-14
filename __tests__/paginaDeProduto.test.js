@@ -61,7 +61,8 @@ describe('preco, tamanho e urgencia', () => {
   test('o rotulo diz o que ja foi escolhido — e cor em hex vira o NOME da cor', () => {
     // "Cor — #92400E" nao diz nada a cliente (Caio, 02/09, Finesse no ar).
     expect(src).toContain("' — <span class=\"op-escolhido\">'+esc(escolhidoRotulo)+'</span>'");
-    expect(src).toContain('escolhidoRotulo=nomeDaCor(escolhido)||escolhido;');
+    // 14/11/2026: o nome da variante (o do Caixa) antes da paleta.
+    expect(src).toContain('escolhidoRotulo=nomeDaCorNaPeca(p,escolhido)||escolhido;');
   });
 });
 

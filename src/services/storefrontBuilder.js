@@ -56,6 +56,8 @@
 
 const db = require('../config/database');
 const mpGatewaySvc = require('./mpGateway');
+// 14/11/2026: nome da cor da variante, o mesmo do Caixa (CP2a da revisao de cores).
+const { nomeDaCorDaVariante } = require('./nomeDaCor');
 // p-85 (08/11/2026, migration 427): De/Por na vitrine.
 const {
   camposDoProduto, camposDaVariante, colunasPromo, colunasPromoNulas, comColunasPromo,
@@ -532,7 +534,7 @@ async function fetchVariantesPorProduto(productIds) {
   // p-85 (427): promocao da variante + preco do produto (base da variante
   // sem preco proprio). Ver promoNaVitrine abaixo.
   const { rows: variantRows } = await comColunasPromo((com) => db.query(`
-    SELECT pv.id, pv.product_id, pv.sku_suffix,
+    SELECT pv.id, pv.product_id, pv.sku_suffix, pv.color_name,
            pv.price_override, pv.stock_qty, pv.is_active, pv.image_url, pv.image_thumb_url,
            ${com ? colunasPromo('pv') : colunasPromoNulas()},
            (SELECT p.price FROM products p WHERE p.id = pv.product_id) AS produto_price,
@@ -569,6 +571,9 @@ async function fetchVariantesPorProduto(productIds) {
       image_url: v.image_url || null,
       thumb_url: v.image_thumb_url || null,
       values: v.values || [],
+      // 14/11/2026 (decisao do Caio): a vitrine mostra o mesmo nome de cor do
+      // Caixa, do cupom e da etiqueta (services/nomeDaCor.js). Sem cor: null.
+      nome_da_cor: nomeDaCorDaVariante({ color_name: v.color_name, sku_suffix: v.sku_suffix, attributes: v.values || [] }),
       ...(propria ? { preco_de: base, em_promocao: true, promo_ends_at: promo.promo_ends_at } : {}),
     });
   }
