@@ -199,11 +199,12 @@ describe('Ofertas: filtros e faixas so das pecas em promocao', () => {
 
 // p-122 (14/11/2026): o texto escrito pela loja. Sem ele, a pagina com a
 // campanha sai byte a byte igual a de antes (hashes gerados com origin/main
-// antes deste card, com CAMPANHA acima).
+// antes deste card, com CAMPANHA acima). p-123b (#1035): +423 bytes, so as 6
+// linhas da sacola que esvazia ao fechar o checkout (parts/checkout.js).
 describe('texto da faixa escrito pela loja (p-122)', () => {
   const ANTES = {
-    so_pix: { bytes: 311930, sha256: 'e51a0b53913219855e1dc8f68500acec5e484b58047daabd26d2cf2cde742e5d' },
-    na_entrega_legado: { bytes: 312044, sha256: '36ca8bf0b51153f7593760e87f8a52a374296ce24879c49795ac33e324e12521' },
+    so_pix: { bytes: 312353, sha256: 'b4063044d1469e5d6c2750149054bb80d5693619b870f7357844749667aa4c9e' },
+    na_entrega_legado: { bytes: 312467, sha256: '66b857e1b7e1a4604a44282134df3e5e818c5c214bf59db8495733af394fc5e3' },
   };
 
   test.each(Object.keys(ANTES))('campanha sem texto escrito (%s): HTML byte a byte igual ao de antes', (nome) => {
