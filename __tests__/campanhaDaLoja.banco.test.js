@@ -162,7 +162,19 @@ test('resumo: conta so o que a loja mostra; variante entra; arredonda para baixo
     ate_pct: 45,
     ate_data: esperado.ate,
     comeca_em: esperado.comeca,
+    // p-123a: oculta e semSaldo valem no Caixa, mas a loja nao mostra.
+    // soDaFilial nao e visivel para a matriz (nao compartilhado): nao conta.
+    fora_da_loja: 2,
   });
+
+  const fora = await request(app).get(rota(matriz) + '/fora-da-loja');
+  expect(fora.status).toBe(200);
+  const motivo = Object.fromEntries(fora.body.produtos.map((p) => [p.id, p.motivo]));
+  expect(motivo[ids.oculta]).toBe('fora_da_vitrine');
+  expect(motivo[ids.semSaldo]).toBe('sem_estoque');
+  expect(motivo[ids.ativa]).toBeUndefined();
+  expect(motivo[ids.doGrupo]).toBeUndefined();
+  expect(motivo[ids.soDaFilial]).toBeUndefined();
   expect(res.body).toMatchObject({ ativa: false, titulo: 'black_friday', pode_ligar: true, no_ar: false });
   expect(res.body.titulos[1].texto).toBe('Black Friday da Boutique BF');
 });
@@ -207,3 +219,26 @@ test('desligada: o payload volta a ter so o tem_promocao; loja sem promocao, nen
   expect(outVazia).not.toHaveProperty('tem_promocao');
   expect(outVazia).not.toHaveProperty('campanha');
 });
+
+// p-122 (migration 453): o texto escrito pela loja grava normalizado, vale
+// no payload e o banco segura o tamanho.
+test('texto da faixa: grava, sai no payload e o CHECK segura o tamanho', async () => {
+  const res = await request(app).put(rota(matriz)).send({ ativa: true, titulo_texto: '  Semana   Aurora ', frase_texto: 'Só até domingo.' });
+  expect(res.status).toBe(200);
+  expect(res.body).toMatchObject({ titulo_texto: 'Semana Aurora', frase_texto: 'Só até domingo.', titulo_final: 'Semana Aurora' });
+  const { rows: [config] } = await q('SELECT * FROM digital_channel_config WHERE company_id = $1', [matriz]);
+  const out = await payload(config);
+  expect(out.campanha).toMatchObject({ titulo: 'Semana Aurora', frase: 'Só até domingo.' });
+
+  expect((await request(app).put(rota(matriz)).send({ titulo_texto: 'Tudo 70% OFF' })).status).toBe(422);
+
+  await q('SAVEPOINT texto_longo');
+  await expect(q('UPDATE digital_channel_config SET bf_titulo_texto = $2 WHERE company_id = $1', [matriz, 'W'.repeat(29)]))
+    .rejects.toThrow();
+  await q('ROLLBACK TO SAVEPOINT texto_longo');
+
+  // null volta a opcao pronta
+  const limpo = await request(app).put(rota(matriz)).send({ titulo_texto: null, frase_texto: '' });
+  expect(limpo.body).toMatchObject({ titulo_texto: null, frase_texto: null, titulo_final: 'Black Friday da Boutique BF' });
+});
+

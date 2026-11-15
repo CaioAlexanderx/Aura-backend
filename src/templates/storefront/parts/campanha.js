@@ -46,10 +46,18 @@ function campanhaNoAr(data) {
   if (!c || c.ativa !== true) return null;
   const pct = Math.floor(Number(c.ate_pct));
   if (!(pct > 0 && pct < 100)) return null;
+  // p-122: `frase` so existe quando a loja escreveu a dela; sem ela, o
+  // texto padrao (a pagina sai igual a de antes).
+  const frase = typeof c.frase === 'string' ? c.frase.replace(/\s+/g, ' ').trim() : '';
+  const titulo = String(c.titulo || 'Black Friday').trim() || 'Black Friday';
   return {
-    titulo: String(c.titulo || 'Black Friday').trim() || 'Black Friday',
+    titulo,
     ate_pct: pct,
     ate: diaMes(c.ate_data),
+    ...(frase ? { frase } : {}),
+    // p-122: titulo escrito com uma palavra longa (o pior caso e 28 "W"
+    // juntos) nao cabe numa linha a 375 px e nao tem espaco para quebrar.
+    ...(PALAVRA_LONGA.test(titulo) ? { quebrar: true } : {}),
   };
 }
 
@@ -68,16 +76,37 @@ function htmlDaFaixaFina(c) {
 
 function htmlDaFaixaGrande(c) {
   const ate = c.ate ? ` até ${c.ate}` : '';
+  const frase = c.frase
+    ? escHtml(c.frase)
+    : `Preços já com desconto${ate}. Os melhores achados, só enquanto durar a promoção.`;
   return `
 <section class="bf-hero" aria-label="${escHtml(c.titulo)}">
   <div class="bf-hero-txt">
     <div class="bf-hero-k">${escHtml(c.titulo)}</div>
     <h2 class="bf-hero-h">Até <em>${c.ate_pct}% OFF</em></h2>
-    <p class="bf-hero-p">Preços já com desconto${ate}. Os melhores achados, só enquanto durar a promoção.</p>
+    <p class="bf-hero-p">${frase}</p>
   </div>
   <button type="button" class="bf-hero-cta" onclick="verTudo('ofertas')">Ver ofertas <span aria-hidden="true">→</span></button>
 </section>
 `;
+}
+
+// Palavra sem espaco a partir deste tamanho pode passar da tela no celular
+// (a 375 px a faixa grande cabe ~20 "W" com o espacamento das letras).
+const PALAVRA_LONGA = /\S{16,}/;
+
+// So com palavra longa no titulo: o titulo da faixa fina e o da faixa
+// grande quebram no meio da palavra em vez de passar da tela. Fora disso a
+// pagina sai byte a byte igual (os titulos prontos nunca chegam aqui).
+const CSS_PALAVRA_LONGA = `
+.bf-faixa>span:first-child{white-space:normal;overflow-wrap:anywhere}
+.bf-hero-k{overflow-wrap:anywhere}
+.bf-hero-txt{min-width:0;max-width:100%}
+`;
+
+/** O CSS da campanha para esta campanha (campanhaNoAr). */
+function cssDe(c) {
+  return CSS + (c && c.quebrar ? CSS_PALAVRA_LONGA : '');
 }
 
 const CSS = `
@@ -209,7 +238,7 @@ function aplicarNoCorpo(body, c) {
 }
 
 module.exports = {
-  campanhaNoAr, diaMes, htmlDaFaixaFina, htmlDaFaixaGrande, CSS,
+  campanhaNoAr, diaMes, htmlDaFaixaFina, htmlDaFaixaGrande, CSS, cssDe,
   aplicarNaHome, aplicarNosProdutos, aplicarNoDetalhe, aplicarNoCorpo,
   TROCAS_DA_HOME, TROCAS_DOS_PRODUTOS, TROCAS_DO_DETALHE, ANCORA_DA_FAIXA_GRANDE,
 };

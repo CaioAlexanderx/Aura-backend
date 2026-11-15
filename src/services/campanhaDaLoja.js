@@ -26,7 +26,7 @@
 'use strict';
 
 const db = require('../config/database');
-const { EM_ESTOQUE, NA_VITRINE, filtroDeFoto } = require('./catalogoPaginado');
+const { EM_ESTOQUE, NA_VITRINE, COM_FOTO, filtroDeFoto } = require('./catalogoPaginado');
 
 const TITULOS = ['black_friday', 'black_friday_da_loja', 'ofertas_de_novembro'];
 const TITULO_PADRAO = 'black_friday';
@@ -41,6 +41,53 @@ function textoDoTitulo(chave, nomeDaLoja) {
   }
 }
 
+// ── O texto escrito pela loja (p-122, 14/11/2026, migration 453) ──
+//
+// Pedido do Caio: alem das tres opcoes prontas, a loja escreve o titulo da
+// faixa (ate 28: cabe em duas linhas da faixa fina no celular e numa linha
+// acima de 1100 px) e a frase da faixa grande (ate 90). O "ate N% OFF" e a
+// data seguem calculados: o texto nao aceita "%" nem "R$" (nao promete
+// desconto diferente do real). Uma linha so, sem emoji; espacos das pontas
+// e repetidos saem. Vazio (ou so espacos) = a opcao pronta.
+const LIMITE_DO_TITULO = 28;
+const LIMITE_DA_FRASE = 90;
+const QUEBRA_DE_LINHA = /[\r\n\u2028\u2029]/;
+const EMOJI = /[\p{Extended_Pictographic}\u{1F1E6}-\u{1F1FF}\u{FE0F}\u{200D}]/u;
+const CONTROLE = /[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/;
+
+/**
+ * O texto da faixa como sera gravado, ou o erro em portugues gentil.
+ * `rotulo`: "O título da faixa" / "A frase da faixa grande".
+ * Devolve { valor } (string ou null = volta a opcao pronta) ou { erro }.
+ */
+function normalizarTextoDaFaixa(bruto, { limite, rotulo }) {
+  if (bruto === null || bruto === undefined) return { valor: null };
+  if (typeof bruto !== 'string') return { erro: `${rotulo} precisa ser um texto.` };
+  if (QUEBRA_DE_LINHA.test(bruto)) return { erro: `${rotulo} vai numa linha só: tire a quebra de linha.` };
+  const texto = bruto.replace(/\s+/g, ' ').trim();
+  if (!texto) return { valor: null };
+  if (CONTROLE.test(texto)) return { erro: `${rotulo} tem um caractere que a loja não mostra. Escreva só com letras, números e pontuação.` };
+  if (EMOJI.test(texto)) return { erro: `${rotulo} não aceita emoji: a faixa usa só letras, números e pontuação.` };
+  if (texto.includes('%') || /r\$/i.test(texto)) {
+    return { erro: `${rotulo} não pode ter “%” nem “R$”: o desconto da faixa é calculado pelas suas promoções, para nunca prometer mais do que a loja dá.` };
+  }
+  const n = Array.from(texto).length;
+  if (n > limite) return { erro: `${rotulo} cabe em até ${limite} caracteres (agora são ${n}).` };
+  return { valor: texto };
+}
+
+/** O titulo que a faixa mostra: o escrito pela loja ou a opcao pronta. */
+function tituloFinal(config, nomeDaLoja) {
+  const escrito = config && typeof config.bf_titulo_texto === 'string' ? config.bf_titulo_texto.trim() : '';
+  return escrito || textoDoTitulo(config && config.bf_titulo, nomeDaLoja);
+}
+
+/** A frase da faixa grande escrita pela loja, ou null (o texto padrao). */
+function fraseEscrita(config) {
+  const escrita = config && typeof config.bf_frase_texto === 'string' ? config.bf_frase_texto.trim() : '';
+  return escrita || null;
+}
+
 /** As tres opcoes, ja com o nome da loja, para o painel. */
 function opcoesDeTitulo(nomeDaLoja) {
   return TITULOS.map((id) => ({ id, texto: textoDoTitulo(id, nomeDaLoja) }));
@@ -52,56 +99,97 @@ function periodoPadrao(agora = new Date()) {
   return { inicio: `${ano}-11-27`, fim: `${ano}-11-30` };
 }
 
-const SEM_PROMOCAO = Object.freeze({ no_ar: 0, agendadas: 0, ate_pct: 0, ate_data: null, comeca_em: null });
+const SEM_PROMOCAO = Object.freeze({ no_ar: 0, agendadas: 0, ate_pct: 0, ate_data: null, comeca_em: null, fora_da_loja: 0 });
 
 /**
- * As promocoes que a loja online mostra, num SELECT so. `cid` vai em $1
- * porque NA_VITRINE e a visibilidade leem $1.
+ * As promocoes da empresa, num SELECT so, separando o que a loja online
+ * MOSTRA (mesma regra da grade: com saldo, foto quando a loja exige,
+ * destaques e ocultas) do que ela nao mostra. `cid` vai em $1 porque
+ * NA_VITRINE e a visibilidade leem $1.
  *
- *   no_ar      pecas (produto) com promocao valendo agora
- *   agendadas  pecas com promocao que ainda vai comecar
- *   ate_pct    maior desconto, para baixo, entre as no ar (0 sem nenhuma)
- *   ate_data   'YYYY-MM-DD' do ultimo fim entre as no ar, em Brasilia
- *   comeca_em  'YYYY-MM-DD' da primeira agendada, em Brasilia
+ *   no_ar         pecas NA LOJA com promocao valendo agora
+ *   agendadas     pecas NA LOJA com promocao que ainda vai comecar
+ *   ate_pct       maior desconto, para baixo, entre as no ar na loja
+ *   ate_data      'YYYY-MM-DD' do ultimo fim entre as no ar, em Brasilia
+ *   comeca_em     'YYYY-MM-DD' da primeira agendada, em Brasilia
+ *   fora_da_loja  pecas com promocao (no ar ou agendada) que a loja online
+ *                 NAO mostra: valem no Caixa, mas nao aparecem na vitrine
+ *                 (QA 14/11, p-123a: a secao dizia "nenhum produto em
+ *                 promocao" e a Promocao em lote, "3 itens no ar")
+ *
+ * So a peca que tem alguma promocao gravada passa pelos filtros da
+ * vitrine: o resto do catalogo nao custa nada.
  */
 function sqlDoResumo(visibilidade, exigeFoto) {
   return `
-    WITH vis AS (
-      SELECT id, price, promo_price, promo_starts_at, promo_ends_at
+    WITH todos AS (
+      SELECT id, price, promo_price, promo_starts_at, promo_ends_at,
+             (${EM_ESTOQUE} AND ${filtroDeFoto(exigeFoto)} AND ${NA_VITRINE}) AS na_loja
         FROM products
        WHERE ${visibilidade}
          AND is_active IS NOT FALSE
-         AND ${EM_ESTOQUE}
-         AND ${filtroDeFoto(exigeFoto)}
-         AND ${NA_VITRINE}
+         AND (promo_price IS NOT NULL OR EXISTS (
+               SELECT 1 FROM product_variants pvp
+                WHERE pvp.product_id = products.id AND pvp.promo_price IS NOT NULL))
     ),
     linhas AS (
-      SELECT vis.id AS pid, vis.price::numeric AS base, vis.promo_price::numeric AS promo,
-             vis.promo_starts_at AS ini, vis.promo_ends_at AS fim
-        FROM vis
-       WHERE vis.promo_price IS NOT NULL
+      SELECT t.id AS pid, t.na_loja, t.price::numeric AS base, t.promo_price::numeric AS promo,
+             t.promo_starts_at AS ini, t.promo_ends_at AS fim
+        FROM todos t
+       WHERE t.promo_price IS NOT NULL
       UNION ALL
-      SELECT vis.id, COALESCE(v.price_override, vis.price)::numeric, v.promo_price::numeric,
+      SELECT t.id, t.na_loja, COALESCE(v.price_override, t.price)::numeric, v.promo_price::numeric,
              v.promo_starts_at, v.promo_ends_at
         FROM product_variants v
-        JOIN vis ON vis.id = v.product_id
+        JOIN todos t ON t.id = v.product_id
        WHERE v.is_active = true AND v.stock_qty > 0 AND v.promo_price IS NOT NULL
     ),
     marcadas AS (
-      SELECT pid, base, promo, ini, fim,
+      SELECT pid, na_loja, base, promo, ini, fim,
              (promo > 0 AND promo < base AND ini <= $2::timestamptz AND fim > $2::timestamptz) AS ativa,
              (promo > 0 AND promo < base AND ini > $2::timestamptz AND fim > ini) AS agendada
         FROM linhas
        WHERE base > 0 AND ini IS NOT NULL AND fim IS NOT NULL
     )
     SELECT
-      COUNT(DISTINCT pid) FILTER (WHERE ativa)::int AS no_ar,
-      COUNT(DISTINCT pid) FILTER (WHERE agendada AND NOT ativa)::int AS agendadas,
-      COALESCE(MAX(FLOOR((1 - promo / base) * 100)) FILTER (WHERE ativa), 0)::int AS ate_pct,
-      to_char((MAX(fim) FILTER (WHERE ativa) - interval '1 millisecond') AT TIME ZONE 'America/Sao_Paulo', 'YYYY-MM-DD') AS ate_data,
-      to_char(MIN(ini) FILTER (WHERE agendada) AT TIME ZONE 'America/Sao_Paulo', 'YYYY-MM-DD') AS comeca_em
+      COUNT(DISTINCT pid) FILTER (WHERE ativa AND na_loja)::int AS no_ar,
+      COUNT(DISTINCT pid) FILTER (WHERE agendada AND NOT ativa AND na_loja)::int AS agendadas,
+      COALESCE(MAX(FLOOR((1 - promo / base) * 100)) FILTER (WHERE ativa AND na_loja), 0)::int AS ate_pct,
+      to_char((MAX(fim) FILTER (WHERE ativa AND na_loja) - interval '1 millisecond') AT TIME ZONE 'America/Sao_Paulo', 'YYYY-MM-DD') AS ate_data,
+      to_char(MIN(ini) FILTER (WHERE agendada AND na_loja) AT TIME ZONE 'America/Sao_Paulo', 'YYYY-MM-DD') AS comeca_em,
+      COUNT(DISTINCT pid) FILTER (WHERE (ativa OR agendada) AND NOT na_loja)::int AS fora_da_loja
     FROM marcadas
   `;
+}
+
+/**
+ * As pecas da empresa que a loja online NAO mostra, com o motivo, para o
+ * assistente "Montar descontos da loja online" marcar (p-123a). Ativas e
+ * visiveis para a empresa (grupo incluido), como a grade. Motivo, na ordem:
+ * 'fora_da_vitrine' (oculta ou fora dos destaques), 'sem_foto' (a loja
+ * exige foto), 'sem_estoque'. Ate LIMITE_FORA_DA_LOJA pecas.
+ */
+const LIMITE_FORA_DA_LOJA = 5000;
+
+function sqlForaDaLoja(visibilidade, exigeFoto) {
+  return `
+    SELECT id, CASE
+             WHEN NOT ${NA_VITRINE} THEN 'fora_da_vitrine'
+             WHEN ${exigeFoto === true ? `NOT ${COM_FOTO}` : 'FALSE'} THEN 'sem_foto'
+             ELSE 'sem_estoque'
+           END AS motivo
+      FROM products
+     WHERE ${visibilidade}
+       AND is_active IS NOT FALSE
+       AND NOT (${EM_ESTOQUE} AND ${filtroDeFoto(exigeFoto)} AND ${NA_VITRINE})
+     ORDER BY id
+     LIMIT ${LIMITE_FORA_DA_LOJA}
+  `;
+}
+
+async function pecasForaDaLoja({ cid, visibilidade, exigeFoto = false, q = db.query.bind(db) }) {
+  const { rows } = await q(sqlForaDaLoja(visibilidade, exigeFoto), [cid]);
+  return (rows || []).map((r) => ({ id: r.id, motivo: r.motivo }));
 }
 
 /**
@@ -121,6 +209,7 @@ async function resumoDasPromocoes({ cid, visibilidade, exigeFoto = false, agora 
       ate_pct: Number(r.ate_pct) || 0,
       ate_data: r.ate_data || null,
       comeca_em: r.comeca_em || null,
+      fora_da_loja: Number(r.fora_da_loja) || 0,
     };
   } catch (e) {
     if (e && (e.code === '42703' || e.code === '42P01')) return { ...SEM_PROMOCAO };
@@ -143,11 +232,15 @@ function chavesDoPayload(config, resumo, nomeDaLoja) {
   if (!(r.no_ar > 0)) return {};
   const out = { tem_promocao: true };
   if (config && config.bf_ativa === true && r.ate_pct > 0) {
+    // p-122: titulo ja com o texto final (o escrito ou a opcao pronta);
+    // `frase` so quando a loja escreveu — sem ela a pagina sai igual.
+    const frase = fraseEscrita(config);
     out.campanha = {
       ativa: true,
-      titulo: textoDoTitulo(config.bf_titulo, nomeDaLoja),
+      titulo: tituloFinal(config, nomeDaLoja),
       ate_pct: r.ate_pct,
       ate_data: r.ate_data,
+      ...(frase ? { frase } : {}),
     };
   }
   return out;
@@ -167,6 +260,12 @@ function estadoParaOPainel(config, resumo, nomeDaLoja, agora = new Date()) {
     ativa,
     titulo,
     titulos: opcoesDeTitulo(nomeDaLoja),
+    // p-122: o texto escrito pela loja (null = a opcao pronta / o padrao) e
+    // o titulo que a faixa mostra agora, para a previa do painel.
+    titulo_texto: (config && config.bf_titulo_texto) || null,
+    frase_texto: (config && config.bf_frase_texto) || null,
+    titulo_final: tituloFinal(config, nomeDaLoja),
+    limites: { titulo: LIMITE_DO_TITULO, frase: LIMITE_DA_FRASE },
     // A faixa esta na loja agora? Ligada E com promocao no ar.
     no_ar: ativa && r.no_ar > 0 && r.ate_pct > 0,
     // Ligada, sem promocao no ar e com agendada: a faixa nasce sozinha.
@@ -180,5 +279,7 @@ function estadoParaOPainel(config, resumo, nomeDaLoja, agora = new Date()) {
 module.exports = {
   TITULOS, TITULO_PADRAO, SEM_PROMOCAO,
   textoDoTitulo, opcoesDeTitulo, periodoPadrao,
+  LIMITE_DO_TITULO, LIMITE_DA_FRASE, normalizarTextoDaFaixa, tituloFinal, fraseEscrita,
   sqlDoResumo, resumoDasPromocoes, chavesDoPayload, estadoParaOPainel,
+  sqlForaDaLoja, pecasForaDaLoja, LIMITE_FORA_DA_LOJA,
 };

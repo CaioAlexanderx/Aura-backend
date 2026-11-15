@@ -50,7 +50,8 @@ function banco(regras) {
   });
 }
 
-const RESUMO = /WITH vis AS/;
+const RESUMO = /WITH todos AS/;
+const FORA = /AS motivo/;
 const resumo = (o) => [{ no_ar: 0, agendadas: 0, ate_pct: 0, ate_data: null, comeca_em: null, ...o }];
 const CONFIG = {
   company_id: CID, slug: 'boutique', is_published: true, site_name: 'Boutique Aurora',
@@ -122,11 +123,24 @@ describe('regras puras', () => {
   test('resumo: o SQL usa a visibilidade da grade, arredonda para baixo e recebe o agora', async () => {
     banco([[RESUMO, (s, p) => { expect(p).toEqual([CID, '2026-11-28T12:00:00.000Z']); return resumo({ no_ar: '2', ate_pct: '30', ate_data: '2026-11-30' }); }]]);
     const r = await campanha.resumoDasPromocoes({ cid: CID, visibilidade: '(company_id = $1)', agora: new Date('2026-11-28T12:00:00Z') });
-    expect(r).toEqual({ no_ar: 2, agendadas: 0, ate_pct: 30, ate_data: '2026-11-30', comeca_em: null });
+    expect(r).toEqual({ no_ar: 2, agendadas: 0, ate_pct: 30, ate_data: '2026-11-30', comeca_em: null, fora_da_loja: 0 });
     const sql = campanha.sqlDoResumo('(company_id = $1)', false);
     expect(sql).toContain('FLOOR((1 - promo / base) * 100)');
     expect(sql).toContain('dcv.featured_product_ids');
     expect(sql).toContain('v.stock_qty > 0');
+    // p-123a: no_ar/agendadas/ate_pct so com a peca NA LOJA; fora_da_loja, o resto.
+    expect(sql).toContain('FILTER (WHERE ativa AND na_loja)');
+    expect(sql).toContain('FILTER (WHERE (ativa OR agendada) AND NOT na_loja)::int AS fora_da_loja');
+  });
+
+  test('pecas fora da loja: o motivo na ordem vitrine, foto, estoque', async () => {
+    const semFoto = campanha.sqlForaDaLoja('(company_id = $1)', true);
+    expect(semFoto).toContain("THEN 'fora_da_vitrine'");
+    expect(semFoto).toContain("THEN 'sem_foto'");
+    expect(campanha.sqlForaDaLoja('(company_id = $1)', false)).toContain("WHEN FALSE THEN 'sem_foto'");
+    banco([[FORA, [{ id: 'p1', motivo: 'fora_da_vitrine' }, { id: 'p2', motivo: 'sem_estoque' }]]]);
+    expect(await campanha.pecasForaDaLoja({ cid: CID, visibilidade: '(company_id = $1)' }))
+      .toEqual([{ id: 'p1', motivo: 'fora_da_vitrine' }, { id: 'p2', motivo: 'sem_estoque' }]);
   });
 
   test('resumo: base sem as colunas de promocao = sem promocao; outro erro sobe', async () => {
@@ -214,6 +228,26 @@ describe('rotas /digital-channel/campanha', () => {
     expect(db.query.mock.calls.some(([s]) => /UPDATE digital_channel_config/.test(String(s)))).toBe(false);
   });
 
+  test('PUT ligar com promocao so fora da loja: 409 que diz isso, com a contagem', async () => {
+    banco(regras(CONFIG, resumo({ fora_da_loja: 3 })));
+    const res = await request(app).put(base).send({ ativa: true });
+    expect(res.status).toBe(409);
+    expect(res.body).toMatchObject({ code: 'BF_SEM_PROMOCAO', fora_da_loja: 3 });
+    expect(res.body.error).toBe('Os seus 3 produtos em promoção não aparecem na loja online (estão fora da vitrine ou sem foto). Mostre pelo menos um na loja para ligar a campanha.');
+    banco(regras(CONFIG, resumo({ fora_da_loja: 1 })));
+    expect((await request(app).put(base).send({ ativa: true })).body.error).toMatch(/^O seu produto em promoção não aparece na loja online/);
+  });
+
+  test('GET /fora-da-loja: as pecas que a loja nao mostra, com o motivo', async () => {
+    banco([...regras({ ...CONFIG, require_product_image: true }, resumo()), [FORA, (s) => {
+      expect(s).toContain("THEN 'sem_foto'");
+      return [{ id: 'p9', motivo: 'sem_foto' }];
+    }]]);
+    const res = await request(app).get(base + '/fora-da-loja');
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ produtos: [{ id: 'p9', motivo: 'sem_foto' }], limite: 5000 });
+  });
+
   test('PUT ligar com promocao agendada: grava, esquece a home guardada e registra', async () => {
     const salvo = { ...CONFIG, bf_ativa: true, bf_titulo: 'black_friday_da_loja' };
     banco(regras(CONFIG, resumo({ agendadas: 4, comeca_em: '2026-11-27' }), [[/UPDATE digital_channel_config/, (s, p) => {
@@ -257,5 +291,94 @@ describe('rotas /digital-channel/campanha', () => {
     papel = 'viewer';
     banco(regras(CONFIG, resumo()));
     expect((await request(app).put(base).send({ ativa: false })).status).toBe(403);
+  });
+});
+
+// ── p-122: o texto escrito pela loja (migration 453) ─────────
+
+describe('texto da faixa escrito pela loja (p-122)', () => {
+  const rotas = require('../src/routes/campanhaDaLoja');
+  beforeEach(() => rotas._resetarParaTeste());
+  const titulo = (v) => campanha.normalizarTextoDaFaixa(v, { limite: 28, rotulo: 'O título da faixa' });
+  const W28 = 'W'.repeat(28);
+  const regras = (config, r, extra = []) => [
+    ...extra,
+    [/FROM digital_channel_config WHERE company_id/, config ? [config] : []],
+    [RESUMO, r || resumo()],
+  ];
+
+  test('normaliza: pontas e espacos repetidos saem; vazio volta a opcao pronta', () => {
+    expect(titulo('  Semana   da  Moda  ')).toEqual({ valor: 'Semana da Moda' });
+    expect(titulo('   ')).toEqual({ valor: null });
+    expect(titulo('')).toEqual({ valor: null });
+    expect(titulo(null)).toEqual({ valor: null });
+    expect(titulo(W28)).toEqual({ valor: W28 });
+    expect(titulo('Ação Ótima é já, ok?')).toEqual({ valor: 'Ação Ótima é já, ok?' });
+  });
+
+  test('recusa com mensagem gentil: tamanho, "%", "R$", quebra de linha, emoji', () => {
+    expect(titulo(W28 + 'W').erro).toBe('O título da faixa cabe em até 28 caracteres (agora são 29).');
+    expect(titulo('Tudo 50% off').erro).toMatch(/não pode ter “%” nem “R\$”/);
+    expect(titulo('Tudo por R$ 10').erro).toMatch(/não pode ter “%” nem “R\$”/);
+    expect(titulo('tudo por r$10').erro).toMatch(/não pode ter/);
+    expect(titulo('Linha 1\nLinha 2').erro).toBe('O título da faixa vai numa linha só: tire a quebra de linha.');
+    expect(titulo('Black Friday 🔥').erro).toMatch(/não aceita emoji/);
+    expect(titulo(42).erro).toMatch(/precisa ser um texto/);
+    expect(campanha.normalizarTextoDaFaixa('x'.repeat(91), { limite: 90, rotulo: 'A frase da faixa grande' }).erro)
+      .toBe('A frase da faixa grande cabe em até 90 caracteres (agora são 91).');
+  });
+
+  test('payload: titulo ja com o texto escrito; frase so quando escrita', () => {
+    const r = { no_ar: 2, agendadas: 0, ate_pct: 30, ate_data: '2026-11-30' };
+    const c = { ...CONFIG, bf_ativa: true, bf_titulo: 'ofertas_de_novembro' };
+    expect(campanha.chavesDoPayload(c, r, 'X').campanha).toEqual({ ativa: true, titulo: 'Ofertas de novembro', ate_pct: 30, ate_data: '2026-11-30' });
+    expect(campanha.chavesDoPayload({ ...c, bf_titulo_texto: '', bf_frase_texto: '  ' }, r, 'X').campanha).not.toHaveProperty('frase');
+    expect(campanha.chavesDoPayload({ ...c, bf_titulo_texto: 'Semana Aurora', bf_frase_texto: 'Só até domingo.' }, r, 'X').campanha)
+      .toEqual({ ativa: true, titulo: 'Semana Aurora', ate_pct: 30, ate_data: '2026-11-30', frase: 'Só até domingo.' });
+  });
+
+  test('painel: os textos, o titulo que a faixa mostra e os limites', () => {
+    const e = campanha.estadoParaOPainel({ ...CONFIG, bf_titulo_texto: 'Semana Aurora' }, campanha.SEM_PROMOCAO, 'B');
+    expect(e).toMatchObject({ titulo_texto: 'Semana Aurora', frase_texto: null, titulo_final: 'Semana Aurora', limites: { titulo: 28, frase: 90 } });
+    expect(campanha.estadoParaOPainel(CONFIG, campanha.SEM_PROMOCAO, 'B').titulo_final).toBe('Black Friday');
+  });
+
+  test('PUT: texto invalido = 422 com o campo, nada gravado', async () => {
+    banco(regras(CONFIG, resumo()));
+    const res = await request(app).put(base).send({ titulo_texto: 'Tudo 70% OFF' });
+    expect(res.status).toBe(422);
+    expect(res.body).toMatchObject({ code: 'TEXTO_DA_FAIXA_INVALIDO', campo: 'titulo_texto' });
+    expect(res.body.error).toMatch(/O título da faixa não pode ter/);
+    const frase = await request(app).put(base).send({ frase_texto: 'x'.repeat(91) });
+    expect(frase.status).toBe(422);
+    expect(frase.body.campo).toBe('frase_texto');
+    expect(db.query.mock.calls.some(([s]) => /UPDATE digital_channel_config/.test(String(s)))).toBe(false);
+  });
+
+  test('PUT: grava o texto normalizado; null volta a opcao pronta; so os campos enviados', async () => {
+    const updates = [];
+    banco(regras(CONFIG, resumo(), [[/UPDATE digital_channel_config/, (s, p) => { updates.push([s, p]); return [{ ...CONFIG, bf_titulo_texto: p[4] }]; }]]));
+    let res = await request(app).put(base).send({ titulo_texto: '  Semana   Aurora ' });
+    expect(res.status).toBe(200);
+    expect(updates[0][1]).toEqual([CID, null, null, true, 'Semana Aurora', false, null]);
+    expect(updates[0][0]).toContain('bf_titulo_texto = CASE WHEN $4::boolean THEN $5::varchar ELSE bf_titulo_texto END');
+    expect(res.body.titulo_final).toBe('Semana Aurora');
+    res = await request(app).put(base).send({ titulo_texto: null, frase_texto: 'Só até domingo.' });
+    expect(updates[1][1]).toEqual([CID, null, null, true, null, true, 'Só até domingo.']);
+    // Sem texto no corpo, o UPDATE e o de antes (base sem a 453 continua gravando a chave).
+    await request(app).put(base).send({ ativa: false });
+    expect(updates[2][0]).not.toContain('bf_titulo_texto');
+    expect(updates[2][1]).toEqual([CID, false, null]);
+  });
+
+  test('base sem a 453: le sem as colunas e a chave continua funcionando', async () => {
+    let primeira = true;
+    banco([
+      [/bf_titulo_texto, bf_frase_texto/, () => { if (primeira) { primeira = false; throw erroPg('42703'); } return []; }],
+      ...regras({ ...CONFIG, bf_ativa: true }, resumo({ no_ar: 1, ate_pct: 10 })),
+    ]);
+    const res = await request(app).get(base);
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({ ativa: true, titulo_texto: null, titulo_final: 'Black Friday' });
   });
 });
