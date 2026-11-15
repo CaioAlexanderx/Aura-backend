@@ -51,7 +51,8 @@ describe('campanha no ar', () => {
     const faixa = corpo.indexOf('<div class="bf-faixa" role="note">');
     expect(faixa).toBeGreaterThan(0);
     expect(faixa).toBeLessThan(corpo.indexOf('<header class="topbar"'));
-    expect(corpo).toContain('<span>Black Friday da Loja &lt;Exemplo&gt;</span><span class="bf-sep" aria-hidden="true">·</span><wbr><span>até 40% OFF</span><span class="bf-sep" aria-hidden="true">·</span><wbr><span>até 30/11</span>');
+    // p-124: o "·" abre o trecho seguinte (nowrap), depois da quebra.
+    expect(corpo).toContain('<span>Black Friday da Loja &lt;Exemplo&gt;</span><wbr><span class="bf-trecho"><span class="bf-sep" aria-hidden="true">·</span>até 40% OFF</span><wbr><span class="bf-trecho"><span class="bf-sep" aria-hidden="true">·</span>até 30/11</span>');
   });
 
   test('faixa grande na home, depois do cabecalho e antes do banner da loja, com "Ver ofertas"', () => {
@@ -201,10 +202,13 @@ describe('Ofertas: filtros e faixas so das pecas em promocao', () => {
 // campanha sai byte a byte igual a de antes (hashes gerados com origin/main
 // antes deste card, com CAMPANHA acima). p-123b (#1035): +423 bytes, so as 6
 // linhas da sacola que esvazia ao fechar o checkout (parts/checkout.js).
+// p-124: +5.908 bytes — os +5.832 da sacola que confere o preco de agora
+// (sacola.js, cart.js, checkout.js; os mesmos de toda loja) e +76 da faixa
+// fina com o "·" grudado no trecho seguinte (HTML e FAIXA_DA_CAMPANHA).
 describe('texto da faixa escrito pela loja (p-122)', () => {
   const ANTES = {
-    so_pix: { bytes: 312353, sha256: 'b4063044d1469e5d6c2750149054bb80d5693619b870f7357844749667aa4c9e' },
-    na_entrega_legado: { bytes: 312467, sha256: '66b857e1b7e1a4604a44282134df3e5e818c5c214bf59db8495733af394fc5e3' },
+    so_pix: { bytes: 318261, sha256: '5b8aad742c8270226beb8a61a33dd0979b2e3a42cc048eee3f4d50a533a1b63f' },
+    na_entrega_legado: { bytes: 318375, sha256: 'd2ce0dc76ff393e3dc631691d4a168dd4bb5dea2cb092ca9bc18e17ecd08dced' },
   };
 
   test.each(Object.keys(ANTES))('campanha sem texto escrito (%s): HTML byte a byte igual ao de antes', (nome) => {

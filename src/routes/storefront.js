@@ -4,6 +4,7 @@
 // GET  /storefront/:slug/page                — HTML renderizado (vitrine pública)
 // GET  /storefront/:slug/produto/:id/fotos  — Galeria por cor de uma peca (323)
 // GET  /storefront/:slug/shipping-quote      — Calcula frete por CEP (Fase 5b)
+// POST /storefront/:slug/sacola/precos       — Preco de agora dos itens da sacola (p-124)
 // POST /storefront/:slug/order               — Cria pedido (Pix, cartão, ou na entrega)
 // POST /storefront/:slug/order/:oid/upload-proof — Cliente envia comprovante de Pix
 // POST /storefront/:slug/order/:oid/mark-as-paid — Cliente avisa que pagou
@@ -62,13 +63,10 @@ const { caminhoDaHomeDaLoja } = require('../middleware/customDomain');
 const { fotosPeloDominioProprio, fotosPeloDominioProprioNoJson } = require('../services/fotosPeloDominioProprio');
 const { paginaDoCatalogo, facetasDoCatalogo, faixaDePreco } = require('../services/catalogoPaginado');
 const { normalizarTamanho } = require('../services/tamanhosDaLoja');
-// 14/11/2026: rotulo da variante com o nome da cor (CP2a da revisao de cores).
-const { colunasDoRotulo, aplicarRotulo } = require('../services/nomeDaCor');
 const { generatePix }     = require('../services/pixService');
-// p-85 (427): preco efetivo (De/Por) no pedido da loja online.
-const {
-  colunasPromo, colunasPromoNulas, comColunasPromo, precoEfetivoDoProduto, precoEfetivoDaVariante,
-} = require('../services/precoEfetivo');
+// p-85 (427) + p-124: as pecas do pedido e o preco efetivo (De/Por). O mesmo
+// modulo responde o pedido e a sacola (POST /sacola/precos).
+const itensDoPedido = require('../services/itensDoPedidoOnline');
 // p-123a (migration 452): o item do pedido guarda se saiu na promocao, como
 // o item do Caixa (sale_items, 428) — "Vendas na promocao" conta a loja.
 const vendaNaPromocao = require('../services/vendaNaPromocao');
@@ -551,6 +549,65 @@ function juntarNotas(...partes) {
   return txt || null;
 }
 
+// ─────────────────────────────────────────────
+// POST /storefront/:slug/sacola/precos  (p-124, 15/11/2026)
+//
+// A sacola guarda no navegador o preco da hora em que o item entrou. Ao
+// abrir a sacola e o checkout, a vitrine pergunta aqui o preco de AGORA de
+// cada item, para o resumo nunca mostrar um total e o Pix cobrar outro
+// (promocao que encerrou, preco que a lojista mudou). A resposta sai do
+// MESMO modulo que o pedido usa para cobrar (services/itensDoPedidoOnline.js).
+// Nao grava nada.
+//
+// Corpo: { items: [{ product_id, variant_id, quantity }] } — o `items` do
+// pedido. Resposta: { itens: [{ indice, product_id, variant_id, preco,
+// disponivel, motivo? }] }, na ordem do corpo. Item que nao vale mais nao e
+// erro aqui: vem com disponivel=false (e preco, quando a peca ainda existe),
+// e o pedido da a mensagem de sempre.
+// ─────────────────────────────────────────────
+const MAX_ITENS_NA_SACOLA = 100;
+
+router.post('/:slug/sacola/precos', async (req, res) => {
+  const items = req.body && req.body.items;
+  if (!Array.isArray(items) || items.length === 0) {
+    return res.status(400).json({ error: 'Informe ao menos 1 item' });
+  }
+  if (items.length > MAX_ITENS_NA_SACOLA) {
+    return res.status(400).json({ error: 'Itens demais para conferir de uma vez' });
+  }
+  const itens = items.map((i) => ({
+    product_id: i && i.product_id != null ? String(i.product_id) : '',
+    variant_id: i && i.variant_id ? String(i.variant_id) : null,
+    quantity:   Math.max(1, parseInt(i && i.quantity, 10) || 1),
+  }));
+  // Id malformado derrubaria o ANY($1::uuid[]) da consulta inteira: fica de
+  // fora da consulta e volta como peca nao encontrada.
+  const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+  for (const i of itens) {
+    if (i.variant_id && !UUID.test(i.variant_id)) i.variant_id = null;
+  }
+  const consultaveis = itens.filter((i) => UUID.test(i.product_id));
+  try {
+    const slug = req.params.slug.toLowerCase().trim();
+    const { rows: configs } = await db.query(
+      `SELECT dcc.company_id, dcc.show_prices
+       FROM digital_channel_config dcc
+       WHERE dcc.slug = $1 AND dcc.is_published = true`, [slug]);
+    if (!configs.length) return res.status(404).json({ error: 'Loja nao encontrada' });
+    const config = configs[0];
+    const pecas = consultaveis.length
+      ? await itensDoPedido.carregarPecas(config.company_id, consultaveis)
+      : { productMap: {}, variantMap: {}, productHasVariants: {} };
+    res.set('Cache-Control', 'no-store');
+    res.json({
+      itens: itensDoPedido.precosDaSacola(itens, pecas, { mostrarPrecos: config.show_prices !== false }),
+    });
+  } catch (err) {
+    console.error('[storefront] precos da sacola:', err && err.message);
+    res.status(500).json({ error: 'Erro ao conferir os precos' });
+  }
+});
+
 router.post('/:slug/order', async (req, res) => {
   const slug = req.params.slug.toLowerCase().trim();
   const {
@@ -734,93 +791,24 @@ router.post('/:slug/order', async (req, res) => {
       return res.status(400).json({ error: 'Esta loja nao aceita pagamento na entrega' });
     }
 
-    const productIds = items.map(i => i.product_id);
-    // p-85 (08/11/2026, migration 427): o preco do pedido e o PRECO EFETIVO
-    // (De/Por), pela regra unica de services/precoEfetivo.js — o mesmo que
-    // a vitrine mostra. Base sem a 427: promo nulo, preco normal.
-    const { rows: products } = await comColunasPromo((com) => db.query(
-      `SELECT id, name, price, stock_qty, image_url, is_active,
-              ${com ? colunasPromo() : colunasPromoNulas()}
-       FROM products
-       WHERE id::text = ANY($1) AND ${listVisibilityWhere('$2')}`,
-      [productIds.map(String), cid]
-    ));
-    const productMap = Object.fromEntries(products.map(p => [p.id, p]));
-
-    const variantIds = items.map(i => i.variant_id).filter(Boolean);
-    let variantMap = {};
-    if (variantIds.length > 0) {
-      const { rows: varRows } = await comColunasPromo((com) => db.query(`
-        SELECT pv.id, pv.product_id, pv.price_override, pv.stock_qty, pv.is_active,
-               ${com ? colunasPromo('pv') : colunasPromoNulas()},
-               ''::text AS label, ${colunasDoRotulo('pv.id')}
-        FROM product_variants pv
-        WHERE pv.id = ANY($1::uuid[])
-      `, [variantIds]));
-      // 14/11/2026 (CP2a da revisao de cores): o item do pedido sai com o nome
-      // da cor, o mesmo do Caixa e do cupom ("Vestido (Off White · M)"), e
-      // nao com "Cor: #FAF9F6 / Tamanho: M". Variante sem atributo: sem rotulo.
-      for (const v of varRows) {
-        const temAtributo = Array.isArray(v._rotulo_attrs) && v._rotulo_attrs.length > 0;
-        aplicarRotulo(v, 'label', ' · ');
-        if (!temAtributo) v.label = '';
-      }
-      variantMap = Object.fromEntries(varRows.map(v => [v.id, v]));
-    }
-
-    const { rows: variantCountRows } = await db.query(`
-      SELECT product_id, COUNT(*) AS cnt
-      FROM product_variants
-      WHERE product_id = ANY($1::uuid[]) AND is_active = true
-      GROUP BY product_id
-    `, [productIds]);
-    const productHasVariants = Object.fromEntries(
-      variantCountRows.map(r => [r.product_id, parseInt(r.cnt) > 0])
-    );
+    // p-124: as pecas e o preco de agora saem de services/itensDoPedidoOnline.js,
+    // o MESMO modulo que responde a sacola (POST /sacola/precos). O preco do
+    // pedido e o PRECO EFETIVO (De/Por, p-85, migration 427), pela regra unica
+    // de services/precoEfetivo.js. Base sem a 427: promo nulo, preco normal.
+    const pecas = await itensDoPedido.carregarPecas(cid, items);
 
     const orderItems = [];
     let subtotal = 0;
 
     for (const item of items) {
-      const p = productMap[item.product_id];
-      if (!p) return res.status(400).json({ error: `Produto ${item.product_id} nao encontrado` });
-      if (p.is_active === false) return res.status(400).json({ error: `Produto "${p.name}" nao esta disponivel` });
-
       const agora = new Date();
-      let effectivePrice = precoEfetivoDoProduto(p, agora);
-      let variantId      = item.variant_id || null;
-      let variantLabel   = null;
-      let marcacao       = vendaNaPromocao.marcacaoDoItem(p, null, agora);
-
-      if (productHasVariants[p.id]) {
-        if (!variantId) {
-          return res.status(400).json({ error: `Selecione uma variante para "${p.name}"` });
-        }
-        const variant = variantMap[variantId];
-        if (!variant || variant.product_id !== p.id) {
-          return res.status(400).json({ error: `Variante invalida para "${p.name}"` });
-        }
-        if (variant.is_active === false) {
-          return res.status(400).json({ error: `Variante de "${p.name}" nao esta disponivel` });
-        }
-        if (variant.stock_qty < item.quantity) {
-          return res.status(400).json({
-            error: `Estoque insuficiente para "${p.name}" (${variant.label}). Disponivel: ${variant.stock_qty}`,
-          });
-        }
-        // Preco proprio da variante, a promocao dela, ou o efetivo do
-        // produto (variante sem preco proprio segue o produto).
-        effectivePrice = precoEfetivoDaVariante(variant, p, agora);
-        variantLabel = variant.label;
-        marcacao = vendaNaPromocao.marcacaoDoItem(p, variant, agora);
-      } else {
-        variantId = null;
-        if (p.stock_qty < item.quantity) {
-          return res.status(400).json({
-            error: `Estoque insuficiente para "${p.name}". Disponivel: ${p.stock_qty}`,
-          });
-        }
-      }
+      const conferido = itensDoPedido.conferirItem(item, pecas, agora);
+      if (conferido.erro) return res.status(400).json({ error: conferido.erro });
+      const p = conferido.produto;
+      const effectivePrice = conferido.preco;
+      const variantId      = conferido.variantId;
+      const variantLabel   = conferido.variante ? conferido.variante.label : null;
+      const marcacao       = vendaNaPromocao.marcacaoDoItem(p, conferido.variante, agora);
 
       const itemSubtotal = effectivePrice * item.quantity;
       subtotal += itemSubtotal;
@@ -1118,6 +1106,11 @@ router.post('/:slug/order', async (req, res) => {
       status:         initialStatus,
       payment_method: pmethod,
       shipping:       shippingMeta,
+      // p-124: o preco que cada item saiu, na ordem do corpo. A vitrine
+      // acerta a sacola por ele: o resumo ao lado do QR e o que o Pix cobra.
+      itens:          orderItems.map((i) => ({
+        product_id: i.product_id, variant_id: i.variant_id || null, unit_price: i.unit_price,
+      })),
       // A tela de pedido concluido repete o aviso com o que o SERVIDOR viu:
       // a loja pode ter fechado com a pagina aberta.
       loja_fechada:   !horario.is_open_now,

@@ -99,10 +99,11 @@ function updateCartUI(){
   if(typeof renderResumoDoCheckout==='function') renderResumoDoCheckout();
   var items=document.getElementById('cartItems'),footer=document.getElementById('cartFooter');
   if(!count){
+    if(typeof avisoDePreco!=='undefined') avisoDePreco='';
     items.innerHTML='<div class="cart-vazio"><span class="cart-vazio-tit">Sua sacola está vazia</span><span>As peças que você escolher aparecem aqui.</span></div>';
     footer.style.display='none';return;
   }
-  items.innerHTML=Object.values(cart).map(function(i){
+  items.innerHTML=((typeof htmlDoAvisoDePreco==='function')?htmlDoAvisoDePreco():'')+Object.values(cart).map(function(i){
     var img=i.image_url?'<img src="'+esc(i.image_url)+'" alt="">':'<span class="product-ph-initials" style="font-size:22px;">'+esc(INICIAIS(i.name))+'</span>';
     return '<div class="cart-item"><div class="cart-item-img">'+img+'</div>'
       +'<div class="cart-item-info"><div class="cart-item-name">'+esc(i.name)+'</div><div class="cart-item-price">'+fmt(i.price)+' × '+i.qty+'</div></div>'
@@ -121,7 +122,10 @@ function updateCartUI(){
   footer.style.display='block';
 }
 
-function openCart(){document.getElementById('cartOverlay').classList.add('open');document.getElementById('cartDrawer').classList.add('open');document.body.style.overflow='hidden';}
+function openCart(){document.getElementById('cartOverlay').classList.add('open');document.getElementById('cartDrawer').classList.add('open');document.body.style.overflow='hidden';
+// p-124: abrir a sacola confere o preco de agora; o aviso e so do que mudou desde a ultima vez.
+if(typeof conferirPrecosDaSacola==='function'){ avisoDePreco=''; updateCartUI(); conferirPrecosDaSacola(); }
+}
 function closeCart(){document.getElementById('cartOverlay').classList.remove('open');document.getElementById('cartDrawer').classList.remove('open');document.body.style.overflow='';}
 function filterCat(cat,el){
   currentCat=cat;

@@ -3405,6 +3405,76 @@ function carregarSacola(){
   }catch(_){}
 }
 
+// ── O preco de agora (p-124) ──
+var avisoDePreco='';
+var conferenciaDePreco=null;
+var ultimaConferencia=null;
+var pedidoDoResumo=null;
+function centavosDe(v){ return Math.round(Number(v)*100); }
+function assinaturaDaSacola(){ return Object.values(cart).map(function(i){ return i.key+'x'+i.qty; }).join('|'); }
+/** "O preco de 1 item mudou desde que voce o adicionou: Blusa, de R$ 98,90 para R$ 139,90." */
+function textoDoAvisoDePreco(subiram){
+  var n=subiram.length;
+  var lista=subiram.map(function(s){ return s.nome+', de '+fmt(s.de)+' para '+fmt(s.para); }).join('; ');
+  return (n===1?'O preço de 1 item mudou desde que você o adicionou: ':'O preço de '+n+' itens mudou desde que você os adicionou: ')+lista+'.';
+}
+function htmlDoAvisoDePreco(){ return avisoDePreco?'<p class="aviso-fechada aviso-preco" role="status">'+esc(avisoDePreco)+'</p>':''; }
+/** [{key, preco}] acerta a sacola. Devolve {mudou, subiram}. */
+function aplicarPrecosDeAgora(lista){
+  var subiram=[], mudou=false;
+  (lista||[]).forEach(function(r){
+    if(!r||r.preco==null) return;
+    var i=cart[r.key]; if(!i) return;
+    var novo=Number(r.preco);
+    if(!isFinite(novo)||novo<0||centavosDe(novo)===centavosDe(i.price)) return;
+    if(centavosDe(novo)>centavosDe(i.price)) subiram.push({ nome:i.name, de:i.price, para:novo });
+    i.price=centavosDe(novo)/100; mudou=true;
+  });
+  if(subiram.length) avisoDePreco=textoDoAvisoDePreco(subiram);
+  if(mudou) updateCartUI();
+  return { mudou:mudou, subiram:subiram };
+}
+/** A resposta vem na ordem do que foi enviado: o indice aponta a chave. */
+function precosPelasChaves(lista, chaves, campo){
+  return (lista||[]).map(function(r,k){
+    if(!r) return null;
+    var key=chaves[(r.indice!=null)?r.indice:k];
+    if(!key||!cart[key]||cart[key].product_id!==r.product_id) key=cartKey(r.product_id,r.variant_id||null);
+    return { key:key, preco:r[campo] };
+  });
+}
+/**
+ * Pergunta ao servidor o preco de agora. Uma conferencia por vez; a mesma
+ * sacola conferida ha menos de 30 s nao pergunta de novo (abrir a sacola e
+ * logo o checkout). Falha de rede resolve null e a sacola fica como estava.
+ */
+function conferirPrecosDaSacola(){
+  if(conferenciaDePreco) return conferenciaDePreco;
+  var itens=Object.values(cart);
+  if(!itens.length||typeof fetch!=='function') return Promise.resolve(null);
+  var ass=assinaturaDaSacola();
+  if(ultimaConferencia&&ultimaConferencia.ass===ass&&(Date.now()-ultimaConferencia.ts)<30000) return Promise.resolve({ mudou:false, subiram:[] });
+  var chaves=itens.map(function(i){ return i.key; });
+  var corpo={ items:itens.map(function(i){ return { product_id:i.product_id, variant_id:i.variant_id||null, quantity:i.qty }; }) };
+  conferenciaDePreco=fetch(API_BASE+'/api/v1/storefront/'+SLUG+'/sacola/precos',{ method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(corpo) })
+    .then(function(r){ return r.ok?r.json():null; })
+    .then(function(d){
+      if(!d||!d.itens) return null;
+      var res=aplicarPrecosDeAgora(precosPelasChaves(d.itens,chaves,'preco'));
+      ultimaConferencia={ ass:assinaturaDaSacola(), ts:Date.now() };
+      return res;
+    })
+    .catch(function(){ return null; })
+    .then(function(x){ conferenciaDePreco=null; return x; });
+  return conferenciaDePreco;
+}
+/** Pedido criado: a sacola e o resumo ficam com o que o servidor cobrou. */
+function acertarPeloPedido(pedido, chaves){
+  pedidoDoResumo=(pedido&&pedido.total!=null&&pedido.subtotal!=null)?pedido:null;
+  if(!pedido||!pedido.itens) return { mudou:false, subiram:[] };
+  return aplicarPrecosDeAgora(precosPelasChaves(pedido.itens,chaves||[],'unit_price'));
+}
+
 /** Percentual do Pix da loja (migration 309). 0 = nao ha desconto. */
 function pctDoPix(){ return Number(__S.pix_discount_pct)||0; }
 /** O desconto sobre o SUBTOTAL — frete nao tem desconto. */
@@ -3424,6 +3494,9 @@ function renderResumoDoCheckout(){
   var sub=getSubtotal(), fee=getFee();
   var pm=customerData&&customerData.payment_method;
   var desc=(pm==='pix')?descontoPix(sub):0;
+  // p-124: com o pedido criado, os totais sao os do servidor (o do QR).
+  var ped=pedidoDoResumo;
+  if(ped){ sub=Number(ped.subtotal)||0; fee=Number(ped.delivery_fee)||0; desc=Math.max(0,centavosDe(sub+fee-Number(ped.total))/100); }
   var pct=pctDoPix();
   var n=itens.reduce(function(s,i){return s+i.qty;},0);
   var linhas=itens.map(function(i){
@@ -3436,6 +3509,7 @@ function renderResumoDoCheckout(){
   }).join('');
   el.innerHTML='<div class="resumo-cabeca"><span class="sf-label">Sua sacola · '+n+(n===1?' item':' itens')+'</span>'
     +'<button type="button" class="resumo-toggle" onclick="alternarResumo()" aria-controls="checkoutResumo">'+(el.classList.contains('aberto')?'Esconder itens':'Ver itens')+'</button></div>'
+    +htmlDoAvisoDePreco()
     +linhas
     +'<div class="resumo-totais">'
     +'<div class="resumo-linha"><span>Subtotal</span><span class="mono">'+fmt(sub)+'</span></div>'
@@ -3538,10 +3612,11 @@ function updateCartUI(){
   if(typeof renderResumoDoCheckout==='function') renderResumoDoCheckout();
   var items=document.getElementById('cartItems'),footer=document.getElementById('cartFooter');
   if(!count){
+    if(typeof avisoDePreco!=='undefined') avisoDePreco='';
     items.innerHTML='<div class="cart-vazio"><span class="cart-vazio-tit">Sua sacola está vazia</span><span>As peças que você escolher aparecem aqui.</span></div>';
     footer.style.display='none';return;
   }
-  items.innerHTML=Object.values(cart).map(function(i){
+  items.innerHTML=((typeof htmlDoAvisoDePreco==='function')?htmlDoAvisoDePreco():'')+Object.values(cart).map(function(i){
     var img=i.image_url?'<img src="'+esc(i.image_url)+'" alt="">':'<span class="product-ph-initials" style="font-size:22px;">'+esc(INICIAIS(i.name))+'</span>';
     return '<div class="cart-item"><div class="cart-item-img">'+img+'</div>'
       +'<div class="cart-item-info"><div class="cart-item-name">'+esc(i.name)+'</div><div class="cart-item-price">'+fmt(i.price)+' × '+i.qty+'</div></div>'
@@ -3560,7 +3635,10 @@ function updateCartUI(){
   footer.style.display='block';
 }
 
-function openCart(){document.getElementById('cartOverlay').classList.add('open');document.getElementById('cartDrawer').classList.add('open');document.body.style.overflow='hidden';}
+function openCart(){document.getElementById('cartOverlay').classList.add('open');document.getElementById('cartDrawer').classList.add('open');document.body.style.overflow='hidden';
+// p-124: abrir a sacola confere o preco de agora; o aviso e so do que mudou desde a ultima vez.
+if(typeof conferirPrecosDaSacola==='function'){ avisoDePreco=''; updateCartUI(); conferirPrecosDaSacola(); }
+}
 function closeCart(){document.getElementById('cartOverlay').classList.remove('open');document.getElementById('cartDrawer').classList.remove('open');document.body.style.overflow='';}
 function filterCat(cat,el){
   currentCat=cat;
@@ -3736,9 +3814,19 @@ function openCheckout(){
   closeCart();
   checkoutStep=1;
   selectedDelivery=SETTINGS.pickup_enabled!==false?'pickup':'delivery';
+  if(typeof pedidoDoResumo!=='undefined') pedidoDoResumo=null;
   renderCheckoutStep();
   document.getElementById('checkoutOverlay').classList.add('open');
   document.body.style.overflow='hidden';
+  // p-124: o preco de agora de cada item, antes de a cliente pagar.
+  if(typeof conferirPrecosDaSacola==='function') conferirPrecosDaSacola().then(function(r){ if(r&&r.mudou) aposMudarOPreco(); });
+}
+/** O preco mudou com o checkout aberto: as formas e o frete seguem o valor novo. */
+function aposMudarOPreco(){
+  var ov=document.getElementById('checkoutOverlay');
+  if(!ov||!ov.classList.contains('open')||pedidoDoResumo) return;
+  if(checkoutStep===3&&!customerData.payment_method) renderCheckoutStep();
+  if(selectedDelivery==='delivery'&&shippingQuote) fetchShippingQuote();
 }
 function closeCheckout(){clearInterval(pollInterval);clearInterval(timerInterval);document.getElementById('checkoutOverlay').classList.remove('open');document.body.style.overflow='';
 // Limpa pendência se checkout foi concluído (cliente fechou após paymentMarked ou success)
@@ -3747,6 +3835,8 @@ try {
     window.localStorage && window.localStorage.removeItem('aura_pending_order_'+SLUG);
   }
 } catch(_) {}
+// p-124: o aviso de preco e o resumo do pedido valem so para este checkout.
+if(typeof avisoDePreco!=='undefined'){ avisoDePreco=''; pedidoDoResumo=null; }
 // p-123b: pedido ja criado (Pix ou na entrega) esvazia a sacola ao fechar.
 if(esvaziarSacolaAoFechar){ esvaziarSacolaAoFechar=false; cart={}; updateCartUI(); renderProducts(); }
 }
@@ -4291,6 +4381,19 @@ function selectDelivery(type){
 function submitOrder(){
   // Toque repetido enquanto o pedido está sendo enviado: ignora (27/10/2026).
   if(enviandoPedido) return;
+  // p-124: a conferencia do preco ainda no ar: o pedido espera por ela. Se
+  // algum preco subiu com as formas na tela, a cliente ve o valor novo e
+  // escolhe de novo.
+  if(typeof conferenciaDePreco!=='undefined'&&conferenciaDePreco){
+    var emCurso=conferenciaDePreco;
+    travarEnvio(customerData.payment_method);
+    emCurso.then(function(r){
+      destravarEnvio();
+      if(r&&r.subiram&&r.subiram.length&&checkoutStep===3){ customerData.payment_method=null; renderCheckoutStep(); return; }
+      submitOrder();
+    });
+    return;
+  }
   // Migration 121: dedup — checa se já existe pedido em andamento
   // criado nos últimos 10min (localStorage). Evita duplicação por
   // duplo-clique, abrir 2 abas, ou voltar pela back_url do MP.
@@ -4327,6 +4430,7 @@ function submitOrder(){
   } catch(_) {}
   travarEnvio(customerData.payment_method);
   var items=Object.values(cart).map(function(i){return{product_id:i.product_id,variant_id:i.variant_id||null,quantity:i.qty};});
+  var chavesDoPedido=Object.values(cart).map(function(i){return i.key;});
   // Fase 5: anti-tampering — envia fee que o cliente esta vendo
   var expectedFee=null;
   if(selectedDelivery==='delivery' && shippingQuote && shippingQuote.fee!=null){
@@ -4363,6 +4467,8 @@ function submitOrder(){
       showToast((res.data && res.data.error)||'Erro ao criar pedido');destravarEnvio();return;
     }
     currentOrder=res.data; paymentMarked=false;
+    // p-124: a sacola e o resumo ficam com o preco que o pedido cobrou.
+    if(typeof acertarPeloPedido==='function') acertarPeloPedido(currentOrder, chavesDoPedido);
     // Pedido criado: a próxima compra nesta página leva chave nova.
     chaveDoPedido=null;
     // Fechar o checkout daqui em diante esvazia a sacola (p-123b).
