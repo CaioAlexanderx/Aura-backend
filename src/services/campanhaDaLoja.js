@@ -41,6 +41,53 @@ function textoDoTitulo(chave, nomeDaLoja) {
   }
 }
 
+// ── O texto escrito pela loja (p-122, 14/11/2026, migration 453) ──
+//
+// Pedido do Caio: alem das tres opcoes prontas, a loja escreve o titulo da
+// faixa (ate 28: cabe em duas linhas da faixa fina no celular e numa linha
+// acima de 1100 px) e a frase da faixa grande (ate 90). O "ate N% OFF" e a
+// data seguem calculados: o texto nao aceita "%" nem "R$" (nao promete
+// desconto diferente do real). Uma linha so, sem emoji; espacos das pontas
+// e repetidos saem. Vazio (ou so espacos) = a opcao pronta.
+const LIMITE_DO_TITULO = 28;
+const LIMITE_DA_FRASE = 90;
+const QUEBRA_DE_LINHA = /[\r\n\u2028\u2029]/;
+const EMOJI = /[\p{Extended_Pictographic}\u{1F1E6}-\u{1F1FF}\u{FE0F}\u{200D}]/u;
+const CONTROLE = /[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/;
+
+/**
+ * O texto da faixa como sera gravado, ou o erro em portugues gentil.
+ * `rotulo`: "O título da faixa" / "A frase da faixa grande".
+ * Devolve { valor } (string ou null = volta a opcao pronta) ou { erro }.
+ */
+function normalizarTextoDaFaixa(bruto, { limite, rotulo }) {
+  if (bruto === null || bruto === undefined) return { valor: null };
+  if (typeof bruto !== 'string') return { erro: `${rotulo} precisa ser um texto.` };
+  if (QUEBRA_DE_LINHA.test(bruto)) return { erro: `${rotulo} vai numa linha só: tire a quebra de linha.` };
+  const texto = bruto.replace(/\s+/g, ' ').trim();
+  if (!texto) return { valor: null };
+  if (CONTROLE.test(texto)) return { erro: `${rotulo} tem um caractere que a loja não mostra. Escreva só com letras, números e pontuação.` };
+  if (EMOJI.test(texto)) return { erro: `${rotulo} não aceita emoji: a faixa usa só letras, números e pontuação.` };
+  if (texto.includes('%') || /r\$/i.test(texto)) {
+    return { erro: `${rotulo} não pode ter “%” nem “R$”: o desconto da faixa é calculado pelas suas promoções, para nunca prometer mais do que a loja dá.` };
+  }
+  const n = Array.from(texto).length;
+  if (n > limite) return { erro: `${rotulo} cabe em até ${limite} caracteres (agora são ${n}).` };
+  return { valor: texto };
+}
+
+/** O titulo que a faixa mostra: o escrito pela loja ou a opcao pronta. */
+function tituloFinal(config, nomeDaLoja) {
+  const escrito = config && typeof config.bf_titulo_texto === 'string' ? config.bf_titulo_texto.trim() : '';
+  return escrito || textoDoTitulo(config && config.bf_titulo, nomeDaLoja);
+}
+
+/** A frase da faixa grande escrita pela loja, ou null (o texto padrao). */
+function fraseEscrita(config) {
+  const escrita = config && typeof config.bf_frase_texto === 'string' ? config.bf_frase_texto.trim() : '';
+  return escrita || null;
+}
+
 /** As tres opcoes, ja com o nome da loja, para o painel. */
 function opcoesDeTitulo(nomeDaLoja) {
   return TITULOS.map((id) => ({ id, texto: textoDoTitulo(id, nomeDaLoja) }));
@@ -185,11 +232,15 @@ function chavesDoPayload(config, resumo, nomeDaLoja) {
   if (!(r.no_ar > 0)) return {};
   const out = { tem_promocao: true };
   if (config && config.bf_ativa === true && r.ate_pct > 0) {
+    // p-122: titulo ja com o texto final (o escrito ou a opcao pronta);
+    // `frase` so quando a loja escreveu — sem ela a pagina sai igual.
+    const frase = fraseEscrita(config);
     out.campanha = {
       ativa: true,
-      titulo: textoDoTitulo(config.bf_titulo, nomeDaLoja),
+      titulo: tituloFinal(config, nomeDaLoja),
       ate_pct: r.ate_pct,
       ate_data: r.ate_data,
+      ...(frase ? { frase } : {}),
     };
   }
   return out;
@@ -209,6 +260,12 @@ function estadoParaOPainel(config, resumo, nomeDaLoja, agora = new Date()) {
     ativa,
     titulo,
     titulos: opcoesDeTitulo(nomeDaLoja),
+    // p-122: o texto escrito pela loja (null = a opcao pronta / o padrao) e
+    // o titulo que a faixa mostra agora, para a previa do painel.
+    titulo_texto: (config && config.bf_titulo_texto) || null,
+    frase_texto: (config && config.bf_frase_texto) || null,
+    titulo_final: tituloFinal(config, nomeDaLoja),
+    limites: { titulo: LIMITE_DO_TITULO, frase: LIMITE_DA_FRASE },
     // A faixa esta na loja agora? Ligada E com promocao no ar.
     no_ar: ativa && r.no_ar > 0 && r.ate_pct > 0,
     // Ligada, sem promocao no ar e com agendada: a faixa nasce sozinha.
@@ -222,6 +279,7 @@ function estadoParaOPainel(config, resumo, nomeDaLoja, agora = new Date()) {
 module.exports = {
   TITULOS, TITULO_PADRAO, SEM_PROMOCAO,
   textoDoTitulo, opcoesDeTitulo, periodoPadrao,
+  LIMITE_DO_TITULO, LIMITE_DA_FRASE, normalizarTextoDaFaixa, tituloFinal, fraseEscrita,
   sqlDoResumo, resumoDasPromocoes, chavesDoPayload, estadoParaOPainel,
   sqlForaDaLoja, pecasForaDaLoja, LIMITE_FORA_DA_LOJA,
 };
