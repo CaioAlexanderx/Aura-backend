@@ -167,9 +167,19 @@ function openCheckout(){
   closeCart();
   checkoutStep=1;
   selectedDelivery=SETTINGS.pickup_enabled!==false?'pickup':'delivery';
+  if(typeof pedidoDoResumo!=='undefined') pedidoDoResumo=null;
   renderCheckoutStep();
   document.getElementById('checkoutOverlay').classList.add('open');
   document.body.style.overflow='hidden';
+  // p-124: o preco de agora de cada item, antes de a cliente pagar.
+  if(typeof conferirPrecosDaSacola==='function') conferirPrecosDaSacola().then(function(r){ if(r&&r.mudou) aposMudarOPreco(); });
+}
+/** O preco mudou com o checkout aberto: as formas e o frete seguem o valor novo. */
+function aposMudarOPreco(){
+  var ov=document.getElementById('checkoutOverlay');
+  if(!ov||!ov.classList.contains('open')||pedidoDoResumo) return;
+  if(checkoutStep===3&&!customerData.payment_method) renderCheckoutStep();
+  if(selectedDelivery==='delivery'&&shippingQuote) fetchShippingQuote();
 }
 function closeCheckout(){clearInterval(pollInterval);clearInterval(timerInterval);document.getElementById('checkoutOverlay').classList.remove('open');document.body.style.overflow='';
 // Limpa pendência se checkout foi concluído (cliente fechou após paymentMarked ou success)
@@ -178,6 +188,8 @@ try {
     window.localStorage && window.localStorage.removeItem('aura_pending_order_'+SLUG);
   }
 } catch(_) {}
+// p-124: o aviso de preco e o resumo do pedido valem so para este checkout.
+if(typeof avisoDePreco!=='undefined'){ avisoDePreco=''; pedidoDoResumo=null; }
 // p-123b: pedido ja criado (Pix ou na entrega) esvazia a sacola ao fechar.
 if(esvaziarSacolaAoFechar){ esvaziarSacolaAoFechar=false; cart={}; updateCartUI(); renderProducts(); }
 }
@@ -722,6 +734,19 @@ function selectDelivery(type){
 function submitOrder(){
   // Toque repetido enquanto o pedido está sendo enviado: ignora (27/10/2026).
   if(enviandoPedido) return;
+  // p-124: a conferencia do preco ainda no ar: o pedido espera por ela. Se
+  // algum preco subiu com as formas na tela, a cliente ve o valor novo e
+  // escolhe de novo.
+  if(typeof conferenciaDePreco!=='undefined'&&conferenciaDePreco){
+    var emCurso=conferenciaDePreco;
+    travarEnvio(customerData.payment_method);
+    emCurso.then(function(r){
+      destravarEnvio();
+      if(r&&r.subiram&&r.subiram.length&&checkoutStep===3){ customerData.payment_method=null; renderCheckoutStep(); return; }
+      submitOrder();
+    });
+    return;
+  }
   // Migration 121: dedup — checa se já existe pedido em andamento
   // criado nos últimos 10min (localStorage). Evita duplicação por
   // duplo-clique, abrir 2 abas, ou voltar pela back_url do MP.
@@ -758,6 +783,7 @@ function submitOrder(){
   } catch(_) {}
   travarEnvio(customerData.payment_method);
   var items=Object.values(cart).map(function(i){return{product_id:i.product_id,variant_id:i.variant_id||null,quantity:i.qty};});
+  var chavesDoPedido=Object.values(cart).map(function(i){return i.key;});
   // Fase 5: anti-tampering — envia fee que o cliente esta vendo
   var expectedFee=null;
   if(selectedDelivery==='delivery' && shippingQuote && shippingQuote.fee!=null){
@@ -794,6 +820,8 @@ function submitOrder(){
       showToast((res.data && res.data.error)||'Erro ao criar pedido');destravarEnvio();return;
     }
     currentOrder=res.data; paymentMarked=false;
+    // p-124: a sacola e o resumo ficam com o preco que o pedido cobrou.
+    if(typeof acertarPeloPedido==='function') acertarPeloPedido(currentOrder, chavesDoPedido);
     // Pedido criado: a próxima compra nesta página leva chave nova.
     chaveDoPedido=null;
     // Fechar o checkout daqui em diante esvazia a sacola (p-123b).

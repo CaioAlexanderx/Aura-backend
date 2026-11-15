@@ -195,6 +195,10 @@ async function responderRepeticao(res, { companyId, key, itens, remontarCartao }
       status:         pedido.status,
       payment_method: pedido.payment_method,
       shipping:       null,
+      // p-124: o preco que cada item saiu, como na primeira resposta.
+      itens:          itensGravados.map((i) => ({
+        product_id: i.product_id, variant_id: i.variant_id || null, unit_price: parseFloat(i.unit_price),
+      })),
       loja_fechada:   false,
       abre_em:        '',
       pix: pedido.asaas_pix_payload ? {

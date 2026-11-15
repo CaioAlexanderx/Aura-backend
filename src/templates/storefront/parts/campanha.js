@@ -63,11 +63,15 @@ function campanhaNoAr(data) {
 
 /** Texto da faixa fina, ja escapado. */
 function textoDaFaixa(c) {
-  // <wbr> depois do ponto: no celular a faixa quebra entre os trechos
-  // (cada trecho e nowrap), nunca no meio de "ate 30/11".
-  const sep = '<span class="bf-sep" aria-hidden="true">·</span><wbr>';
-  return `<span>${escHtml(c.titulo)}</span>${sep}<span>até ${c.ate_pct}% OFF</span>`
-    + (c.ate ? `${sep}<span>até ${c.ate}</span>` : '');
+  // <wbr> ANTES do ponto, e o ponto dentro do trecho seguinte (nowrap): no
+  // celular a faixa quebra entre os trechos, nunca no meio de "ate 30/11",
+  // e o "·" sai sempre grudado no texto que ele separa. Com o <wbr> depois
+  // do ponto (ate p-124), titulo longo deixava o "·" sozinho no fim de uma
+  // linha (QA, titulo de 28 letras largas).
+  const sep = '<span class="bf-sep" aria-hidden="true">·</span>';
+  const trecho = (t) => `<wbr><span class="bf-trecho">${sep}${t}</span>`;
+  return `<span>${escHtml(c.titulo)}</span>${trecho(`até ${c.ate_pct}% OFF`)}`
+    + (c.ate ? trecho(`até ${c.ate}`) : '');
 }
 
 function htmlDaFaixaFina(c) {
