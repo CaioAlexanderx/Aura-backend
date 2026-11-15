@@ -50,7 +50,8 @@ function banco(regras) {
   });
 }
 
-const RESUMO = /WITH vis AS/;
+const RESUMO = /WITH todos AS/;
+const FORA = /AS motivo/;
 const resumo = (o) => [{ no_ar: 0, agendadas: 0, ate_pct: 0, ate_data: null, comeca_em: null, ...o }];
 const CONFIG = {
   company_id: CID, slug: 'boutique', is_published: true, site_name: 'Boutique Aurora',
@@ -122,11 +123,24 @@ describe('regras puras', () => {
   test('resumo: o SQL usa a visibilidade da grade, arredonda para baixo e recebe o agora', async () => {
     banco([[RESUMO, (s, p) => { expect(p).toEqual([CID, '2026-11-28T12:00:00.000Z']); return resumo({ no_ar: '2', ate_pct: '30', ate_data: '2026-11-30' }); }]]);
     const r = await campanha.resumoDasPromocoes({ cid: CID, visibilidade: '(company_id = $1)', agora: new Date('2026-11-28T12:00:00Z') });
-    expect(r).toEqual({ no_ar: 2, agendadas: 0, ate_pct: 30, ate_data: '2026-11-30', comeca_em: null });
+    expect(r).toEqual({ no_ar: 2, agendadas: 0, ate_pct: 30, ate_data: '2026-11-30', comeca_em: null, fora_da_loja: 0 });
     const sql = campanha.sqlDoResumo('(company_id = $1)', false);
     expect(sql).toContain('FLOOR((1 - promo / base) * 100)');
     expect(sql).toContain('dcv.featured_product_ids');
     expect(sql).toContain('v.stock_qty > 0');
+    // p-123a: no_ar/agendadas/ate_pct so com a peca NA LOJA; fora_da_loja, o resto.
+    expect(sql).toContain('FILTER (WHERE ativa AND na_loja)');
+    expect(sql).toContain('FILTER (WHERE (ativa OR agendada) AND NOT na_loja)::int AS fora_da_loja');
+  });
+
+  test('pecas fora da loja: o motivo na ordem vitrine, foto, estoque', async () => {
+    const semFoto = campanha.sqlForaDaLoja('(company_id = $1)', true);
+    expect(semFoto).toContain("THEN 'fora_da_vitrine'");
+    expect(semFoto).toContain("THEN 'sem_foto'");
+    expect(campanha.sqlForaDaLoja('(company_id = $1)', false)).toContain("WHEN FALSE THEN 'sem_foto'");
+    banco([[FORA, [{ id: 'p1', motivo: 'fora_da_vitrine' }, { id: 'p2', motivo: 'sem_estoque' }]]]);
+    expect(await campanha.pecasForaDaLoja({ cid: CID, visibilidade: '(company_id = $1)' }))
+      .toEqual([{ id: 'p1', motivo: 'fora_da_vitrine' }, { id: 'p2', motivo: 'sem_estoque' }]);
   });
 
   test('resumo: base sem as colunas de promocao = sem promocao; outro erro sobe', async () => {
@@ -212,6 +226,26 @@ describe('rotas /digital-channel/campanha', () => {
     expect(res.body.code).toBe('BF_SEM_PROMOCAO');
     expect(res.body.error).toMatch(/monte antes pelo menos um desconto/);
     expect(db.query.mock.calls.some(([s]) => /UPDATE digital_channel_config/.test(String(s)))).toBe(false);
+  });
+
+  test('PUT ligar com promocao so fora da loja: 409 que diz isso, com a contagem', async () => {
+    banco(regras(CONFIG, resumo({ fora_da_loja: 3 })));
+    const res = await request(app).put(base).send({ ativa: true });
+    expect(res.status).toBe(409);
+    expect(res.body).toMatchObject({ code: 'BF_SEM_PROMOCAO', fora_da_loja: 3 });
+    expect(res.body.error).toBe('Os seus 3 produtos em promoção não aparecem na loja online (estão fora da vitrine ou sem foto). Mostre pelo menos um na loja para ligar a campanha.');
+    banco(regras(CONFIG, resumo({ fora_da_loja: 1 })));
+    expect((await request(app).put(base).send({ ativa: true })).body.error).toMatch(/^O seu produto em promoção não aparece na loja online/);
+  });
+
+  test('GET /fora-da-loja: as pecas que a loja nao mostra, com o motivo', async () => {
+    banco([...regras({ ...CONFIG, require_product_image: true }, resumo()), [FORA, (s) => {
+      expect(s).toContain("THEN 'sem_foto'");
+      return [{ id: 'p9', motivo: 'sem_foto' }];
+    }]]);
+    const res = await request(app).get(base + '/fora-da-loja');
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ produtos: [{ id: 'p9', motivo: 'sem_foto' }], limite: 5000 });
   });
 
   test('PUT ligar com promocao agendada: grava, esquece a home guardada e registra', async () => {

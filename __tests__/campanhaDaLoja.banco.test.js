@@ -162,7 +162,19 @@ test('resumo: conta so o que a loja mostra; variante entra; arredonda para baixo
     ate_pct: 45,
     ate_data: esperado.ate,
     comeca_em: esperado.comeca,
+    // p-123a: oculta e semSaldo valem no Caixa, mas a loja nao mostra.
+    // soDaFilial nao e visivel para a matriz (nao compartilhado): nao conta.
+    fora_da_loja: 2,
   });
+
+  const fora = await request(app).get(rota(matriz) + '/fora-da-loja');
+  expect(fora.status).toBe(200);
+  const motivo = Object.fromEntries(fora.body.produtos.map((p) => [p.id, p.motivo]));
+  expect(motivo[ids.oculta]).toBe('fora_da_vitrine');
+  expect(motivo[ids.semSaldo]).toBe('sem_estoque');
+  expect(motivo[ids.ativa]).toBeUndefined();
+  expect(motivo[ids.doGrupo]).toBeUndefined();
+  expect(motivo[ids.soDaFilial]).toBeUndefined();
   expect(res.body).toMatchObject({ ativa: false, titulo: 'black_friday', pode_ligar: true, no_ar: false });
   expect(res.body.titulos[1].texto).toBe('Black Friday da Boutique BF');
 });
