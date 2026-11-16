@@ -376,8 +376,16 @@ async function calcularTotais(companyId, sessaoId, openedAt, closedAt) {
  * caso de erro.
  *
  * total_vendas = SUM(sales.total_amount) da janela, status <> 'cancelled'
- * — a fonte única de "vendas" (regime competência), o MESMO número que a
- * tela de Vendas mostra. É deliberadamente DIFERENTE de totais.geral
+ * e type <> 'troca' — a fonte única de "vendas" (regime competência), o
+ * MESMO número que a tela de Vendas mostra.
+ *
+ * 16/11/2026 (INC-2026-11-16-01, Look das Patroas): total_vendas e
+ * sales_count somavam a venda type='troca' com o valor cheio da peça nova,
+ * e a peça devolvida já tinha sido vendida antes. "Vendas do período" saía
+ * maior que "Entradas no caixa" exatamente pelo valor devolvido (14/11:
+ * 10.724,88 contra 10.584,98). A tela de Vendas, o Painel e o /pdv/summary
+ * excluem troca desde 11/05; agora o fechamento também. A diferença que a
+ * cliente paga na troca continua nas Entradas (é dinheiro que entrou). É deliberadamente DIFERENTE de totais.geral
  * (entradas no caixa por método): num dia com troca ou crediário os dois
  * divergem por design, e o PDF de fechamento mostra os dois com rótulos
  * distintos pra ninguém achar que "o caixa não bate".
@@ -397,7 +405,8 @@ async function calcularMetricas(companyId, sessaoId, openedAt, closedAt) {
          AND (sp.sessao_id = $2
               OR (sp.sessao_id IS NULL
                   AND s.created_at >= $3 AND s.created_at < $4))
-         AND COALESCE(s.status, 'completed') <> 'cancelled'`,
+         AND COALESCE(s.status, 'completed') <> 'cancelled'
+         AND COALESCE(s.type, 'sale') <> 'troca'`,
       [companyId, sessaoId, openedAt, until]
     );
     result.sales_count = rows[0]?.c || 0;
@@ -412,7 +421,8 @@ async function calcularMetricas(companyId, sessaoId, openedAt, closedAt) {
        WHERE s.company_id = $1
          AND s.created_at >= $2
          AND s.created_at < $3
-         AND COALESCE(s.status, 'completed') <> 'cancelled'`,
+         AND COALESCE(s.status, 'completed') <> 'cancelled'
+         AND COALESCE(s.type, 'sale') <> 'troca'`,
       [companyId, openedAt, until]
     );
     result.total_vendas = parseFloat(rows[0]?.total || 0);

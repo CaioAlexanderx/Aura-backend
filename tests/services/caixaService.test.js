@@ -215,4 +215,28 @@ describe('fechar — snapshot e métricas', () => {
     expect(sql).not.toMatch(/= 'active'/);
     expect(fechamento.sales_count).toBe(3);
   });
+  // 16/11/2026 (INC-2026-11-16-01, Look das Patroas 14/11): a troca entrava
+  // em "Vendas do período" com o valor cheio da peça nova (199,80), e a
+  // peça devolvida (139,90) já tinha sido vendida antes.
+  test('Vendas do período e a contagem de vendas não somam a troca', async () => {
+    routeQueries([
+      ...baseHandlers(),
+      [/FROM sale_payments sp/, () => ({ rows: [] })],
+      [/COUNT\(DISTINCT s\.id\)/, () => ({ rows: [{ c: 43 }] })],
+      [/SUM\(s\.total_amount\)/, () => ({ rows: [{ total: '10525.08' }] })],
+    ]);
+    mockClientOk();
+
+    const fechamento = await caixaService.fechar(COMPANY, 'user-1', 0, null);
+
+    const sqlVendas = capturedSql(/SUM\(s\.total_amount\)/);
+    const sqlContagem = capturedSql(/COUNT\(DISTINCT s\.id\)/);
+    for (const sql of [sqlVendas, sqlContagem]) {
+      expect(sql).toMatch(/COALESCE\(s\.type, 'sale'\) <> 'troca'/);
+      expect(sql).toMatch(/<> 'cancelled'/);
+    }
+    expect(fechamento.total_vendas).toBe(10525.08);
+    expect(fechamento.sales_count).toBe(43);
+  });
 });
+
