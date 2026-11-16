@@ -10,7 +10,7 @@
 // O retrato de produção (pg_get_viewdef e information_schema, só leitura,
 // 16/11/2026) fica em tests/fixtures/studio/. Este arquivo acusa diferença em
 // três pontos:
-//   1. texto: a definição da migration 208 contra o retrato de produção;
+//   1. texto: a definição das migrations 208 e 454 contra o retrato;
 //   2. banco do CI: as colunas da view (nome, ordem e tipo) contra o retrato;
 //   3. banco do CI: a definição que o Postgres devolve contra o retrato.
 //
@@ -45,17 +45,43 @@ function normalizar(def) {
     .toLowerCase();
 }
 
-/** O SELECT da view dentro da migration 208. */
-function definicaoDaMigration() {
-  const sql = ler('migrations/208_studio_visual_engine.sql');
+// As duas migrations que criam a view: a 208 (original, com guarda) e a 454
+// (que completa o schema de marketplace_orders e cria a view onde faltava).
+const MIGRATIONS_DA_VIEW = [
+  'migrations/208_studio_visual_engine.sql',
+  'migrations/454_studio_orders_view_paridade.sql',
+];
+
+/** O SELECT da view dentro de uma migration. */
+function definicaoDaMigration(arquivo) {
+  const sql = ler(arquivo).replace(/\r\n/g, '\n');
   const m = sql.match(/CREATE VIEW studio_orders AS\s*\n([\s\S]*?)\n\$v\$;/);
-  if (!m) throw new Error('CREATE VIEW studio_orders não encontrado na migration 208');
+  if (!m) throw new Error(`CREATE VIEW studio_orders não encontrado em ${arquivo}`);
   return m[1];
 }
 
-describe('studio_orders · texto da migration 208 contra o retrato de produção', () => {
-  it('a definição do repositório é a de produção', () => {
-    expect(normalizar(definicaoDaMigration())).toBe(normalizar(RETRATO_DEF));
+describe('studio_orders · texto das migrations contra o retrato de produção', () => {
+  it.each(MIGRATIONS_DA_VIEW)('a definição em %s é a de produção', (arquivo) => {
+    expect(normalizar(definicaoDaMigration(arquivo))).toBe(normalizar(RETRATO_DEF));
+  });
+
+  it('nenhuma outra migration cria ou troca a view', () => {
+    const fora = fs.readdirSync(path.join(raiz, 'migrations'))
+      .filter((f) => f.endsWith('.sql'))
+      .filter((f) => !MIGRATIONS_DA_VIEW.includes(`migrations/${f}`))
+      .filter((f) => /CREATE\s+(OR\s+REPLACE\s+)?VIEW\s+(public\.)?studio_orders\b|DROP\s+VIEW\s+(IF\s+EXISTS\s+)?(public\.)?studio_orders\b/i
+        .test(ler(`migrations/${f}`)));
+    expect(fora).toEqual([]);
+  });
+
+  it('a 454 cria as colunas de marketplace_orders que a view lê e só existiam em produção', () => {
+    const sql = ler('migrations/454_studio_orders_view_paridade.sql');
+    for (const coluna of ['vertical text', 'customization_collected_at timestamptz', 'customization_data jsonb', 'studio_production_status_override text']) {
+      expect(sql).toContain(`ALTER TABLE marketplace_orders ADD COLUMN IF NOT EXISTS ${coluna}`);
+    }
+    // Idempotente e sem engolir erro: falha em voz alta se a view não nascer.
+    expect(sql).toMatch(/IF to_regclass\('public\.studio_orders'\) IS NULL THEN/);
+    expect(sql).not.toMatch(/^\s*EXCEPTION\b/m);
   });
 
   it('o retrato une as três origens, nesta ordem', () => {
