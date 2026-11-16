@@ -1,0 +1,19 @@
+[
+  ["id", "uuid"],
+  ["company_id", "uuid"],
+  ["created_at", "timestamptz"],
+  ["updated_at", "timestamptz"],
+  ["total_amount", "numeric"],
+  ["status", "text"],
+  ["studio_production_status", "text"],
+  ["customer_name", "text"],
+  ["customer_phone", "text"],
+  ["display_name", "text"],
+  ["source", "text"],
+  ["digital_order_id", "uuid"],
+  ["pdv_sale_id", "uuid"],
+  ["studio_bulk_event_id", "uuid"],
+  ["marketplace_order_id", "uuid"],
+  ["marketplace_platform", "text"],
+  ["customization_collected_at", "timestamptz"]
+]
