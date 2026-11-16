@@ -62,6 +62,24 @@ const MODULE_PLAN_MAP = {
   canal:          'negocio',
   whatsapp:       'negocio',
 
+  // 16/11/2026 (p-127) — Personalizados: a frente Studio dentro do shell
+  // Negócio. As chaves espelham os mods do app (hooks/useVisibleModules.ts)
+  // e existem aqui para o override por empresa do ClientsAdmin não voltar
+  // 400 ("Módulo inválido"). Plano mínimo Negócio, o mesmo requirePlan das
+  // rotas /companies/:id/studio/* (private.js). O opt-in continua sendo
+  // pdv_settings.studio_enabled; quem decide mostrar é o app. Sem gate de
+  // rota novo. "personalizados.access" é também a chave de permissão do
+  // membro (company_members.permissions), lida por /auth/my-permissions.
+  'personalizados.access':     'negocio',
+  'personalizados.orcamentos': 'negocio',
+  'personalizados.producao':   'negocio',
+  'personalizados.insumos':    'negocio',
+  'personalizados.galeria':    'negocio',
+  'personalizados.pedido':     'negocio',
+  'personalizados.ficha':      'negocio',
+  'personalizados.loja':       'negocio',
+  'personalizados.config':     'negocio',
+
   // Expansão only
   agentes:        'expansao',
 };
