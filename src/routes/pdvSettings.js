@@ -86,6 +86,11 @@ const ALLOWED_BOOL_KEYS = [
   // migration: pdv_settings e jsonb. Chegou no app antes desta linha e o
   // PUT descartava a chave em silencio (a chave "nao arrastava").
   'frete_enabled',
+  // 17/11/2026 (p-158) — impressao automatica do cupom nao fiscal ao
+  // registrar a venda no Caixa. Desligado por padrao; cada aparelho ainda
+  // pode dizer "neste aparelho nao" (guardado no navegador, no app). A nota
+  // fiscal continua sempre manual. Sem migration: pdv_settings e jsonb.
+  'auto_print_receipt',
 ];
 
 // 22/09/2026 — Matcon: lista de unidades habilitadas ("Minha loja vende
@@ -356,6 +361,8 @@ const DEFAULT_SETTINGS = {
   comanda_enabled:           false,
   // 30/10/2026 — desligado = carrinho de sempre, sem o atalho "Frete".
   frete_enabled:             false,
+  // 17/11/2026 — desligado = cupom so pelo botao "Imprimir cupom", como hoje.
+  auto_print_receipt:        false,
   // 08/11/2026 — desligado por padrao: o vale-troca deixa de sair sozinho no
   // cupom; a lojista liga em Configuracoes se quiser. (Era true desde 13/10.)
   vale_troca_enabled:        false,
