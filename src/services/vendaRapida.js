@@ -12,12 +12,18 @@
 //                    com a promocao De/Por e a vendedora junto (p-141).
 //                    Antes: 1 por item, +1 por variacao, +2 da promocao,
 //                    +1 da vendedora.
+//   gravarItens()    sale_items, baixa de estoque, stock_movements, contador
+//                    da vendedora e uso do cupom num comando so (p-142).
+//                    Antes: 3 por item, +1 da vendedora, +1 do cupom.
 //
 // O CAMINHO DE SEMPRE CONTINUA NO CODIGO (routes/pdv.js), intocado:
 //   - PDV_VENDA_CAMINHO=fila volta a venda inteira para ele, sem deploy de
 //     codigo;
 //   - cada funcao daqui devolve null quando o caso foge do comum (id que nao
-//     e uuid minusculo) e a venda segue pelo caminho de sempre naquele trecho.
+//     e uuid minusculo, quantidade negativa em linha repetida...) e a venda
+//     segue pelo caminho de sempre naquele trecho;
+//   - __tests__/pdv.vendaRapida.banco.test.js roda cada cenario nos dois
+//     caminhos, no Postgres de verdade, e exige banco e resposta identicos.
 //
 // UMA DIFERENCA DE PROPOSITO (p-141/p-142): a leitura dos produtos trava as linhas
 // de estoque que a venda vai baixar (FOR NO KEY UPDATE, a mesma trava que o
@@ -160,8 +166,154 @@ async function lerProdutos(client, { companyId, items, employeeId, comPromocao, 
   return { porItem, vendedora };
 }
 
+// ── gravarItens ──────────────────────────────────────────────
+const alvoDaBaixa = (i) => (i.variant_id ? `v:${i.variant_id}:${i.product_id}` : `p:${i.product_id}`) + `:${i.stock_company_id}`;
+
+/**
+ * O comando unico soma as quantidades das linhas que baixam o mesmo saldo.
+ * Com quantidades positivas, somar e baixar de uma vez da o mesmo resultado
+ * de baixar linha a linha (o saldo para em zero nos dois). Com quantidade
+ * zero, negativa ou que nao e numero em linha repetida, nao: ai a venda
+ * grava linha a linha, como sempre.
+ */
+function podeGravarDeUmaVez(itens) {
+  const vistos = new Map();
+  for (const i of itens) {
+    if (i.product_id && !ehUuid(i.product_id)) return false;
+    if (i.variant_id && !ehUuid(i.variant_id)) return false;
+    if (i.product_id && !ehUuid(i.stock_company_id)) return false;
+    if (!i.product_id) continue;
+    const chave = alvoDaBaixa(i);
+    vistos.set(chave, (vistos.get(chave) || []).concat([i.quantity]));
+  }
+  for (const quantidades of vistos.values()) {
+    if (quantidades.length < 2) continue;
+    for (const q of quantidades) {
+      const n = typeof q === 'number' ? q : Number(String(q).trim());
+      if (!Number.isFinite(n) || !(n > 0) || String(q).trim() === '') return false;
+    }
+  }
+  return true;
+}
+
+/**
+ * sale_items + baixa do estoque + stock_movements num comando so, mais o
+ * contador da vendedora e o uso do cupom quando a venda tem um ou outro.
+ *
+ * Cada parte e a MESMA do laco de sempre:
+ *   - um sale_items por linha, na ordem do carrinho, com os mesmos valores;
+ *   - item sem variacao: products.stock_qty = GREATEST(0, saldo - qtd), so
+ *     na linha da empresa dona (stock_company_id);
+ *   - item com variacao: product_variants.stock_qty, so quando a variacao e
+ *     do produto e o produto e da empresa dona;
+ *   - um stock_movements 'out' por linha com produto.
+ *
+ * Devolve os itens gravados, na ordem do carrinho (si.* + product_name), ou
+ * null quando o caso pede o caminho de sempre (nada foi gravado).
+ */
+async function gravarItens(client, {
+  saleId, companyId, itens, marcacoes, employeeId, totalAmount, couponId,
+}) {
+  if (!itens.length || !podeGravarDeUmaVez(itens)) return null;
+  const comMarca = !!marcacoes;
+  const col = (fn) => itens.map(fn);
+
+  const params = [
+    saleId,
+    col((i) => i.product_id || null),
+    col((i) => i.variant_id || null),
+    col((i) => i.quantity),
+    col((i) => i.unit_price),
+    col((i) => i.cost_price),
+    col((i) => i.item_discount || 0),
+    col((i) => i.line_total),
+    col((i) => i.product_name_snapshot),
+    col((i) => (i.product_id ? i.stock_company_id : null)),
+  ];
+  let marcaCols = '';
+  let marcaSrc = '';
+  let marcaUnnest = '';
+  let marcaAlias = '';
+  if (comMarca) {
+    params.push(col((_, idx) => marcacoes[idx].preco_lista), col((_, idx) => marcacoes[idx].em_promocao));
+    marcaUnnest = `, $${params.length - 1}::numeric[], $${params.length}::boolean[]`;
+    marcaAlias = ', preco_lista, em_promocao';
+    marcaCols = ', preco_lista, em_promocao';
+    marcaSrc = ', src.preco_lista, src.em_promocao';
+  }
+  let vendedoraCte = '';
+  if (employeeId) {
+    params.push(totalAmount, employeeId, companyId);
+    vendedoraCte = `,
+     vendedora AS (
+       UPDATE employees SET total_sales = COALESCE(total_sales,0) + 1,
+              total_revenue = COALESCE(total_revenue,0) + $${params.length - 2}, updated_at = NOW()
+        WHERE id = $${params.length - 1} AND company_id = $${params.length}
+     )`;
+  }
+  let cupomCte = '';
+  if (couponId) {
+    params.push(couponId);
+    cupomCte = `,
+     cupom AS (
+       UPDATE coupons SET current_uses = current_uses + 1, updated_at = NOW() WHERE id = $${params.length}
+     )`;
+  }
+
+  const { rows } = await client.query(
+    `WITH src AS (
+       SELECT t.ord, uuid_generate_v4() AS id, t.product_id, t.variant_id, t.quantity, t.unit_price,
+              t.unit_cost, t.discount, t.total_price, t.nome, t.stock_company_id${marcaAlias ? ', t.preco_lista, t.em_promocao' : ''}
+         FROM unnest($2::uuid[], $3::uuid[], $4::numeric[], $5::numeric[], $6::numeric[], $7::numeric[],
+                     $8::numeric[], $9::text[], $10::uuid[]${marcaUnnest})
+              WITH ORDINALITY AS t(product_id, variant_id, quantity, unit_price, unit_cost, discount,
+                                   total_price, nome, stock_company_id${marcaAlias}, ord)
+     ),
+     itens_gravados AS (
+       INSERT INTO sale_items (id, sale_id, product_id, variant_id, quantity, unit_price, unit_cost,
+                               discount, total_price, product_name_snapshot${marcaCols})
+       SELECT src.id, $1::uuid, src.product_id, src.variant_id, src.quantity, src.unit_price, src.unit_cost,
+              src.discount, src.total_price, src.nome${marcaSrc}
+         FROM src ORDER BY src.ord
+       RETURNING *
+     ),
+     baixa_variacao AS (
+       UPDATE product_variants v
+          SET stock_qty = GREATEST(0, v.stock_qty - q.quantidade), updated_at = NOW()
+         FROM (SELECT variant_id, product_id, stock_company_id, SUM(quantity) AS quantidade
+                 FROM src WHERE product_id IS NOT NULL AND variant_id IS NOT NULL
+                GROUP BY variant_id, product_id, stock_company_id) q
+        WHERE v.id = q.variant_id AND v.product_id = q.product_id
+          AND v.product_id IN (SELECT p.id FROM products p WHERE p.id = q.product_id AND p.company_id = q.stock_company_id)
+     ),
+     baixa_produto AS (
+       UPDATE products p
+          SET stock_qty = GREATEST(0, p.stock_qty - q.quantidade), updated_at = NOW()
+         FROM (SELECT product_id, stock_company_id, SUM(quantity) AS quantidade
+                 FROM src WHERE product_id IS NOT NULL AND variant_id IS NULL
+                GROUP BY product_id, stock_company_id) q
+        WHERE p.id = q.product_id AND p.company_id = q.stock_company_id
+     ),
+     movimentos AS (
+       INSERT INTO stock_movements (product_id, company_id, type, quantity, reference_id, reference_type, notes)
+       SELECT src.product_id, src.stock_company_id, 'out', src.quantity, $1::uuid, 'sale', 'Venda PDV'
+         FROM src WHERE src.product_id IS NOT NULL ORDER BY src.ord
+       ON CONFLICT DO NOTHING
+     )${vendedoraCte}${cupomCte}
+     SELECT g.*, p.name AS product_name
+       FROM itens_gravados g
+       JOIN src ON src.id = g.id
+       LEFT JOIN products p ON p.id = g.product_id
+      ORDER BY src.ord`,
+    params
+  );
+  return rows;
+}
+
 module.exports = {
   caminhoRapido,
   ehUuid,
   lerProdutos,
+  podeGravarDeUmaVez,
+  gravarItens,
 };

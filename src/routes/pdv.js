@@ -103,8 +103,8 @@ const nfseAutomaticaRepo = require('../services/nfseAutomaticaRepo');
 const { prazoDoValeEmDias } = require('../utils/valeTrocaPrazo');
 // 17/11/2026 (p-140): uma linha de log por venda com o tempo de cada etapa.
 const vendaTiming = require('../services/vendaTiming');
-// 17/11/2026 (p-141): a venda com menos idas ao banco. O caminho de sempre
-// continua aqui (PDV_VENDA_CAMINHO=fila volta a ele).
+// 17/11/2026 (p-141 a p-144): a venda com menos idas ao banco. O caminho de
+// sempre continua aqui, em cada `else` (PDV_VENDA_CAMINHO=fila volta a ele).
 const vendaRapida = require('../services/vendaRapida');
 
 const fmt = (v) => parseFloat(v || 0).toFixed(2);
@@ -634,6 +634,16 @@ async function handleSale(req, res, opts = {}) {
     if (sale_date) marcacoes = null;
     else if (leitura) marcacoes = comPromocao ? enrichedItems.map((_, idx) => leitura.porItem[idx]?.marcacao || vendaNaPromocao.NULO) : null;
     else marcacoes = await vendaNaPromocao.marcarItens((sql, params) => client.query(sql, params), enrichedItems, { visiveis: produtosVisiveis });
+    // p-142: sale_items, baixa do estoque, stock_movements, contador da
+    // vendedora e uso do cupom num comando so. Devolve os itens ja no formato
+    // da resposta (p-143). null = o caso pede o laco de sempre (nada gravado).
+    const itensGravados = rapido
+      ? await vendaRapida.gravarItens(client, {
+        saleId: sale.id, companyId: req.params.id, itens: enrichedItems, marcacoes,
+        employeeId: employee_id || null, totalAmount, couponId,
+      })
+      : null;
+    if (!itensGravados) {
     for (const [idx, item] of enrichedItems.entries()) {
       const marca = marcacoes ? marcacoes[idx] : null;
       await client.query(
@@ -680,6 +690,7 @@ async function handleSale(req, res, opts = {}) {
     }
     if (couponId) {
       await client.query(`UPDATE coupons SET current_uses=current_uses+1,updated_at=NOW() WHERE id=$1`, [couponId]);
+    }
     }
     timing.etapa('itens_estoque');
 
