@@ -51,13 +51,33 @@
 //     de services/artReview.js (initialArtStatus), que tambem guarda os
 //     status e as transicoes da triagem.
 //
+// ehPecaPersonalizada(produto) -> boolean                  (p-184)
+//     A peca vai pelo personalizador: is_personalizable E
+//     customization_config preenchido. E a mesma regra do fragmento
+//     PERSONALIZAVEL da vitrine (services/catalogoPaginado.js). Marcado sem
+//     configurador, ou configurador sem a marca, e prateleira.
+//
+// temPersonalizacao(customization, config) -> boolean      (p-177/p-184)
+//     O item tem arte ou texto registrado? Com os campos do produto, conta
+//     um campo preenchido; sem os campos, qualquer texto nao vazio.
+//
+// etapaInicialDoPedido(linhas) -> 'pending_art' | 'awaiting_customization'
+//                                                           (p-184)
+//     A etapa da Fila do pedido online recem-criado. `linhas` =
+//     [{ customization, produto: { customization_config } }] (as linhas de
+//     cotarPersonalizados servem). Toda linha com arte ou texto:
+//     'pending_art' ("Aguardando arte", a lojista confere e aprova). Alguma
+//     sem nada: 'awaiting_customization', e a lojista recolhe pela folha da
+//     Fila (POST /studio/orders/:oid/personalizacao).
+//
 // O que NAO esta aqui: a consulta dos produtos e das faixas (SQL de cada
 // rota), o frete, o desconto do Pix e o total do pedido
 // (services/precoDoStudio.js: totaisDoPedido, prazoDaSacola), e a
 // gravacao do pedido.
 //
-// Quem usa hoje: POST /storefront/:slug/studio/order e
-// POST /storefront/:slug/studio/cotacao. Testes de caracterizacao em
+// Quem usa hoje: POST /storefront/:slug/studio/order,
+// POST /storefront/:slug/studio/cotacao, POST /storefront/:slug/order e
+// POST /storefront/:slug/sacola/precos (loja comum, p-184). Testes de caracterizacao em
 // __tests__/personalizavelCaracterizacao.test.js: se um deles quebrar, o
 // comportamento da vitrine Studio mudou.
 // ============================================================
@@ -180,6 +200,50 @@ function cotarPersonalizados({ items, produtos, faixas }) {
   });
 }
 
+// ─────────────────────────────────────────────
+// p-184: peca personalizada e etapa inicial do pedido da loja comum
+// ─────────────────────────────────────────────
+const ETAPA_COM_PERSONALIZACAO = 'pending_art';
+const ETAPA_SEM_PERSONALIZACAO = 'awaiting_customization';
+
+function ehObjeto(v) {
+  return !!v && typeof v === 'object' && !Array.isArray(v);
+}
+
+/** Vai pelo personalizador? Mesma regra do PERSONALIZAVEL da vitrine. */
+function ehPecaPersonalizada(produto) {
+  return !!produto && produto.is_personalizable === true && produto.customization_config != null;
+}
+
+function preenchido(v) {
+  if (v === null || v === undefined) return false;
+  if (typeof v === 'string') return v.trim() !== '';
+  if (typeof v === 'boolean') return false;
+  return true;
+}
+
+/**
+ * O item tem arte ou texto registrado? Com os campos do produto, conta um
+ * campo do produto preenchido. Sem os campos (produto apagado, config
+ * antiga), conta qualquer texto nao vazio. Pura. (Saiu de
+ * routes/studioPersonalizacaoDoPedido.js, p-177, sem mudar a regra.)
+ */
+function temPersonalizacao(customization, cfg) {
+  if (!ehObjeto(customization)) return false;
+  const c = ehObjeto(cfg) && Array.isArray(cfg.fields) ? cfg : null;
+  if (c) {
+    return c.fields.some((f) => f && f.id != null && preenchido(customization[f.id]));
+  }
+  return Object.values(customization).some((v) => typeof v === 'string' && v.trim() !== '');
+}
+
+/** Etapa da Fila do pedido online recem-criado. Ver o cabecalho. */
+function etapaInicialDoPedido(linhas) {
+  const todas = (linhas || []).every((l) => temPersonalizacao(
+    l && l.customization, l && l.produto ? l.produto.customization_config : null));
+  return todas ? ETAPA_COM_PERSONALIZACAO : ETAPA_SEM_PERSONALIZACAO;
+}
+
 /** art_review_status inicial do item. Ver artReview.initialArtStatus. */
 function statusInicialDaArte(config, customization) {
   return initialArtStatus(config, customization);
@@ -191,4 +255,9 @@ module.exports = {
   prepararPersonalizacao,
   cotarPersonalizados,
   statusInicialDaArte,
+  ehPecaPersonalizada,
+  temPersonalizacao,
+  etapaInicialDoPedido,
+  ETAPA_COM_PERSONALIZACAO,
+  ETAPA_SEM_PERSONALIZACAO,
 };

@@ -33,6 +33,8 @@ router.use('/me', productLinksUserRouter);
 router.use('/me', require('./meAggregates'));
 // 10/11/2026: estoque por loja na visao consolidada (GET /me/estoque/por-loja).
 router.use('/me', require('./meEstoquePorLoja'));
+// 17/11/2026 (p-186): Personalizados na visao consolidada (GET /me/studio/orders|quotes).
+router.use('/me', require('./meStudio'));
 // Fase 1 · consentimento (340): GET /me/whatsapp/consent/summary.
 router.use('/me', require('./customerConsent').meRouter);
 
@@ -65,6 +67,8 @@ router.use('/admin', require('./admin'));
 router.use('/admin', require('./adminAccessCodes'));
 router.use('/admin', require('./adminPlan'));
 router.use('/admin', require('./adminVertical'));
+// 17/11/2026 (p-189): casa no Negocio de UMA empresa (virada do Studio), so equipe.
+router.use('/admin', require('./adminCasaNegocio'));
 router.use('/admin', require('./adminKarate'));
 router.use('/admin', require('./adminSubVertical'));
 router.use('/admin', require('./adminSupport'));

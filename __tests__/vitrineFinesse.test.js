@@ -58,7 +58,7 @@ describe('1. a home sai da memoria', () => {
     // BE-1 (25/09/2026): as paginas que so a vitrine Studio tem (sacola,
     // pedido...) tambem ficam de fora — nao sao a home.
     expect(rota).toContain("const ehHome = !produtoId && !somenteStudio && !String(req.url || '').includes('?');");
-    expect(rota).toContain('if (ehHome) { lembrarPagina(slug, html);');
+    expect(rota).toContain('if (ehHome) { lembrarPagina(slug, html, csp);');
     expect(rota).toContain("res.setHeader('X-Aura-Cache', 'hit');");
   });
 

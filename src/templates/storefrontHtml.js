@@ -23,7 +23,7 @@
 //   siteName, tagline, logoInTopbar, logoNoRodape, contactBar,
 //   addrText, horarioTexto, cnpjTexto, announcementBar, banners[],
 //   serviceCards[], isOpenNow, nextOpenText, pagamentos, politicaTroca,
-//   whatsNum, whatsBloco, textosDaFrente,
+//   whatsNum, whatsBloco, textosDaFrente, heroPronto,
 // }) → string HTML
 //
 // whatsNum ja chega com o 55 (services/whatsappDaLoja.js, tq-61).
@@ -56,7 +56,7 @@ function buildHtmlBody({
   siteName, tagline, logoInTopbar, logoNoRodape, contactBar,
   addrText, horarioTexto, cnpjTexto, announcementBar, banners, serviceCards,
   isOpenNow, nextOpenText,
-  pagamentos, politicaTroca, whatsNum, redes, whatsBloco, textosDaFrente,
+  pagamentos, politicaTroca, whatsNum, redes, whatsBloco, textosDaFrente, heroPronto,
 }) {
   banners = Array.isArray(banners) ? banners : [];
   serviceCards = Array.isArray(serviceCards) ? serviceCards : [];
@@ -197,7 +197,9 @@ function buildHtmlBody({
   // Basta UMA arte do celular pra voltar ao hero alto de sempre.
   const comFotos = hasBanners && banners.some((b) => b.image_url);
   const largaNoCelular = comFotos && !banners.some((b) => b.image_url && b.image_url_mobile);
-  const heroHtml = `
+  // p-180: o banner A da loja com personalizavel (parts/personalizavel.js)
+  // entra no lugar do hero, ja pronto. Sem ele, o hero de sempre.
+  const heroHtml = heroPronto || `
 <section class="hero${largaNoCelular ? ' hero-larga-no-celular' : ''}" id="bannerStage">
   ${slidesHtml}
   ${dotsHtml}

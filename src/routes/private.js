@@ -383,6 +383,9 @@ router.use('/studio', requirePlan('negocio', 'expansao'), require('./studioBulkH
 router.use('/studio', requirePlan('negocio', 'expansao'), require('./studioUpload'));
 router.use('/studio', requirePlan('negocio', 'expansao'), require('./studioBulkConvert'));
 router.use('/studio', requirePlan('negocio', 'expansao'), require('./studioSaleItemPatch'));
+// p-177 (17/11/2026): folha "Recolher a arte e o texto" da Fila de producao
+// do Negocio. GET/POST /studio/orders/:oid/personalizacao.
+router.use('/studio', requirePlan('negocio', 'expansao'), require('./studioPersonalizacaoDoPedido'));
 // S5 — fila de triagem da arte que o cliente enviou (migration 289).
 router.use('/studio', requirePlan('negocio', 'expansao'), require('./studioArtReview'));
 router.use('/studio', requirePlan('negocio', 'expansao'), require('./studioMarketplaceListing'));

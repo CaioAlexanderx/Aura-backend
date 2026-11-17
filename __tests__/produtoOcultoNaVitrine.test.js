@@ -71,8 +71,9 @@ describe('o alcance: toda consulta que desenha a vitrine', () => {
     expect(paginado).toContain("filtroDeFoto(exigeFoto), NA_VITRINE]");
     // Tres consultas: a grade curada, a grade normal e a peca da URL
     // propria (produtoPublicoPorId, 08/09/2026) — um link colado nao
-    // pode abrir o que a grade esconde.
-    expect((builder.match(/\$\{NA_VITRINE\}/g) || []).length).toBe(3);
+    // pode abrir o que a grade esconde. A quarta (p-179) e o
+    // tem_personalizavel da contagem: personalizavel oculto nao liga nada.
+    expect((builder.match(/\$\{NA_VITRINE\}/g) || []).length).toBe(4);
     expect(builder).toContain('async function produtoPublicoPorId');
   });
 

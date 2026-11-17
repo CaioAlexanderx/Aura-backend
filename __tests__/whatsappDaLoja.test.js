@@ -11,7 +11,7 @@
 'use strict';
 
 jest.mock('../src/services/cacheDaPaginaDaLoja', () => ({
-  esquecerPagina: jest.fn(), paginaLembrada: jest.fn(() => null), lembrarPagina: jest.fn(),
+  esquecerPagina: jest.fn(), paginaLembrada: jest.fn(() => null), entradaLembrada: jest.fn(() => null), lembrarPagina: jest.fn(),
 }));
 
 const fs = require('fs');
@@ -115,10 +115,11 @@ describe('todo wa.me da vitrine passa pela regra unica', () => {
       });
     }
     expect(achados.filter((a) => a.startsWith('SEM REGRA'))).toEqual([]);
-    // Os tres lugares que montam wa.me na loja comum (bloco da home,
-    // pedido confirmado, pagina do produto) — se aparecer um quarto, ele
-    // tem de usar numeroDoWhatsapp e entrar aqui.
-    expect(achados.map((a) => a.split(':')[0]).sort()).toEqual(['pix.js', 'product_detail.js', 'storefrontHtml.js', 'storefrontHtml.js']);
+    // Os lugares que montam wa.me na loja comum (bloco da home, pedido
+    // confirmado, pagina do produto e, p-180, o "Personalizar" sem o
+    // quadro do personalizador; p-182, a saida quando o quadro nao abre) —
+    // se aparecer outro, ele tem de usar numeroDoWhatsapp e entrar aqui.
+    expect(achados.map((a) => a.split(':')[0]).sort()).toEqual(['personalizavel.js', 'pix.js', 'product_detail.js', 'quadro.js', 'storefrontHtml.js', 'storefrontHtml.js']);
   });
 
   test('a pagina da loja sai com wa.me/55', () => {

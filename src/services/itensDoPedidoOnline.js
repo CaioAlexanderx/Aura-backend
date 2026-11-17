@@ -15,6 +15,13 @@
 // (De/Por, promocao da variante, price_override) e o de
 // services/precoEfetivo.js, e as conferencias de produto, variante e
 // estoque sao estas, com as mensagens de sempre.
+//
+// p-184 (loja unica 3.4b, 17/11/2026): a peca PERSONALIZAVEL (is_personalizable
+// com customization_config, services/personalizavel.ehPecaPersonalizada) nao
+// passa por conferirItem: nao confere estoque nem variante, e o preco e o da
+// cotacao do Studio (cotarPersonalizados: opcoes, verso, meio, arte e faixa
+// de quantidade), nunca o da sacola. A peca de prateleira segue aqui como
+// sempre.
 // ============================================================
 'use strict';
 
@@ -25,11 +32,14 @@ const {
 } = require('./precoEfetivo');
 // 14/11/2026: rotulo da variante com o nome da cor (CP2a da revisao de cores).
 const { colunasDoRotulo, aplicarRotulo } = require('./nomeDaCor');
+const { ehPecaPersonalizada, cotarPersonalizados, statusInicialDaArte } = require('./personalizavel');
 
 /**
  * As pecas citadas em `items`, da empresa `cid` e visiveis na vitrine:
  * { productMap, variantMap, productHasVariants }. As consultas sao as que o
- * pedido sempre fez (saidas da rota, sem mudar uma linha do SQL).
+ * pedido sempre fez (saidas da rota). p-184: a de products traz tambem
+ * is_personalizable e customization_config, para separar a peca
+ * personalizada da de prateleira sem outra ida ao banco.
  */
 async function carregarPecas(cid, items) {
   const productIds = items.map(i => i.product_id);
@@ -38,6 +48,7 @@ async function carregarPecas(cid, items) {
   // a vitrine mostra. Base sem a 427: promo nulo, preco normal.
   const { rows: products } = await comColunasPromo((com) => db.query(
     `SELECT id, name, price, stock_qty, image_url, is_active,
+            is_personalizable, customization_config,
             ${com ? colunasPromo() : colunasPromoNulas()}
      FROM products
      WHERE id::text = ANY($1) AND ${listVisibilityWhere('$2')}`,
@@ -131,8 +142,11 @@ function conferirItem(item, { productMap, variantMap, productHasVariants }, agor
  * pedido, com `indice`. `preco` nulo quando nao ha o que mostrar (peca que
  * saiu da loja, variante invalida, loja que esconde os precos).
  */
-function precosDaSacola(items, pecas, { mostrarPrecos = true, agora = new Date() } = {}) {
+function precosDaSacola(items, pecas, { mostrarPrecos = true, agora = new Date(), faixas = null } = {}) {
   return items.map((item, indice) => {
+    if (ehPecaPersonalizada(pecas.productMap[item.product_id])) {
+      return precoDoPersonalizado(item, indice, pecas, { mostrarPrecos, faixas });
+    }
     const r = conferirItem(item, pecas, agora);
     const base = { indice, product_id: item.product_id, variant_id: item.variant_id || null };
     const preco = mostrarPrecos && r.preco != null ? r.preco : null;
@@ -141,4 +155,84 @@ function precosDaSacola(items, pecas, { mostrarPrecos = true, agora = new Date()
   });
 }
 
-module.exports = { carregarPecas, conferirItem, precosDaSacola };
+// ─────────────────────────────────────────────
+// p-184: a peca personalizada no pedido e na sacola
+// ─────────────────────────────────────────────
+
+/** Os indices, em `items`, dos itens de peca personalizada. */
+function indicesPersonalizados(items, { productMap }) {
+  const out = [];
+  items.forEach((item, i) => {
+    if (item && ehPecaPersonalizada(productMap[item.product_id])) out.push(i);
+  });
+  return out;
+}
+
+/**
+ * Cota os itens personalizados do pedido (os de `indices`) pela regra do
+ * Studio. Devolve { linhas: Map(indice -> linha de cotarPersonalizados),
+ * lista: [linhas na ordem] } ou { erro } com a mensagem da vitrine Studio
+ * (ex.: 'Personalizacao de "Caneca": campo "Nome" obrigatorio').
+ */
+function cotarPersonalizadosDoPedido(items, indices, pecas, faixas) {
+  const cot = cotarPersonalizados({
+    items: indices.map((i) => items[i]), produtos: pecas.productMap, faixas,
+  });
+  if (cot.erro) return { erro: cot.erro };
+  return { linhas: new Map(indices.map((i, k) => [i, cot.linhas[k]])), lista: cot.linhas };
+}
+
+/**
+ * A linha de cotarPersonalizados no formato do item do pedido da loja
+ * comum. `unit_price` sem a arte (cobrada uma vez por linha): unit_price x
+ * quantity + arte = subtotal, como na vitrine Studio. Sem variante (o
+ * tamanho e a cor do personalizado vem no customization) e sem promocao
+ * (o preco e o da cotacao). `_art_delta` nao e gravado: e o que o cartao
+ * cobra como item proprio (precoDoStudio.itensParaCobranca).
+ */
+function itemPersonalizado({ produto: p, quantidade, customization, preco }) {
+  return {
+    product_id:        p.id,
+    product_name:      p.name,
+    product_image:     p.image_url,
+    unit_price:        preco.preco_unitario,
+    quantity:          quantidade,
+    subtotal:          preco.total,
+    variant_id:        null,
+    preco_lista:       null,
+    em_promocao:       false,
+    personalizado:     true,
+    customization:     customization || null,
+    art_review_status: statusInicialDaArte(p.customization_config, customization),
+    _art_delta:        preco.arte,
+  };
+}
+
+/**
+ * O registro de POST /sacola/precos para a peca personalizada: o preco
+ * cotado com o customization do item (`preco` = unitario sem a arte,
+ * `subtotal` = a linha inteira, com a arte), `personalizado: true`. Item
+ * que nao passa na cotacao vem com disponivel=false e motivo
+ * 'personalizacao' (o pedido da a mensagem). Nao confere estoque.
+ */
+function precoDoPersonalizado(item, indice, pecas, { mostrarPrecos, faixas }) {
+  const base = { indice, product_id: item.product_id, variant_id: null, personalizado: true };
+  const cot = cotarPersonalizados({ items: [item], produtos: pecas.productMap, faixas: faixas || {} });
+  if (cot.erro) {
+    const p = pecas.productMap[item.product_id];
+    const motivo = p && p.is_active === false ? 'indisponivel' : 'personalizacao';
+    return { ...base, preco: null, subtotal: null, disponivel: false, motivo };
+  }
+  const { preco } = cot.linhas[0];
+  return {
+    ...base,
+    preco: mostrarPrecos ? preco.preco_unitario : null,
+    subtotal: mostrarPrecos ? preco.total : null,
+    disponivel: true,
+  };
+}
+
+module.exports = {
+  carregarPecas, conferirItem, precosDaSacola,
+  indicesPersonalizados, cotarPersonalizadosDoPedido, itemPersonalizado,
+};

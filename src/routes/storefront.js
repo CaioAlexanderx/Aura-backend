@@ -55,13 +55,15 @@ const {
 // personalizados, nao a loja comum. Ver services/vitrineStudioShell.js.
 const {
   ehLojaStudio, montarVitrineStudio, cspDaVitrineStudio, metatagsDaVitrineStudio,
+  // p-182: o personalizador no quadro da loja comum.
+  cspDoQuadro, montarQuadroDoPersonalizador, paginaDoQuadroIndisponivel,
 } = require('../services/vitrineStudioShell');
 // Loja comum que recebe um endereco da vitrine Studio volta para a home
 // pelo mesmo host por onde chegou (BE-1).
 const { caminhoDaHomeDaLoja } = require('../middleware/customDomain');
 // Fotos pelo r2.getaura.com.br em vez do r2.dev (tq-65) — ver o servico.
 const { fotosPeloDominioProprio, fotosPeloDominioProprioNoJson } = require('../services/fotosPeloDominioProprio');
-const { paginaDoCatalogo, facetasDoCatalogo, faixaDePreco } = require('../services/catalogoPaginado');
+const { paginaDoCatalogo, facetasDoCatalogo, faixaDePreco, PERSONALIZAVEL } = require('../services/catalogoPaginado');
 const { normalizarTamanho } = require('../services/tamanhosDaLoja');
 const { generatePix }     = require('../services/pixService');
 // p-85 (427) + p-124: as pecas do pedido e o preco efetivo (De/Por). O mesmo
@@ -76,7 +78,7 @@ const { createMpPixPayment, createMpPreference } = require('../services/mpServic
 const mpGatewaySvc = require('../services/mpGateway');
 const { calculateShippingQuote } = require('../services/shippingQuote');
 // A home da loja sai da memoria por 60 s (10/09/2026).
-const { paginaLembrada, lembrarPagina } = require('../services/cacheDaPaginaDaLoja');
+const { entradaLembrada, lembrarPagina } = require('../services/cacheDaPaginaDaLoja');
 const { COURIER, validateCourierPickup } = require('../services/courierPickup');
 const { lerAtribuicao, gravarAtribuicao } = require('../services/atribuicaoDoPedido');
 const lojaEvents          = require('../services/lojaEvents');
@@ -88,6 +90,11 @@ const pedidoSemPix        = require('../services/pedidoSemPix');
 // Pagar na entrega com forma e troco; pedido espera o aceite (tq-44).
 const pagarNaEntrega      = require('../services/pagarNaEntrega');
 const aceiteDoPedido      = require('../services/aceiteDoPedido');
+// Peca personalizavel no pedido da loja comum (p-184, loja unica 3.4b):
+// a cotacao e as faixas do Studio, a etapa da Fila e o prazo do Pix de 72 h.
+const { carregarFaixas, itensParaCobranca } = require('../services/precoDoStudio');
+const { etapaInicialDoPedido, ETAPA_COM_PERSONALIZACAO, ETAPA_SEM_PERSONALIZACAO } = require('../services/personalizavel');
+const { PRAZO_HORAS_STUDIO } = require('../jobs/lojaPixExpiradoJob');
 // Sentinela: a chave ja tem pedido gravado — desfaz a transacao e responde
 // com o pedido que existe.
 const PEDIDO_REPETIDO     = Symbol('pedido-repetido');
@@ -127,6 +134,17 @@ const STOREFRONT_CSP = [
   "base-uri 'self'",
   "form-action 'self'",
 ].join('; ');
+
+// p-182 (loja unica 3.3b): a loja com peca personalizavel abre o
+// personalizador num quadro servido pelo PROPRIO host da loja
+// (/<slug>/personalizar/<id>, abaixo). `frame-src 'self'` diz isso com
+// todas as letras: hoje o default-src 'self' ja cobre, e a linha segura o
+// quadro se alguem apertar o default-src. So nessa loja: a de quem nao tem
+// personalizavel sai com a CSP de sempre, byte a byte.
+const STOREFRONT_CSP_COM_QUADRO = STOREFRONT_CSP + "; frame-src 'self'";
+function cspDaLoja(data) {
+  return data && data.tem_personalizavel === true ? STOREFRONT_CSP_COM_QUADRO : STOREFRONT_CSP;
+}
 
 router.get('/:slug', async (req, res) => {
   try {
@@ -339,13 +357,14 @@ async function servirPaginaDaLoja(req, res, produtoId, { somenteStudio = false, 
     // montada na hora: o navegador nao distingue.
     const ehHome = !produtoId && !somenteStudio && !String(req.url || '').includes('?');
     if (ehHome) {
-      const guardada = paginaLembrada(slug);
+      // A CSP sai da entrada guardada, a mesma da pagina montada (p-180).
+      const guardada = entradaLembrada(slug);
       if (guardada) {
-        res.setHeader('Content-Security-Policy', STOREFRONT_CSP);
+        res.setHeader('Content-Security-Policy', guardada.csp || STOREFRONT_CSP);
         res.removeHeader('X-Frame-Options');
         res.setHeader('Content-Type', 'text/html; charset=utf-8');
         res.setHeader('X-Aura-Cache', 'hit');
-        return res.send(guardada);
+        return res.send(guardada.html);
       }
     }
     const { rows } = await db.query(
@@ -413,11 +432,15 @@ async function servirPaginaDaLoja(req, res, produtoId, { somenteStudio = false, 
       if (peca) data.produto_inicial = peca;
       else data.produto_ausente = true;
     }
-    res.setHeader('Content-Security-Policy', STOREFRONT_CSP);
+    // A CSP ganha `frame-src 'self'` so na loja com personalizavel (p-182,
+    // o quadro do personalizador). Ela e guardada junto com o HTML (p-180),
+    // para o hit de 60 s responder a mesma da pagina montada.
+    const csp = cspDaLoja(data);
+    res.setHeader('Content-Security-Policy', csp);
     res.removeHeader('X-Frame-Options');
     res.setHeader('Content-Type', 'text/html; charset=utf-8');
     const html = fotosPeloDominioProprio(buildStorefrontPage(data, slug));
-    if (ehHome) { lembrarPagina(slug, html); res.setHeader('X-Aura-Cache', 'miss'); }
+    if (ehHome) { lembrarPagina(slug, html, csp); res.setHeader('X-Aura-Cache', 'miss'); }
     res.send(html);
   } catch (err) {
     console.error('storefront page error:', err);
@@ -430,6 +453,66 @@ router.get('/:slug/page', (req, res) => servirPaginaDaLoja(req, res, null));
 // aqui pelo middleware de dominio (customDomain.js) sem regra nova: ele
 // so cola o caminho que sobrou depois do slug.
 router.get('/:slug/p/:id', (req, res) => servirPaginaDaLoja(req, res, req.params.id));
+
+/**
+ * O personalizador no quadro da loja comum (p-182, loja unica 3.3b).
+ *
+ * A loja com peca personalizavel abre esta pagina num iframe quando a
+ * cliente toca em "Personalizar" (parts/quadro.js). E a casca do app (a
+ * mesma da vitrine Studio), servida pelo host da loja: a rota do app
+ * `/[slug]/personalizar/[id]` (p-181, app#1300) desenha so o personalizador
+ * e conversa com a loja por postMessage, na mesma origem.
+ *
+ *   loja.getaura.com.br/<slug>/personalizar/<id> -> aqui (middleware de dominio)
+ *   www.dominio-proprio/personalizar/<id>         -> aqui (idem)
+ *
+ * So abre para loja publicada e peca personalizavel dela (a mesma regra da
+ * grade, catalogoPaginado PERSONALIZAVEL). O resto recebe a pagina de
+ * falha, com a marca que a loja le para oferecer o WhatsApp. Nunca
+ * indexada, nunca guardada no navegador, e so a propria loja enquadra.
+ */
+const UUID_DA_PECA = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+async function servirQuadroDoPersonalizador(req, res) {
+  const responder = (status, html) => {
+    res.setHeader('Content-Security-Policy', cspDoQuadro(STOREFRONT_API_BASE));
+    res.removeHeader('X-Frame-Options');
+    res.setHeader('Content-Type', 'text/html; charset=utf-8');
+    res.setHeader('Cache-Control', 'no-store');
+    res.setHeader('X-Robots-Tag', 'noindex, nofollow');
+    return res.status(status).send(html);
+  };
+  try {
+    const slug = String(req.params.slug || '').toLowerCase().trim();
+    const id = String(req.params.id || '').trim();
+    if (!slug || !UUID_DA_PECA.test(id)) return responder(404, paginaDoQuadroIndisponivel());
+    const { rows: lojas } = await db.query(
+      `SELECT company_id FROM digital_channel_config WHERE slug = $1 AND is_published = true`, [slug]);
+    if (!lojas.length) return responder(404, paginaDoQuadroIndisponivel());
+    const { rows: pecas } = await db.query(
+      `SELECT 1 FROM products
+        WHERE ${listVisibilityWhere('$1')}
+          AND id = $2
+          AND is_active IS NOT FALSE
+          AND ${PERSONALIZAVEL}
+        LIMIT 1`, [lojas[0].company_id, id]);
+    if (!pecas.length) return responder(404, paginaDoQuadroIndisponivel());
+    const forcarCasca = typeof req.query._casca === 'string' && req.query._casca !== '';
+    const pagina = await montarQuadroDoPersonalizador(slug, id, { forcarCasca });
+    if (!pagina) return responder(503, paginaDoQuadroIndisponivel());
+    return responder(200, pagina);
+  } catch (err) {
+    console.error('[storefront] quadro do personalizador:', err.message);
+    return responder(500, paginaDoQuadroIndisponivel());
+  }
+}
+router.get('/:slug/personalizar/:id', servirQuadroDoPersonalizador);
+// O quadro recarregado no dominio proprio: a barra do quadro virou
+// /<slug>/personalizar/<id> (scriptDoCaminhoDoQuadro) e o middleware poe o
+// slug na frente de novo. So quando os dois slugs sao o mesmo.
+router.get('/:slug/:repetido/personalizar/:id', (req, res, next) => {
+  if (String(req.params.repetido).toLowerCase() !== String(req.params.slug).toLowerCase()) return next();
+  return servirQuadroDoPersonalizador(req, res);
+});
 
 /**
  * As paginas da vitrine Studio nova (BE-1, 25/09/2026).
@@ -579,6 +662,8 @@ router.post('/:slug/sacola/precos', async (req, res) => {
     product_id: i && i.product_id != null ? String(i.product_id) : '',
     variant_id: i && i.variant_id ? String(i.variant_id) : null,
     quantity:   Math.max(1, parseInt(i && i.quantity, 10) || 1),
+    // p-184: so a peca personalizada le (a cotacao depende da escolha).
+    customization: i && i.customization,
   }));
   // Id malformado derrubaria o ANY($1::uuid[]) da consulta inteira: fica de
   // fora da consulta e volta como peca nao encontrada.
@@ -598,15 +683,77 @@ router.post('/:slug/sacola/precos', async (req, res) => {
     const pecas = consultaveis.length
       ? await itensDoPedido.carregarPecas(config.company_id, consultaveis)
       : { productMap: {}, variantMap: {}, productHasVariants: {} };
+    // p-184: faixas de quantidade do Studio so quando ha peca personalizada.
+    const faixas = itensDoPedido.indicesPersonalizados(itens, pecas).length
+      ? await carregarFaixas(db, config.company_id)
+      : null;
     res.set('Cache-Control', 'no-store');
     res.json({
-      itens: itensDoPedido.precosDaSacola(itens, pecas, { mostrarPrecos: config.show_prices !== false }),
+      itens: itensDoPedido.precosDaSacola(itens, pecas, { mostrarPrecos: config.show_prices !== false, faixas }),
     });
   } catch (err) {
     console.error('[storefront] precos da sacola:', err && err.message);
     res.status(500).json({ error: 'Erro ao conferir os precos' });
   }
 });
+
+// ─────────────────────────────────────────────
+// POST /storefront/:slug/order — contrato do item personalizado (p-184)
+//
+// O corpo e o de sempre. O item de peca personalizavel (is_personalizable
+// com customization_config) leva o `customization` da escolha da cliente:
+//
+//   items: [
+//     { product_id, variant_id?, quantity },                 // prateleira
+//     { product_id, quantity, customization: { ... } },      // personalizado
+//   ]
+//
+//   - customization: o MESMO objeto plano { [field.id]: valor } que o
+//     personalizador da vitrine Studio manda ao POST /studio/order (texto,
+//     URL da arte enviada pelo upload, opcoes, art_service, has_back_selected,
+//     has_middle_selected, <campo>_ajuste/_fonte/_tam/_contorno). Validado
+//     contra o customization_config pela regra unica
+//     (services/personalizavel.js); recusa = 400 com a mensagem da vitrine
+//     Studio, ex.: 'Personalizacao de "Caneca": campo "Nome" obrigatorio'.
+//     Ausente ou nulo = 'customization obrigatoria'.
+//   - quantity: inteiro >= 1 (parseInt; vazio vira 1). A faixa de quantidade
+//     do Studio vale por linha.
+//   - variant_id: ignorado no personalizado (tamanho e cor vem no
+//     customization). Estoque nao e conferido.
+//   - preco: sempre do servidor (cotacao com opcoes, verso, meio, arte e
+//     faixa). O desconto do Pix da loja vale sobre o subtotal inteiro.
+//   - Sem sinal (D11): o pedido e pago inteiro.
+//
+// Resposta, so quando ha personalizado (a do so de prateleira nao muda):
+//   personalizado: true, studio_production_status: 'pending_art' |
+//   'awaiting_customization', e em `itens` a linha personalizada com
+//   { product_id, variant_id: null, unit_price, subtotal, personalizado: true }
+//   (unit_price sem a arte; subtotal = unit_price x quantity + arte).
+//   O Pix vale 72 h (pix.expires_at no Mercado Pago; Pix manual sem data).
+//
+// POST /sacola/precos aceita o mesmo item (com customization) e devolve
+// { indice, product_id, variant_id: null, personalizado: true, preco,
+//   subtotal, disponivel, motivo? } — motivo 'personalizacao' quando a
+// escolha nao passa na validacao.
+// ─────────────────────────────────────────────
+
+/**
+ * p-184: os itens do cartao de um pedido com personalizado, relidos do
+ * banco (repeticao do toque sem a resposta guardada). A arte cobrada uma
+ * vez por linha (subtotal - unit_price x quantity) volta a ser item
+ * proprio, como no pedido novo (precoDoStudio.itensParaCobranca).
+ */
+async function itensDoCartaoComArte(orderId) {
+  const { rows } = await db.query(
+    `SELECT product_id, variant_id, quantity, product_name, unit_price, subtotal
+       FROM digital_order_items WHERE order_id = $1`,
+    [orderId]
+  );
+  return itensParaCobranca(rows.map((r) => {
+    const arte = Math.round((Number(r.subtotal) - Number(r.unit_price) * Number(r.quantity)) * 100) / 100;
+    return { ...r, _art_delta: arte > 0 ? arte : 0 };
+  }));
+}
 
 router.post('/:slug/order', async (req, res) => {
   const slug = req.params.slug.toLowerCase().trim();
@@ -692,7 +839,11 @@ router.post('/:slug/order', async (req, res) => {
       companyId: cid, key: idemKey, itens: items,
       remontarCartao: hasMpGateway
         ? async (pedido, itensGravados) => {
-          const c = await criarCartao(pedido, itensGravados, {
+          // p-184: pedido com personalizado cobra a arte como item proprio.
+          const itensDoCartao = pedido.vertical === 'studio'
+            ? await itensDoCartaoComArte(pedido.id)
+            : itensGravados;
+          const c = await criarCartao(pedido, itensDoCartao, {
             email: pedido.customer_email, cpf: pedido.customer_cpf_cnpj,
           });
           return { init_point: c.init_point, preference_id: c.preference_id };
@@ -797,10 +948,35 @@ router.post('/:slug/order', async (req, res) => {
     // de services/precoEfetivo.js. Base sem a 427: promo nulo, preco normal.
     const pecas = await itensDoPedido.carregarPecas(cid, items);
 
+    // p-184 (loja unica 3.4b): a peca personalizavel (is_personalizable com
+    // customization_config) vai pela cotacao do Studio, com o customization
+    // validado e limpo (services/personalizavel.js). Nao confere estoque nem
+    // variante. Pedido com ao menos uma vira pedido da Fila: vertical
+    // 'studio', etapa inicial, Pix de 72 h (D10) e sem sinal (D11: paga
+    // inteiro). O item de prateleira do mesmo pedido continua conferindo
+    // estoque aqui e baixando na confirmacao. Pedido so de prateleira: nada
+    // muda (__tests__/pedidoDaLojaSoPrateleira.paridade.test.js).
+    const indicesPers = itensDoPedido.indicesPersonalizados(items, pecas);
+    let personalizados = null;
+    if (indicesPers.length) {
+      const faixas = await carregarFaixas(db, cid);
+      personalizados = itensDoPedido.cotarPersonalizadosDoPedido(items, indicesPers, pecas, faixas);
+      if (personalizados.erro) return res.status(400).json({ error: personalizados.erro });
+    }
+    const temPersonalizado = !!personalizados;
+    const etapaDaFila = temPersonalizado ? etapaInicialDoPedido(personalizados.lista) : null;
+
     const orderItems = [];
     let subtotal = 0;
 
-    for (const item of items) {
+    for (const [indice, item] of items.entries()) {
+      const linhaPers = temPersonalizado ? personalizados.linhas.get(indice) : null;
+      if (linhaPers) {
+        const itemPers = itensDoPedido.itemPersonalizado(linhaPers);
+        subtotal += itemPers.subtotal;
+        orderItems.push(itemPers);
+        continue;
+      }
       const agora = new Date();
       const conferido = itensDoPedido.conferirItem(item, pecas, agora);
       if (conferido.erro) return res.status(400).json({ error: conferido.erro });
@@ -908,7 +1084,7 @@ router.post('/:slug/order', async (req, res) => {
           customer_cpf_cnpj, nfce_requested,
           address_zip, address_street, address_number, address_complement,
           address_neighborhood, address_city, address_state,
-          courier_name, courier_plate${comDesconto ? ', discount_amount, discount_reason' : ''}${idemKey ? ', idempotency_key' : ''}${naEntrega ? ', pay_on_delivery_method, change_for' : ''}
+          courier_name, courier_plate${comDesconto ? ', discount_amount, discount_reason' : ''}${idemKey ? ', idempotency_key' : ''}${naEntrega ? ', pay_on_delivery_method, change_for' : ''}${temPersonalizado ? ', vertical, studio_production_status' : ''}
         ) VALUES (
           $1, next_digital_order_number($1), $2, $3, $4,
           $5, $6, $7, $8, $9,
@@ -917,7 +1093,7 @@ router.post('/:slug/order', async (req, res) => {
           $14, $15,
           $16, $17, $18, $19,
           $20, $21, $22,
-          $23, $24${comDesconto ? ', $25, $26' : ''}${idemKey ? (comDesconto ? ', $27' : ', $25') : ''}${naEntrega ? colunasNaEntrega(comDesconto) : ''}
+          $23, $24${comDesconto ? ', $25, $26' : ''}${idemKey ? (comDesconto ? ', $27' : ', $25') : ''}${naEntrega ? colunasNaEntrega(comDesconto) : ''}${temPersonalizado ? colunasDaFila() : ''}
         ) RETURNING *
       `, [
         cid, customer_name, customer_phone, customer_email || null,
@@ -938,6 +1114,15 @@ router.post('/:slug/order', async (req, res) => {
         const n = 24 + (comDesc ? 2 : 0) + (idemKey ? 1 : 0);
         return `, $${n + 1}, $${n + 2}`;
       }
+      // p-184: o pedido com peca personalizada entra na Fila. Literais (e nao
+      // parametros) para nao renumerar os de cima; a etapa sai de um
+      // conjunto fechado, nunca do corpo.
+      function colunasDaFila() {
+        if (etapaDaFila !== ETAPA_COM_PERSONALIZACAO && etapaDaFila !== ETAPA_SEM_PERSONALIZACAO) {
+          throw new Error(`etapa da Fila invalida: ${etapaDaFila}`);
+        }
+        return `, 'studio', '${etapaDaFila}'`;
+      }
       let newOrder;
       try {
         ({ rows: [newOrder] } = await insertPedido(true));
@@ -955,6 +1140,23 @@ router.post('/:slug/order', async (req, res) => {
       // transacao, guardada no processo).
       const comMarcacao = await vendaNaPromocao.colunasDoPedidoPresentes((sql, p) => client.query(sql, p));
       for (const item of orderItems) {
+        // p-184: o item personalizado grava o customization e a triagem da
+        // arte. O de prateleira grava o INSERT de sempre (abaixo).
+        if (item.personalizado) {
+          const marca = comMarcacao ? ', preco_lista, em_promocao' : '';
+          const n = comMarcacao ? 10 : 8;
+          await client.query(`
+            INSERT INTO digital_order_items
+              (order_id, product_id, product_name, product_image, unit_price, quantity, subtotal, variant_id${marca},
+               customization, art_review_status)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8${comMarcacao ? ', $9, $10' : ''}, $${n + 1}::jsonb, $${n + 2})
+          `, [order.id, item.product_id, item.product_name, item.product_image,
+              item.unit_price, item.quantity, item.subtotal, null,
+              ...(comMarcacao ? [item.preco_lista, item.em_promocao] : []),
+              item.customization ? JSON.stringify(item.customization) : null,
+              item.art_review_status || null]);
+          continue;
+        }
         if (comMarcacao) {
           await client.query(`
             INSERT INTO digital_order_items
@@ -1015,6 +1217,9 @@ router.post('/:slug/order', async (req, res) => {
               orderNumber:   order.order_number,
               customerEmail: customer_email || null,
               description:   `Pedido #${order.order_number}`,
+              // p-184 (D10): o Pix do pedido com personalizado vale o prazo
+              // do cancelamento (72 h). O so de prateleira segue nas 24 h.
+              ...(temPersonalizado ? { horasDeValidade: PRAZO_HORAS_STUDIO } : {}),
             });
             await db.query(
               `UPDATE digital_orders SET mp_payment_id = $1, updated_at = NOW() WHERE id = $2`,
@@ -1060,7 +1265,10 @@ router.post('/:slug/order', async (req, res) => {
     let cardData = null;
     if (pmethod === 'card') {
       try {
-        cardData = await criarCartao(order, orderItems, { email: customer_email, cpf: cpfNorm });
+        // p-184: a arte cobrada por linha vira item proprio, como na vitrine
+        // Studio (sem isso o cartao cobraria so unit_price x quantidade).
+        cardData = await criarCartao(order, temPersonalizado ? itensParaCobranca(orderItems) : orderItems,
+          { email: customer_email, cpf: cpfNorm });
       } catch (mpErr) {
         console.error('[storefront] MP Preference error:', mpErr.message);
         return res.status(500).json({ error: 'Erro ao criar preferencia de pagamento. Tente novamente.' });
@@ -1108,9 +1316,11 @@ router.post('/:slug/order', async (req, res) => {
       shipping:       shippingMeta,
       // p-124: o preco que cada item saiu, na ordem do corpo. A vitrine
       // acerta a sacola por ele: o resumo ao lado do QR e o que o Pix cobra.
-      itens:          orderItems.map((i) => ({
-        product_id: i.product_id, variant_id: i.variant_id || null, unit_price: i.unit_price,
-      })),
+      itens:          orderItems.map((i) => (i.personalizado
+        // p-184: no personalizado, a linha inteira (com a arte) e a marca.
+        ? { product_id: i.product_id, variant_id: null, unit_price: i.unit_price,
+          subtotal: i.subtotal, personalizado: true }
+        : { product_id: i.product_id, variant_id: i.variant_id || null, unit_price: i.unit_price })),
       // A tela de pedido concluido repete o aviso com o que o SERVIDOR viu:
       // a loja pode ter fechado com a pagina aberta.
       loja_fechada:   !horario.is_open_now,
@@ -1126,6 +1336,13 @@ router.post('/:slug/order', async (req, res) => {
         preference_id: cardData.preference_id,
       } : null,
     };
+    // p-184: so no pedido com personalizado — a resposta do de prateleira
+    // nao muda. A vitrine mostra "seu pedido entra na producao" e o prazo
+    // do Pix vem em pix.expires_at.
+    if (temPersonalizado) {
+      corpo.personalizado = true;
+      corpo.studio_production_status = etapaDaFila;
+    }
     // tq-44: so no fluxo com aceite — a resposta das outras lojas nao muda.
     if (naEntrega) {
       corpo.na_entrega = {

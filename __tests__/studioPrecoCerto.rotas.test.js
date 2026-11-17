@@ -19,6 +19,7 @@
 jest.mock('../src/services/cacheDaPaginaDaLoja', () => ({
   esquecerPagina: jest.fn(),
   paginaLembrada: jest.fn(),
+  entradaLembrada: jest.fn(),
   lembrarPagina: jest.fn(),
 }));
 

@@ -30,6 +30,7 @@ const AppError = require('../errors/AppError');
 const {
   setCompanyVertical, canHaveStudio, studioPlanError, applySegment, isValidSegment, SEGMENTS,
 } = require('../services/segment');
+const { casaLigadaNoBanco } = require('../services/casaNegocio');
 
 const adminOnly = [requireAuth, requireRole('admin')];
 
@@ -72,6 +73,16 @@ router.patch('/clients/:cid/vertical', ...adminOnly, asyncHandler(async (req, re
   if (vertical === 'studio' && !canHaveStudio(existing[0].plan)) {
     const err = studioPlanError(existing[0].plan);
     return res.status(409).json({ error: err.message, code: err.code });
+  }
+
+  // 17/11/2026 (p-189): empresa com a casa no Negocio ligada nao volta ao
+  // Studio por aqui (a chave ficaria ligada com a vertical gravada). A volta
+  // e pela propria casa: PATCH /admin/clients/:cid/casa-negocio.
+  if (vertical === 'studio' && await casaLigadaNoBanco(pool, cid)) {
+    return res.status(409).json({
+      error: 'Esta empresa está com a casa no Negócio. Para voltar ao Studio, desligue a casa.',
+      code: 'CASA_LIGADA',
+    });
   }
 
   // Atualiza vertical_active + timestamp de ativacao e sincroniza o toggle

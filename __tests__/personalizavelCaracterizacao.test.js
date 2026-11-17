@@ -443,8 +443,12 @@ describe('3. services/personalizavel.js', () => {
   });
 
   test('a API exportada e so esta', () => {
+    // p-184: a peca personalizada, a etapa inicial do pedido online e o
+    // temPersonalizacao (saido da rota do p-177) entraram no modulo.
     expect(Object.keys(svc).sort()).toEqual([
-      'cotarPersonalizados', 'prepararPersonalizacao', 'statusInicialDaArte',
+      'ETAPA_COM_PERSONALIZACAO', 'ETAPA_SEM_PERSONALIZACAO',
+      'cotarPersonalizados', 'ehPecaPersonalizada', 'etapaInicialDoPedido', 'prepararPersonalizacao',
+      'statusInicialDaArte', 'temPersonalizacao',
       'validarPersonalizacao', 'validateCustomizationValues',
     ]);
   });

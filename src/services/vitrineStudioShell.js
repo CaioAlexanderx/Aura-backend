@@ -467,6 +467,62 @@ function cspDaVitrineStudio(baseDaApi) {
   ].join('; ');
 }
 
+// ── O PERSONALIZADOR NO QUADRO DA LOJA COMUM (p-182, 17/11/2026) ───────
+// A loja comum com peca personalizavel abre o personalizador do app num
+// quadro (iframe) quando a cliente toca em "Personalizar". O quadro e a
+// MESMA casca do app, servida pelo PROPRIO host da loja
+// (`<host da loja>/<slug>/personalizar/<id>`), e nao por app.getaura.com.br:
+//   - mesma origem: a loja precisa so de `frame-src 'self'` e confere as
+//     mensagens contra `location.origin`;
+//   - dominio proprio funciona sem cabecalho por loja no app (o `_headers`
+//     do app e estatico e so deixa enquadrar por loja.getaura.com.br);
+//   - `frame-ancestors 'self'`: so a propria loja enquadra o quadro.
+// O contrato das mensagens esta no app, em
+// components/studio/storefront/quadro/mensagensDoQuadro.ts (p-181).
+
+/** Marca da pagina de falha do quadro: a loja le e mostra a saida. */
+const MARCA_QUADRO_INDISPONIVEL = '<meta name="aura-quadro" content="indisponivel">';
+
+/** A CSP da vitrine Studio, com o enquadramento so pela propria loja. */
+function cspDoQuadro(baseDaApi) {
+  return cspDaVitrineStudio(baseDaApi).replace('frame-ancestors *', "frame-ancestors 'self'");
+}
+
+/**
+ * O roteador do app casa `/<slug>/personalizar/<id>`. No dominio proprio a
+ * loja pede `/personalizar/<id>` (o middleware de dominio poe o slug); no
+ * host da API, `/api/v1/storefront/<slug>/personalizar/<id>`. Antes do
+ * bundle rodar, a barra de endereco do quadro (que ninguem ve) passa a ser
+ * a que o app conhece. A volta (recarregar o quadro no dominio proprio)
+ * chega como `/<slug>/<slug>/personalizar/<id>` e tem rota (storefront.js).
+ */
+function scriptDoCaminhoDoQuadro(slug, produtoId) {
+  const caminho = JSON.stringify(`/${encodeURIComponent(String(slug))}/personalizar/${encodeURIComponent(String(produtoId))}`);
+  return '<script>(function(){try{var w=' + caminho + ';'
+    + "if(location.pathname!==w)history.replaceState(history.state,'',w+location.search+location.hash);"
+    + '}catch(e){}})();</script>';
+}
+
+/**
+ * A pagina do quadro: a casca do app com o recado da loja, sem indexacao.
+ * null quando o app nao responde (a rota responde a pagina de falha).
+ */
+async function montarQuadroDoPersonalizador(slug, produtoId, { forcarCasca = false } = {}) {
+  const cabecalho = '<title>Personalizar</title>\n<meta name="robots" content="noindex">';
+  const pagina = await montarVitrineStudio(slug, cabecalho, { forcarCasca });
+  if (!pagina) return null;
+  return pagina.replace('</head>', () => scriptDoCaminhoDoQuadro(slug, produtoId) + '</head>');
+}
+
+/** A pagina que o quadro mostra quando nao da para abrir o personalizador. */
+function paginaDoQuadroIndisponivel() {
+  return '<!doctype html><html lang="pt-BR"><head><meta charset="utf-8">'
+    + '<meta name="viewport" content="width=device-width,initial-scale=1">'
+    + MARCA_QUADRO_INDISPONIVEL + '<meta name="robots" content="noindex"><title>Personalizar</title></head>'
+    + '<body style="font-family:system-ui,sans-serif;padding:24px;text-align:center">'
+    + '<p>Não deu para abrir o personalizador agora.</p></body></html>';
+}
+
 /** So para teste: esquece a casca guardada e o limite da busca forcada. */
 function limparCache() {
   _cache = null; _atualizando = null; _validando = null; _ultimaForcada = 0;
@@ -491,4 +547,7 @@ module.exports = {
   buscarCasca, entryDaCasca, conferirEntry, scriptDeAutocura,
   VALIDADE_MS, VALIDACAO_MS, INTERVALO_FORCADA_MS, CAMINHO_DO_ENTRY,
   limparCache, _esperarAtualizacao,
+  // O personalizador no quadro da loja comum (p-182).
+  cspDoQuadro, montarQuadroDoPersonalizador, scriptDoCaminhoDoQuadro,
+  paginaDoQuadroIndisponivel, MARCA_QUADRO_INDISPONIVEL,
 };

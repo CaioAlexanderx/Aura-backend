@@ -42,9 +42,32 @@ const LIMITE_MAXIMO = 60;
  *
  * A regra e a de montarProdutoPublico: com variante ativa, basta uma com
  * saldo; sem variante, o saldo do proprio produto.
+ *
+ * EXCECAO (p-179, loja unica 3.2a, 17/11/2026): o produto PERSONALIZAVEL
+ * (fragmento abaixo) nao passa pelo estoque. Ele e feito sob encomenda e
+ * quase sempre tem saldo 0; sem a excecao ele sumiria da grade, da home,
+ * da arvore, da contagem e da URL propria da loja comum. Para todos os
+ * outros produtos a regra e a de sempre: o primeiro ramo e falso para
+ * quem nao e personalizavel, e o CASE decide como antes. A loja sem
+ * personalizavel sai byte a byte igual
+ * (__tests__/lojaSemPersonalizavel.fixture.test.js).
  */
+const PERSONALIZAVEL = `(
+  products.is_personalizable IS TRUE
+  AND products.customization_config IS NOT NULL
+)`;
+
+/**
+ * A coluna `personalizavel` das consultas que montam o cartao (p-180): o
+ * builder so poe `personalizavel: true` no produto quando ela vem
+ * verdadeira. Para quem nao e personalizavel a chave nao existe e o
+ * payload sai como antes.
+ */
+const COLUNA_PERSONALIZAVEL = `${PERSONALIZAVEL} AS personalizavel`;
+
 const EM_ESTOQUE = `(
-  CASE WHEN EXISTS (
+  ${PERSONALIZAVEL}
+  OR CASE WHEN EXISTS (
     SELECT 1 FROM product_variants v
      WHERE v.product_id = products.id AND v.is_active = true
   )
@@ -374,7 +397,8 @@ async function paginaDoCatalogo({
   // p-85 (427): promo_* para o De/Por da vitrine (montarProdutoPublico).
   const { rows: produtos } = await comColunasPromo((com) => bd().query(
     `SELECT id, name, description, price, image_url, image_thumb_url, gallery_urls, category, stock_qty, created_at,
-            material, medidas, cuidados, duration_minutes, ${com ? colunasPromo() : colunasPromoNulas()}
+            material, medidas, cuidados, duration_minutes, ${com ? colunasPromo() : colunasPromoNulas()},
+            ${COLUNA_PERSONALIZAVEL}
      FROM products
      WHERE ${where}
      ORDER BY ${ordenacao}
@@ -699,7 +723,7 @@ function janelaDePaginas(atual, totalPaginas, vizinhas = 1) {
 }
 
 module.exports = {
-  POR_PAGINA, LIMITE_MAXIMO, EM_ESTOQUE, COM_FOTO, NA_VITRINE, filtroDeFoto, EM_PROMOCAO_NO_AR, PRECO_NA_VITRINE,
+  POR_PAGINA, LIMITE_MAXIMO, EM_ESTOQUE, PERSONALIZAVEL, COLUNA_PERSONALIZAVEL, COM_FOTO, NA_VITRINE, filtroDeFoto, EM_PROMOCAO_NO_AR, PRECO_NA_VITRINE,
   JANELA_DE_VENDAS_DIAS, VENDIDOS_RECENTES,
   arvoreDeCategorias, facetasDoCatalogo, faixaDePreco, condicaoDeCategoria,
   paginaDoCatalogo, contarPorCategoria, janelaDePaginas, normalizar, ordemSql,
