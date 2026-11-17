@@ -25,7 +25,10 @@
 const router = require('express').Router({ mergeParams: true });
 const db = require('../config/database');
 const { onlyDigits, isValidCnpj } = require('../utils/cnpj');
-const { companyGroupWhere } = require('../utils/companyGroup');
+const { companyGroupWhere, productVisibilityWhere } = require('../utils/companyGroup');
+
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const semTabela = (err) => err && (err.code === '42P01' || err.code === '42703');
 
 function limpar(v, max) {
   if (v === undefined || v === null) return null;
@@ -244,14 +247,25 @@ router.get('/', async (req, res) => {
       }
     }
 
+    // 17/11/2026 (B3): last_delivery_at = última entrada de mercadoria
+    // daquele fornecedor NESTA loja ("Mais usados" do Chegou mercadoria).
+    // Uma passada só nos movimentos da loja, não uma por fornecedor.
     const { rows } = await db.query(
       `SELECT s.id, s.company_id, s.name, s.cnpj, s.contact_name, s.phone, s.email,
               s.notes, s.is_active, s.created_at, s.updated_at,
               COALESCE((
                 SELECT COUNT(*)::int FROM products p
                 WHERE p.supplier_id = s.id AND p.is_active = true
-              ), 0) AS product_count
+              ), 0) AS product_count,
+              ld.last_delivery_at
        FROM suppliers s
+       LEFT JOIN (
+         SELECT sm.supplier_id, MAX(sm.created_at) AS last_delivery_at
+           FROM stock_movements sm
+          WHERE sm.company_id = $1 AND sm.type = 'in' AND sm.reference_type = 'entrada'
+            AND sm.supplier_id IS NOT NULL
+          GROUP BY sm.supplier_id
+       ) ld ON ld.supplier_id = s.id
        ${where}
        ORDER BY s.name ASC`,
       params
@@ -261,6 +275,47 @@ router.get('/', async (req, res) => {
   } catch (err) {
     console.error('[suppliers] list error:', err.message);
     res.status(500).json({ error: 'Erro ao listar fornecedores' });
+  }
+});
+
+// ─── GET /:sid/codes — código do fornecedor -> produto (B3, 17/11/2026) ──
+// "Chegou mercadoria": a linha da nota acha o produto pelo código que o
+// fornecedor usa (cProd), guardado em product_suppliers.supplier_code.
+// Só produtos visíveis para a loja (regra única de visibilidade).
+// `map`: código -> product_id (com dois produtos no mesmo código, o
+// primeiro pelo nome; `items` traz todos).
+router.get('/:sid/codes', async (req, res) => {
+  const cid = req.params.id;
+  const sid = req.params.sid;
+  if (!UUID.test(sid)) return res.status(404).json({ error: 'Fornecedor nao encontrado' });
+  try {
+    const { rows: sup } = await db.query(
+      `SELECT id FROM suppliers WHERE id = $1 AND ${companyGroupWhere('$2')}`,
+      [sid, cid]
+    );
+    if (!sup.length) return res.status(404).json({ error: 'Fornecedor nao encontrado' });
+    let items = [];
+    try {
+      const { rows } = await db.query(
+        `SELECT ps.supplier_code, p.id AS product_id, p.name AS product_name, p.barcode, p.sku
+           FROM product_suppliers ps
+           JOIN products p ON p.id = ps.product_id
+          WHERE ps.supplier_id = $1 AND ps.supplier_code IS NOT NULL AND ps.supplier_code <> ''
+            AND ${productVisibilityWhere('$2', 'p.')}
+          ORDER BY ps.supplier_code, lower(p.name)`,
+        [sid, cid]
+      );
+      items = rows;
+    } catch (err) {
+      if (!semTabela(err)) throw err;
+      return res.json({ supplier_id: sid, items: [], map: {}, indisponivel: true });
+    }
+    const map = {};
+    for (const r of items) if (!(r.supplier_code in map)) map[r.supplier_code] = r.product_id;
+    res.json({ supplier_id: sid, items, map });
+  } catch (err) {
+    console.error('[suppliers] codes error:', err.message);
+    res.status(500).json({ error: 'Erro ao buscar os codigos do fornecedor' });
   }
 });
 
@@ -295,10 +350,32 @@ router.get('/:sid', async (req, res) => {
       [sid]
     );
 
+    // 17/11/2026 (B3): todos os produtos ligados a este fornecedor pela
+    // lista de fornecedores do produto (product_suppliers, migration 424),
+    // principal ou não, visíveis para a loja, com a última compra.
+    // `products` (só onde ele é o principal) fica como estava.
+    let ligados = [];
+    try {
+      const { rows } = await db.query(
+        `SELECT p.id, p.name, p.sku, p.barcode, p.stock_qty, p.is_active,
+                ps.cost, ps.supplier_code, ps.is_main, ps.last_purchase_at
+           FROM product_suppliers ps
+           JOIN products p ON p.id = ps.product_id
+          WHERE ps.supplier_id = $1 AND ${productVisibilityWhere('$2', 'p.')}
+          ORDER BY ps.last_purchase_at DESC NULLS LAST, lower(p.name)
+          LIMIT 500`,
+        [sid, cid]
+      );
+      ligados = rows;
+    } catch (err) {
+      if (!semTabela(err)) throw err;
+    }
+
     res.json({
       ...supplier,
       product_count: produtos.length,
       products: produtos,
+      linked_products: ligados,
       recent_stock_movements: movimentos,
     });
   } catch (err) {
