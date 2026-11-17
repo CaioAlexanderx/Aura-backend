@@ -62,6 +62,7 @@ const R = require('../src/services/resultadoDoPeriodo');
 async function limpar() {
   const passos = [
     [`DELETE FROM transactions WHERE company_id = ANY($1)`, [EMPRESAS]],
+    [`DELETE FROM finance_categories WHERE company_id = ANY($1)`, [EMPRESAS]],
     [`DELETE FROM studio_payments WHERE company_id = ANY($1)`, [EMPRESAS]],
     [`DELETE FROM sale_items WHERE sale_id IN (SELECT id FROM sales WHERE company_id = ANY($1))`, [EMPRESAS]],
     [`DELETE FROM sales WHERE company_id = ANY($1)`, [EMPRESAS]],
@@ -444,6 +445,36 @@ describe('POST /pedidos/:oid/sinal', () => {
     const r = await sinal(oid, { amount: 10, method: 'pix' });
     expect(r.status).toBe(404);
     expect(Object.keys(await lancamentosDoPedido(oid))).toEqual(['pedido-areceber']);
+  });
+});
+
+describe('categorias vivas: o script de migracao (aplicarMigracao) nos lancamentos do pedido', () => {
+  test('"Sinal de pedido" e "Pedido a receber" ligam a Vendas; "Devolução de sinal" nao liga a nada nem vira categoria', async () => {
+    await zerarFinanceiro();
+    const r = await guardar({ items: ITENS_CELIA, sinal: { amount: 100, method: 'pix' } });
+    expect(r.status).toBe(201);
+    // A devolucao do B6, como ele grava.
+    await q(`INSERT INTO transactions (company_id, type, status, amount, description, category, due_date, paid_at, idempotency_key)
+             VALUES ($1, 'expense', 'confirmed', 100, 'Devolução do sinal', 'Devolução de sinal', $2::date, NOW(), $3)`,
+      [ID.loja, hoje, `pedido-devolucao-${r.body.order.id}`]);
+    const cat = require('../src/services/financeCategories');
+    const plano = await cat.planejarMigracao(ID.loja);
+    expect(plano.ligar.find((l) => /sinal de pedido/i.test(l.texto))).toMatchObject({ categoria: 'Vendas' });
+    expect(plano.ligar.find((l) => /devolu/i.test(l.texto))).toBeUndefined();
+    expect(plano.criar.find((c) => /devolu/i.test(c.name))).toBeUndefined();
+
+    await cat.aplicarMigracao(ID.loja);
+    const { rows } = await q(
+      `SELECT t.category, f.name AS categoria, f.dre_line
+         FROM transactions t LEFT JOIN finance_categories f ON f.id = t.category_id
+        WHERE t.idempotency_key LIKE $1 ORDER BY t.category`, [`pedido-%${r.body.order.id}`]);
+    expect(rows).toEqual([
+      { category: 'Devolução de sinal', categoria: null, dre_line: null },
+      { category: 'Pedido a receber', categoria: 'Vendas', dre_line: 'receita_vendas' },
+      { category: 'Sinal de pedido', categoria: 'Vendas', dre_line: 'receita_vendas' },
+    ]);
+    const { rows: novas } = await q(`SELECT name FROM finance_categories WHERE company_id = $1 AND name_norm LIKE 'devolu%'`, [ID.loja]);
+    expect(novas.map((x) => x.name)).toEqual([]);
   });
 });
 
