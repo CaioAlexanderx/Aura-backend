@@ -103,6 +103,9 @@ const nfseAutomaticaRepo = require('../services/nfseAutomaticaRepo');
 const { prazoDoValeEmDias } = require('../utils/valeTrocaPrazo');
 // 17/11/2026 (p-140): uma linha de log por venda com o tempo de cada etapa.
 const vendaTiming = require('../services/vendaTiming');
+// 17/11/2026 (p-141): a venda com menos idas ao banco. O caminho de sempre
+// continua aqui (PDV_VENDA_CAMINHO=fila volta a ele).
+const vendaRapida = require('../services/vendaRapida');
 
 const fmt = (v) => parseFloat(v || 0).toFixed(2);
 const SP_DATE_NOW = "(NOW() AT TIME ZONE 'America/Sao_Paulo')::date";
@@ -351,6 +354,9 @@ async function handleSale(req, res, opts = {}) {
   const conexao = await db.connect();
   const client = timing.contar(conexao);
   timing.etapa('conexao');
+  // p-141: decidido uma vez por venda (PDV_VENDA_CAMINHO=fila = caminho de sempre).
+  const rapido = vendaRapida.caminhoRapido();
+  timing.dado({ caminho: rapido ? 'rapido' : 'fila' });
   try {
     await client.query('BEGIN');
     // Mesma chave ja gerou venda: devolve a venda registrada, sem gravar
@@ -406,7 +412,22 @@ async function handleSale(req, res, opts = {}) {
     // p-92: produtos ja validados para a empresa (so eles ganham a marcacao
     // de promocao no sale_items).
     const produtosVisiveis = new Set();
-    for (const item of items) {
+    // p-141: todos os produtos e variacoes da venda numa consulta (com a
+    // promocao De/Por e a vendedora junto). null = algum id foge do formato
+    // comum e a venda le item a item, como sempre. As regras abaixo (ordem
+    // dos itens, mensagens, 409) sao as mesmas nos dois casos: so muda de
+    // onde vem a linha lida.
+    let comPromocao = false;
+    let leitura = null;
+    if (rapido) {
+      comPromocao = !sale_date
+        && await vendaNaPromocao.colunasPresentes((sql, params) => client.query(sql, params));
+      leitura = await vendaRapida.lerProdutos(client, {
+        companyId: req.params.id, items, employeeId: employee_id, comPromocao,
+      });
+    }
+    for (const [idx, item] of items.entries()) {
+      const lido = leitura ? leitura.porItem[idx] : null;
       const qty = parseFloat(item.quantity);
       const unitPrice = parseFloat(item.unit_price);
       // Desconto por item (lapis do PDV): unit_price mantem o preco de tabela
@@ -426,7 +447,7 @@ async function handleSale(req, res, opts = {}) {
         // stock_company_id caía na própria matriz (baixa no lugar errado).
         // Produto compartilhado é UMA linha para o grupo: a baixa vai na
         // linha da dona (stock_company_id), nos dois sentidos.
-        const { rows: p } = await client.query(
+        const { rows: p } = lido ? { rows: lido.p } : await client.query(
           `SELECT p.name, p.cost_price, p.stock_qty, p.company_id AS stock_company_id
            FROM products p JOIN companies c ON c.id=$2
            WHERE p.id=$1 AND ${productVisibilityWhere('$2', 'p.')}`,
@@ -440,7 +461,7 @@ async function handleSale(req, res, opts = {}) {
           let stockAvailable = parseFloat(p[0].stock_qty);
           let stockLabel = p[0].name;
           if (item.variant_id) {
-            const { rows: v } = await client.query(
+            const { rows: v } = lido ? { rows: lido.v } : await client.query(
               `SELECT stock_qty, sku_suffix FROM product_variants WHERE id=$1 AND product_id=$2`,
               [item.variant_id, item.product_id]
             );
@@ -513,9 +534,12 @@ async function handleSale(req, res, opts = {}) {
     );
     const totalAmount = parseFloat((subtotal - discountAmt).toFixed(2));
     if (employee_id) {
-      const { rows: empCheck } = await client.query(
-        `SELECT id FROM employees WHERE id=$1 AND company_id=$2`, [employee_id, req.params.id]
-      );
+      // p-141: a leitura dos produtos ja trouxe se a vendedora e da empresa.
+      const empCheck = (leitura && leitura.vendedora !== undefined)
+        ? (leitura.vendedora ? [{ id: employee_id }] : [])
+        : (await client.query(
+          `SELECT id FROM employees WHERE id=$1 AND company_id=$2`, [employee_id, req.params.id]
+        )).rows;
       if (!empCheck.length) { await client.query('ROLLBACK'); return res.status(400).json({ error: 'Funcionario nao encontrado nesta empresa' }); }
     }
     // F2: no sinal o saldo e DERIVADO do total calculado aqui no servidor,
@@ -604,9 +628,12 @@ async function handleSale(req, res, opts = {}) {
     // unit_price e os totais continuam os que o app mandou. Venda com data
     // retroativa fica sem marcacao (NULL = nao sabemos). Base sem as colunas:
     // null aqui e o INSERT e o de sempre (services/vendaNaPromocao.js).
-    const marcacoes = sale_date
-      ? null
-      : await vendaNaPromocao.marcarItens((sql, params) => client.query(sql, params), enrichedItems, { visiveis: produtosVisiveis });
+    // p-141: no caminho novo a marcacao ja veio com a leitura dos produtos
+    // (mesma conta, vendaNaPromocao.marcacaoDoItem).
+    let marcacoes;
+    if (sale_date) marcacoes = null;
+    else if (leitura) marcacoes = comPromocao ? enrichedItems.map((_, idx) => leitura.porItem[idx]?.marcacao || vendaNaPromocao.NULO) : null;
+    else marcacoes = await vendaNaPromocao.marcarItens((sql, params) => client.query(sql, params), enrichedItems, { visiveis: produtosVisiveis });
     for (const [idx, item] of enrichedItems.entries()) {
       const marca = marcacoes ? marcacoes[idx] : null;
       await client.query(

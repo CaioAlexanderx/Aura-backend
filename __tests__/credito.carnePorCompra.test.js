@@ -20,6 +20,13 @@
 // Mock por CONTEÚDO DO SQL.
 // ============================================================
 
+// 17/11/2026 (p-141 a p-144): este arquivo confere as regras da venda pelo
+// caminho de sempre, com um banco de mentira casado pelo texto de cada SQL.
+// O caminho novo (services/vendaRapida.js) e conferido no Postgres de verdade
+// em __tests__/pdv.vendaRapida.banco.test.js, que roda cada caso nos dois
+// caminhos e exige o mesmo banco e a mesma resposta.
+process.env.PDV_VENDA_CAMINHO = 'fila';
+
 jest.mock('../src/config/database');
 const db = require('../src/config/database');
 const express = require('express');

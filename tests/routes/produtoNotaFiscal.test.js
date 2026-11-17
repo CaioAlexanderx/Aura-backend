@@ -12,6 +12,13 @@
 //   5. A baixa de estoque do produto que sai na NFS-e acontece no Caixa,
 //      como a de qualquer produto.
 // ============================================================
+// 17/11/2026 (p-141 a p-144): este arquivo confere as regras da venda pelo
+// caminho de sempre, com um banco de mentira casado pelo texto de cada SQL.
+// O caminho novo (services/vendaRapida.js) e conferido no Postgres de verdade
+// em __tests__/pdv.vendaRapida.banco.test.js, que roda cada caso nos dois
+// caminhos e exige o mesmo banco e a mesma resposta.
+process.env.PDV_VENDA_CAMINHO = 'fila';
+
 const express = require('express');
 const request = require('supertest');
 const jwt = require('jsonwebtoken');
