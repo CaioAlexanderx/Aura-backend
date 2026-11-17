@@ -336,8 +336,10 @@ async function handleSale(req, res, opts = {}) {
   const timing = vendaTiming.iniciar(req);
   timing.dado({
     company_id: req.params.id,
-    itens: items.length,
-    itens_com_variante: items.filter((i) => i && i.variant_id).length,
+    // `items` que nao e array passa na guarda la de cima (`items?.length`):
+    // a medicao nao pode lancar antes do try da venda.
+    itens: Array.isArray(items) ? items.length : 0,
+    itens_com_variante: Array.isArray(items) ? items.filter((i) => i && i.variant_id).length : 0,
     metodo: vendaTiming.rotuloDoMetodo(payment_method || payments?.[0]?.method || 'dinheiro'),
     pagamentos: Array.isArray(payments) ? payments.length : 0,
     cliente: !!(customer_id || req.body?.customer || req.body?.customer_name),

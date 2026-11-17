@@ -121,10 +121,29 @@ describe('POST /pdv/sale -- linha [pdv-sale-timing]', () => {
     }
   });
 
-  test('forma de pagamento estranha vira rotulo curto, sem texto livre', async () => {
-    await sell({ ...BODY, payment_method: 'Pix da <Maria> 11 99999-0000 muito muito longo' });
-    const l = lerLinha();
-    expect(l.metodo).toMatch(/^[a-z0-9_-]{1,20}$/);
+  test('forma de pagamento fora da lista vira "outro": nenhum texto livre no log', async () => {
+    await sell({ ...BODY, payment_method: 'Pix da <Maria> 11 99999-0000' });
+    expect(lerLinha().metodo).toBe('outro');
+    expect(linhas()[0]).not.toMatch(/maria|99999/i);
+  });
+
+  test('items que nao e array: a requisicao responde como antes, nao fica pendurada', async () => {
+    const errSpy = jest.spyOn(console, 'error').mockImplementation(() => {});
+    // { length: 1 } passa na guarda `items?.length` e nao e iteravel: o laco
+    // dos itens lanca dentro do try e a venda responde o 500 de sempre.
+    let res = await sell({ ...BODY, items: { length: 1 } });
+    expect(res.status).toBe(500);
+    expect(res.body).toEqual({ error: 'Erro ao registrar venda' });
+    expect(client.release).toHaveBeenCalledTimes(1);
+    expect(lerLinha()).toMatchObject({ status: 500, itens: 0, itens_com_variante: 0 });
+
+    // Texto tambem passa na guarda; o que importa aqui e que a medicao nao
+    // lanca antes do try e a requisicao recebe resposta.
+    logSpy.mockClear();
+    res = await sell({ ...BODY, items: 'abc' });
+    expect(typeof res.status).toBe('number');
+    expect(lerLinha()).toMatchObject({ status: res.status, itens: 0, itens_com_variante: 0 });
+    errSpy.mockRestore();
   });
 
   test('venda recusada por falta de estoque (409) tambem escreve a linha', async () => {
@@ -224,6 +243,23 @@ describe('vendaTiming -- pecas', () => {
     const n = spy.mock.calls.filter((c) => String(c[0]).startsWith(vendaTiming.PREFIXO)).length;
     spy.mockRestore();
     expect(n).toBe(1);
+  });
+
+  test.each([
+    ['dinheiro', 'dinheiro'], ['PIX', 'pix'], [' cartao ', 'cartao'], ['debito', 'debito'],
+    ['crediario', 'crediario'], ['sinal', 'sinal'],
+    ['pixdamaria', 'outro'], ['', 'outro'], [null, 'outro'], [undefined, 'outro'], [{ a: 1 }, 'outro'],
+  ])('rotuloDoMetodo(%j) => %s', (entrada, esperado) => {
+    expect(vendaTiming.rotuloDoMetodo(entrada)).toBe(esperado);
+  });
+
+  test('nada foi enviado (headersSent false): status null, nao o 200 padrao', () => {
+    const t = vendaTiming.iniciar({});
+    const spy = jest.spyOn(console, 'log').mockImplementation(() => {});
+    t.emitir({ statusCode: 200, headersSent: false });
+    const linha = JSON.parse(String(spy.mock.calls[0][0]).slice(vendaTiming.PREFIXO.length + 1));
+    spy.mockRestore();
+    expect(linha.status).toBeNull();
   });
 
   test('sem o carimbo de inicio, pre_ms e null', () => {
