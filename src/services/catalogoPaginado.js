@@ -42,9 +42,24 @@ const LIMITE_MAXIMO = 60;
  *
  * A regra e a de montarProdutoPublico: com variante ativa, basta uma com
  * saldo; sem variante, o saldo do proprio produto.
+ *
+ * EXCECAO (p-179, loja unica 3.2a, 17/11/2026): o produto PERSONALIZAVEL
+ * (fragmento abaixo) nao passa pelo estoque. Ele e feito sob encomenda e
+ * quase sempre tem saldo 0; sem a excecao ele sumiria da grade, da home,
+ * da arvore, da contagem e da URL propria da loja comum. Para todos os
+ * outros produtos a regra e a de sempre: o primeiro ramo e falso para
+ * quem nao e personalizavel, e o CASE decide como antes. A loja sem
+ * personalizavel sai byte a byte igual
+ * (__tests__/lojaSemPersonalizavel.fixture.test.js).
  */
+const PERSONALIZAVEL = `(
+  products.is_personalizable IS TRUE
+  AND products.customization_config IS NOT NULL
+)`;
+
 const EM_ESTOQUE = `(
-  CASE WHEN EXISTS (
+  ${PERSONALIZAVEL}
+  OR CASE WHEN EXISTS (
     SELECT 1 FROM product_variants v
      WHERE v.product_id = products.id AND v.is_active = true
   )
@@ -699,7 +714,7 @@ function janelaDePaginas(atual, totalPaginas, vizinhas = 1) {
 }
 
 module.exports = {
-  POR_PAGINA, LIMITE_MAXIMO, EM_ESTOQUE, COM_FOTO, NA_VITRINE, filtroDeFoto, EM_PROMOCAO_NO_AR, PRECO_NA_VITRINE,
+  POR_PAGINA, LIMITE_MAXIMO, EM_ESTOQUE, PERSONALIZAVEL, COM_FOTO, NA_VITRINE, filtroDeFoto, EM_PROMOCAO_NO_AR, PRECO_NA_VITRINE,
   JANELA_DE_VENDAS_DIAS, VENDIDOS_RECENTES,
   arvoreDeCategorias, facetasDoCatalogo, faixaDePreco, condicaoDeCategoria,
   paginaDoCatalogo, contarPorCategoria, janelaDePaginas, normalizar, ordemSql,
