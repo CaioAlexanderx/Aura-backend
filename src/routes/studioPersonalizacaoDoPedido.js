@@ -48,26 +48,9 @@ function configValida(cfg) {
   return ehObjeto(cfg) && Array.isArray(cfg.fields) ? cfg : null;
 }
 
-function preenchido(v) {
-  if (v === null || v === undefined) return false;
-  if (typeof v === 'string') return v.trim() !== '';
-  if (typeof v === 'boolean') return false;
-  return true;
-}
-
-/**
- * O item tem arte ou texto registrado? Com os campos do produto, conta um
- * campo do produto preenchido. Sem os campos (produto apagado, config
- * antiga), conta qualquer texto não vazio. Pura.
- */
-function temPersonalizacao(customization, cfg) {
-  if (!ehObjeto(customization)) return false;
-  const c = configValida(cfg);
-  if (c) {
-    return c.fields.some((f) => f && f.id != null && preenchido(customization[f.id]));
-  }
-  return Object.values(customization).some((v) => typeof v === 'string' && v.trim() !== '');
-}
+// p-184: temPersonalizacao mora em services/personalizavel.js, porque o
+// pedido da loja comum usa a mesma conta para escolher a etapa da Fila.
+const { temPersonalizacao } = require('../services/personalizavel');
 
 /** Corpo do POST validado, ou { erro }. Pura. */
 function lerCorpo(body) {

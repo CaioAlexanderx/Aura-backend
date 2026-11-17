@@ -104,6 +104,14 @@ async function tickPixExpirado({ db, lojaEvents }) {
 // codigo (nao "a hora do deploy"): o resultado nao depende de quando o
 // servidor subiu, e o teste e deterministico.
 //
+// Loja comum com peca personalizada (p-184, 17/11/2026, decisao D10 do
+// Caio): o pedido nasce com vertical = 'studio' (routes/storefront.js) e cai
+// aqui no ramo do Studio, com as 72 h e o texto das 72 h, misto ou nao. O
+// so de prateleira nasce sem vertical e segue nas 48 h. Sem sinal na loja
+// online (D11): deposit_paid nunca e marcado por ela. O cancelamento devolve
+// os insumos pelo trigger trg_studio_restore_inputs_digital_cancel, que so
+// olha vertical = 'studio' (pedidoDaLojaPersonalizado.banco.test.js).
+//
 // Pedido recente (JANELA_DIAS) avisa no sino; pedido antigo cancela calado
 // para o primeiro deploy nao despejar meses de aviso. Loja de teste segue a
 // mesma regra: o aviso e so o sino da propria lojista (lojaEvents), nada
