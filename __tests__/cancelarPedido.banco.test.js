@@ -295,6 +295,57 @@ describe('devolucao: caixa e formas', () => {
   });
 });
 
+describe('taxa da maquininha do sinal no cartao (revisao da Celia)', () => {
+  // Credito a 3,5%: sinal de R$ 100 no cartao paga R$ 3,50 de taxa.
+  beforeEach(async () => {
+    await zerar();
+    await q(`UPDATE companies SET pdv_settings = $2::jsonb WHERE id = $1`,
+      [ID.loja, JSON.stringify({ card_fee_enabled: true, card_fee_credit_pct: 3.5, card_fee_debit_pct: 1.5 })]);
+  });
+
+  async function despesasDeHoje() {
+    return (await R.resultadoDoPeriodo({ empresas: [ID.loja], de: hoje, ate: hoje, comProdutos: false, client: pool })).despesas;
+  }
+
+  test('estorno: a taxa sai junto (como o cancelamento de venda); Despesas 3,50 -> 0', async () => {
+    const oid = await pedido({ sinal: { amount: 100, method: 'cartao' } });
+    expect((await lancamentosDoPedido(oid))['pedido-sinal-taxa'].amount).toBe(3.5);
+    expect(await despesasDeHoje()).toBe(3.5);
+    const r = await cancelar(oid, { refund_kind: 'devolucao', refund_method: 'estorno' });
+    expect(r.status).toBe(200);
+    expect(r.body.cancelamento).toMatchObject({ refund_kind: 'estorno', valor: 100, taxa_estornada: 3.5 });
+    const l = await lancamentosDoPedido(oid);
+    expect(l['pedido-sinal-taxa']).toBeUndefined();
+    expect(l['pedido-devolucao'].amount).toBe(100);
+    expect(await despesasDeHoje()).toBe(0);
+  });
+
+  test('estorno de sinal no debito: a taxa de 1,5% (R$ 3,00 sobre 200) sai junto', async () => {
+    const oid = await pedido({ sinal: { amount: 200, method: 'debito' } });
+    const r = await cancelar(oid, { refund_kind: 'devolucao', refund_method: 'estorno' });
+    expect(r.body.cancelamento.taxa_estornada).toBe(3);
+    expect((await lancamentosDoPedido(oid))['pedido-sinal-taxa']).toBeUndefined();
+  });
+
+  test.each(['dinheiro', 'pix'])('devolucao em %s de sinal no cartao: a taxa fica (Despesas 3,50)', async (method) => {
+    const oid = await pedido({ sinal: { amount: 100, method: 'cartao' } });
+    const r = await cancelar(oid, { refund_kind: 'devolucao', refund_method: method });
+    expect(r.status).toBe(200);
+    expect(r.body.cancelamento).toMatchObject({ refund_kind: method, taxa_estornada: 0 });
+    expect((await lancamentosDoPedido(oid))['pedido-sinal-taxa']).toMatchObject({ status: 'confirmed', amount: 3.5 });
+    expect(await despesasDeHoje()).toBe(3.5);
+  });
+
+  test('credito na ficha de sinal no cartao: a taxa fica (Despesas 3,50)', async () => {
+    const oid = await pedido({ sinal: { amount: 100, method: 'cartao' }, cliente: true });
+    const r = await cancelar(oid, { refund_kind: 'credito' });
+    expect(r.status).toBe(200);
+    expect(r.body.cancelamento).toMatchObject({ refund_kind: 'credito', taxa_estornada: 0 });
+    expect((await lancamentosDoPedido(oid))['pedido-sinal-taxa']).toMatchObject({ status: 'confirmed', amount: 3.5 });
+    expect(await despesasDeHoje()).toBe(3.5);
+  });
+});
+
 describe('credito na ficha', () => {
   beforeEach(async () => { await zerar(); });
 

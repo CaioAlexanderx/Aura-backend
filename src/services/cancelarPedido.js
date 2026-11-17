@@ -37,7 +37,15 @@
 // lancado duas vezes. Pedido concluido (virou venda) nao cancela por aqui:
 // desfazer e pela venda.
 //
-// A taxa da maquininha do sinal no cartao fica: e despesa que a loja pagou.
+// Taxa da maquininha do sinal (pedido-sinal-taxa-<pedido>), revisao da Celia
+// (17/11):
+//   - ESTORNO de sinal pago no cartao (credito ou debito): a taxa sai junto,
+//     apagada como o cancelamento de venda apaga o pdv-card-fee
+//     (routes/sales.js). A adquirente devolve a taxa no estorno; deixa-la
+//     seria prejuizo fantasma.
+//   - devolucao em dinheiro ou Pix de sinal pago no cartao: a taxa FICA (a
+//     loja pagou a maquininha e devolveu o dinheiro por fora).
+//   - credito na ficha: a taxa FICA.
 //
 // Multi-CNPJ: tudo na company_id da loja do pedido. O credito fica na ficha
 // da cliente NESTA loja, como o credito da troca (trocaV2.js).
@@ -130,14 +138,17 @@ async function cancelarPedido(db, { companyId, orderId, body, userId }) {
     }
 
     const { rows: [s] } = await client.query(
-      `SELECT COALESCE(SUM(amount), 0) AS v FROM studio_payments
+      `SELECT COALESCE(SUM(amount), 0) AS v,
+              BOOL_OR(COALESCE(forma IN ('cartao', 'debito'), method = 'card')) AS no_cartao
+         FROM studio_payments
         WHERE order_id = $1 AND kind = 'deposit' AND status = 'paid'`, [orderId]);
     const sinal = round2(Number(s && s.v) || 0);
+    const sinalNoCartao = !!(s && s.no_cartao);
     const lido = lerDestino(body, sinal > 0);
     if (lido.erro) throw erro(lido.erro.status, lido.erro.message, lido.erro.code);
     const { kind, method } = lido.dados;
 
-    const cancelamento = { refund_kind: null, refund_method: null, valor: sinal, credito_id: null, movimento_caixa: false };
+    const cancelamento = { refund_kind: null, refund_method: null, valor: sinal, credito_id: null, movimento_caixa: false, taxa_estornada: 0 };
 
     if (kind === 'credito') {
       const cliente = pedido.customer_id
@@ -182,6 +193,14 @@ async function cancelarPedido(db, { companyId, orderId, body, userId }) {
           [companyId, sessaoId, sinal, `Sinal devolvido: pedido ${pedido.order_number}`.slice(0, 200), userId || null]
         );
         cancelamento.movimento_caixa = true;
+      }
+      // Estorno de sinal pago no cartao: a taxa da maquininha sai junto.
+      if (method === 'estorno' && sinalNoCartao) {
+        const { rows: taxa } = await client.query(
+          `DELETE FROM transactions WHERE idempotency_key = $1 AND company_id = $2 RETURNING amount`,
+          [sinalDoPedido.CHAVE_TAXA_SINAL(orderId), companyId]
+        );
+        cancelamento.taxa_estornada = round2(taxa.reduce((a, t) => a + Number(t.amount || 0), 0));
       }
       cancelamento.refund_kind = method;
       cancelamento.refund_method = method;
