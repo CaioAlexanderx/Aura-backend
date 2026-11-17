@@ -123,3 +123,18 @@ describe('a rota usa o servico', () => {
     expect(rota).toContain('COALESCE(p.image_thumb_url, i.product_image, p.image_url) AS product_image');
   });
 });
+
+describe('pedido guardado no Caixa fica fora da fila do Canal (B1, 17/11)', () => {
+  test('a consulta exclui a origem balcao sem perder origem NULL (IS DISTINCT FROM) e sem parametro novo', () => {
+    for (const p of [{}, { status: 'confirmed' }, { q: 'eryca' }, { q: '3' }]) {
+      const c = montarConsultaDaFila({ cid: CID, limit: 20, offset: 0, ...p });
+      expect(c.sql).toContain("o.origem IS DISTINCT FROM 'balcao'");
+      expect(c.params).not.toContain('balcao');
+      conferirParametros(c);
+    }
+  });
+  test('as contagens da rota excluem a mesma origem', () => {
+    const rota = fs.readFileSync(path.join(__dirname, '..', 'src', 'routes', 'digitalOrders.js'), 'utf8');
+    expect(rota).toContain('FROM digital_orders WHERE company_id = $1 AND ${FORA_DO_BALCAO}');
+  });
+});

@@ -82,6 +82,10 @@ router.use('/matcon', require('./matconPurchases'));
 // e cobrado no fim. Gate por pdv_settings.comanda_enabled dentro do router,
 // so na escrita, sem requirePlan no prefixo (e do Caixa, plano Essencial).
 router.use('/comandas', require('./comandas'));
+// 17/11/2026 — Pedido separado de venda (B1, migration 459): o Caixa guarda a
+// venda como pedido (digital_orders, origem 'balcao'). Sem requirePlan no
+// prefixo (Caixa e de todo plano); trava PEDIDO_LIBERADO dentro do router.
+router.use('/pedidos', require('./pedidosDoBalcao'));
 // 23/09/2026 — Matcon M3: Profissionais Parceiros (migration 353). Mesmo
 // desenho da Otica: gate por pdv_settings.matcon_enabled dentro do router,
 // so na escrita, sem requirePlan no prefixo.

@@ -277,6 +277,8 @@ router.get('/', async (req, res) => {
         FROM digital_orders
         WHERE company_id = $1
           AND created_at > NOW() - INTERVAL '24 hours'
+          -- B1 (17/11): o pedido guardado no Caixa nao e pedido novo da loja online.
+          AND origem IS DISTINCT FROM 'balcao'
         ORDER BY created_at DESC
         LIMIT 10
       `, [cid]);

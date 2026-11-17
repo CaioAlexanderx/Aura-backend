@@ -55,9 +55,15 @@ const COLUNAS_DA_ENTREGA = `,
  * @param {{cid: string, status?: string, q?: string, limit: number, offset: number}} p
  * @returns {{sql: string, params: any[]}}
  */
+// 17/11/2026 (B1): o pedido guardado no Caixa (origem 'balcao', migration
+// 459) mora em digital_orders mas NAO e pedido da loja online: fica fora da
+// fila e das contagens do Canal. IS DISTINCT FROM para nao perder os pedidos
+// de origem NULL (todos os da loja) nem os da Aurinha.
+const FORA_DO_BALCAO = "origem IS DISTINCT FROM 'balcao'";
+
 function montarConsultaDaFila({ cid, status, q, limit, offset, comEntrega = false }) {
   const params = [cid];
-  const filtros = ['o.company_id = $1'];
+  const filtros = ['o.company_id = $1', `o.${FORA_DO_BALCAO}`];
 
   if (status && status !== 'all') {
     params.push(status);
@@ -125,4 +131,4 @@ function apresentarLinhaDaFila(linha) {
   return saida;
 }
 
-module.exports = { nomeLegivelDoItem, escaparLike, montarConsultaDaFila, apresentarLinhaDaFila };
+module.exports = { nomeLegivelDoItem, escaparLike, montarConsultaDaFila, apresentarLinhaDaFila, FORA_DO_BALCAO };
