@@ -38,6 +38,9 @@ const pagamentoDoPedido = require('../services/pagamentoDoPedidoStudio');
 // QA final 28/09/2026 (LJ-33): pedido cancelado e etapa 'cancelled' tambem
 // na leitura — o cancelamento so mudava `status`, e o quadro lia a etapa.
 const { sqlDaEtapa, etapaDaProducao } = require('../services/cancelamentoDoPedido');
+// 17/11/2026 (p-177): nome do item e origem do pedido no cartao da Fila do
+// Negocio. Consultas a parte, depois da query rica: so somam campos.
+const { comItemEOrigem, NULL_ITEM_E_ORIGEM } = require('../services/itemEOrigemDoPedido');
 const ETAPA_DO_PEDIDO = sqlDaEtapa('o');
 
 // ═══════════════════════════════════════════════════════
@@ -621,6 +624,10 @@ ${withBalance ? BALANCE_COLS : ''}
       db, cid, orders, (o) => (o.source === 'digital' ? o.digital_order_id : null)
     );
 
+    // 17/11/2026 (p-177): item_name, item_quantity, origin e origin_label.
+    // Nunca lanca: falha deixa os quatro campos null.
+    orders = await comItemEOrigem(db, cid, orders);
+
     return res.json({ orders });
   } catch (errRich) {
     console.error('[studio/orders:GET][rich]', errRich.message, errRich.code, errRich.stack);
@@ -662,6 +669,7 @@ ${withBalance ? BALANCE_COLS : ''}
         approval_count: 0,
         ...NULL_BALANCE,
         ...NULL_CARD,
+        ...NULL_ITEM_E_ORIGEM,
       })),
       degraded: 'slim',
     });
@@ -705,6 +713,7 @@ ${withBalance ? BALANCE_COLS : ''}
         approval_count: 0,
         ...NULL_BALANCE,
         ...NULL_CARD,
+        ...NULL_ITEM_E_ORIGEM,
       })),
       degraded: 'raw',
     });
