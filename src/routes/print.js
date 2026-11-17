@@ -265,14 +265,21 @@ function _payLabel(method) {
   return m[method] || method;
 }
 
+// 17/11/2026 (p-162): as consultas do cupom saem juntas. Cada ida ao banco
+// custa ~190 ms (Railway us-west x Supabase Sao Paulo, config/database.js);
+// em fila eram 5 a 6 idas antes do HTML (~1 s). Agora e uma rodada so. O
+// resultado e o mesmo de antes, campo a campo -- o HTML do cupom nao muda
+// (cupom.logoDaLoja.test.js trava byte a byte). As parcelas do crediario
+// tambem vao junto; o erro delas so conta quando a venda e no crediario,
+// como antes, e tabela/coluna ausente segue ignorada.
 async function _loadSaleData(saleId, companyId) {
-  const { rows: companyRows } = await db.query(
+  const companyQ = db.query(
     `SELECT legal_name, trade_name, cnpj, phone, logo_url,
             address_street, address_number, address_city, address_state
      FROM companies WHERE id=$1`, [companyId]
   );
   // P0 #6 FIX: prefer employee name (cashier) over user name (owner)
-  const { rows: saleRows } = await db.query(
+  const saleQ = db.query(
     `SELECT s.*,
             COALESCE(e.name, u.full_name) AS seller_name,
             c.name AS customer_name
@@ -282,8 +289,7 @@ async function _loadSaleData(saleId, companyId) {
      LEFT JOIN customers c ON c.id = s.customer_id
      WHERE s.id=$1 AND s.company_id=$2`, [saleId, companyId]
   );
-  if (!saleRows.length) return null;
-  const { rows: itensLidos } = await db.query(
+  const itemsQ = db.query(
     `SELECT si.*,
             COALESCE(p.name, si.product_name_snapshot) AS product_name,
             pv.sku_suffix AS variant_label,
@@ -296,6 +302,32 @@ async function _loadSaleData(saleId, companyId) {
      LEFT JOIN product_variants pv ON pv.id=si.variant_id
      WHERE si.sale_id=$1`, [saleId]
   );
+  const paymentsQ = db.query(
+    `SELECT method, amount FROM sale_payments WHERE sale_id=$1`, [saleId]
+  );
+  // 14/09/2026: parcelas do crediario para o cupom (credit_installments
+  // guarda o sale_id). Data ja formatada no SQL para nao depender do fuso do
+  // Node. O erro fica guardado e so e lancado se a venda for no crediario.
+  const installmentsQ = db.query(
+    `SELECT installment_number, total_installments, amount_due,
+            to_char(due_date, 'DD/MM/YYYY') AS due_date_br
+       FROM credit_installments
+      WHERE sale_id = $1 AND company_id = $2 AND status <> 'cancelled'
+      ORDER BY installment_number ASC`,
+    [saleId, companyId]
+  ).then((r) => ({ rows: r.rows }), (err) => ({ err }));
+
+  // Promise.allSettled: nenhuma rejeicao fica solta (unhandledRejection)
+  // quando outra consulta falha primeiro.
+  const settled = await Promise.allSettled([companyQ, saleQ, itemsQ, paymentsQ, installmentsQ]);
+  const firstErr = settled.find((r) => r.status === 'rejected');
+  if (firstErr) throw firstErr.reason;
+  const [companyRes, saleRes, itemsRes, paymentsRes, installmentsRes] = settled.map((r) => r.value);
+
+  const companyRows = companyRes.rows;
+  const saleRows = saleRes.rows;
+  if (!saleRows.length) return null;
+  const itensLidos = itemsRes.rows;
   // 14/11/2026 (decisao do Caio): o cupom sai com o NOME da cor ("Off White
   // · M"), o mesmo do Caixa, da nota e da vitrine (services/nomeDaCor.js),
   // e nao com o sku_suffix ("OFF WHITE-M"). Variante sem atributo segue com o
@@ -306,28 +338,16 @@ async function _loadSaleData(saleId, companyId) {
     const rotulo = rotuloDaVariante({ color_name: variant_color_name, sku_suffix: i.variant_label, attributes: variant_attrs });
     return rotulo ? { ...resto, variant_label: rotulo } : resto;
   });
-  const { rows: payments } = await db.query(
-    `SELECT method, amount FROM sale_payments WHERE sale_id=$1`, [saleId]
-  );
-  // 14/09/2026: parcelas do crediario para o cupom. So consulta quando a
-  // venda (ou parte dela) foi no crediario — credit_installments guarda o
-  // sale_id. Data ja formatada no SQL para nao depender do fuso do Node.
+  const payments = paymentsRes.rows;
   let installments = [];
   const isCrediario = String(saleRows[0].payment_method || '').toLowerCase() === 'crediario'
     || payments.some(p => String(p.method || '').toLowerCase() === 'crediario');
   if (isCrediario) {
-    try {
-      const { rows } = await db.query(
-        `SELECT installment_number, total_installments, amount_due,
-                to_char(due_date, 'DD/MM/YYYY') AS due_date_br
-           FROM credit_installments
-          WHERE sale_id = $1 AND company_id = $2 AND status <> 'cancelled'
-          ORDER BY installment_number ASC`,
-        [saleId, companyId]
-      );
-      installments = rows;
-    } catch (e) {
+    if (installmentsRes.err) {
+      const e = installmentsRes.err;
       if (e.code !== '42P01' && e.code !== '42703') throw e;
+    } else {
+      installments = installmentsRes.rows;
     }
   }
   return { company: companyRows[0] || {}, sale: saleRows[0], items, payments, installments };
