@@ -48,8 +48,12 @@ function cfopForCsosn(csosn) {
  *  mesma UF 5102 / ST 5405; outra UF 6102 / ST 6404 (6.404 = venda de
  *  mercadoria com o ICMS já retido antes por ST, a irmã interestadual da
  *  5.405). A NFC-e continua em cfopForCsosn (sempre dentro do estado). */
-function cfopVenda55(csosn, { interestadual = false } = {}) {
+// 17/11/2026: cliente de outra UF que NÃO é contribuinte do ICMS (sem IE,
+// indIEDest 9, ou isento, indIEDest 2) sai em 6108 ("venda ... destinada a
+// não contribuinte"), com ou sem ST. 6102/6404 ficam para o contribuinte.
+function cfopVenda55(csosn, { interestadual = false, naoContribuinte = false } = {}) {
   const st = String(csosn) === '500';
+  if (interestadual && naoContribuinte) return '6108';
   if (interestadual) return st ? '6404' : '6102';
   return st ? '5405' : '5102';
 }

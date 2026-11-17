@@ -196,8 +196,10 @@ function buildInfNfe55Venda(company, nfeData, opts = {}) {
   const indFinal = nfeData.indFinal != null
     ? String(Number(nfeData.indFinal) ? 1 : 0)
     : (indIEDest === '1' ? '0' : '1');
-  if (interestadual && indIEDest === '9') {
-    throw new Error('nfe55Venda: DIFAL (outra UF + não contribuinte) fora do v1');
+  // 17/11/2026: Simples (CRT 1) monta sem ICMSUFDest (NT 2022.005, NA01-20,
+  // exceção 12; DIFAL do Simples suspenso, ADI 5464). MEI (CRT 4) segue fora.
+  if (interestadual && indIEDest === '9' && crt === 4) {
+    throw new Error('nfe55Venda: MEI vendendo para não contribuinte de outra UF fora do v1');
   }
   const indPres = String(nfeData.indPres == null ? '1' : nfeData.indPres);
   if (!IND_PRES_VALIDOS.includes(indPres)) throw new Error(`nfe55Venda: indPres inválido (${nfeData.indPres})`);
@@ -217,7 +219,7 @@ function buildInfNfe55Venda(company, nfeData, opts = {}) {
   // CFOP pelo destino; CFOP explícito no item vence (ajuste fino).
   const items = nfeData.items.map((it) => ({
     ...it,
-    cfop: it.cfop || cfopVenda55(it.csosn || '102', { interestadual }),
+    cfop: it.cfop || cfopVenda55(it.csosn || '102', { interestadual, naoContribuinte: indIEDest !== '1' }),
   }));
 
   const vNF = round2(items.reduce((s, it) =>

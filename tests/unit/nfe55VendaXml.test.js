@@ -177,11 +177,21 @@ describe('NF-e 55 de venda — outra UF, cliente contribuinte (6102/6404)', () =
     expect(r.infNfeXml).not.toContain('<CFOP>5102</CFOP>');
     expect(bloco(r.infNfeXml, 'dest')).toContain('<UF>MG</UF>');
   });
-  it('isento (indIEDest=2) em outra UF não é DIFAL do v1: sai 6102 sem IE', () => {
+  it('isento (indIEDest=2) em outra UF não é contribuinte: sai 6108 sem IE (17/11)', () => {
     const r2 = build({ dest: { ...DEST_CNPJ_MG, ie: null, indIEDest: '2' } });
     expect(bloco(r2.infNfeXml, 'dest')).toContain('<indIEDest>2</indIEDest>');
     expect(bloco(r2.infNfeXml, 'dest')).not.toContain('<IE>');
-    expect(r2.infNfeXml).toContain('<CFOP>6102</CFOP>');
+    expect(r2.infNfeXml).toContain('<CFOP>6108</CFOP>');
+    expect(r2.infNfeXml).not.toContain('<CFOP>6102</CFOP>');
+    expect(r2.infNfeXml).not.toContain('<CFOP>6404</CFOP>');
+  });
+  it('Simples para não contribuinte de outra UF (indIEDest=9): monta em 6108, sem ICMSUFDest (17/11)', () => {
+    const r3 = build({ dest: { ...DEST_CPF_SP, endereco: { ...DEST_CNPJ_MG.endereco } } });
+    expect(r3.infNfeXml).toContain('<idDest>2</idDest>');
+    expect(r3.infNfeXml).toContain('<indFinal>1</indFinal>');
+    expect(bloco(r3.infNfeXml, 'dest')).toContain('<indIEDest>9</indIEDest>');
+    expect(r3.infNfeXml).toContain('<CFOP>6108</CFOP>');
+    expect(r3.infNfeXml).not.toContain('ICMSUFDest');
   });
 });
 
@@ -253,7 +263,10 @@ describe('NF-e 55 de venda — opções e recusas do v1', () => {
     expect(() => buildInfNfe55Venda({ ...EMITENTE, tax_regime: 'lucro_presumido' }, {
       items: [ITEM()], dest: DEST_CNPJ_SP, payments: [], serie: 2, numero: 1,
     }, OPTS)).toThrow(/regime normal/);
-    expect(() => build({ dest: { ...DEST_CPF_SP, endereco: { ...DEST_CNPJ_MG.endereco } } })).toThrow(/DIFAL/);
+    // MEI (CRT 4) não está na exceção 12 da NA01-20: segue fora.
+    expect(() => buildInfNfe55Venda({ ...EMITENTE, tax_regime: 'mei' }, {
+      items: [ITEM()], dest: { ...DEST_CPF_SP, endereco: { ...DEST_CNPJ_MG.endereco } }, payments: [], serie: 2, numero: 1,
+    }, OPTS)).toThrow(/MEI vendendo para não contribuinte/);
     expect(() => build({ dest: { ...DEST_CNPJ_SP, endereco: { ...DEST_CNPJ_SP.endereco, uf: 'EX' } } })).toThrow(/exterior/);
   });
   it('contribuinte sem IE não monta', () => {

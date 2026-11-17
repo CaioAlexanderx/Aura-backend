@@ -63,6 +63,8 @@ const MSG = {
     + 'Por enquanto a NF-e de venda pela Aura é para o Simples Nacional e o MEI. Se precisar, fale com o suporte.',
   difal: 'Venda para consumidor final de outro estado que não tem inscrição estadual tem uma conta a mais de imposto '
     + '(o DIFAL), e essa NF-e a Aura ainda não emite. Você pode emitir uma NFC-e no balcão ou falar com o seu contador.',
+  difalMei: 'Para o MEI, a venda para consumidor final de outro estado sem inscrição estadual ainda não sai como NF-e pela Aura. '
+    + 'Você pode emitir uma NFC-e no balcão ou falar com o suporte.',
   exterior: 'Ainda não emitimos NF-e para clientes de fora do Brasil.',
   semProdutos: 'Esta venda só tem serviços. A NF-e é nota de mercadoria; o serviço sai na nota de serviço (NFS-e).',
   numeracao: 'A numeração da NF-e ainda não está pronta nesta loja. Fale com o suporte.',
@@ -535,8 +537,14 @@ async function montarNotaDaVenda(db, { companyId, saleId, body, buscarIbge = ibg
   const ufDest = dest.endereco.uf;
   if (ufDest === 'EX') return { ...bloqueio(422, 'NFE_EXTERIOR_FORA_DO_V1', MSG.exterior), faltantes };
   const interestadual = !!ufDest && ufDest !== ufEmitente;
-  if (interestadual && dest.indIEDest === '9') {
-    return { ...bloqueio(422, 'NFE_DIFAL_FORA_DO_V1', MSG.difal), faltantes };
+  // 17/11/2026 (decisão do Caio): Simples (CRT 1) vende para consumidor
+  // final de outra UF sem IE, em 6108 e sem o grupo ICMSUFDest. O STF
+  // suspendeu o DIFAL do Simples (ADI 5464; Tema 1.284) e a NT 2022.005
+  // (NA01-20, exceção 12) dispensa o grupo para CRT=1. O MEI (CRT 4) não
+  // está na exceção 12: segue recusado com mensagem gentil até o teste em
+  // homologação mostrar que a SEFAZ aceita.
+  if (interestadual && dest.indIEDest === '9' && crt === 4) {
+    return { ...bloqueio(422, 'NFE_DIFAL_FORA_DO_V1', MSG.difalMei), faltantes };
   }
   const indFinal = b.consumidor_final !== undefined && b.consumidor_final !== null
     ? (b.consumidor_final ? '1' : '0')
@@ -571,7 +579,10 @@ async function montarNotaDaVenda(db, { companyId, saleId, body, buscarIbge = ibg
   const natOp = texto(b.natureza_operacao) || 'Venda de mercadoria';
   const observacoes = texto(b.observacoes);
 
-  const itemsComCfop = items.map((it) => ({ ...it, cfop: taxEngine.cfopVenda55(it.csosn, { interestadual }) }));
+  const itemsComCfop = items.map((it) => ({
+    ...it,
+    cfop: taxEngine.cfopVenda55(it.csosn, { interestadual, naoContribuinte: dest.indIEDest !== '1' }),
+  }));
 
   const nfeData = {
     items: itemsComCfop,
