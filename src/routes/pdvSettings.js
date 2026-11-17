@@ -22,6 +22,8 @@
 //                          label_design (classico | editorial)
 //   LISTA OU NULL: label_custom_specs (medidas proprias de etiqueta, ate 20)
 //   OBJETO OU NULL: label_printer_prefs (calibracao por modelo fixo)
+//   SOMENTE LEITURA: personalizados_ativado_em (ISO; o PUT ignora o corpo e
+//                    grava so ao ligar a frente, ver aplicarDataDeAtivacao)
 //
 // 26/05/2026: ampliada whitelist pra desbloquear UI Studio/Food. Antes,
 // app/studio/(estudio)/configuracoes.tsx tentava salvar studio_approval_*
@@ -33,6 +35,7 @@ const pool = require('../config/database');
 const asyncHandler = require('../utils/asyncHandler');
 const AppError = require('../errors/AppError');
 const valeTrocaPrazo = require('../utils/valeTrocaPrazo');
+const ativacao = require('../services/personalizadosAtivacao');
 
 const ALLOWED_BOOL_KEYS = [
   'require_customer',
@@ -545,6 +548,27 @@ function applyVerticalInvariants(settings, verticalActive) {
   return settings;
 }
 
+// 17/11/2026 (p-172) — pdv_settings.personalizados_ativado_em: SOMENTE
+// LEITURA. Fica fora das listas de chaves aceitas de proposito: o lojista
+// nunca a edita. O GET devolve o que estiver gravado (merge com o salvo); o
+// PUT ignora a chave do corpo, mantem a do banco e, quando este PUT liga a
+// frente pela primeira vez (studio_enabled de desligado para ligado), grava
+// a hora. Regras em services/personalizadosAtivacao.js.
+function aplicarDataDeAtivacao(clean, saved, verticalActive) {
+  const gravada = saved[ativacao.CHAVE];
+  if (ativacao.temValorGravado(gravada)) {
+    clean[ativacao.CHAVE] = gravada;
+    return clean;
+  }
+  const marca = ativacao.marcaDaAtivacao({
+    antes: saved,
+    verticalAntes: verticalActive,
+    ligadaDepois: clean.studio_enabled === true,
+  });
+  if (marca) clean[ativacao.CHAVE] = marca;
+  return clean;
+}
+
 // GET /companies/:id/pdv-settings
 router.get('/pdv-settings', asyncHandler(async (req, res) => {
   const companyId = req.params.id;
@@ -581,9 +605,13 @@ router.put('/pdv-settings', asyncHandler(async (req, res) => {
     validateSettings({ ...saved, ...(settings || {}) }),
     rows[0].vertical_active
   );
+  aplicarDataDeAtivacao(clean, saved, rows[0].vertical_active);
 
+  // A data de ativacao do banco vence o objeto do app (SQL_PRESERVA_DATA):
+  // uma copia antiga, sem a chave, nao apaga a data gravada entre a leitura
+  // acima e esta escrita (o mesmo tipo de corrida de 03/10).
   await pool.query(
-    'UPDATE companies SET pdv_settings = $1, updated_at = NOW() WHERE id = $2',
+    'UPDATE companies SET pdv_settings = $1::jsonb || ' + ativacao.SQL_PRESERVA_DATA + ', updated_at = NOW() WHERE id = $2',
     [JSON.stringify(clean), companyId]
   );
   res.json({ settings: clean });

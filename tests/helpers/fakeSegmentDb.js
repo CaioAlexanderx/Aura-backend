@@ -35,7 +35,17 @@ function fakeSegmentDb({ companies = {}, existingCnpj = null, accessCode = null 
     if (/jsonb_build_object\('studio_enabled', (true|false)\)/.test(text)) {
       const c = rowOf(params[0]);
       const on = /'studio_enabled', true/.test(text);
-      if (c) c.pdv_settings = { ...(c.pdv_settings || {}), studio_enabled: on };
+      if (c) {
+        const antes = c.pdv_settings || {};
+        c.pdv_settings = { ...antes, studio_enabled: on };
+        // p-172: a data de ativacao ($2) so entra quando a chave esta vazia
+        // (mesma guarda de sqlMarcaSeAusente).
+        const vazia = antes.personalizados_ativado_em === undefined
+          || antes.personalizados_ativado_em === null || antes.personalizados_ativado_em === '';
+        if (on && /personalizados_ativado_em/.test(text) && params[1] && vazia) {
+          c.pdv_settings.personalizados_ativado_em = params[1];
+        }
+      }
       return { rows: [] };
     }
     if (/SET segment = \$2/.test(text)) {
