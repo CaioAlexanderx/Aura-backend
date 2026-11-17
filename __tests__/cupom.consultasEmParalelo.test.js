@@ -2,8 +2,8 @@
 // Cupom do Caixa: as consultas do _loadSaleData saem juntas (p-162,
 // 17/11/2026). Cada ida ao banco custa ~190 ms; em fila eram 5 a 6 antes
 // do HTML. O HTML nao muda (cupom.logoDaLoja.test.js trava byte a byte).
-//   (1) as 5 consultas sao disparadas antes de qualquer uma responder;
-//   (2) erro nas parcelas nao derruba o cupom de venda fora do crediario;
+//   (1) as 4 consultas sao disparadas antes de qualquer uma responder;
+//   (2) venda fora do crediario nao consulta as parcelas;
 //   (3) no crediario, erro de verdade nas parcelas continua dando erro;
 //       tabela ausente (42P01) continua ignorada.
 // ============================================================
@@ -41,7 +41,7 @@ function resposta(sql, { pagamento = 'pix', erroParcelas = null } = {}) {
 
 beforeEach(() => db.query.mockReset());
 
-test('(1) as 5 consultas saem juntas, antes de qualquer resposta', async () => {
+test('(1) as 4 consultas saem juntas, antes de qualquer resposta', async () => {
   const pendentes = [];
   let disparadasAntesDaPrimeiraResposta = null;
   db.query.mockImplementation((sql) => new Promise((resolve, reject) => {
@@ -57,14 +57,15 @@ test('(1) as 5 consultas saem juntas, antes de qualquer resposta', async () => {
   }));
   const res = await request(app).get(`/companies/${LOJA}/print/receipt/${VENDA}`);
   expect(res.status).toBe(200);
-  expect(disparadasAntesDaPrimeiraResposta).toBe(5);
+  expect(disparadasAntesDaPrimeiraResposta).toBe(4);
 });
 
-test('(2) erro nas parcelas nao derruba o cupom fora do crediario', async () => {
-  db.query.mockImplementation(async (sql) => resposta(sql, { erroParcelas: Object.assign(new Error('boom'), { code: '57014' }) }));
+test('(2) venda fora do crediario nao consulta as parcelas', async () => {
+  db.query.mockImplementation(async (sql) => resposta(sql));
   const res = await request(app).get(`/companies/${LOJA}/print/receipt/${VENDA}`);
   expect(res.status).toBe(200);
   expect(res.text).toContain('Blusa');
+  expect(db.query.mock.calls.some((c) => /credit_installments/.test(String(c[0])))).toBe(false);
 });
 
 test('(3a) crediario: tabela ausente segue ignorada', async () => {

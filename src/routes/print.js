@@ -267,11 +267,11 @@ function _payLabel(method) {
 
 // 17/11/2026 (p-162): as consultas do cupom saem juntas. Cada ida ao banco
 // custa ~190 ms (Railway us-west x Supabase Sao Paulo, config/database.js);
-// em fila eram 5 a 6 idas antes do HTML (~1 s). Agora e uma rodada so. O
-// resultado e o mesmo de antes, campo a campo -- o HTML do cupom nao muda
-// (cupom.logoDaLoja.test.js trava byte a byte). As parcelas do crediario
-// tambem vao junto; o erro delas so conta quando a venda e no crediario,
-// como antes, e tabela/coluna ausente segue ignorada.
+// em fila eram 4 idas antes do HTML (5 no crediario). Agora as 4 saem numa
+// rodada so; as parcelas continuam depois, so na venda no crediario (venda
+// comum nao consulta credit_installments). O resultado e o mesmo de antes,
+// campo a campo -- o HTML do cupom nao muda (cupom.logoDaLoja.test.js trava
+// byte a byte).
 async function _loadSaleData(saleId, companyId) {
   const companyQ = db.query(
     `SELECT legal_name, trade_name, cnpj, phone, logo_url,
@@ -305,24 +305,12 @@ async function _loadSaleData(saleId, companyId) {
   const paymentsQ = db.query(
     `SELECT method, amount FROM sale_payments WHERE sale_id=$1`, [saleId]
   );
-  // 14/09/2026: parcelas do crediario para o cupom (credit_installments
-  // guarda o sale_id). Data ja formatada no SQL para nao depender do fuso do
-  // Node. O erro fica guardado e so e lancado se a venda for no crediario.
-  const installmentsQ = db.query(
-    `SELECT installment_number, total_installments, amount_due,
-            to_char(due_date, 'DD/MM/YYYY') AS due_date_br
-       FROM credit_installments
-      WHERE sale_id = $1 AND company_id = $2 AND status <> 'cancelled'
-      ORDER BY installment_number ASC`,
-    [saleId, companyId]
-  ).then((r) => ({ rows: r.rows }), (err) => ({ err }));
-
   // Promise.allSettled: nenhuma rejeicao fica solta (unhandledRejection)
   // quando outra consulta falha primeiro.
-  const settled = await Promise.allSettled([companyQ, saleQ, itemsQ, paymentsQ, installmentsQ]);
+  const settled = await Promise.allSettled([companyQ, saleQ, itemsQ, paymentsQ]);
   const firstErr = settled.find((r) => r.status === 'rejected');
   if (firstErr) throw firstErr.reason;
-  const [companyRes, saleRes, itemsRes, paymentsRes, installmentsRes] = settled.map((r) => r.value);
+  const [companyRes, saleRes, itemsRes, paymentsRes] = settled.map((r) => r.value);
 
   const companyRows = companyRes.rows;
   const saleRows = saleRes.rows;
@@ -342,12 +330,22 @@ async function _loadSaleData(saleId, companyId) {
   let installments = [];
   const isCrediario = String(saleRows[0].payment_method || '').toLowerCase() === 'crediario'
     || payments.some(p => String(p.method || '').toLowerCase() === 'crediario');
+  // 14/09/2026: parcelas do crediario para o cupom. So consulta quando a
+  // venda (ou parte dela) foi no crediario -- credit_installments guarda o
+  // sale_id. Data ja formatada no SQL para nao depender do fuso do Node.
   if (isCrediario) {
-    if (installmentsRes.err) {
-      const e = installmentsRes.err;
+    try {
+      const { rows } = await db.query(
+        `SELECT installment_number, total_installments, amount_due,
+                to_char(due_date, 'DD/MM/YYYY') AS due_date_br
+           FROM credit_installments
+          WHERE sale_id = $1 AND company_id = $2 AND status <> 'cancelled'
+          ORDER BY installment_number ASC`,
+        [saleId, companyId]
+      );
+      installments = rows;
+    } catch (e) {
       if (e.code !== '42P01' && e.code !== '42703') throw e;
-    } else {
-      installments = installmentsRes.rows;
     }
   }
   return { company: companyRows[0] || {}, sale: saleRows[0], items, payments, installments };
