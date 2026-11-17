@@ -50,6 +50,9 @@ const BARRAS_P = '7890000000017';
 let pool;
 let app;
 let seq = 0;
+let usuario;
+const STAFF = { id: ID.dono, role: 'client', is_staff: true, plan: 'negocio' };
+const LOJISTA = { id: ID.dono, role: 'client', plan: 'negocio' };
 const q = (sql, params) => pool.query(sql, params);
 
 async function limpar() {
@@ -119,10 +122,15 @@ beforeAll(async () => {
 
   app = express();
   app.use(express.json());
-  app.use((req, _res, next) => { req.user = { id: ID.dono, role: 'client', is_staff: true, plan: 'negocio' }; next(); });
+  app.use((req, _res, next) => { req.user = usuario; next(); });
   app.use('/companies/:id/products', require('../src/routes/products'));
   app.use('/companies/:id/pdv', require('../src/routes/scanner'));
   app.use('/companies/:id/pedidos', require('../src/routes/pedidosDoBalcao'));
+});
+
+beforeEach(() => {
+  usuario = STAFF;
+  delete process.env.PEDIDO_LIBERADO;
 });
 
 afterAll(async () => {
@@ -229,5 +237,56 @@ describe('aviso ao guardar', () => {
     // O estoque continua o da prateleira.
     const { rows: [p] } = await q(`SELECT stock_qty::numeric AS s FROM products WHERE id = $1`, [ID.liso]);
     expect(Number(p.s)).toBe(2);
+  });
+});
+
+describe('trava PEDIDO_LIBERADO desligada (lojista)', () => {
+  // Ha pedidos do balcao abertos reservando pecas (os testes acima).
+  const db = () => require('../src/config/database');
+  const consultasAosItens = () => db().query.mock.calls
+    .filter(([sql]) => /digital_order_items/.test(String(sql))).length;
+
+  beforeEach(() => { usuario = LOJISTA; db().query.mockClear(); });
+
+  test('GET /products: nenhuma consulta a digital_order_items e nenhum campo novo', async () => {
+    const r = await request(app).get(`/companies/${ID.matriz}/products?limit=100`);
+    expect(r.status).toBe(200);
+    expect(consultasAosItens()).toBe(0);
+    for (const p of r.body.products) {
+      expect(p).not.toHaveProperty('reserved_qty');
+      expect(p).not.toHaveProperty('reserved_by_variant');
+    }
+    expect(JSON.stringify(r.body)).not.toMatch(/reserved/);
+  });
+
+  test('bipe (variante, produto, sugestoes e lote): nenhuma consulta nova e nenhum campo novo', async () => {
+    const respostas = [
+      await request(app).get(`/companies/${ID.matriz}/pdv/scan/${BARRAS_P}`),
+      await request(app).get(`/companies/${ID.matriz}/pdv/scan/7890000000099`),
+      await request(app).get(`/companies/${ID.matriz}/pdv/scan/Camiseta`),
+      await request(app).post(`/companies/${ID.matriz}/pdv/scan/batch`).send({ codes: ['7890000000099'] }),
+    ];
+    expect(respostas.map((r) => r.status)).toEqual([200, 200, 207, 200]);
+    expect(consultasAosItens()).toBe(0);
+    for (const r of respostas) expect(JSON.stringify(r.body)).not.toMatch(/reserved/);
+  });
+
+  test('com staff (ou PEDIDO_LIBERADO=true) a reserva aparece no /products e no bipe', async () => {
+    for (const modo of ['staff', 'env']) {
+      if (modo === 'staff') usuario = STAFF;
+      else { usuario = LOJISTA; process.env.PEDIDO_LIBERADO = 'true'; }
+      // O esperado sai do servico (os testes de "guardar" acima somaram pedidos).
+      const R = require('../src/services/reservaDoPedido');
+      const m = await R.lerReservas(pool, ID.matriz, [ID.camiseta, ID.liso]);
+      expect(R.reservadoDoProduto(m, ID.camiseta)).toBeGreaterThan(0);
+      const lista = await listar(ID.matriz);
+      expect(lista[ID.camiseta].reserved_qty).toBe(R.reservadoDoProduto(m, ID.camiseta));
+      expect(lista[ID.camiseta].reserved_by_variant).toEqual(R.reservasPorVariante(m, ID.camiseta));
+      const bipe = await request(app).get(`/companies/${ID.matriz}/pdv/scan/${BARRAS_P}`);
+      expect(bipe.body.product.reserved_qty).toBe(R.reservadoDoProduto(m, ID.camiseta));
+      expect(bipe.body.variant_reserved_qty).toBe(R.reservadoDaVariante(m, ID.camiseta, ID.varP));
+      const lote = await request(app).post(`/companies/${ID.matriz}/pdv/scan/batch`).send({ codes: ['7890000000099'] });
+      expect(lote.body.products['7890000000099'].reserved_qty).toBe(R.reservadoDoProduto(m, ID.liso));
+    }
   });
 });
