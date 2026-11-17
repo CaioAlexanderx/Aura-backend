@@ -335,6 +335,21 @@ router.get('/', async (req, res) => {
       .sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime())
       .slice(0, 15);
 
+    // p-194: com a frente Personalizados no Negócio (sem a vertical Studio),
+    // o card do Studio leva cta_route para /personalizados/pedido/<id>. Quem
+    // está no /studio recebe o card exatamente como antes. Uma leitura da
+    // empresa, e só se houver card do Studio; se falhar, fica o de sempre.
+    if (orders.some((o) => o.source === 'studio')) {
+      const casa = await lojaEvents.casaDoPedido({ vertical: 'studio', company_id: cid });
+      if (casa.personalizados_no_negocio === true) {
+        for (let i = 0; i < orders.length; i++) {
+          if (orders[i].source === 'studio') {
+            orders[i] = { ...orders[i], personalizados_no_negocio: true, cta_route: lojaEvents.routeForOrder({ ...casa, id: orders[i].id }) };
+          }
+        }
+      }
+    }
+
     // unread_count: banners não lidos + eventos não lidos + pedidos com menos de 2h
     const threshold = Date.now() - 2 * 60 * 60 * 1000;
     const newOrderCount = orders.filter(o => new Date(o.created_at).getTime() > threshold).length;

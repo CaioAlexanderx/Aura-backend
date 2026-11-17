@@ -88,6 +88,16 @@ function routeForOrder(order = {}) {
   return `/canal?tab=pedidos&order_id=${order.id}`;
 }
 
+// Orçamento: mesma regra do routeForOrder (p-194).
+function routeForQuote(q = {}) {
+  if (q.vertical === 'studio') {
+    return q.personalizados_no_negocio === true
+      ? `/personalizados/orcamentos?orcamento=${q.id}`
+      : `/studio/gestao/orcamentos/${q.id}`;
+  }
+  return '/matcon/orcamentos';
+}
+
 // A empresa do pedido do Studio usa a frente Personalizados no Negócio?
 // Mesma conta de services/personalizadosAtivacao (frente ligada =
 // vertical Studio OU studio_enabled true): aqui é a frente ligada SEM a
@@ -581,7 +591,11 @@ const EVENTS = Object.freeze({
     title: (q) => `Orçamento aprovado · ${fmtMilhar(q.total)}`,
     body:  (q) => corpoDoOrcamento(q),
     ctaLabel: 'Ver orçamento',
-    ctaRoute: (q) => (q.vertical === 'studio' ? `/studio/gestao/orcamentos/${q.id}` : '/matcon/orcamentos'),
+    // p-194: com a frente Personalizados no Negócio (sem a vertical Studio),
+    // o orçamento abre em /personalizados/orcamentos. `casa` pede a leitura
+    // da empresa (casaDoPedido); sem ela, o link de sempre.
+    ctaRoute: (q) => routeForQuote(q),
+    casa: true,
     load: loadQuote,
     destinatarios: { chaves: ['financeiro'], incluir: (q) => [q.created_by, q.seller_id] },
     entity: (q) => ({ ref: `orcamento:${q.id}`, label: `Orçamento ${numDoOrcamento(q)}` }),
@@ -794,7 +808,7 @@ async function emitLojaEvent(type, order = {}, opts = {}) {
     if (!spec.orderless) payload = await loadOrder(payload);
     else if (spec.load) payload = await spec.load(payload);
     // Só os tipos que usam routeForOrder precisam saber a casa do pedido.
-    if (!spec.ctaRoute) payload = await casaDoPedido(payload);
+    if (!spec.ctaRoute || spec.casa) payload = await casaDoPedido(payload);
     if (spec.destinatarios) payload = { ...payload, loja: await nomeDaLojaSeGrupo(companyId) };
     if (opts.body) payload = { ...payload, body: opts.body };
 
@@ -940,6 +954,7 @@ module.exports = {
   isEnabled,
   invalidatePrefs,
   routeForOrder,
+  routeForQuote,
   casaDoPedido,
   emitLojaEvent,
   emit,
