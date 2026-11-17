@@ -33,6 +33,8 @@ router.use('/me', productLinksUserRouter);
 router.use('/me', require('./meAggregates'));
 // 10/11/2026: estoque por loja na visao consolidada (GET /me/estoque/por-loja).
 router.use('/me', require('./meEstoquePorLoja'));
+// 17/11/2026 (p-186): Personalizados na visao consolidada (GET /me/studio/orders|quotes).
+router.use('/me', require('./meStudio'));
 // Fase 1 · consentimento (340): GET /me/whatsapp/consent/summary.
 router.use('/me', require('./customerConsent').meRouter);
 
