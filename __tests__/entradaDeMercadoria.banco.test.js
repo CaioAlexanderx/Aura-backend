@@ -339,3 +339,32 @@ describe('rastro da rota', () => {
     expect(r).toMatchSnapshot();
   });
 });
+
+// ── Migration 457: o cabeçalho da entrada de vários itens (B1) ─────────
+describe('migration 457 — stock_receipts', () => {
+  test('chave única, chave da NF-e com 44 dígitos, origem conhecida', async () => {
+    const c = await pool.connect();
+    const tentar = async (sql, params) => {
+      await c.query('SAVEPOINT t');
+      try { await c.query(sql, params); await c.query('RELEASE SAVEPOINT t'); return null; } catch (e) {
+        await c.query('ROLLBACK TO SAVEPOINT t');
+        return e.code;
+      }
+    };
+    try {
+      await c.query('BEGIN');
+      const ins = `INSERT INTO stock_receipts (company_id, idempotency_key, origin, nfe_key) VALUES ($1, $2, $3, $4)`;
+      const k = uuid();
+      expect(await tentar(ins, [matriz, k, 'nota', '3'.repeat(44)])).toBeNull();
+      expect(await tentar(ins, [filial, k, 'nota', null])).toBe('23505');
+      expect(await tentar(ins, [matriz, uuid(), 'nota', '123'])).toBe('23514');
+      expect(await tentar(ins, [matriz, uuid(), 'pix', null])).toBe('23514');
+      expect(await tentar(`INSERT INTO stock_receipts (company_id) VALUES ($1)`, [matriz])).toBe('23502');
+      const { rows } = await c.query(`SELECT origin, supplier_id, result, created_at IS NOT NULL AS tem_data FROM stock_receipts WHERE idempotency_key = $1`, [k]);
+      expect(rows).toEqual([{ origin: 'nota', supplier_id: null, result: null, tem_data: true }]);
+    } finally {
+      await c.query('ROLLBACK');
+      c.release();
+    }
+  });
+});
