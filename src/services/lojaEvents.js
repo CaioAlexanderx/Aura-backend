@@ -53,6 +53,8 @@ const webPush = require('./webPush');
 // agrupa em rajada. Os dois pelo módulo, pelo mesmo motivo acima.
 const destinatariosDoAviso = require('./destinatariosDoAviso');
 const rajadaDeVendas = require('./rajadaDeVendas');
+// p-177: a mesma conta de "frente ligada" do resto do backend.
+const { frenteLigada } = require('./personalizadosAtivacao');
 
 const PREFIX = 'loja_';
 
@@ -71,9 +73,43 @@ const APP_BANNER_DEFAULT = true;
 // query params já no formato que a tela vai querer ler quando ganhar deep
 // link; o Expo Router os ignora sem erro enquanto a tela não os lê, e a
 // lojista cai na tela certa de qualquer forma.
+//
+// 17/11/2026 (p-177): a empresa com a frente Personalizados DENTRO do
+// Negócio (sem a vertical Studio) não abre o /studio, que cai no gate
+// "Studio não habilitado". Para ela o pedido abre em
+// /personalizados/pedido/<id>. Quem decide é casaDoPedido, que marca
+// `personalizados_no_negocio` no payload; sem a marca, nada muda.
 function routeForOrder(order = {}) {
-  if (order.vertical === 'studio') return `/studio/pedidos/${order.id}`;
+  if (order.vertical === 'studio') {
+    return order.personalizados_no_negocio === true
+      ? `/personalizados/pedido/${order.id}`
+      : `/studio/pedidos/${order.id}`;
+  }
   return `/canal?tab=pedidos&order_id=${order.id}`;
+}
+
+// A empresa do pedido do Studio usa a frente Personalizados no Negócio?
+// Mesma conta de services/personalizadosAtivacao (frente ligada =
+// vertical Studio OU studio_enabled true): aqui é a frente ligada SEM a
+// vertical Studio. Só consulta para pedido com vertical 'studio'; os
+// outros pedidos não gastam um SELECT. Falha devolve o payload como veio
+// (o link de sempre): notificar nunca derruba o fluxo.
+async function casaDoPedido(payload) {
+  if (!payload || payload.vertical !== 'studio' || !payload.company_id) return payload;
+  try {
+    const { rows } = await db.query(
+      `SELECT vertical_active, pdv_settings->'studio_enabled' AS studio_enabled
+         FROM companies WHERE id = $1`,
+      [payload.company_id]
+    );
+    const c = rows && rows[0];
+    if (c && c.vertical_active !== 'studio' && frenteLigada({ studio_enabled: c.studio_enabled }, c.vertical_active)) {
+      return { ...payload, personalizados_no_negocio: true };
+    }
+  } catch (err) {
+    console.error('[lojaEvents] falha ao ler a casa do pedido:', err.message);
+  }
+  return payload;
 }
 
 const fmt = (v) => {
@@ -757,6 +793,8 @@ async function emitLojaEvent(type, order = {}, opts = {}) {
 
     if (!spec.orderless) payload = await loadOrder(payload);
     else if (spec.load) payload = await spec.load(payload);
+    // Só os tipos que usam routeForOrder precisam saber a casa do pedido.
+    if (!spec.ctaRoute) payload = await casaDoPedido(payload);
     if (spec.destinatarios) payload = { ...payload, loja: await nomeDaLojaSeGrupo(companyId) };
     if (opts.body) payload = { ...payload, body: opts.body };
 
@@ -902,6 +940,7 @@ module.exports = {
   isEnabled,
   invalidatePrefs,
   routeForOrder,
+  casaDoPedido,
   emitLojaEvent,
   emit,
   _resetCaches,
