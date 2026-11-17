@@ -25,23 +25,75 @@
 //
 // Matcon: nada aqui é do Matcon. A nota do Matcon continua pelo caminho
 // dele (custo da nota, pendência 4); o app desvia antes de chegar aqui.
+//
+// B2b (17/11/2026): produtos NOVOS na mesma chamada (item com new_product
+// em vez de product_id). Preço de venda obrigatório (pendência 6, decidida
+// pelo Caio em 17/11: o app sugere pela margem e a pessoa pode editar).
+// Nascem com estoque 0 e custo 0, na loja da rota, compartilhados no grupo
+// pela mesma regra do "+ Produto" (POST /products), e recebem a entrada
+// pelo mesmo caminho dos outros: custo médio, fornecedor principal,
+// movimento. Respeitam o limite de produtos do plano (tudo ou nada) e
+// avançam o passo "produto" do onboarding, como os imports.
 // ============================================================
 'use strict';
 
 const router = require('express').Router({ mergeParams: true });
 const db = require('../config/database');
 const { productVisibilityWhere } = require('../utils/companyGroup');
+const crypto = require('crypto');
 const { onlyDigits } = require('../utils/cnpj');
 const {
-  lerEntrada, round, falhaDeSchema, conferirGrade, achaOuCriaFornecedor,
+  lerEntrada, round, numeroPositivo, falhaDeSchema, conferirGrade, achaOuCriaFornecedor,
 } = require('../services/entradaDeMercadoria');
 const { planejarEntradaEmLote, gravarEntradaEmLote } = require('../services/entradaEmLote');
+const { avancarSemEsperar } = require('../services/onboardingProgress');
+const { linkImportedCategories } = require('../services/importCategoryLink');
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const CHAVE = /^[A-Za-z0-9._:-]{8,100}$/;
 const ORIGENS = new Set(['nota', 'planilha', 'digitar', 'lista']);
 const MAX_LINHAS = 300;
 const SCHEMA_PENDENTE = { error: 'Recurso ainda não disponível. Tente de novo em alguns minutos.', code: 'SCHEMA_PENDENTE' };
+
+// Igual a products.js e productsBatch.js (essencial=2000, negocio=7000,
+// expansao=ilimitado). O plano vem do JWT, como nas outras rotas de cadastro.
+function limiteDoPlano(plan) {
+  switch ((plan || '').toLowerCase()) {
+    case 'expansao':
+    case 'personalizado': return 999999;
+    case 'negocio':       return 7000;
+    default:              return 2000;
+  }
+}
+
+const texto = (v, max) => (v === undefined || v === null ? null : String(v).trim().slice(0, max) || null);
+
+// NCM: 8 dígitos ou nada (mesma regra do POST /products).
+function lerNcm(v) {
+  if (v === undefined || v === null) return null;
+  const d = String(v).replace(/\D/g, '');
+  return d.length === 8 ? d : null;
+}
+
+// Produto novo da linha (B2b). Devolve { erro } ou { novo }.
+function lerProdutoNovo(np) {
+  if (!np || typeof np !== 'object') return { erro: 'Produto novo inválido' };
+  const nome = texto(np.name, 200);
+  if (!nome) return { erro: 'Informe o nome do produto novo' };
+  const preco = numeroPositivo(np.price);
+  if (!preco) return { erro: 'Informe o preço de venda do produto novo' };
+  return {
+    novo: {
+      name: nome,
+      price: round(preco, 2),
+      category: texto(np.category, 100) || 'Produtos',
+      ncm: lerNcm(np.ncm),
+      barcode: texto(np.barcode, 60),
+      sku: texto(np.sku, 60),
+      unit: texto(np.unit, 10) || 'un',
+    },
+  };
+}
 
 function lerChave(req) {
   const h = req.headers && req.headers['idempotency-key'];
@@ -100,10 +152,28 @@ function lerRecebimento(req) {
 
   const linhas = [];
   const erros = [];
+  const codigosNovos = new Map(); // código de barras -> index (produtos novos)
   itens.forEach((it, index) => {
-    const pid = it && it.product_id ? String(it.product_id) : '';
-    if (!UUID.test(pid)) { erros.push({ index, product_id: pid || null, error: 'Produto não encontrado' }); return; }
-    const variantes = Array.isArray(it.variants) ? it.variants : null;
+    let novo = null;
+    if (it && it.new_product && !it.product_id) {
+      const lidoNovo = lerProdutoNovo(it.new_product);
+      if (lidoNovo.erro) { erros.push({ index, product_id: null, error: lidoNovo.erro }); return; }
+      novo = lidoNovo.novo;
+      if (Array.isArray(it.variants) && it.variants.length) {
+        erros.push({ index, product_id: null, error: 'Produto novo entra sem cor e tamanho; a grade você cadastra depois' });
+        return;
+      }
+      if (novo.barcode) {
+        if (codigosNovos.has(novo.barcode)) {
+          erros.push({ index, product_id: null, error: `Código de barras repetido na entrada (item ${codigosNovos.get(novo.barcode) + 1})` });
+          return;
+        }
+        codigosNovos.set(novo.barcode, index);
+      }
+    }
+    const pid = novo ? null : (it && it.product_id ? String(it.product_id) : '');
+    if (!novo && !UUID.test(pid)) { erros.push({ index, product_id: pid || null, error: 'Produto não encontrado' }); return; }
+    const variantes = novo ? null : (Array.isArray(it.variants) ? it.variants : null);
     const lida = lerEntrada({
       quantity: it.quantity,
       items: variantes || undefined,
@@ -117,7 +187,7 @@ function lerRecebimento(req) {
     }
     const codigo = it.supplier_code === undefined || it.supplier_code === null
       ? null : String(it.supplier_code).trim().slice(0, 60) || null;
-    linhas.push({ index, product_id: pid, entrada: arredondarQuantidades({ ...lida, nota }), supplierCode: codigo });
+    linhas.push({ index, product_id: pid, novo, entrada: arredondarQuantidades({ ...lida, nota }), supplierCode: codigo });
   });
   if (erros.length) return { erro: 'Há itens com problema', status: 400, code: 'LINHAS_COM_ERRO', lines: erros };
 
@@ -142,6 +212,9 @@ function responderErro(res, r) {
 //   update_cost (padrão true; cada item pode trocar)
 //   items[]: { product_id, quantity | variants[{ variant_id, quantity }],
 //              unit_cost, supplier_code, update_cost }   até 300
+//            ou, para cadastrar na hora (B2b):
+//            { new_product: { name, price*, category, ncm, barcode, sku, unit },
+//              quantity, unit_cost, supplier_code, update_cost }
 // Tudo ou nada: um item com problema devolve 400 LINHAS_COM_ERRO com a
 // lista (index = posição no items[]) e nada grava.
 router.post('/stock-receipts', async (req, res) => {
@@ -181,7 +254,9 @@ router.post('/stock-receipts', async (req, res) => {
 
     // 2. Trava os produtos e as variantes em ordem de id (duas entradas com
     //    os mesmos produtos em ordem diferente não se travam uma à outra).
-    const pids = [...new Set(linhas.map((l) => l.product_id))];
+    const existentes = linhas.filter((l) => !l.novo);
+    const novos = linhas.filter((l) => l.novo);
+    const pids = [...new Set(existentes.map((l) => l.product_id))];
     const { rows: travados } = await client.query(
       `SELECT id, company_id, name, stock_qty, cost_price, weighted_avg_cost, supplier_id
          FROM products
@@ -205,20 +280,58 @@ router.post('/stock-receipts', async (req, res) => {
     }
 
     const erros = [];
-    for (const l of linhas) {
+    for (const l of existentes) {
       if (!produtos.has(l.product_id)) { erros.push({ index: l.index, product_id: l.product_id, error: 'Produto não encontrado' }); continue; }
       const e = conferirGrade(l.entrada, variantes.get(l.product_id) || []);
       if (e) erros.push({ index: l.index, product_id: l.product_id, error: e });
+    }
+    // Produto novo com código de barras que a loja já usa: ligar ao que existe.
+    const codigos = novos.map((l) => l.novo.barcode).filter(Boolean);
+    if (codigos.length) {
+      const { rows: jaUsados } = await client.query(
+        `SELECT barcode, name FROM products WHERE company_id = $1 AND barcode = ANY($2::text[])`,
+        [cid, codigos]
+      );
+      const dono = new Map(jaUsados.map((r) => [r.barcode, r.name]));
+      for (const l of novos) {
+        if (l.novo.barcode && dono.has(l.novo.barcode)) {
+          erros.push({ index: l.index, product_id: null, error: `Este código de barras já é do produto "${dono.get(l.novo.barcode)}". Ligue o item a ele.` });
+        }
+      }
     }
     if (erros.length) {
       await client.query('ROLLBACK');
       return responderErro(res, { erro: 'Há itens com problema', status: 400, code: 'LINHAS_COM_ERRO', lines: erros });
     }
 
+    // Limite de produtos do plano: os novos entram todos ou nenhum.
+    let compartilharNovos = false;
+    if (novos.length) {
+      const grupo = await estatisticasDaLoja(client, cid);
+      const limite = limiteDoPlano(req.user && req.user.plan);
+      if (grupo.total + novos.length > limite) {
+        await client.query('ROLLBACK');
+        return res.status(403).json({
+          error: `Limite de produtos do plano: ${limite}. A loja tem ${grupo.total} e a entrada cadastraria mais ${novos.length}.`,
+          code: 'LIMITE_DO_PLANO', limit: limite, current: grupo.total, attempted: novos.length,
+        });
+      }
+      compartilharNovos = grupo.compartilhar;
+    }
+
     // 3. Fornecedor: o de sempre (id), novo pelo CNPJ/nome, ou nenhum.
     const forn = await achaOuCriaFornecedor(client, cid, req.body || {});
     if (forn.erro) { await client.query('ROLLBACK'); return res.status(forn.status).json({ error: forn.erro }); }
     const fornecedor = forn.fornecedor;
+
+    // 3b. Produtos novos (B2b): estoque 0 e custo 0; a entrada logo abaixo
+    //     dá o estoque, o custo médio e o fornecedor, como a qualquer outro.
+    let categorias = null;
+    if (novos.length) {
+      const criados = await cadastrarNovos(client, cid, novos, compartilharNovos);
+      for (const p of criados) produtos.set(p.id, p);
+      categorias = await ligarCategorias(client, cid, criados);
+    }
 
     // 4. Plano (sem banco) e gravação (um comando por tabela).
     const plano = planejarEntradaEmLote({ produtos, variantes, linhas });
@@ -231,20 +344,25 @@ router.post('/stock-receipts', async (req, res) => {
         id: recibo.id, origin: origem, invoice_number: nota, nfe_key: chaveNfe, created_at: recibo.created_at,
       },
       supplier: fornecedor ? { id: fornecedor.id, name: fornecedor.name, created: !!forn.criado } : null,
-      lines: plano.porLinha,
+      lines: plano.porLinha.map((l, i) => (linhas[i].novo ? { ...l, created: true } : l)),
       totals: {
         lines: plano.porLinha.length,
         products: plano.produtos.length,
+        created_products: novos.length,
         quantity: quantidade,
         total_cost: comCusto.length ? round(comCusto.reduce((s, l) => s + l.quantity * l.unit_cost, 0), 2) : null,
       },
     };
 
+    if (categorias && (categorias.pending.length || categorias.ambiguous.length)) {
+      resultado.categorias = { pendentes: categorias.pending, ambiguos: categorias.ambiguous };
+    }
     await client.query(
       `UPDATE stock_receipts SET supplier_id = $2, result = $3::jsonb WHERE id = $1`,
       [recibo.id, fornecedor ? fornecedor.id : null, JSON.stringify(resultado)]
     );
     await client.query('COMMIT');
+    if (novos.length) avancarSemEsperar(cid, 'produto');
     console.log(`[stock-receipts] ${cid} ${linhas.length} linhas, ${plano.produtos.length} produtos em ${Date.now() - inicio} ms`);
     res.status(201).json(resultado);
   } catch (err) {
@@ -256,6 +374,85 @@ router.post('/stock-receipts', async (req, res) => {
     client.release();
   }
 });
+
+// Quantos produtos a loja tem e se o produto novo nasce compartilhado no
+// grupo (mesma regra do POST /products: loja num grupo que não separou os
+// produtos). Base sem share_products_in_group (42703): só o grupo conta.
+async function estatisticasDaLoja(client, cid) {
+  const sql = (comSeparacao) => `SELECT
+      (SELECT COUNT(*)::int FROM products WHERE company_id = $1) AS total,
+      EXISTS(
+        SELECT 1 FROM companies c
+         WHERE c.id = $1
+           AND ((c.billing_owner_company_id IS NOT NULL AND c.billing_owner_company_id != c.id)
+                OR EXISTS (SELECT 1 FROM companies sub WHERE sub.billing_owner_company_id = c.id AND sub.id != c.id))
+      ) AS in_group${comSeparacao ? `,
+      EXISTS(
+        SELECT 1 FROM companies g
+         WHERE COALESCE(NULLIF(g.billing_owner_company_id, g.id), g.id) = (
+           SELECT COALESCE(NULLIF(billing_owner_company_id, id), id) FROM companies WHERE id = $1)
+           AND g.share_products_in_group = false
+      ) AS group_separated` : ''}`;
+  await client.query('SAVEPOINT estatisticas');
+  let r;
+  try {
+    ({ rows: [r] } = await client.query(sql(true), [cid]));
+    await client.query('RELEASE SAVEPOINT estatisticas');
+  } catch (e) {
+    if (e.code !== '42703') throw e;
+    await client.query('ROLLBACK TO SAVEPOINT estatisticas');
+    ({ rows: [r] } = await client.query(sql(false), [cid]));
+  }
+  return { total: Number(r.total) || 0, compartilhar: r.in_group === true && r.group_separated !== true };
+}
+
+// Um INSERT só para todos os novos. O id nasce aqui para casar cada linha
+// com o seu produto sem depender da ordem do RETURNING.
+// products.ncm existe em produção mas não nasce de nenhuma migration do
+// repo (o banco de CI não tem): sem a coluna (42703), cadastra sem o NCM,
+// o mesmo degrau que o POST /products usa para as colunas novas.
+async function cadastrarNovos(client, cid, novos, compartilhar) {
+  for (const l of novos) l.product_id = crypto.randomUUID();
+  const col = (k) => novos.map((l) => l.novo[k]);
+  const inserir = (comNcm) => client.query(
+    `INSERT INTO products (id, company_id, name, sku, barcode, category, price, cost_price, stock_qty, unit, is_group_shared${comNcm ? ', ncm' : ''})
+     SELECT u.id, $1, u.name, u.sku, u.barcode, u.category, u.price, 0, 0, u.unit, $9${comNcm ? ', u.ncm' : ''}
+       FROM unnest($2::uuid[], $3::text[], $4::text[], $5::text[], $6::text[], $7::numeric[], $8::text[], $10::text[])
+            AS u(id, name, sku, barcode, category, price, unit, ncm)
+     RETURNING id, company_id, name, category, stock_qty, cost_price, weighted_avg_cost, supplier_id`,
+    [cid, novos.map((l) => l.product_id), col('name'), col('sku'), col('barcode'), col('category'),
+      col('price'), col('unit'), compartilhar, col('ncm')]
+  );
+  await client.query('SAVEPOINT novos');
+  try {
+    const { rows } = await inserir(true);
+    await client.query('RELEASE SAVEPOINT novos');
+    return rows;
+  } catch (e) {
+    if (e.code !== '42703') throw e;
+    await client.query('ROLLBACK TO SAVEPOINT novos');
+    console.warn('[stock-receipts] produtos novos sem NCM: base sem products.ncm');
+    const { rows } = await inserir(false);
+    return rows;
+  }
+}
+
+// Categoria na árvore, como o lote e a planilha. A função engole alguns
+// erros do banco, o que deixaria a transação abortada: o savepoint isola
+// (sem vínculo, o texto da categoria já está no produto e o wizard de
+// categorias pega depois).
+async function ligarCategorias(client, cid, criados) {
+  await client.query('SAVEPOINT categorias');
+  try {
+    const out = await linkImportedCategories(client, cid, criados);
+    await client.query('RELEASE SAVEPOINT categorias');
+    return out;
+  } catch (e) {
+    await client.query('ROLLBACK TO SAVEPOINT categorias');
+    console.warn('[stock-receipts] categorias dos novos ficaram de fora:', e.message);
+    return null;
+  }
+}
 
 // ─── GET /stock-receipts?nfe_key&invoice_number&supplier_id ──
 // "Nota já lançada?" na loja da rota. Acha:
