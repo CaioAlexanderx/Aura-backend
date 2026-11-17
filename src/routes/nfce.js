@@ -75,6 +75,7 @@ const { itensComDescontoDaVenda, ehUuid, MENSAGEM_DESCONTO_TOTAL } = require('..
 const { nfeDeVendaQueTrava }       = require('../services/nfe55Venda');
 // 14/11/2026 (CP5): cancelamento da NF-e 55 pelo evento da 55, não o da NFC-e.
 const eventos55                    = require('../services/nfe55Eventos');
+const nfceCancelamento             = require('../services/nfceCancelamento');
 // products.nota_fiscal (migration 442): false = base sem a coluna.
 let temColunaNotaFiscal = true;
 // 11/11/2026 — fiscal do produto na nota (migration 350: cest, origem,
@@ -1268,85 +1269,15 @@ router.get('/:nfceId', requireAuth, async (req, res) => {
 });
 
 router.post('/:nfceId/cancel', requireAuth, requireRole('client','analyst','admin'), async (req, res) => {
-  const { reason } = req.body;
-  if (!reason || reason.length < 15) return res.status(400).json({ error: 'Motivo do cancelamento exige ao menos 15 caracteres (regra SEFAZ)' });
+  // 17/11/2026 (b-troca-prazo-nfce): o corpo foi para services/nfceCancelamento.js
+  // (o cancelar venda usa o mesmo). Prazo da NFC-e por UF em
+  // services/nfcePrazoCancelamento.js; o caminho de cada nota nao mudou.
   try {
-    // S2.1: nota da emissão própria cancela via evento 110111 na SEFAZ-SP
-    // ANTES de marcar local — nada de cancelamento só-local.
-    const { rows: ownRows } = await db.query(
-      `SELECT * FROM nfce_emissions WHERE id=$1 AND company_id=$2 AND xml_signed IS NOT NULL`,
-      [req.params.nfceId, req.params.id]
-    );
-    if (ownRows.length) {
-      const own = ownRows[0];
-      if (own.status === 'cancelada') return res.json({ nfce: own, idempotent: true });
-      // 14/11/2026 (NF-e 55, CP5): a NF-e modelo 55 (venda ou devolução) NÃO
-      // cancela pelo caminho da NFC-e (endpoint da NFC-e e 30 min): vai ao
-      // evento da 55, com o prazo de 24 h (services/nfe55Eventos.js). Mesmo
-      // serviço do POST /nfe55/:id/cancelar. A NFC-e segue abaixo, igual.
-      if (eventos55.ehModelo55(own.chave_acesso)) {
-        try {
-          const r = await eventos55.cancelarNfe55(db, own, { justificativa: reason, userId: req.user && req.user.id });
-          logAuditAction(req.user.id, req.params.id, 'nfe55_cancelada',
-            `NF-e nº ${own.numero} cancelada na SEFAZ (evento ${r.evento.protocolo || r.evento.cStat}): ${reason}`);
-          const { xml_signed, ...nota } = r.nota; // eslint-disable-line no-unused-vars
-          return res.json({ nfce: nota, evento: { cStat: r.evento.cStat, protocolo: r.evento.protocolo, ja_cancelada: !!r.evento.ja_cancelada }, cancelavel_ate: r.prazo.ate });
-        } catch (e) {
-          if (e && e.code && e.status) return res.status(e.status).json({ error: e.message, code: e.code, ...(e.extra || {}) });
-          throw e;
-        }
-      }
-      if (own.status !== 'autorizada') {
-        return res.status(400).json({ error: `Nota não pode ser cancelada (status: ${own.status})` });
-      }
-      // Prazo legal de cancelamento da NFC-e em SP (default 30min —
-      // ⚠️ confirmar no MOC SP vigente; ajustável via env).
-      const deadlineMin = parseInt(process.env.NFCE_CANCEL_DEADLINE_MIN || '30', 10);
-      const ageMin = own.authorized_at ? (Date.now() - new Date(own.authorized_at).getTime()) / 60000 : null;
-      if (ageMin !== null && ageMin > deadlineMin) {
-        return res.status(400).json({ error: `Prazo de cancelamento expirado (${deadlineMin} min após a autorização, regra SEFAZ-SP). Fale com seu contador sobre regularização.` });
-      }
-      const { rows: cfgRows } = await db.query('SELECT * FROM nfce_config WHERE company_id=$1', [req.params.id]);
-      if (!cfgRows.length) return res.status(400).json({ error: 'Config NFC-e não encontrada' });
-      try {
-        const ev = await sefazSp.cancelNfce({
-          db, config: cfgRows[0], companyId: req.params.id,
-          chave: own.chave_acesso, protocolo: own.protocolo, justificativa: reason,
-        });
-        if (!ev.sucesso) {
-          return res.status(422).json({ error: `SEFAZ-SP recusou o cancelamento: [${ev.cStat}] ${ev.xMotivo || ''}`, cStat: ev.cStat });
-        }
-        const { rows: upd } = await db.query(
-          `UPDATE nfce_emissions SET status='cancelada', cancel_reason=$1, cancelled_at=NOW() WHERE id=$2 RETURNING *`,
-          [reason, own.id]
-        );
-        logAuditAction(req.user.id, req.params.id, 'nfce_cancelled',
-          `NFC-e no ${own.numero} cancelada na SEFAZ-SP (evento ${ev.protocoloEvento || ev.cStat}): ${reason}`);
-        return res.json({ nfce: upd[0], evento: { cStat: ev.cStat, protocolo: ev.protocoloEvento, ja_cancelada: ev.jaCancelada || false } });
-      } catch (apiErr) {
-        console.error('[nfce] SEFAZ-SP cancel error:', apiErr.message);
-        return res.status(502).json({ error: 'Erro ao cancelar na SEFAZ-SP: ' + apiErr.message });
-      }
-    }
-    const { rows } = await db.query(
-      `UPDATE nfce_emissions SET status='cancelada', cancel_reason=$1, cancelled_at=NOW()
-        WHERE id=$2 AND company_id=$3 AND status='autorizada' RETURNING *`,
-      [reason, req.params.nfceId, req.params.id]
-    );
-    if (!rows.length) return res.status(400).json({ error: 'Nota nao encontrada ou nao pode ser cancelada' });
-    const emission = rows[0];
-    if (emission.nuvemfiscal_id) {
-      try {
-        const cancelFn = emission.tipo==='nfe' ? nuvemfiscal.cancelNfe : nuvemfiscal.cancelNfce;
-        await cancelFn(emission.nuvemfiscal_id, reason);
-      } catch (apiErr) {
-        console.error('[nfce] Nuvem Fiscal cancel error:', apiErr.message);
-        await db.query('UPDATE nfce_emissions SET error_message=$1 WHERE id=$2',
-          ['Cancelamento local OK. Erro Nuvem Fiscal: '+apiErr.message, emission.id]);
-      }
-    }
-    logAuditAction(req.user.id, req.params.id, 'nfce_cancelled', `${(emission.tipo||'nfce').toUpperCase()} no ${emission.numero} cancelada: ${reason}`);
-    res.json({ nfce: emission });
+    const r = await nfceCancelamento.cancelarEmissao(db, {
+      companyId: req.params.id, nfceId: req.params.nfceId,
+      reason: req.body && req.body.reason, userId: req.user && req.user.id,
+    });
+    res.status(r.status).json(r.body);
   } catch (err) { res.status(500).json({ error: 'Erro ao cancelar nota' }); }
 });
 
