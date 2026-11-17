@@ -19,7 +19,7 @@ jest.mock('../src/middleware/auth', () => ({
     ? next() : res.status(403).json({ error: 'sem permissao' })),
 }));
 jest.mock('../src/services/cacheDaPaginaDaLoja', () => ({
-  esquecerPagina: jest.fn(), lembrarPagina: jest.fn(), paginaLembrada: jest.fn(() => null),
+  esquecerPagina: jest.fn(), lembrarPagina: jest.fn(), paginaLembrada: jest.fn(() => null), entradaLembrada: jest.fn(() => null),
 }));
 jest.mock('../src/services/mpGateway', () => ({ temGatewayAtivo: jest.fn(async () => false) }));
 

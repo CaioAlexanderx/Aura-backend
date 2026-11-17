@@ -19,7 +19,7 @@
 
 function bd() { return require('../config/database'); }
 
-const { EM_ESTOQUE, PERSONALIZAVEL, COM_FOTO, NA_VITRINE, filtroDeFoto, VENDIDOS_RECENTES } = require('./catalogoPaginado');
+const { EM_ESTOQUE, PERSONALIZAVEL, COLUNA_PERSONALIZAVEL, COM_FOTO, NA_VITRINE, filtroDeFoto, VENDIDOS_RECENTES } = require('./catalogoPaginado');
 const { colunasPromo, colunasPromoNulas, comColunasPromo } = require('./precoEfetivo');
 
 /** Abaixo disto o bloco não aparece: um cartão sozinho lê como defeito. */
@@ -36,7 +36,8 @@ const DIAS_DE_NOVO = 14;
 const COLUNAS = `id, name, description, price, image_url, image_thumb_url, gallery_urls, category,
   stock_qty, stock_min, created_at, material, medidas, cuidados, duration_minutes`;
 // p-85 (427): + promo_* para o De/Por da vitrine (montarProdutoPublico).
-const colunas = (com) => `${COLUNAS}, ${com ? colunasPromo() : colunasPromoNulas()}`;
+// p-180: + personalizavel (o selo "Personalize" no cartao da home).
+const colunas = (com) => `${COLUNAS}, ${com ? colunasPromo() : colunasPromoNulas()}, ${COLUNA_PERSONALIZAVEL}`;
 
 /**
  * Saldo total da peça, na mesma regra de EM_ESTOQUE: com variante ativa,

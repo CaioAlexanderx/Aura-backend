@@ -1570,6 +1570,79 @@ router.delete('/upload-image', requireRole('client', 'analyst', 'admin'), async 
   }
 });
 
+// ============================================================
+// GET/PUT /companies/:id/digital-channel/banner-personalizados (p-180)
+//
+// O banner A da loja com produto personalizavel (mockup p-132, D9): o
+// modelo pronto da Aura com a foto da peca, titulo, texto e botoes que a
+// lojista edita, e a faixa de confianca. Mora em
+// digital_channel_config.banner_personalizados (migration 458). A loja so
+// desenha o banner com `ativo: true` E com peca personalizavel na vitrine
+// (services/bannerPersonalizados.js). Rota propria, fora do PUT / grande:
+// salvar o resto da loja nao toca no banner, e vice-versa.
+//
+// Uma loja por empresa (digital_channel_config.company_id): no multi-CNPJ
+// cada CNPJ tem a sua loja e o seu banner; nao ha visao consolidada.
+// O gate de tela (modulo personalizados.loja e a trava
+// PERSONALIZADOS_LIBERADO) fica no app, como nas outras rotas do Canal.
+// ============================================================
+const bannerPz = require('../services/bannerPersonalizados');
+const { PERSONALIZAVEL: PERSONALIZAVEL_DO_BANNER } = require('../services/catalogoPaginado');
+
+router.get('/banner-personalizados', requireRole('client', 'analyst', 'admin'), async (req, res) => {
+  const cid = req.params.id;
+  try {
+    let banner = null;
+    try {
+      const { rows } = await db.query(
+        'SELECT banner_personalizados FROM digital_channel_config WHERE company_id = $1', [cid]);
+      banner = rows.length ? bannerPz.sanearBanner(rows[0].banner_personalizados) : null;
+    } catch (e) {
+      // 42703: a migration 458 ainda nao rodou. Sem coluna, sem banner.
+      if (e.code !== '42703') throw e;
+    }
+    // As pecas que podem ir no banner: personalizaveis ativas da loja, com
+    // a foto que vira a capa. A loja escolhe uma; sem escolha, a mais nova.
+    const { rows: pecas } = await db.query(
+      `SELECT id, name, NULLIF(TRIM(image_url), '') AS image_url
+         FROM products
+        WHERE ${listVisibilityWhere('$1')}
+          AND is_active IS NOT FALSE
+          AND ${PERSONALIZAVEL_DO_BANNER}
+        ORDER BY created_at DESC
+        LIMIT 50`, [cid]);
+    res.json({ banner, padrao: bannerPz.PADRAO, limites: bannerPz.LIMITES, pecas });
+  } catch (err) {
+    console.error('[digital-channel] banner-personalizados GET:', err.message);
+    res.status(500).json({ error: 'Não foi possível carregar o banner.' });
+  }
+});
+
+router.put('/banner-personalizados', requireRole('client', 'analyst', 'admin'), async (req, res) => {
+  const cid = req.params.id;
+  const banner = bannerPz.sanearBanner(req.body);
+  if (!banner) return res.status(400).json({ error: 'Envie o banner como objeto.' });
+  try {
+    if (banner.produto_id) {
+      const { rows } = await db.query(
+        `SELECT 1 FROM products
+          WHERE ${listVisibilityWhere('$1')} AND id = $2 AND ${PERSONALIZAVEL_DO_BANNER}
+          LIMIT 1`, [cid, banner.produto_id]);
+      if (!rows.length) return res.status(400).json({ error: 'Escolha uma peça personalizável da sua loja.' });
+    }
+    const { rows } = await db.query(
+      `UPDATE digital_channel_config SET banner_personalizados = $2::jsonb, updated_at = NOW()
+        WHERE company_id = $1 RETURNING slug`, [cid, JSON.stringify(banner)]);
+    if (!rows.length) return res.status(404).json({ error: 'Configure a loja online antes do banner.' });
+    // A home fica 60 s na memoria: sem isto o banner novo demoraria a sair.
+    esquecerPagina(rows[0].slug || undefined);
+    res.json({ banner });
+  } catch (err) {
+    console.error('[digital-channel] banner-personalizados PUT:', err.message);
+    res.status(500).json({ error: 'Não foi possível salvar o banner.' });
+  }
+});
+
 // RA-04 (10/11/2026): "Ativar Pix" pela subconta Asaas desativado. A rota
 // criava a conta na Asaas com o token mestre e depois gravava em
 // companies.asaas_subconta_* — colunas que nao existem no banco de producao —

@@ -23,22 +23,37 @@ const MAXIMO_DE_LOJAS = 200;
 
 const _paginas = new Map();
 
-/** O HTML guardado da loja, ou null se nao ha ou venceu. */
-function paginaLembrada(slug) {
+/**
+ * A entrada guardada da loja ({ html, csp }), ou null se nao ha ou venceu.
+ *
+ * A CSP vai junto com o HTML (p-180): a loja com personalizavel vai ganhar
+ * uma CSP propria quando o quadro do personalizador entrar (p-182, frame-src
+ * do app). Guardar so o HTML e responder o hit com a CSP de todas as lojas
+ * serviria, por 60 s, a pagina nova com a politica velha — o quadro seria
+ * bloqueado so na segunda visita. `csp` null = quem guardou nao informou, e
+ * a rota usa a CSP padrao, como antes.
+ */
+function entradaLembrada(slug) {
   const hit = _paginas.get(slug);
   if (!hit) return null;
   if (hit.ate <= Date.now()) { _paginas.delete(slug); return null; }
-  return hit.html;
+  return { html: hit.html, csp: hit.csp || null };
 }
 
-function lembrarPagina(slug, html) {
+/** O HTML guardado da loja, ou null se nao ha ou venceu. */
+function paginaLembrada(slug) {
+  const hit = entradaLembrada(slug);
+  return hit ? hit.html : null;
+}
+
+function lembrarPagina(slug, html, csp) {
   if (!slug || typeof html !== 'string') return;
   if (_paginas.size >= MAXIMO_DE_LOJAS && !_paginas.has(slug)) {
     // Fora a mais antiga: Map guarda a ordem de insercao.
     const primeira = _paginas.keys().next().value;
     _paginas.delete(primeira);
   }
-  _paginas.set(slug, { html, ate: Date.now() + TTL_MS });
+  _paginas.set(slug, { html, csp: typeof csp === 'string' && csp ? csp : null, ate: Date.now() + TTL_MS });
 }
 
 /** Sem slug, esquece todas — quem salva config nao sabe o slug de cor. */
@@ -47,4 +62,4 @@ function esquecerPagina(slug) {
   else _paginas.clear();
 }
 
-module.exports = { paginaLembrada, lembrarPagina, esquecerPagina, TTL_MS, MAXIMO_DE_LOJAS };
+module.exports = { paginaLembrada, entradaLembrada, lembrarPagina, esquecerPagina, TTL_MS, MAXIMO_DE_LOJAS };

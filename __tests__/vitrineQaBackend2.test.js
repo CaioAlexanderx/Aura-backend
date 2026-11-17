@@ -32,7 +32,7 @@ jest.mock('../src/services/mpService', () => ({
   createMpPixPayment: jest.fn(), createMpPreference: jest.fn(),
 }));
 jest.mock('../src/services/cacheDaPaginaDaLoja', () => ({
-  esquecerPagina: jest.fn(), paginaLembrada: jest.fn(() => null), lembrarPagina: jest.fn(),
+  esquecerPagina: jest.fn(), paginaLembrada: jest.fn(() => null), entradaLembrada: jest.fn(() => null), lembrarPagina: jest.fn(),
 }));
 
 const fs = require('fs');
