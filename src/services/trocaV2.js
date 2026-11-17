@@ -108,6 +108,7 @@ const { resolveManualDiscount } = require('./descontoManual');
 const { productVisibilityWhere } = require('../utils/companyGroup');
 // p-92 (08/11/2026, migration 428): item novo da troca guarda se saiu na promocao.
 const vendaNaPromocao = require('./vendaNaPromocao');
+const { findOwnerScopedCustomer, CUSTOMER_NOT_FOUND_BODY } = require('../utils/customerScope');
 
 const SP_DATE_NOW = "(NOW() AT TIME ZONE 'America/Sao_Paulo')::date";
 
@@ -120,6 +121,34 @@ const SP_DATE_NOW = "(NOW() AT TIME ZONE 'America/Sao_Paulo')::date";
 function toFiniteNum(v, fallback = 0) {
   const n = typeof v === 'number' ? v : parseFloat(v);
   return Number.isFinite(n) ? n : fallback;
+}
+
+// 17/11/2026 (p-165): credito na conta precisa de cliente. Antes o erro
+// saia so no INSERT do payout -- depois do pre-cancelamento das NFC-e de
+// origem -- com status 400 e texto tecnico. Agora a troca confere logo
+// depois de calcular os totais, antes de tocar a SEFAZ, e devolve um codigo
+// para o app.
+const CREDITO_EXIGE_CLIENTE_BODY = Object.freeze({
+  error: 'Para deixar o valor como crédito, a troca precisa de um cliente cadastrado. Escolha o cliente ou devolva o valor de outra forma.',
+  code:  'CREDITO_EXIGE_CLIENTE',
+});
+
+function temCreditoNaConta(refundSplits) {
+  return (refundSplits || []).some((r) => r && r.method === 'crediario_credito' && parseFloat(r.amount) > 0);
+}
+
+// Cliente da troca: o do corpo (caso do presente: o credito vai para outra
+// pessoa) ou o da venda original. O do corpo passa pela mesma conferencia da
+// venda (cliente do mesmo dono, utils/customerScope.js); o da venda original
+// ja foi gravado por uma venda conferida.
+async function resolverClienteDaTroca(client, companyId, bodyCustomerId, primarySale) {
+  const daVenda = primarySale?.customer_id || null;
+  if (bodyCustomerId && bodyCustomerId !== daVenda) {
+    const found = await findOwnerScopedCustomer(client, companyId, bodyCustomerId);
+    if (!found) throw new TrocaV2Error(404, { ...CUSTOMER_NOT_FOUND_BODY });
+    return bodyCustomerId;
+  }
+  return bodyCustomerId || daVenda;
 }
 
 class TrocaV2Error extends Error {
@@ -799,7 +828,7 @@ async function insertTrocaPayouts(client, trocaSaleId, companyId, sessaoId, cust
     const amount = parseFloat(parseFloat(r.amount).toFixed(2));
     let creditTxId = null;
     if (r.method === 'crediario_credito') {
-      if (!customerId) throw new TrocaV2Error(400, { error: 'crediario_credito exige customer_id (cliente cadastrado)' });
+      if (!customerId) throw new TrocaV2Error(422, { ...CREDITO_EXIGE_CLIENTE_BODY });
       const { rows: txRows } = await client.query(
         `INSERT INTO customer_credit_transactions
            (company_id, customer_id, sale_id, type, amount, payment_method, notes, created_by)
@@ -1004,12 +1033,20 @@ async function handle(req, res) {
     const totals = computeAndValidateTotals({ returned_items, new_items, payment_splits, refund_splits, legacyMethod, discount: req.body });
     const _paymentSplits = totals.paymentSplits;
     const _refundSplits = totals.refundSplits;
+
+    // Pedido online so vira "primario" quando nao ha venda do Caixa na troca.
+    const primarySale = originSales[0] || originDigital[0];
+    // 17/11/2026 (p-165): cliente conferido e credito sem cliente recusado
+    // ANTES do pre-cancelamento das NFC-e de origem.
+    const effectiveCustomerId = await resolverClienteDaTroca(client, companyId, customer_id, primarySale);
+    if (!effectiveCustomerId && temCreditoNaConta(_refundSplits)) {
+      throw new TrocaV2Error(422, { ...CREDITO_EXIGE_CLIENTE_BODY });
+    }
+
     const strategyMap = decideFiscalPerOrigin(originSales, returned_items, nfce_strategy);
 
     preCancelled = await preCancelNfces(originSales, strategyMap);
 
-    // Pedido online so vira "primario" quando nao ha venda do Caixa na troca.
-    const primarySale = originSales[0] || originDigital[0];
     const saleCompanyId = primarySale.company_id;
     const isCrossFilial = originSales.some((s) => s.is_cross_filial) || originDigital.some((o) => o.is_cross_filial);
     const digitalOrderNumbers = originDigital.map((o) => o.order_number);
@@ -1032,7 +1069,6 @@ async function handle(req, res) {
       return res.status(503).json({ error: 'Troca cross-filial v2 indisponivel: migration 111 nao aplicada', code: 'MIGRATION_111_PENDING' });
     }
 
-    const effectiveCustomerId = customer_id || primarySale?.customer_id || null;
     const trocaPaymentMethod = (_paymentSplits[0]?.method || _refundSplits[0]?.method || 'dinheiro');
 
     let trocaSaleRow;
@@ -1387,5 +1423,5 @@ module.exports = {
   handle,
   reemitirEmissao,
   TrocaV2Error,
-  _internal: { adjustStock, computeAndValidateTotals, newItemLine, balanceSplits, decideFiscalPerOrigin, normalizeMethodForSalePayments, bestEffort, toFiniteNum, lookupOriginDigitalOrders, validateDigitalReturnedItems, trocaSummary },
+  _internal: { resolverClienteDaTroca, temCreditoNaConta, CREDITO_EXIGE_CLIENTE_BODY, adjustStock, computeAndValidateTotals, newItemLine, balanceSplits, decideFiscalPerOrigin, normalizeMethodForSalePayments, bestEffort, toFiniteNum, lookupOriginDigitalOrders, validateDigitalReturnedItems, trocaSummary },
 };
