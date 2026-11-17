@@ -1362,9 +1362,6 @@ module.exports = {
   travaDaVenda,
   travaDoDinheiro,
   resumoParaEdicao,
-  // 17/11/2026 (Trocar por NF-e): o prazo da NFC-e da venda, lido também
-  // por services/nfe55Venda.situacaoDaTrocaPorNfe (um prazo só).
-  infoNfce,
   planejar,
   aplicar,
   ultimaEdicao,

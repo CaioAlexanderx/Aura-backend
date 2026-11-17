@@ -39,6 +39,7 @@ const {
 const { separarServicos, pagamentosDosProdutos } = require('./nfceSemServico');
 const { ibgePeloCep } = require('./ibgePeloCep');
 const { CNPJ_REQUIRED_CODE, CNPJ_REQUIRED_MSG } = require('./documentoEmpresa');
+const { prazoDeCancelamento } = require('./nfcePrazoCancelamento');
 
 function onlyDigits(s) { return String(s == null ? '' : s).replace(/\D/g, ''); }
 function texto(v) {
@@ -293,10 +294,11 @@ async function nfeDeVendaQueTrava(db, companyId, saleId) {
 //   fora_do_prazo     passou o prazo de cancelamento da NFC-e
 //   pode_trocar       dá para cancelar a NFC-e e emitir a NF-e
 //
-// Prazo: editarVenda.infoNfce, o mesmo do aviso "Cancelar a nota e emitir
-// outra" do Editar venda. É o ponto único: quando o prazo por UF
-// (b-troca-prazo-nfce) entrar lá, ele vale aqui sem mudar este arquivo. A
-// rota de cancelamento confere o prazo de novo (quem manda é ela).
+// Prazo: services/nfcePrazoCancelamento.prazoDeCancelamento (por UF,
+// b-troca-prazo-nfce), o MESMO que a rota de cancelamento
+// (services/nfceCancelamento.js) usa para recusar fora do prazo. Sem
+// authorized_at não dá para afirmar o prazo: oferece a troca e deixa a SEFAZ
+// decidir (habilitar, nunca bloquear; se ela recusar, o assistente não abre).
 //
 // Multi-CNPJ: tudo com o companyId da loja da venda (sales.company_id).
 async function situacaoDaTrocaPorNfe(db, { companyId, saleId, now = Date.now() }) {
@@ -306,7 +308,7 @@ async function situacaoDaTrocaPorNfe(db, { companyId, saleId, now = Date.now() }
     situacao,
     nfce: nfce ? {
       id: nfce.id, numero: nfce.numero, serie: nfce.serie, authorized_at: nfce.authorized_at || null,
-      cancelavel_ate: null,
+      cancelavel_ate: null, prazo_minutos: null, uf: null,
     } : null,
     bloqueio: null,
     ...(extra || {}),
@@ -328,12 +330,9 @@ async function situacaoDaTrocaPorNfe(db, { companyId, saleId, now = Date.now() }
   }
   if (bloqueio) return resposta('nfe_indisponivel', { bloqueio });
 
-  // require aqui: este serviço também é carregado pelo /nfce/emit, que não
-  // precisa do editarVenda (crediário, Financeiro) para nada.
-  const { infoNfce } = require('./editarVenda');
-  const info = infoNfce({ nfce }, now);
-  const r = resposta(info && info.can_cancel ? 'pode_trocar' : 'fora_do_prazo');
-  r.nfce.cancelavel_ate = (info && info.cancel_until) || null;
+  const prazo = prazoDeCancelamento(nfce, { uf: m.config && m.config.uf, now });
+  const r = resposta(prazo.dentro || prazo.desconhecido ? 'pode_trocar' : 'fora_do_prazo');
+  Object.assign(r.nfce, { cancelavel_ate: prazo.ate, prazo_minutos: prazo.minutos, uf: prazo.uf });
   return r;
 }
 

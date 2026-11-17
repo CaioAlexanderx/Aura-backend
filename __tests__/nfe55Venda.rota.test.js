@@ -680,6 +680,8 @@ describe('Trocar por NF-e: GET /venda/:saleId/trocar-nfce e o caminho inteiro', 
     expect(r.body.nfce).toEqual({
       id: 'em-nfce-1', numero: 900, serie: 2, authorized_at: nota.authorized_at,
       cancelavel_ate: new Date(new Date(nota.authorized_at).getTime() + 30 * MIN).toISOString(),
+      // UF pela chave (a fictícia começa com 33 = RJ): o mesmo prazo da rota de cancelamento.
+      prazo_minutos: 30, uf: 'RJ',
     });
     expect(JSON.stringify(r.body)).not.toMatch(/assinada/);
     // Só lê: nada cancelado, nada emitido, nenhum número reservado.
@@ -724,17 +726,26 @@ describe('Trocar por NF-e: GET /venda/:saleId/trocar-nfce e o caminho inteiro', 
     nfcePropria(40);
     const r = await situacao(V_COM_NFCE);
     expect(r.body.situacao).toBe('fora_do_prazo');
-    expect(r.body.nfce.cancelavel_ate).toEqual(expect.any(String));
+    expect(r.body.nfce).toMatchObject({ cancelavel_ate: expect.any(String), prazo_minutos: 30, uf: 'RJ' });
     const c = await cancelarNfce('em-nfce-1');
     expect(c.status).toBe(400);
+    expect(c.body.code).toBe('NFCE_PRAZO_CANCELAMENTO_VENCIDO');
     expect(cancelNfce).not.toHaveBeenCalled();
     expect(nfceDaVenda().status).toBe('autorizada');
   });
 
-  it('o prazo é o mesmo do Editar venda (NFCE_CANCEL_DEADLINE_MIN, um ponto só)', async () => {
+  it('o prazo é o da rota de cancelamento (nfcePrazoCancelamento; NFCE_CANCEL_DEADLINE_MIN segue como alavanca)', async () => {
     process.env.NFCE_CANCEL_DEADLINE_MIN = '60';
     nfcePropria(40);
     expect((await situacao(V_COM_NFCE)).body.situacao).toBe('pode_trocar');
+  });
+
+  it('sem data de autorização: oferece a troca e a SEFAZ decide', async () => {
+    nfcePropria(5);
+    nfceDaVenda().authorized_at = null;
+    const r = await situacao(V_COM_NFCE);
+    expect(r.body.situacao).toBe('pode_trocar');
+    expect(r.body.nfce.cancelavel_ate).toBeNull();
   });
 
   it('NFC-e do gateway (sem XML assinado pela Aura): fora_da_aura', async () => {
