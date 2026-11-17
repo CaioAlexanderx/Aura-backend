@@ -26,6 +26,20 @@
 //   outro        nada
 // Extras: so ['os'] -> os_enabled = true.
 //
+// 17/11/2026 (p-189) — frente 'studio' sem a vertical, pronta e desligada:
+//   Com FRENTE_STUDIO_NO_NEGOCIO = 'true' (variavel de ambiente, desligada
+//   por padrao), a frente studio liga SO o modulo no shell Negocio:
+//   pdv_settings.studio_enabled = true + a data de ativacao
+//   (personalizados_ativado_em), sem vertical_active. Sem a variavel, o
+//   cadastro e byte a byte o de antes (__tests__/cadastroFrenteStudio.
+//   retrato.test.js compara com o retrato gravado com a main).
+//   Empresa com a "casa no Negocio" ligada (services/casaNegocio.js) segue o
+//   caminho novo mesmo sem a variavel, mas so quando a troca vem da equipe
+//   ou do proprio cliente em Configuracoes: o cadastro nunca chega aqui com
+//   a casa ligada, e por isso nao ganha consulta nova.
+//   O caminho novo nunca desliga studio_enabled e nunca troca uma vertical
+//   que ja esteja gravada (quem ja esta no /studio continua la).
+//
 // NUNCA desliga nada, exceto:
 //   - chamado por staff com `disable` explicito ou trocando a frente de
 //     studio para outra (desativa a vertical Studio);
@@ -51,6 +65,16 @@ const DISABLEABLE = ['matcon', 'otica', 'os'];
 // 'personalizado' e o plano sob medida, acima do Expansao (adminPlan.js):
 // barra-lo prenderia cliente grande fora do Studio.
 const STUDIO_PLANS = ['negocio', 'expansao', 'personalizado'];
+
+// p-189: a frente studio sem a vertical. So o texto 'true' (sem diferenca
+// de maiusculas, espacos nas pontas ignorados) liga; ausente, vazio ou
+// qualquer outro valor deixa o cadastro como sempre foi. Lido a cada
+// chamada, para a troca da variavel valer sem novo deploy de codigo.
+const VARIAVEL_STUDIO_NO_NEGOCIO = 'FRENTE_STUDIO_NO_NEGOCIO';
+function frenteStudioNoNegocio(env = process.env) {
+  const v = env ? env[VARIAVEL_STUDIO_NO_NEGOCIO] : undefined;
+  return typeof v === 'string' && v.trim().toLowerCase() === 'true';
+}
 
 // Chave de pdv_settings ligada por cada frente/extra. Todas estao na
 // whitelist ALLOWED_BOOL_KEYS de routes/pdvSettings.js.
@@ -192,6 +216,25 @@ async function setCompanyVertical(conn, companyId, vertical, oldVertical, { best
   return rows[0];
 }
 
+// p-189: liga a frente studio so como modulo do Negocio. Mesmo SQL da
+// sincronizacao de setCompanyVertical (studio_enabled + data de ativacao
+// na primeira vez), sem tocar em vertical_active.
+async function ligarStudioSemVertical(conn, companyId, company) {
+  const marca = marcaDaAtivacao({
+    antes: company ? company.pdv_settings : null,
+    verticalAntes: company ? company.vertical_active : null,
+    ligadaDepois: true,
+  });
+  await conn.query(
+    `UPDATE companies
+       SET pdv_settings = COALESCE(pdv_settings, '{}'::jsonb)
+                         || jsonb_build_object('studio_enabled', true)
+                         || ${sqlMarcaSeAusente('$2')}
+     WHERE id = $1`,
+    [companyId, marca]
+  );
+}
+
 function studioPlanError(plan) {
   const err = new AppError(
     'A frente Personalizados (Studio) so pode ser ativada nos planos Negocio, Expansao ou Personalizado. Plano atual: ' + (plan || 'essencial') + '.',
@@ -261,7 +304,17 @@ async function applySegment(client, companyId, { segment, extras, source = 'user
   if (segment === 'studio') {
     if (!canHaveStudio(company.plan)) throw studioPlanError(company.plan);
     if (company.vertical_active !== 'studio') {
-      await setCompanyVertical(client, companyId, 'studio', company.vertical_active);
+      // p-189: caminho novo (so o modulo) com a variavel ligada, ou com a
+      // casa no Negocio ligada numa troca feita pela equipe ou pelo cliente.
+      // O cadastro (sem replacePrevious, nunca 'staff') nao consulta a casa.
+      const podeTerCasa = source === 'staff' || replacePrevious;
+      const soOModulo = frenteStudioNoNegocio()
+        || (podeTerCasa && await require('./casaNegocio').casaLigadaNoBanco(client, companyId));
+      if (soOModulo) {
+        await ligarStudioSemVertical(client, companyId, company);
+      } else {
+        await setCompanyVertical(client, companyId, 'studio', company.vertical_active);
+      }
     }
   } else if (company.vertical_active === 'studio' && (source === 'staff' || replacePrevious)) {
     // Troca explicita (equipe, ou o cliente em Configuracoes) saindo do
@@ -306,6 +359,9 @@ module.exports = {
   canHaveStudio,
   studioPlanError,
   setCompanyVertical,
+  ligarStudioSemVertical,
+  frenteStudioNoNegocio,
+  VARIAVEL_STUDIO_NO_NEGOCIO,
   applySegment,
   shapeState,
 };

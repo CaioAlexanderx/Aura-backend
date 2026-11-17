@@ -1,0 +1,3953 @@
+{
+  "negocio|varejo|cnae|-": {
+    "sql": [
+      {
+        "text": "SELECT id, plan, vertical_active, pdv_settings, segment FROM companies WHERE id = $1 FOR UPDATE",
+        "params": [
+          "c-novo-1"
+        ]
+      },
+      {
+        "text": "UPDATE companies\n        SET segment = $2,\n            segment_source = $3,\n            segment_suggested = CASE WHEN $5 THEN $6 ELSE segment_suggested END,\n            cnae_principal    = CASE WHEN $5 THEN $7 ELSE cnae_principal END,\n            cnae_descricao    = CASE WHEN $5 THEN $8 ELSE cnae_descricao END,\n            pdv_settings = COALESCE(pdv_settings, '{}'::jsonb) || $4::jsonb,\n            updated_at = NOW()\n      WHERE id = $1\n      RETURNING id, segment, segment_source, vertical_active, pdv_settings",
+        "params": [
+          "c-novo-1",
+          "varejo",
+          "cnae",
+          "{}",
+          true,
+          "varejo",
+          "1813001",
+          "Impressao"
+        ]
+      }
+    ],
+    "resultado": {
+      "segment": "varejo",
+      "segment_source": "cnae",
+      "vertical_active": null,
+      "flags": {
+        "matcon_enabled": false,
+        "otica_enabled": false,
+        "os_enabled": false,
+        "studio_enabled": false
+      }
+    },
+    "erro": null,
+    "empresa": {
+      "id": "c-novo-1",
+      "plan": "negocio",
+      "vertical_active": null,
+      "pdv_settings": {},
+      "segment": "varejo",
+      "segment_source": "cnae",
+      "segment_suggested": "varejo",
+      "cnae_principal": "1813001",
+      "cnae_descricao": "Impressao"
+    }
+  },
+  "negocio|varejo|cnae|os": {
+    "sql": [
+      {
+        "text": "SELECT id, plan, vertical_active, pdv_settings, segment FROM companies WHERE id = $1 FOR UPDATE",
+        "params": [
+          "c-novo-1"
+        ]
+      },
+      {
+        "text": "UPDATE companies\n        SET segment = $2,\n            segment_source = $3,\n            segment_suggested = CASE WHEN $5 THEN $6 ELSE segment_suggested END,\n            cnae_principal    = CASE WHEN $5 THEN $7 ELSE cnae_principal END,\n            cnae_descricao    = CASE WHEN $5 THEN $8 ELSE cnae_descricao END,\n            pdv_settings = COALESCE(pdv_settings, '{}'::jsonb) || $4::jsonb,\n            updated_at = NOW()\n      WHERE id = $1\n      RETURNING id, segment, segment_source, vertical_active, pdv_settings",
+        "params": [
+          "c-novo-1",
+          "varejo",
+          "cnae",
+          "{\"os_enabled\":true}",
+          true,
+          "varejo",
+          "1813001",
+          "Impressao"
+        ]
+      }
+    ],
+    "resultado": {
+      "segment": "varejo",
+      "segment_source": "cnae",
+      "vertical_active": null,
+      "flags": {
+        "matcon_enabled": false,
+        "otica_enabled": false,
+        "os_enabled": true,
+        "studio_enabled": false
+      }
+    },
+    "erro": null,
+    "empresa": {
+      "id": "c-novo-1",
+      "plan": "negocio",
+      "vertical_active": null,
+      "pdv_settings": {
+        "os_enabled": true
+      },
+      "segment": "varejo",
+      "segment_source": "cnae",
+      "segment_suggested": "varejo",
+      "cnae_principal": "1813001",
+      "cnae_descricao": "Impressao"
+    }
+  },
+  "negocio|varejo|landing|-": {
+    "sql": [
+      {
+        "text": "SELECT id, plan, vertical_active, pdv_settings, segment FROM companies WHERE id = $1 FOR UPDATE",
+        "params": [
+          "c-novo-1"
+        ]
+      },
+      {
+        "text": "UPDATE companies\n        SET segment = $2,\n            segment_source = $3,\n            segment_suggested = CASE WHEN $5 THEN $6 ELSE segment_suggested END,\n            cnae_principal    = CASE WHEN $5 THEN $7 ELSE cnae_principal END,\n            cnae_descricao    = CASE WHEN $5 THEN $8 ELSE cnae_descricao END,\n            pdv_settings = COALESCE(pdv_settings, '{}'::jsonb) || $4::jsonb,\n            updated_at = NOW()\n      WHERE id = $1\n      RETURNING id, segment, segment_source, vertical_active, pdv_settings",
+        "params": [
+          "c-novo-1",
+          "varejo",
+          "landing",
+          "{}",
+          true,
+          null,
+          null,
+          null
+        ]
+      }
+    ],
+    "resultado": {
+      "segment": "varejo",
+      "segment_source": "landing",
+      "vertical_active": null,
+      "flags": {
+        "matcon_enabled": false,
+        "otica_enabled": false,
+        "os_enabled": false,
+        "studio_enabled": false
+      }
+    },
+    "erro": null,
+    "empresa": {
+      "id": "c-novo-1",
+      "plan": "negocio",
+      "vertical_active": null,
+      "pdv_settings": {},
+      "segment": "varejo",
+      "segment_source": "landing",
+      "segment_suggested": null,
+      "cnae_principal": null,
+      "cnae_descricao": null
+    }
+  },
+  "negocio|varejo|landing|os": {
+    "sql": [
+      {
+        "text": "SELECT id, plan, vertical_active, pdv_settings, segment FROM companies WHERE id = $1 FOR UPDATE",
+        "params": [
+          "c-novo-1"
+        ]
+      },
+      {
+        "text": "UPDATE companies\n        SET segment = $2,\n            segment_source = $3,\n            segment_suggested = CASE WHEN $5 THEN $6 ELSE segment_suggested END,\n            cnae_principal    = CASE WHEN $5 THEN $7 ELSE cnae_principal END,\n            cnae_descricao    = CASE WHEN $5 THEN $8 ELSE cnae_descricao END,\n            pdv_settings = COALESCE(pdv_settings, '{}'::jsonb) || $4::jsonb,\n            updated_at = NOW()\n      WHERE id = $1\n      RETURNING id, segment, segment_source, vertical_active, pdv_settings",
+        "params": [
+          "c-novo-1",
+          "varejo",
+          "landing",
+          "{\"os_enabled\":true}",
+          true,
+          null,
+          null,
+          null
+        ]
+      }
+    ],
+    "resultado": {
+      "segment": "varejo",
+      "segment_source": "landing",
+      "vertical_active": null,
+      "flags": {
+        "matcon_enabled": false,
+        "otica_enabled": false,
+        "os_enabled": true,
+        "studio_enabled": false
+      }
+    },
+    "erro": null,
+    "empresa": {
+      "id": "c-novo-1",
+      "plan": "negocio",
+      "vertical_active": null,
+      "pdv_settings": {
+        "os_enabled": true
+      },
+      "segment": "varejo",
+      "segment_source": "landing",
+      "segment_suggested": null,
+      "cnae_principal": null,
+      "cnae_descricao": null
+    }
+  },
+  "negocio|varejo|user|-": {
+    "sql": [
+      {
+        "text": "SELECT id, plan, vertical_active, pdv_settings, segment FROM companies WHERE id = $1 FOR UPDATE",
+        "params": [
+          "c-novo-1"
+        ]
+      },
+      {
+        "text": "UPDATE companies\n        SET segment = $2,\n            segment_source = $3,\n            segment_suggested = CASE WHEN $5 THEN $6 ELSE segment_suggested END,\n            cnae_principal    = CASE WHEN $5 THEN $7 ELSE cnae_principal END,\n            cnae_descricao    = CASE WHEN $5 THEN $8 ELSE cnae_descricao END,\n            pdv_settings = COALESCE(pdv_settings, '{}'::jsonb) || $4::jsonb,\n            updated_at = NOW()\n      WHERE id = $1\n      RETURNING id, segment, segment_source, vertical_active, pdv_settings",
+        "params": [
+          "c-novo-1",
+          "varejo",
+          "user",
+          "{}",
+          true,
+          null,
+          null,
+          null
+        ]
+      }
+    ],
+    "resultado": {
+      "segment": "varejo",
+      "segment_source": "user",
+      "vertical_active": null,
+      "flags": {
+        "matcon_enabled": false,
+        "otica_enabled": false,
+        "os_enabled": false,
+        "studio_enabled": false
+      }
+    },
+    "erro": null,
+    "empresa": {
+      "id": "c-novo-1",
+      "plan": "negocio",
+      "vertical_active": null,
+      "pdv_settings": {},
+      "segment": "varejo",
+      "segment_source": "user",
+      "segment_suggested": null,
+      "cnae_principal": null,
+      "cnae_descricao": null
+    }
+  },
+  "negocio|varejo|user|os": {
+    "sql": [
+      {
+        "text": "SELECT id, plan, vertical_active, pdv_settings, segment FROM companies WHERE id = $1 FOR UPDATE",
+        "params": [
+          "c-novo-1"
+        ]
+      },
+      {
+        "text": "UPDATE companies\n        SET segment = $2,\n            segment_source = $3,\n            segment_suggested = CASE WHEN $5 THEN $6 ELSE segment_suggested END,\n            cnae_principal    = CASE WHEN $5 THEN $7 ELSE cnae_principal END,\n            cnae_descricao    = CASE WHEN $5 THEN $8 ELSE cnae_descricao END,\n            pdv_settings = COALESCE(pdv_settings, '{}'::jsonb) || $4::jsonb,\n            updated_at = NOW()\n      WHERE id = $1\n      RETURNING id, segment, segment_source, vertical_active, pdv_settings",
+        "params": [
+          "c-novo-1",
+          "varejo",
+          "user",
+          "{\"os_enabled\":true}",
+          true,
+          null,
+          null,
+          null
+        ]
+      }
+    ],
+    "resultado": {
+      "segment": "varejo",
+      "segment_source": "user",
+      "vertical_active": null,
+      "flags": {
+        "matcon_enabled": false,
+        "otica_enabled": false,
+        "os_enabled": true,
+        "studio_enabled": false
+      }
+    },
+    "erro": null,
+    "empresa": {
+      "id": "c-novo-1",
+      "plan": "negocio",
+      "vertical_active": null,
+      "pdv_settings": {
+        "os_enabled": true
+      },
+      "segment": "varejo",
+      "segment_source": "user",
+      "segment_suggested": null,
+      "cnae_principal": null,
+      "cnae_descricao": null
+    }
+  },
+  "negocio|matcon|cnae|-": {
+    "sql": [
+      {
+        "text": "SELECT id, plan, vertical_active, pdv_settings, segment FROM companies WHERE id = $1 FOR UPDATE",
+        "params": [
+          "c-novo-1"
+        ]
+      },
+      {
+        "text": "UPDATE companies\n        SET segment = $2,\n            segment_source = $3,\n            segment_suggested = CASE WHEN $5 THEN $6 ELSE segment_suggested END,\n            cnae_principal    = CASE WHEN $5 THEN $7 ELSE cnae_principal END,\n            cnae_descricao    = CASE WHEN $5 THEN $8 ELSE cnae_descricao END,\n            pdv_settings = COALESCE(pdv_settings, '{}'::jsonb) || $4::jsonb,\n            updated_at = NOW()\n      WHERE id = $1\n      RETURNING id, segment, segment_source, vertical_active, pdv_settings",
+        "params": [
+          "c-novo-1",
+          "matcon",
+          "cnae",
+          "{\"matcon_enabled\":true}",
+          true,
+          "matcon",
+          "1813001",
+          "Impressao"
+        ]
+      }
+    ],
+    "resultado": {
+      "segment": "matcon",
+      "segment_source": "cnae",
+      "vertical_active": null,
+      "flags": {
+        "matcon_enabled": true,
+        "otica_enabled": false,
+        "os_enabled": false,
+        "studio_enabled": false
+      }
+    },
+    "erro": null,
+    "empresa": {
+      "id": "c-novo-1",
+      "plan": "negocio",
+      "vertical_active": null,
+      "pdv_settings": {
+        "matcon_enabled": true
+      },
+      "segment": "matcon",
+      "segment_source": "cnae",
+      "segment_suggested": "matcon",
+      "cnae_principal": "1813001",
+      "cnae_descricao": "Impressao"
+    }
+  },
+  "negocio|matcon|cnae|os": {
+    "sql": [
+      {
+        "text": "SELECT id, plan, vertical_active, pdv_settings, segment FROM companies WHERE id = $1 FOR UPDATE",
+        "params": [
+          "c-novo-1"
+        ]
+      },
+      {
+        "text": "UPDATE companies\n        SET segment = $2,\n            segment_source = $3,\n            segment_suggested = CASE WHEN $5 THEN $6 ELSE segment_suggested END,\n            cnae_principal    = CASE WHEN $5 THEN $7 ELSE cnae_principal END,\n            cnae_descricao    = CASE WHEN $5 THEN $8 ELSE cnae_descricao END,\n            pdv_settings = COALESCE(pdv_settings, '{}'::jsonb) || $4::jsonb,\n            updated_at = NOW()\n      WHERE id = $1\n      RETURNING id, segment, segment_source, vertical_active, pdv_settings",
+        "params": [
+          "c-novo-1",
+          "matcon",
+          "cnae",
+          "{\"matcon_enabled\":true,\"os_enabled\":true}",
+          true,
+          "matcon",
+          "1813001",
+          "Impressao"
+        ]
+      }
+    ],
+    "resultado": {
+      "segment": "matcon",
+      "segment_source": "cnae",
+      "vertical_active": null,
+      "flags": {
+        "matcon_enabled": true,
+        "otica_enabled": false,
+        "os_enabled": true,
+        "studio_enabled": false
+      }
+    },
+    "erro": null,
+    "empresa": {
+      "id": "c-novo-1",
+      "plan": "negocio",
+      "vertical_active": null,
+      "pdv_settings": {
+        "matcon_enabled": true,
+        "os_enabled": true
+      },
+      "segment": "matcon",
+      "segment_source": "cnae",
+      "segment_suggested": "matcon",
+      "cnae_principal": "1813001",
+      "cnae_descricao": "Impressao"
+    }
+  },
+  "negocio|matcon|landing|-": {
+    "sql": [
+      {
+        "text": "SELECT id, plan, vertical_active, pdv_settings, segment FROM companies WHERE id = $1 FOR UPDATE",
+        "params": [
+          "c-novo-1"
+        ]
+      },
+      {
+        "text": "UPDATE companies\n        SET segment = $2,\n            segment_source = $3,\n            segment_suggested = CASE WHEN $5 THEN $6 ELSE segment_suggested END,\n            cnae_principal    = CASE WHEN $5 THEN $7 ELSE cnae_principal END,\n            cnae_descricao    = CASE WHEN $5 THEN $8 ELSE cnae_descricao END,\n            pdv_settings = COALESCE(pdv_settings, '{}'::jsonb) || $4::jsonb,\n            updated_at = NOW()\n      WHERE id = $1\n      RETURNING id, segment, segment_source, vertical_active, pdv_settings",
+        "params": [
+          "c-novo-1",
+          "matcon",
+          "landing",
+          "{\"matcon_enabled\":true}",
+          true,
+          null,
+          null,
+          null
+        ]
+      }
+    ],
+    "resultado": {
+      "segment": "matcon",
+      "segment_source": "landing",
+      "vertical_active": null,
+      "flags": {
+        "matcon_enabled": true,
+        "otica_enabled": false,
+        "os_enabled": false,
+        "studio_enabled": false
+      }
+    },
+    "erro": null,
+    "empresa": {
+      "id": "c-novo-1",
+      "plan": "negocio",
+      "vertical_active": null,
+      "pdv_settings": {
+        "matcon_enabled": true
+      },
+      "segment": "matcon",
+      "segment_source": "landing",
+      "segment_suggested": null,
+      "cnae_principal": null,
+      "cnae_descricao": null
+    }
+  },
+  "negocio|matcon|landing|os": {
+    "sql": [
+      {
+        "text": "SELECT id, plan, vertical_active, pdv_settings, segment FROM companies WHERE id = $1 FOR UPDATE",
+        "params": [
+          "c-novo-1"
+        ]
+      },
+      {
+        "text": "UPDATE companies\n        SET segment = $2,\n            segment_source = $3,\n            segment_suggested = CASE WHEN $5 THEN $6 ELSE segment_suggested END,\n            cnae_principal    = CASE WHEN $5 THEN $7 ELSE cnae_principal END,\n            cnae_descricao    = CASE WHEN $5 THEN $8 ELSE cnae_descricao END,\n            pdv_settings = COALESCE(pdv_settings, '{}'::jsonb) || $4::jsonb,\n            updated_at = NOW()\n      WHERE id = $1\n      RETURNING id, segment, segment_source, vertical_active, pdv_settings",
+        "params": [
+          "c-novo-1",
+          "matcon",
+          "landing",
+          "{\"matcon_enabled\":true,\"os_enabled\":true}",
+          true,
+          null,
+          null,
+          null
+        ]
+      }
+    ],
+    "resultado": {
+      "segment": "matcon",
+      "segment_source": "landing",
+      "vertical_active": null,
+      "flags": {
+        "matcon_enabled": true,
+        "otica_enabled": false,
+        "os_enabled": true,
+        "studio_enabled": false
+      }
+    },
+    "erro": null,
+    "empresa": {
+      "id": "c-novo-1",
+      "plan": "negocio",
+      "vertical_active": null,
+      "pdv_settings": {
+        "matcon_enabled": true,
+        "os_enabled": true
+      },
+      "segment": "matcon",
+      "segment_source": "landing",
+      "segment_suggested": null,
+      "cnae_principal": null,
+      "cnae_descricao": null
+    }
+  },
+  "negocio|matcon|user|-": {
+    "sql": [
+      {
+        "text": "SELECT id, plan, vertical_active, pdv_settings, segment FROM companies WHERE id = $1 FOR UPDATE",
+        "params": [
+          "c-novo-1"
+        ]
+      },
+      {
+        "text": "UPDATE companies\n        SET segment = $2,\n            segment_source = $3,\n            segment_suggested = CASE WHEN $5 THEN $6 ELSE segment_suggested END,\n            cnae_principal    = CASE WHEN $5 THEN $7 ELSE cnae_principal END,\n            cnae_descricao    = CASE WHEN $5 THEN $8 ELSE cnae_descricao END,\n            pdv_settings = COALESCE(pdv_settings, '{}'::jsonb) || $4::jsonb,\n            updated_at = NOW()\n      WHERE id = $1\n      RETURNING id, segment, segment_source, vertical_active, pdv_settings",
+        "params": [
+          "c-novo-1",
+          "matcon",
+          "user",
+          "{\"matcon_enabled\":true}",
+          true,
+          null,
+          null,
+          null
+        ]
+      }
+    ],
+    "resultado": {
+      "segment": "matcon",
+      "segment_source": "user",
+      "vertical_active": null,
+      "flags": {
+        "matcon_enabled": true,
+        "otica_enabled": false,
+        "os_enabled": false,
+        "studio_enabled": false
+      }
+    },
+    "erro": null,
+    "empresa": {
+      "id": "c-novo-1",
+      "plan": "negocio",
+      "vertical_active": null,
+      "pdv_settings": {
+        "matcon_enabled": true
+      },
+      "segment": "matcon",
+      "segment_source": "user",
+      "segment_suggested": null,
+      "cnae_principal": null,
+      "cnae_descricao": null
+    }
+  },
+  "negocio|matcon|user|os": {
+    "sql": [
+      {
+        "text": "SELECT id, plan, vertical_active, pdv_settings, segment FROM companies WHERE id = $1 FOR UPDATE",
+        "params": [
+          "c-novo-1"
+        ]
+      },
+      {
+        "text": "UPDATE companies\n        SET segment = $2,\n            segment_source = $3,\n            segment_suggested = CASE WHEN $5 THEN $6 ELSE segment_suggested END,\n            cnae_principal    = CASE WHEN $5 THEN $7 ELSE cnae_principal END,\n            cnae_descricao    = CASE WHEN $5 THEN $8 ELSE cnae_descricao END,\n            pdv_settings = COALESCE(pdv_settings, '{}'::jsonb) || $4::jsonb,\n            updated_at = NOW()\n      WHERE id = $1\n      RETURNING id, segment, segment_source, vertical_active, pdv_settings",
+        "params": [
+          "c-novo-1",
+          "matcon",
+          "user",
+          "{\"matcon_enabled\":true,\"os_enabled\":true}",
+          true,
+          null,
+          null,
+          null
+        ]
+      }
+    ],
+    "resultado": {
+      "segment": "matcon",
+      "segment_source": "user",
+      "vertical_active": null,
+      "flags": {
+        "matcon_enabled": true,
+        "otica_enabled": false,
+        "os_enabled": true,
+        "studio_enabled": false
+      }
+    },
+    "erro": null,
+    "empresa": {
+      "id": "c-novo-1",
+      "plan": "negocio",
+      "vertical_active": null,
+      "pdv_settings": {
+        "matcon_enabled": true,
+        "os_enabled": true
+      },
+      "segment": "matcon",
+      "segment_source": "user",
+      "segment_suggested": null,
+      "cnae_principal": null,
+      "cnae_descricao": null
+    }
+  },
+  "negocio|otica|cnae|-": {
+    "sql": [
+      {
+        "text": "SELECT id, plan, vertical_active, pdv_settings, segment FROM companies WHERE id = $1 FOR UPDATE",
+        "params": [
+          "c-novo-1"
+        ]
+      },
+      {
+        "text": "UPDATE companies\n        SET segment = $2,\n            segment_source = $3,\n            segment_suggested = CASE WHEN $5 THEN $6 ELSE segment_suggested END,\n            cnae_principal    = CASE WHEN $5 THEN $7 ELSE cnae_principal END,\n            cnae_descricao    = CASE WHEN $5 THEN $8 ELSE cnae_descricao END,\n            pdv_settings = COALESCE(pdv_settings, '{}'::jsonb) || $4::jsonb,\n            updated_at = NOW()\n      WHERE id = $1\n      RETURNING id, segment, segment_source, vertical_active, pdv_settings",
+        "params": [
+          "c-novo-1",
+          "otica",
+          "cnae",
+          "{\"otica_enabled\":true}",
+          true,
+          "otica",
+          "1813001",
+          "Impressao"
+        ]
+      }
+    ],
+    "resultado": {
+      "segment": "otica",
+      "segment_source": "cnae",
+      "vertical_active": null,
+      "flags": {
+        "matcon_enabled": false,
+        "otica_enabled": true,
+        "os_enabled": false,
+        "studio_enabled": false
+      }
+    },
+    "erro": null,
+    "empresa": {
+      "id": "c-novo-1",
+      "plan": "negocio",
+      "vertical_active": null,
+      "pdv_settings": {
+        "otica_enabled": true
+      },
+      "segment": "otica",
+      "segment_source": "cnae",
+      "segment_suggested": "otica",
+      "cnae_principal": "1813001",
+      "cnae_descricao": "Impressao"
+    }
+  },
+  "negocio|otica|cnae|os": {
+    "sql": [
+      {
+        "text": "SELECT id, plan, vertical_active, pdv_settings, segment FROM companies WHERE id = $1 FOR UPDATE",
+        "params": [
+          "c-novo-1"
+        ]
+      },
+      {
+        "text": "UPDATE companies\n        SET segment = $2,\n            segment_source = $3,\n            segment_suggested = CASE WHEN $5 THEN $6 ELSE segment_suggested END,\n            cnae_principal    = CASE WHEN $5 THEN $7 ELSE cnae_principal END,\n            cnae_descricao    = CASE WHEN $5 THEN $8 ELSE cnae_descricao END,\n            pdv_settings = COALESCE(pdv_settings, '{}'::jsonb) || $4::jsonb,\n            updated_at = NOW()\n      WHERE id = $1\n      RETURNING id, segment, segment_source, vertical_active, pdv_settings",
+        "params": [
+          "c-novo-1",
+          "otica",
+          "cnae",
+          "{\"otica_enabled\":true,\"os_enabled\":true}",
+          true,
+          "otica",
+          "1813001",
+          "Impressao"
+        ]
+      }
+    ],
+    "resultado": {
+      "segment": "otica",
+      "segment_source": "cnae",
+      "vertical_active": null,
+      "flags": {
+        "matcon_enabled": false,
+        "otica_enabled": true,
+        "os_enabled": true,
+        "studio_enabled": false
+      }
+    },
+    "erro": null,
+    "empresa": {
+      "id": "c-novo-1",
+      "plan": "negocio",
+      "vertical_active": null,
+      "pdv_settings": {
+        "otica_enabled": true,
+        "os_enabled": true
+      },
+      "segment": "otica",
+      "segment_source": "cnae",
+      "segment_suggested": "otica",
+      "cnae_principal": "1813001",
+      "cnae_descricao": "Impressao"
+    }
+  },
+  "negocio|otica|landing|-": {
+    "sql": [
+      {
+        "text": "SELECT id, plan, vertical_active, pdv_settings, segment FROM companies WHERE id = $1 FOR UPDATE",
+        "params": [
+          "c-novo-1"
+        ]
+      },
+      {
+        "text": "UPDATE companies\n        SET segment = $2,\n            segment_source = $3,\n            segment_suggested = CASE WHEN $5 THEN $6 ELSE segment_suggested END,\n            cnae_principal    = CASE WHEN $5 THEN $7 ELSE cnae_principal END,\n            cnae_descricao    = CASE WHEN $5 THEN $8 ELSE cnae_descricao END,\n            pdv_settings = COALESCE(pdv_settings, '{}'::jsonb) || $4::jsonb,\n            updated_at = NOW()\n      WHERE id = $1\n      RETURNING id, segment, segment_source, vertical_active, pdv_settings",
+        "params": [
+          "c-novo-1",
+          "otica",
+          "landing",
+          "{\"otica_enabled\":true}",
+          true,
+          null,
+          null,
+          null
+        ]
+      }
+    ],
+    "resultado": {
+      "segment": "otica",
+      "segment_source": "landing",
+      "vertical_active": null,
+      "flags": {
+        "matcon_enabled": false,
+        "otica_enabled": true,
+        "os_enabled": false,
+        "studio_enabled": false
+      }
+    },
+    "erro": null,
+    "empresa": {
+      "id": "c-novo-1",
+      "plan": "negocio",
+      "vertical_active": null,
+      "pdv_settings": {
+        "otica_enabled": true
+      },
+      "segment": "otica",
+      "segment_source": "landing",
+      "segment_suggested": null,
+      "cnae_principal": null,
+      "cnae_descricao": null
+    }
+  },
+  "negocio|otica|landing|os": {
+    "sql": [
+      {
+        "text": "SELECT id, plan, vertical_active, pdv_settings, segment FROM companies WHERE id = $1 FOR UPDATE",
+        "params": [
+          "c-novo-1"
+        ]
+      },
+      {
+        "text": "UPDATE companies\n        SET segment = $2,\n            segment_source = $3,\n            segment_suggested = CASE WHEN $5 THEN $6 ELSE segment_suggested END,\n            cnae_principal    = CASE WHEN $5 THEN $7 ELSE cnae_principal END,\n            cnae_descricao    = CASE WHEN $5 THEN $8 ELSE cnae_descricao END,\n            pdv_settings = COALESCE(pdv_settings, '{}'::jsonb) || $4::jsonb,\n            updated_at = NOW()\n      WHERE id = $1\n      RETURNING id, segment, segment_source, vertical_active, pdv_settings",
+        "params": [
+          "c-novo-1",
+          "otica",
+          "landing",
+          "{\"otica_enabled\":true,\"os_enabled\":true}",
+          true,
+          null,
+          null,
+          null
+        ]
+      }
+    ],
+    "resultado": {
+      "segment": "otica",
+      "segment_source": "landing",
+      "vertical_active": null,
+      "flags": {
+        "matcon_enabled": false,
+        "otica_enabled": true,
+        "os_enabled": true,
+        "studio_enabled": false
+      }
+    },
+    "erro": null,
+    "empresa": {
+      "id": "c-novo-1",
+      "plan": "negocio",
+      "vertical_active": null,
+      "pdv_settings": {
+        "otica_enabled": true,
+        "os_enabled": true
+      },
+      "segment": "otica",
+      "segment_source": "landing",
+      "segment_suggested": null,
+      "cnae_principal": null,
+      "cnae_descricao": null
+    }
+  },
+  "negocio|otica|user|-": {
+    "sql": [
+      {
+        "text": "SELECT id, plan, vertical_active, pdv_settings, segment FROM companies WHERE id = $1 FOR UPDATE",
+        "params": [
+          "c-novo-1"
+        ]
+      },
+      {
+        "text": "UPDATE companies\n        SET segment = $2,\n            segment_source = $3,\n            segment_suggested = CASE WHEN $5 THEN $6 ELSE segment_suggested END,\n            cnae_principal    = CASE WHEN $5 THEN $7 ELSE cnae_principal END,\n            cnae_descricao    = CASE WHEN $5 THEN $8 ELSE cnae_descricao END,\n            pdv_settings = COALESCE(pdv_settings, '{}'::jsonb) || $4::jsonb,\n            updated_at = NOW()\n      WHERE id = $1\n      RETURNING id, segment, segment_source, vertical_active, pdv_settings",
+        "params": [
+          "c-novo-1",
+          "otica",
+          "user",
+          "{\"otica_enabled\":true}",
+          true,
+          null,
+          null,
+          null
+        ]
+      }
+    ],
+    "resultado": {
+      "segment": "otica",
+      "segment_source": "user",
+      "vertical_active": null,
+      "flags": {
+        "matcon_enabled": false,
+        "otica_enabled": true,
+        "os_enabled": false,
+        "studio_enabled": false
+      }
+    },
+    "erro": null,
+    "empresa": {
+      "id": "c-novo-1",
+      "plan": "negocio",
+      "vertical_active": null,
+      "pdv_settings": {
+        "otica_enabled": true
+      },
+      "segment": "otica",
+      "segment_source": "user",
+      "segment_suggested": null,
+      "cnae_principal": null,
+      "cnae_descricao": null
+    }
+  },
+  "negocio|otica|user|os": {
+    "sql": [
+      {
+        "text": "SELECT id, plan, vertical_active, pdv_settings, segment FROM companies WHERE id = $1 FOR UPDATE",
+        "params": [
+          "c-novo-1"
+        ]
+      },
+      {
+        "text": "UPDATE companies\n        SET segment = $2,\n            segment_source = $3,\n            segment_suggested = CASE WHEN $5 THEN $6 ELSE segment_suggested END,\n            cnae_principal    = CASE WHEN $5 THEN $7 ELSE cnae_principal END,\n            cnae_descricao    = CASE WHEN $5 THEN $8 ELSE cnae_descricao END,\n            pdv_settings = COALESCE(pdv_settings, '{}'::jsonb) || $4::jsonb,\n            updated_at = NOW()\n      WHERE id = $1\n      RETURNING id, segment, segment_source, vertical_active, pdv_settings",
+        "params": [
+          "c-novo-1",
+          "otica",
+          "user",
+          "{\"otica_enabled\":true,\"os_enabled\":true}",
+          true,
+          null,
+          null,
+          null
+        ]
+      }
+    ],
+    "resultado": {
+      "segment": "otica",
+      "segment_source": "user",
+      "vertical_active": null,
+      "flags": {
+        "matcon_enabled": false,
+        "otica_enabled": true,
+        "os_enabled": true,
+        "studio_enabled": false
+      }
+    },
+    "erro": null,
+    "empresa": {
+      "id": "c-novo-1",
+      "plan": "negocio",
+      "vertical_active": null,
+      "pdv_settings": {
+        "otica_enabled": true,
+        "os_enabled": true
+      },
+      "segment": "otica",
+      "segment_source": "user",
+      "segment_suggested": null,
+      "cnae_principal": null,
+      "cnae_descricao": null
+    }
+  },
+  "negocio|assistencia|cnae|-": {
+    "sql": [
+      {
+        "text": "SELECT id, plan, vertical_active, pdv_settings, segment FROM companies WHERE id = $1 FOR UPDATE",
+        "params": [
+          "c-novo-1"
+        ]
+      },
+      {
+        "text": "UPDATE companies\n        SET segment = $2,\n            segment_source = $3,\n            segment_suggested = CASE WHEN $5 THEN $6 ELSE segment_suggested END,\n            cnae_principal    = CASE WHEN $5 THEN $7 ELSE cnae_principal END,\n            cnae_descricao    = CASE WHEN $5 THEN $8 ELSE cnae_descricao END,\n            pdv_settings = COALESCE(pdv_settings, '{}'::jsonb) || $4::jsonb,\n            updated_at = NOW()\n      WHERE id = $1\n      RETURNING id, segment, segment_source, vertical_active, pdv_settings",
+        "params": [
+          "c-novo-1",
+          "assistencia",
+          "cnae",
+          "{\"os_enabled\":true}",
+          true,
+          "assistencia",
+          "1813001",
+          "Impressao"
+        ]
+      }
+    ],
+    "resultado": {
+      "segment": "assistencia",
+      "segment_source": "cnae",
+      "vertical_active": null,
+      "flags": {
+        "matcon_enabled": false,
+        "otica_enabled": false,
+        "os_enabled": true,
+        "studio_enabled": false
+      }
+    },
+    "erro": null,
+    "empresa": {
+      "id": "c-novo-1",
+      "plan": "negocio",
+      "vertical_active": null,
+      "pdv_settings": {
+        "os_enabled": true
+      },
+      "segment": "assistencia",
+      "segment_source": "cnae",
+      "segment_suggested": "assistencia",
+      "cnae_principal": "1813001",
+      "cnae_descricao": "Impressao"
+    }
+  },
+  "negocio|assistencia|cnae|os": {
+    "sql": [
+      {
+        "text": "SELECT id, plan, vertical_active, pdv_settings, segment FROM companies WHERE id = $1 FOR UPDATE",
+        "params": [
+          "c-novo-1"
+        ]
+      },
+      {
+        "text": "UPDATE companies\n        SET segment = $2,\n            segment_source = $3,\n            segment_suggested = CASE WHEN $5 THEN $6 ELSE segment_suggested END,\n            cnae_principal    = CASE WHEN $5 THEN $7 ELSE cnae_principal END,\n            cnae_descricao    = CASE WHEN $5 THEN $8 ELSE cnae_descricao END,\n            pdv_settings = COALESCE(pdv_settings, '{}'::jsonb) || $4::jsonb,\n            updated_at = NOW()\n      WHERE id = $1\n      RETURNING id, segment, segment_source, vertical_active, pdv_settings",
+        "params": [
+          "c-novo-1",
+          "assistencia",
+          "cnae",
+          "{\"os_enabled\":true}",
+          true,
+          "assistencia",
+          "1813001",
+          "Impressao"
+        ]
+      }
+    ],
+    "resultado": {
+      "segment": "assistencia",
+      "segment_source": "cnae",
+      "vertical_active": null,
+      "flags": {
+        "matcon_enabled": false,
+        "otica_enabled": false,
+        "os_enabled": true,
+        "studio_enabled": false
+      }
+    },
+    "erro": null,
+    "empresa": {
+      "id": "c-novo-1",
+      "plan": "negocio",
+      "vertical_active": null,
+      "pdv_settings": {
+        "os_enabled": true
+      },
+      "segment": "assistencia",
+      "segment_source": "cnae",
+      "segment_suggested": "assistencia",
+      "cnae_principal": "1813001",
+      "cnae_descricao": "Impressao"
+    }
+  },
+  "negocio|assistencia|landing|-": {
+    "sql": [
+      {
+        "text": "SELECT id, plan, vertical_active, pdv_settings, segment FROM companies WHERE id = $1 FOR UPDATE",
+        "params": [
+          "c-novo-1"
+        ]
+      },
+      {
+        "text": "UPDATE companies\n        SET segment = $2,\n            segment_source = $3,\n            segment_suggested = CASE WHEN $5 THEN $6 ELSE segment_suggested END,\n            cnae_principal    = CASE WHEN $5 THEN $7 ELSE cnae_principal END,\n            cnae_descricao    = CASE WHEN $5 THEN $8 ELSE cnae_descricao END,\n            pdv_settings = COALESCE(pdv_settings, '{}'::jsonb) || $4::jsonb,\n            updated_at = NOW()\n      WHERE id = $1\n      RETURNING id, segment, segment_source, vertical_active, pdv_settings",
+        "params": [
+          "c-novo-1",
+          "assistencia",
+          "landing",
+          "{\"os_enabled\":true}",
+          true,
+          null,
+          null,
+          null
+        ]
+      }
+    ],
+    "resultado": {
+      "segment": "assistencia",
+      "segment_source": "landing",
+      "vertical_active": null,
+      "flags": {
+        "matcon_enabled": false,
+        "otica_enabled": false,
+        "os_enabled": true,
+        "studio_enabled": false
+      }
+    },
+    "erro": null,
+    "empresa": {
+      "id": "c-novo-1",
+      "plan": "negocio",
+      "vertical_active": null,
+      "pdv_settings": {
+        "os_enabled": true
+      },
+      "segment": "assistencia",
+      "segment_source": "landing",
+      "segment_suggested": null,
+      "cnae_principal": null,
+      "cnae_descricao": null
+    }
+  },
+  "negocio|assistencia|landing|os": {
+    "sql": [
+      {
+        "text": "SELECT id, plan, vertical_active, pdv_settings, segment FROM companies WHERE id = $1 FOR UPDATE",
+        "params": [
+          "c-novo-1"
+        ]
+      },
+      {
+        "text": "UPDATE companies\n        SET segment = $2,\n            segment_source = $3,\n            segment_suggested = CASE WHEN $5 THEN $6 ELSE segment_suggested END,\n            cnae_principal    = CASE WHEN $5 THEN $7 ELSE cnae_principal END,\n            cnae_descricao    = CASE WHEN $5 THEN $8 ELSE cnae_descricao END,\n            pdv_settings = COALESCE(pdv_settings, '{}'::jsonb) || $4::jsonb,\n            updated_at = NOW()\n      WHERE id = $1\n      RETURNING id, segment, segment_source, vertical_active, pdv_settings",
+        "params": [
+          "c-novo-1",
+          "assistencia",
+          "landing",
+          "{\"os_enabled\":true}",
+          true,
+          null,
+          null,
+          null
+        ]
+      }
+    ],
+    "resultado": {
+      "segment": "assistencia",
+      "segment_source": "landing",
+      "vertical_active": null,
+      "flags": {
+        "matcon_enabled": false,
+        "otica_enabled": false,
+        "os_enabled": true,
+        "studio_enabled": false
+      }
+    },
+    "erro": null,
+    "empresa": {
+      "id": "c-novo-1",
+      "plan": "negocio",
+      "vertical_active": null,
+      "pdv_settings": {
+        "os_enabled": true
+      },
+      "segment": "assistencia",
+      "segment_source": "landing",
+      "segment_suggested": null,
+      "cnae_principal": null,
+      "cnae_descricao": null
+    }
+  },
+  "negocio|assistencia|user|-": {
+    "sql": [
+      {
+        "text": "SELECT id, plan, vertical_active, pdv_settings, segment FROM companies WHERE id = $1 FOR UPDATE",
+        "params": [
+          "c-novo-1"
+        ]
+      },
+      {
+        "text": "UPDATE companies\n        SET segment = $2,\n            segment_source = $3,\n            segment_suggested = CASE WHEN $5 THEN $6 ELSE segment_suggested END,\n            cnae_principal    = CASE WHEN $5 THEN $7 ELSE cnae_principal END,\n            cnae_descricao    = CASE WHEN $5 THEN $8 ELSE cnae_descricao END,\n            pdv_settings = COALESCE(pdv_settings, '{}'::jsonb) || $4::jsonb,\n            updated_at = NOW()\n      WHERE id = $1\n      RETURNING id, segment, segment_source, vertical_active, pdv_settings",
+        "params": [
+          "c-novo-1",
+          "assistencia",
+          "user",
+          "{\"os_enabled\":true}",
+          true,
+          null,
+          null,
+          null
+        ]
+      }
+    ],
+    "resultado": {
+      "segment": "assistencia",
+      "segment_source": "user",
+      "vertical_active": null,
+      "flags": {
+        "matcon_enabled": false,
+        "otica_enabled": false,
+        "os_enabled": true,
+        "studio_enabled": false
+      }
+    },
+    "erro": null,
+    "empresa": {
+      "id": "c-novo-1",
+      "plan": "negocio",
+      "vertical_active": null,
+      "pdv_settings": {
+        "os_enabled": true
+      },
+      "segment": "assistencia",
+      "segment_source": "user",
+      "segment_suggested": null,
+      "cnae_principal": null,
+      "cnae_descricao": null
+    }
+  },
+  "negocio|assistencia|user|os": {
+    "sql": [
+      {
+        "text": "SELECT id, plan, vertical_active, pdv_settings, segment FROM companies WHERE id = $1 FOR UPDATE",
+        "params": [
+          "c-novo-1"
+        ]
+      },
+      {
+        "text": "UPDATE companies\n        SET segment = $2,\n            segment_source = $3,\n            segment_suggested = CASE WHEN $5 THEN $6 ELSE segment_suggested END,\n            cnae_principal    = CASE WHEN $5 THEN $7 ELSE cnae_principal END,\n            cnae_descricao    = CASE WHEN $5 THEN $8 ELSE cnae_descricao END,\n            pdv_settings = COALESCE(pdv_settings, '{}'::jsonb) || $4::jsonb,\n            updated_at = NOW()\n      WHERE id = $1\n      RETURNING id, segment, segment_source, vertical_active, pdv_settings",
+        "params": [
+          "c-novo-1",
+          "assistencia",
+          "user",
+          "{\"os_enabled\":true}",
+          true,
+          null,
+          null,
+          null
+        ]
+      }
+    ],
+    "resultado": {
+      "segment": "assistencia",
+      "segment_source": "user",
+      "vertical_active": null,
+      "flags": {
+        "matcon_enabled": false,
+        "otica_enabled": false,
+        "os_enabled": true,
+        "studio_enabled": false
+      }
+    },
+    "erro": null,
+    "empresa": {
+      "id": "c-novo-1",
+      "plan": "negocio",
+      "vertical_active": null,
+      "pdv_settings": {
+        "os_enabled": true
+      },
+      "segment": "assistencia",
+      "segment_source": "user",
+      "segment_suggested": null,
+      "cnae_principal": null,
+      "cnae_descricao": null
+    }
+  },
+  "negocio|studio|cnae|-": {
+    "sql": [
+      {
+        "text": "SELECT id, plan, vertical_active, pdv_settings, segment FROM companies WHERE id = $1 FOR UPDATE",
+        "params": [
+          "c-novo-1"
+        ]
+      },
+      {
+        "text": "UPDATE companies\n     SET vertical_active = $1,\n         vertical_enabled_at = CASE WHEN $1::text IS NULL THEN NULL ELSE NOW() END,\n         updated_at = NOW()\n     WHERE id = $2\n     RETURNING id, plan, trade_name, vertical_active, vertical_enabled_at, pdv_settings",
+        "params": [
+          "studio",
+          "c-novo-1"
+        ]
+      },
+      {
+        "text": "UPDATE companies\n           SET pdv_settings = COALESCE(pdv_settings, '{}'::jsonb)\n                             || jsonb_build_object('studio_enabled', true)\n                             || (CASE WHEN $2::text IS NOT NULL\n                 AND NULLIF(COALESCE(pdv_settings, '{}'::jsonb)->>'personalizados_ativado_em', '') IS NULL\n            THEN jsonb_build_object('personalizados_ativado_em', $2::text)\n            ELSE '{}'::jsonb END)\n         WHERE id = $1",
+        "params": [
+          "c-novo-1",
+          "2026-11-17T12:00:00.000Z"
+        ]
+      },
+      {
+        "text": "UPDATE companies\n        SET segment = $2,\n            segment_source = $3,\n            segment_suggested = CASE WHEN $5 THEN $6 ELSE segment_suggested END,\n            cnae_principal    = CASE WHEN $5 THEN $7 ELSE cnae_principal END,\n            cnae_descricao    = CASE WHEN $5 THEN $8 ELSE cnae_descricao END,\n            pdv_settings = COALESCE(pdv_settings, '{}'::jsonb) || $4::jsonb,\n            updated_at = NOW()\n      WHERE id = $1\n      RETURNING id, segment, segment_source, vertical_active, pdv_settings",
+        "params": [
+          "c-novo-1",
+          "studio",
+          "cnae",
+          "{}",
+          true,
+          "studio",
+          "1813001",
+          "Impressao"
+        ]
+      }
+    ],
+    "resultado": {
+      "segment": "studio",
+      "segment_source": "cnae",
+      "vertical_active": "studio",
+      "flags": {
+        "matcon_enabled": false,
+        "otica_enabled": false,
+        "os_enabled": false,
+        "studio_enabled": true
+      }
+    },
+    "erro": null,
+    "empresa": {
+      "id": "c-novo-1",
+      "plan": "negocio",
+      "vertical_active": "studio",
+      "pdv_settings": {
+        "studio_enabled": true,
+        "personalizados_ativado_em": "2026-11-17T12:00:00.000Z"
+      },
+      "segment": "studio",
+      "segment_source": "cnae",
+      "segment_suggested": "studio",
+      "cnae_principal": "1813001",
+      "cnae_descricao": "Impressao"
+    }
+  },
+  "negocio|studio|cnae|os": {
+    "sql": [
+      {
+        "text": "SELECT id, plan, vertical_active, pdv_settings, segment FROM companies WHERE id = $1 FOR UPDATE",
+        "params": [
+          "c-novo-1"
+        ]
+      },
+      {
+        "text": "UPDATE companies\n     SET vertical_active = $1,\n         vertical_enabled_at = CASE WHEN $1::text IS NULL THEN NULL ELSE NOW() END,\n         updated_at = NOW()\n     WHERE id = $2\n     RETURNING id, plan, trade_name, vertical_active, vertical_enabled_at, pdv_settings",
+        "params": [
+          "studio",
+          "c-novo-1"
+        ]
+      },
+      {
+        "text": "UPDATE companies\n           SET pdv_settings = COALESCE(pdv_settings, '{}'::jsonb)\n                             || jsonb_build_object('studio_enabled', true)\n                             || (CASE WHEN $2::text IS NOT NULL\n                 AND NULLIF(COALESCE(pdv_settings, '{}'::jsonb)->>'personalizados_ativado_em', '') IS NULL\n            THEN jsonb_build_object('personalizados_ativado_em', $2::text)\n            ELSE '{}'::jsonb END)\n         WHERE id = $1",
+        "params": [
+          "c-novo-1",
+          "2026-11-17T12:00:00.000Z"
+        ]
+      },
+      {
+        "text": "UPDATE companies\n        SET segment = $2,\n            segment_source = $3,\n            segment_suggested = CASE WHEN $5 THEN $6 ELSE segment_suggested END,\n            cnae_principal    = CASE WHEN $5 THEN $7 ELSE cnae_principal END,\n            cnae_descricao    = CASE WHEN $5 THEN $8 ELSE cnae_descricao END,\n            pdv_settings = COALESCE(pdv_settings, '{}'::jsonb) || $4::jsonb,\n            updated_at = NOW()\n      WHERE id = $1\n      RETURNING id, segment, segment_source, vertical_active, pdv_settings",
+        "params": [
+          "c-novo-1",
+          "studio",
+          "cnae",
+          "{\"os_enabled\":true}",
+          true,
+          "studio",
+          "1813001",
+          "Impressao"
+        ]
+      }
+    ],
+    "resultado": {
+      "segment": "studio",
+      "segment_source": "cnae",
+      "vertical_active": "studio",
+      "flags": {
+        "matcon_enabled": false,
+        "otica_enabled": false,
+        "os_enabled": true,
+        "studio_enabled": true
+      }
+    },
+    "erro": null,
+    "empresa": {
+      "id": "c-novo-1",
+      "plan": "negocio",
+      "vertical_active": "studio",
+      "pdv_settings": {
+        "studio_enabled": true,
+        "personalizados_ativado_em": "2026-11-17T12:00:00.000Z",
+        "os_enabled": true
+      },
+      "segment": "studio",
+      "segment_source": "cnae",
+      "segment_suggested": "studio",
+      "cnae_principal": "1813001",
+      "cnae_descricao": "Impressao"
+    }
+  },
+  "negocio|studio|landing|-": {
+    "sql": [
+      {
+        "text": "SELECT id, plan, vertical_active, pdv_settings, segment FROM companies WHERE id = $1 FOR UPDATE",
+        "params": [
+          "c-novo-1"
+        ]
+      },
+      {
+        "text": "UPDATE companies\n     SET vertical_active = $1,\n         vertical_enabled_at = CASE WHEN $1::text IS NULL THEN NULL ELSE NOW() END,\n         updated_at = NOW()\n     WHERE id = $2\n     RETURNING id, plan, trade_name, vertical_active, vertical_enabled_at, pdv_settings",
+        "params": [
+          "studio",
+          "c-novo-1"
+        ]
+      },
+      {
+        "text": "UPDATE companies\n           SET pdv_settings = COALESCE(pdv_settings, '{}'::jsonb)\n                             || jsonb_build_object('studio_enabled', true)\n                             || (CASE WHEN $2::text IS NOT NULL\n                 AND NULLIF(COALESCE(pdv_settings, '{}'::jsonb)->>'personalizados_ativado_em', '') IS NULL\n            THEN jsonb_build_object('personalizados_ativado_em', $2::text)\n            ELSE '{}'::jsonb END)\n         WHERE id = $1",
+        "params": [
+          "c-novo-1",
+          "2026-11-17T12:00:00.000Z"
+        ]
+      },
+      {
+        "text": "UPDATE companies\n        SET segment = $2,\n            segment_source = $3,\n            segment_suggested = CASE WHEN $5 THEN $6 ELSE segment_suggested END,\n            cnae_principal    = CASE WHEN $5 THEN $7 ELSE cnae_principal END,\n            cnae_descricao    = CASE WHEN $5 THEN $8 ELSE cnae_descricao END,\n            pdv_settings = COALESCE(pdv_settings, '{}'::jsonb) || $4::jsonb,\n            updated_at = NOW()\n      WHERE id = $1\n      RETURNING id, segment, segment_source, vertical_active, pdv_settings",
+        "params": [
+          "c-novo-1",
+          "studio",
+          "landing",
+          "{}",
+          true,
+          null,
+          null,
+          null
+        ]
+      }
+    ],
+    "resultado": {
+      "segment": "studio",
+      "segment_source": "landing",
+      "vertical_active": "studio",
+      "flags": {
+        "matcon_enabled": false,
+        "otica_enabled": false,
+        "os_enabled": false,
+        "studio_enabled": true
+      }
+    },
+    "erro": null,
+    "empresa": {
+      "id": "c-novo-1",
+      "plan": "negocio",
+      "vertical_active": "studio",
+      "pdv_settings": {
+        "studio_enabled": true,
+        "personalizados_ativado_em": "2026-11-17T12:00:00.000Z"
+      },
+      "segment": "studio",
+      "segment_source": "landing",
+      "segment_suggested": null,
+      "cnae_principal": null,
+      "cnae_descricao": null
+    }
+  },
+  "negocio|studio|landing|os": {
+    "sql": [
+      {
+        "text": "SELECT id, plan, vertical_active, pdv_settings, segment FROM companies WHERE id = $1 FOR UPDATE",
+        "params": [
+          "c-novo-1"
+        ]
+      },
+      {
+        "text": "UPDATE companies\n     SET vertical_active = $1,\n         vertical_enabled_at = CASE WHEN $1::text IS NULL THEN NULL ELSE NOW() END,\n         updated_at = NOW()\n     WHERE id = $2\n     RETURNING id, plan, trade_name, vertical_active, vertical_enabled_at, pdv_settings",
+        "params": [
+          "studio",
+          "c-novo-1"
+        ]
+      },
+      {
+        "text": "UPDATE companies\n           SET pdv_settings = COALESCE(pdv_settings, '{}'::jsonb)\n                             || jsonb_build_object('studio_enabled', true)\n                             || (CASE WHEN $2::text IS NOT NULL\n                 AND NULLIF(COALESCE(pdv_settings, '{}'::jsonb)->>'personalizados_ativado_em', '') IS NULL\n            THEN jsonb_build_object('personalizados_ativado_em', $2::text)\n            ELSE '{}'::jsonb END)\n         WHERE id = $1",
+        "params": [
+          "c-novo-1",
+          "2026-11-17T12:00:00.000Z"
+        ]
+      },
+      {
+        "text": "UPDATE companies\n        SET segment = $2,\n            segment_source = $3,\n            segment_suggested = CASE WHEN $5 THEN $6 ELSE segment_suggested END,\n            cnae_principal    = CASE WHEN $5 THEN $7 ELSE cnae_principal END,\n            cnae_descricao    = CASE WHEN $5 THEN $8 ELSE cnae_descricao END,\n            pdv_settings = COALESCE(pdv_settings, '{}'::jsonb) || $4::jsonb,\n            updated_at = NOW()\n      WHERE id = $1\n      RETURNING id, segment, segment_source, vertical_active, pdv_settings",
+        "params": [
+          "c-novo-1",
+          "studio",
+          "landing",
+          "{\"os_enabled\":true}",
+          true,
+          null,
+          null,
+          null
+        ]
+      }
+    ],
+    "resultado": {
+      "segment": "studio",
+      "segment_source": "landing",
+      "vertical_active": "studio",
+      "flags": {
+        "matcon_enabled": false,
+        "otica_enabled": false,
+        "os_enabled": true,
+        "studio_enabled": true
+      }
+    },
+    "erro": null,
+    "empresa": {
+      "id": "c-novo-1",
+      "plan": "negocio",
+      "vertical_active": "studio",
+      "pdv_settings": {
+        "studio_enabled": true,
+        "personalizados_ativado_em": "2026-11-17T12:00:00.000Z",
+        "os_enabled": true
+      },
+      "segment": "studio",
+      "segment_source": "landing",
+      "segment_suggested": null,
+      "cnae_principal": null,
+      "cnae_descricao": null
+    }
+  },
+  "negocio|studio|user|-": {
+    "sql": [
+      {
+        "text": "SELECT id, plan, vertical_active, pdv_settings, segment FROM companies WHERE id = $1 FOR UPDATE",
+        "params": [
+          "c-novo-1"
+        ]
+      },
+      {
+        "text": "UPDATE companies\n     SET vertical_active = $1,\n         vertical_enabled_at = CASE WHEN $1::text IS NULL THEN NULL ELSE NOW() END,\n         updated_at = NOW()\n     WHERE id = $2\n     RETURNING id, plan, trade_name, vertical_active, vertical_enabled_at, pdv_settings",
+        "params": [
+          "studio",
+          "c-novo-1"
+        ]
+      },
+      {
+        "text": "UPDATE companies\n           SET pdv_settings = COALESCE(pdv_settings, '{}'::jsonb)\n                             || jsonb_build_object('studio_enabled', true)\n                             || (CASE WHEN $2::text IS NOT NULL\n                 AND NULLIF(COALESCE(pdv_settings, '{}'::jsonb)->>'personalizados_ativado_em', '') IS NULL\n            THEN jsonb_build_object('personalizados_ativado_em', $2::text)\n            ELSE '{}'::jsonb END)\n         WHERE id = $1",
+        "params": [
+          "c-novo-1",
+          "2026-11-17T12:00:00.000Z"
+        ]
+      },
+      {
+        "text": "UPDATE companies\n        SET segment = $2,\n            segment_source = $3,\n            segment_suggested = CASE WHEN $5 THEN $6 ELSE segment_suggested END,\n            cnae_principal    = CASE WHEN $5 THEN $7 ELSE cnae_principal END,\n            cnae_descricao    = CASE WHEN $5 THEN $8 ELSE cnae_descricao END,\n            pdv_settings = COALESCE(pdv_settings, '{}'::jsonb) || $4::jsonb,\n            updated_at = NOW()\n      WHERE id = $1\n      RETURNING id, segment, segment_source, vertical_active, pdv_settings",
+        "params": [
+          "c-novo-1",
+          "studio",
+          "user",
+          "{}",
+          true,
+          null,
+          null,
+          null
+        ]
+      }
+    ],
+    "resultado": {
+      "segment": "studio",
+      "segment_source": "user",
+      "vertical_active": "studio",
+      "flags": {
+        "matcon_enabled": false,
+        "otica_enabled": false,
+        "os_enabled": false,
+        "studio_enabled": true
+      }
+    },
+    "erro": null,
+    "empresa": {
+      "id": "c-novo-1",
+      "plan": "negocio",
+      "vertical_active": "studio",
+      "pdv_settings": {
+        "studio_enabled": true,
+        "personalizados_ativado_em": "2026-11-17T12:00:00.000Z"
+      },
+      "segment": "studio",
+      "segment_source": "user",
+      "segment_suggested": null,
+      "cnae_principal": null,
+      "cnae_descricao": null
+    }
+  },
+  "negocio|studio|user|os": {
+    "sql": [
+      {
+        "text": "SELECT id, plan, vertical_active, pdv_settings, segment FROM companies WHERE id = $1 FOR UPDATE",
+        "params": [
+          "c-novo-1"
+        ]
+      },
+      {
+        "text": "UPDATE companies\n     SET vertical_active = $1,\n         vertical_enabled_at = CASE WHEN $1::text IS NULL THEN NULL ELSE NOW() END,\n         updated_at = NOW()\n     WHERE id = $2\n     RETURNING id, plan, trade_name, vertical_active, vertical_enabled_at, pdv_settings",
+        "params": [
+          "studio",
+          "c-novo-1"
+        ]
+      },
+      {
+        "text": "UPDATE companies\n           SET pdv_settings = COALESCE(pdv_settings, '{}'::jsonb)\n                             || jsonb_build_object('studio_enabled', true)\n                             || (CASE WHEN $2::text IS NOT NULL\n                 AND NULLIF(COALESCE(pdv_settings, '{}'::jsonb)->>'personalizados_ativado_em', '') IS NULL\n            THEN jsonb_build_object('personalizados_ativado_em', $2::text)\n            ELSE '{}'::jsonb END)\n         WHERE id = $1",
+        "params": [
+          "c-novo-1",
+          "2026-11-17T12:00:00.000Z"
+        ]
+      },
+      {
+        "text": "UPDATE companies\n        SET segment = $2,\n            segment_source = $3,\n            segment_suggested = CASE WHEN $5 THEN $6 ELSE segment_suggested END,\n            cnae_principal    = CASE WHEN $5 THEN $7 ELSE cnae_principal END,\n            cnae_descricao    = CASE WHEN $5 THEN $8 ELSE cnae_descricao END,\n            pdv_settings = COALESCE(pdv_settings, '{}'::jsonb) || $4::jsonb,\n            updated_at = NOW()\n      WHERE id = $1\n      RETURNING id, segment, segment_source, vertical_active, pdv_settings",
+        "params": [
+          "c-novo-1",
+          "studio",
+          "user",
+          "{\"os_enabled\":true}",
+          true,
+          null,
+          null,
+          null
+        ]
+      }
+    ],
+    "resultado": {
+      "segment": "studio",
+      "segment_source": "user",
+      "vertical_active": "studio",
+      "flags": {
+        "matcon_enabled": false,
+        "otica_enabled": false,
+        "os_enabled": true,
+        "studio_enabled": true
+      }
+    },
+    "erro": null,
+    "empresa": {
+      "id": "c-novo-1",
+      "plan": "negocio",
+      "vertical_active": "studio",
+      "pdv_settings": {
+        "studio_enabled": true,
+        "personalizados_ativado_em": "2026-11-17T12:00:00.000Z",
+        "os_enabled": true
+      },
+      "segment": "studio",
+      "segment_source": "user",
+      "segment_suggested": null,
+      "cnae_principal": null,
+      "cnae_descricao": null
+    }
+  },
+  "negocio|adega|cnae|-": {
+    "sql": [
+      {
+        "text": "SELECT id, plan, vertical_active, pdv_settings, segment FROM companies WHERE id = $1 FOR UPDATE",
+        "params": [
+          "c-novo-1"
+        ]
+      },
+      {
+        "text": "UPDATE companies\n        SET segment = $2,\n            segment_source = $3,\n            segment_suggested = CASE WHEN $5 THEN $6 ELSE segment_suggested END,\n            cnae_principal    = CASE WHEN $5 THEN $7 ELSE cnae_principal END,\n            cnae_descricao    = CASE WHEN $5 THEN $8 ELSE cnae_descricao END,\n            pdv_settings = COALESCE(pdv_settings, '{}'::jsonb) || $4::jsonb,\n            updated_at = NOW()\n      WHERE id = $1\n      RETURNING id, segment, segment_source, vertical_active, pdv_settings",
+        "params": [
+          "c-novo-1",
+          "adega",
+          "cnae",
+          "{}",
+          true,
+          "adega",
+          "1813001",
+          "Impressao"
+        ]
+      }
+    ],
+    "resultado": {
+      "segment": "adega",
+      "segment_source": "cnae",
+      "vertical_active": null,
+      "flags": {
+        "matcon_enabled": false,
+        "otica_enabled": false,
+        "os_enabled": false,
+        "studio_enabled": false
+      }
+    },
+    "erro": null,
+    "empresa": {
+      "id": "c-novo-1",
+      "plan": "negocio",
+      "vertical_active": null,
+      "pdv_settings": {},
+      "segment": "adega",
+      "segment_source": "cnae",
+      "segment_suggested": "adega",
+      "cnae_principal": "1813001",
+      "cnae_descricao": "Impressao"
+    }
+  },
+  "negocio|adega|cnae|os": {
+    "sql": [
+      {
+        "text": "SELECT id, plan, vertical_active, pdv_settings, segment FROM companies WHERE id = $1 FOR UPDATE",
+        "params": [
+          "c-novo-1"
+        ]
+      },
+      {
+        "text": "UPDATE companies\n        SET segment = $2,\n            segment_source = $3,\n            segment_suggested = CASE WHEN $5 THEN $6 ELSE segment_suggested END,\n            cnae_principal    = CASE WHEN $5 THEN $7 ELSE cnae_principal END,\n            cnae_descricao    = CASE WHEN $5 THEN $8 ELSE cnae_descricao END,\n            pdv_settings = COALESCE(pdv_settings, '{}'::jsonb) || $4::jsonb,\n            updated_at = NOW()\n      WHERE id = $1\n      RETURNING id, segment, segment_source, vertical_active, pdv_settings",
+        "params": [
+          "c-novo-1",
+          "adega",
+          "cnae",
+          "{\"os_enabled\":true}",
+          true,
+          "adega",
+          "1813001",
+          "Impressao"
+        ]
+      }
+    ],
+    "resultado": {
+      "segment": "adega",
+      "segment_source": "cnae",
+      "vertical_active": null,
+      "flags": {
+        "matcon_enabled": false,
+        "otica_enabled": false,
+        "os_enabled": true,
+        "studio_enabled": false
+      }
+    },
+    "erro": null,
+    "empresa": {
+      "id": "c-novo-1",
+      "plan": "negocio",
+      "vertical_active": null,
+      "pdv_settings": {
+        "os_enabled": true
+      },
+      "segment": "adega",
+      "segment_source": "cnae",
+      "segment_suggested": "adega",
+      "cnae_principal": "1813001",
+      "cnae_descricao": "Impressao"
+    }
+  },
+  "negocio|adega|landing|-": {
+    "sql": [
+      {
+        "text": "SELECT id, plan, vertical_active, pdv_settings, segment FROM companies WHERE id = $1 FOR UPDATE",
+        "params": [
+          "c-novo-1"
+        ]
+      },
+      {
+        "text": "UPDATE companies\n        SET segment = $2,\n            segment_source = $3,\n            segment_suggested = CASE WHEN $5 THEN $6 ELSE segment_suggested END,\n            cnae_principal    = CASE WHEN $5 THEN $7 ELSE cnae_principal END,\n            cnae_descricao    = CASE WHEN $5 THEN $8 ELSE cnae_descricao END,\n            pdv_settings = COALESCE(pdv_settings, '{}'::jsonb) || $4::jsonb,\n            updated_at = NOW()\n      WHERE id = $1\n      RETURNING id, segment, segment_source, vertical_active, pdv_settings",
+        "params": [
+          "c-novo-1",
+          "adega",
+          "landing",
+          "{}",
+          true,
+          null,
+          null,
+          null
+        ]
+      }
+    ],
+    "resultado": {
+      "segment": "adega",
+      "segment_source": "landing",
+      "vertical_active": null,
+      "flags": {
+        "matcon_enabled": false,
+        "otica_enabled": false,
+        "os_enabled": false,
+        "studio_enabled": false
+      }
+    },
+    "erro": null,
+    "empresa": {
+      "id": "c-novo-1",
+      "plan": "negocio",
+      "vertical_active": null,
+      "pdv_settings": {},
+      "segment": "adega",
+      "segment_source": "landing",
+      "segment_suggested": null,
+      "cnae_principal": null,
+      "cnae_descricao": null
+    }
+  },
+  "negocio|adega|landing|os": {
+    "sql": [
+      {
+        "text": "SELECT id, plan, vertical_active, pdv_settings, segment FROM companies WHERE id = $1 FOR UPDATE",
+        "params": [
+          "c-novo-1"
+        ]
+      },
+      {
+        "text": "UPDATE companies\n        SET segment = $2,\n            segment_source = $3,\n            segment_suggested = CASE WHEN $5 THEN $6 ELSE segment_suggested END,\n            cnae_principal    = CASE WHEN $5 THEN $7 ELSE cnae_principal END,\n            cnae_descricao    = CASE WHEN $5 THEN $8 ELSE cnae_descricao END,\n            pdv_settings = COALESCE(pdv_settings, '{}'::jsonb) || $4::jsonb,\n            updated_at = NOW()\n      WHERE id = $1\n      RETURNING id, segment, segment_source, vertical_active, pdv_settings",
+        "params": [
+          "c-novo-1",
+          "adega",
+          "landing",
+          "{\"os_enabled\":true}",
+          true,
+          null,
+          null,
+          null
+        ]
+      }
+    ],
+    "resultado": {
+      "segment": "adega",
+      "segment_source": "landing",
+      "vertical_active": null,
+      "flags": {
+        "matcon_enabled": false,
+        "otica_enabled": false,
+        "os_enabled": true,
+        "studio_enabled": false
+      }
+    },
+    "erro": null,
+    "empresa": {
+      "id": "c-novo-1",
+      "plan": "negocio",
+      "vertical_active": null,
+      "pdv_settings": {
+        "os_enabled": true
+      },
+      "segment": "adega",
+      "segment_source": "landing",
+      "segment_suggested": null,
+      "cnae_principal": null,
+      "cnae_descricao": null
+    }
+  },
+  "negocio|adega|user|-": {
+    "sql": [
+      {
+        "text": "SELECT id, plan, vertical_active, pdv_settings, segment FROM companies WHERE id = $1 FOR UPDATE",
+        "params": [
+          "c-novo-1"
+        ]
+      },
+      {
+        "text": "UPDATE companies\n        SET segment = $2,\n            segment_source = $3,\n            segment_suggested = CASE WHEN $5 THEN $6 ELSE segment_suggested END,\n            cnae_principal    = CASE WHEN $5 THEN $7 ELSE cnae_principal END,\n            cnae_descricao    = CASE WHEN $5 THEN $8 ELSE cnae_descricao END,\n            pdv_settings = COALESCE(pdv_settings, '{}'::jsonb) || $4::jsonb,\n            updated_at = NOW()\n      WHERE id = $1\n      RETURNING id, segment, segment_source, vertical_active, pdv_settings",
+        "params": [
+          "c-novo-1",
+          "adega",
+          "user",
+          "{}",
+          true,
+          null,
+          null,
+          null
+        ]
+      }
+    ],
+    "resultado": {
+      "segment": "adega",
+      "segment_source": "user",
+      "vertical_active": null,
+      "flags": {
+        "matcon_enabled": false,
+        "otica_enabled": false,
+        "os_enabled": false,
+        "studio_enabled": false
+      }
+    },
+    "erro": null,
+    "empresa": {
+      "id": "c-novo-1",
+      "plan": "negocio",
+      "vertical_active": null,
+      "pdv_settings": {},
+      "segment": "adega",
+      "segment_source": "user",
+      "segment_suggested": null,
+      "cnae_principal": null,
+      "cnae_descricao": null
+    }
+  },
+  "negocio|adega|user|os": {
+    "sql": [
+      {
+        "text": "SELECT id, plan, vertical_active, pdv_settings, segment FROM companies WHERE id = $1 FOR UPDATE",
+        "params": [
+          "c-novo-1"
+        ]
+      },
+      {
+        "text": "UPDATE companies\n        SET segment = $2,\n            segment_source = $3,\n            segment_suggested = CASE WHEN $5 THEN $6 ELSE segment_suggested END,\n            cnae_principal    = CASE WHEN $5 THEN $7 ELSE cnae_principal END,\n            cnae_descricao    = CASE WHEN $5 THEN $8 ELSE cnae_descricao END,\n            pdv_settings = COALESCE(pdv_settings, '{}'::jsonb) || $4::jsonb,\n            updated_at = NOW()\n      WHERE id = $1\n      RETURNING id, segment, segment_source, vertical_active, pdv_settings",
+        "params": [
+          "c-novo-1",
+          "adega",
+          "user",
+          "{\"os_enabled\":true}",
+          true,
+          null,
+          null,
+          null
+        ]
+      }
+    ],
+    "resultado": {
+      "segment": "adega",
+      "segment_source": "user",
+      "vertical_active": null,
+      "flags": {
+        "matcon_enabled": false,
+        "otica_enabled": false,
+        "os_enabled": true,
+        "studio_enabled": false
+      }
+    },
+    "erro": null,
+    "empresa": {
+      "id": "c-novo-1",
+      "plan": "negocio",
+      "vertical_active": null,
+      "pdv_settings": {
+        "os_enabled": true
+      },
+      "segment": "adega",
+      "segment_source": "user",
+      "segment_suggested": null,
+      "cnae_principal": null,
+      "cnae_descricao": null
+    }
+  },
+  "negocio|outro|cnae|-": {
+    "sql": [
+      {
+        "text": "SELECT id, plan, vertical_active, pdv_settings, segment FROM companies WHERE id = $1 FOR UPDATE",
+        "params": [
+          "c-novo-1"
+        ]
+      },
+      {
+        "text": "UPDATE companies\n        SET segment = $2,\n            segment_source = $3,\n            segment_suggested = CASE WHEN $5 THEN $6 ELSE segment_suggested END,\n            cnae_principal    = CASE WHEN $5 THEN $7 ELSE cnae_principal END,\n            cnae_descricao    = CASE WHEN $5 THEN $8 ELSE cnae_descricao END,\n            pdv_settings = COALESCE(pdv_settings, '{}'::jsonb) || $4::jsonb,\n            updated_at = NOW()\n      WHERE id = $1\n      RETURNING id, segment, segment_source, vertical_active, pdv_settings",
+        "params": [
+          "c-novo-1",
+          "outro",
+          "cnae",
+          "{}",
+          true,
+          "outro",
+          "1813001",
+          "Impressao"
+        ]
+      }
+    ],
+    "resultado": {
+      "segment": "outro",
+      "segment_source": "cnae",
+      "vertical_active": null,
+      "flags": {
+        "matcon_enabled": false,
+        "otica_enabled": false,
+        "os_enabled": false,
+        "studio_enabled": false
+      }
+    },
+    "erro": null,
+    "empresa": {
+      "id": "c-novo-1",
+      "plan": "negocio",
+      "vertical_active": null,
+      "pdv_settings": {},
+      "segment": "outro",
+      "segment_source": "cnae",
+      "segment_suggested": "outro",
+      "cnae_principal": "1813001",
+      "cnae_descricao": "Impressao"
+    }
+  },
+  "negocio|outro|cnae|os": {
+    "sql": [
+      {
+        "text": "SELECT id, plan, vertical_active, pdv_settings, segment FROM companies WHERE id = $1 FOR UPDATE",
+        "params": [
+          "c-novo-1"
+        ]
+      },
+      {
+        "text": "UPDATE companies\n        SET segment = $2,\n            segment_source = $3,\n            segment_suggested = CASE WHEN $5 THEN $6 ELSE segment_suggested END,\n            cnae_principal    = CASE WHEN $5 THEN $7 ELSE cnae_principal END,\n            cnae_descricao    = CASE WHEN $5 THEN $8 ELSE cnae_descricao END,\n            pdv_settings = COALESCE(pdv_settings, '{}'::jsonb) || $4::jsonb,\n            updated_at = NOW()\n      WHERE id = $1\n      RETURNING id, segment, segment_source, vertical_active, pdv_settings",
+        "params": [
+          "c-novo-1",
+          "outro",
+          "cnae",
+          "{\"os_enabled\":true}",
+          true,
+          "outro",
+          "1813001",
+          "Impressao"
+        ]
+      }
+    ],
+    "resultado": {
+      "segment": "outro",
+      "segment_source": "cnae",
+      "vertical_active": null,
+      "flags": {
+        "matcon_enabled": false,
+        "otica_enabled": false,
+        "os_enabled": true,
+        "studio_enabled": false
+      }
+    },
+    "erro": null,
+    "empresa": {
+      "id": "c-novo-1",
+      "plan": "negocio",
+      "vertical_active": null,
+      "pdv_settings": {
+        "os_enabled": true
+      },
+      "segment": "outro",
+      "segment_source": "cnae",
+      "segment_suggested": "outro",
+      "cnae_principal": "1813001",
+      "cnae_descricao": "Impressao"
+    }
+  },
+  "negocio|outro|landing|-": {
+    "sql": [
+      {
+        "text": "SELECT id, plan, vertical_active, pdv_settings, segment FROM companies WHERE id = $1 FOR UPDATE",
+        "params": [
+          "c-novo-1"
+        ]
+      },
+      {
+        "text": "UPDATE companies\n        SET segment = $2,\n            segment_source = $3,\n            segment_suggested = CASE WHEN $5 THEN $6 ELSE segment_suggested END,\n            cnae_principal    = CASE WHEN $5 THEN $7 ELSE cnae_principal END,\n            cnae_descricao    = CASE WHEN $5 THEN $8 ELSE cnae_descricao END,\n            pdv_settings = COALESCE(pdv_settings, '{}'::jsonb) || $4::jsonb,\n            updated_at = NOW()\n      WHERE id = $1\n      RETURNING id, segment, segment_source, vertical_active, pdv_settings",
+        "params": [
+          "c-novo-1",
+          "outro",
+          "landing",
+          "{}",
+          true,
+          null,
+          null,
+          null
+        ]
+      }
+    ],
+    "resultado": {
+      "segment": "outro",
+      "segment_source": "landing",
+      "vertical_active": null,
+      "flags": {
+        "matcon_enabled": false,
+        "otica_enabled": false,
+        "os_enabled": false,
+        "studio_enabled": false
+      }
+    },
+    "erro": null,
+    "empresa": {
+      "id": "c-novo-1",
+      "plan": "negocio",
+      "vertical_active": null,
+      "pdv_settings": {},
+      "segment": "outro",
+      "segment_source": "landing",
+      "segment_suggested": null,
+      "cnae_principal": null,
+      "cnae_descricao": null
+    }
+  },
+  "negocio|outro|landing|os": {
+    "sql": [
+      {
+        "text": "SELECT id, plan, vertical_active, pdv_settings, segment FROM companies WHERE id = $1 FOR UPDATE",
+        "params": [
+          "c-novo-1"
+        ]
+      },
+      {
+        "text": "UPDATE companies\n        SET segment = $2,\n            segment_source = $3,\n            segment_suggested = CASE WHEN $5 THEN $6 ELSE segment_suggested END,\n            cnae_principal    = CASE WHEN $5 THEN $7 ELSE cnae_principal END,\n            cnae_descricao    = CASE WHEN $5 THEN $8 ELSE cnae_descricao END,\n            pdv_settings = COALESCE(pdv_settings, '{}'::jsonb) || $4::jsonb,\n            updated_at = NOW()\n      WHERE id = $1\n      RETURNING id, segment, segment_source, vertical_active, pdv_settings",
+        "params": [
+          "c-novo-1",
+          "outro",
+          "landing",
+          "{\"os_enabled\":true}",
+          true,
+          null,
+          null,
+          null
+        ]
+      }
+    ],
+    "resultado": {
+      "segment": "outro",
+      "segment_source": "landing",
+      "vertical_active": null,
+      "flags": {
+        "matcon_enabled": false,
+        "otica_enabled": false,
+        "os_enabled": true,
+        "studio_enabled": false
+      }
+    },
+    "erro": null,
+    "empresa": {
+      "id": "c-novo-1",
+      "plan": "negocio",
+      "vertical_active": null,
+      "pdv_settings": {
+        "os_enabled": true
+      },
+      "segment": "outro",
+      "segment_source": "landing",
+      "segment_suggested": null,
+      "cnae_principal": null,
+      "cnae_descricao": null
+    }
+  },
+  "negocio|outro|user|-": {
+    "sql": [
+      {
+        "text": "SELECT id, plan, vertical_active, pdv_settings, segment FROM companies WHERE id = $1 FOR UPDATE",
+        "params": [
+          "c-novo-1"
+        ]
+      },
+      {
+        "text": "UPDATE companies\n        SET segment = $2,\n            segment_source = $3,\n            segment_suggested = CASE WHEN $5 THEN $6 ELSE segment_suggested END,\n            cnae_principal    = CASE WHEN $5 THEN $7 ELSE cnae_principal END,\n            cnae_descricao    = CASE WHEN $5 THEN $8 ELSE cnae_descricao END,\n            pdv_settings = COALESCE(pdv_settings, '{}'::jsonb) || $4::jsonb,\n            updated_at = NOW()\n      WHERE id = $1\n      RETURNING id, segment, segment_source, vertical_active, pdv_settings",
+        "params": [
+          "c-novo-1",
+          "outro",
+          "user",
+          "{}",
+          true,
+          null,
+          null,
+          null
+        ]
+      }
+    ],
+    "resultado": {
+      "segment": "outro",
+      "segment_source": "user",
+      "vertical_active": null,
+      "flags": {
+        "matcon_enabled": false,
+        "otica_enabled": false,
+        "os_enabled": false,
+        "studio_enabled": false
+      }
+    },
+    "erro": null,
+    "empresa": {
+      "id": "c-novo-1",
+      "plan": "negocio",
+      "vertical_active": null,
+      "pdv_settings": {},
+      "segment": "outro",
+      "segment_source": "user",
+      "segment_suggested": null,
+      "cnae_principal": null,
+      "cnae_descricao": null
+    }
+  },
+  "negocio|outro|user|os": {
+    "sql": [
+      {
+        "text": "SELECT id, plan, vertical_active, pdv_settings, segment FROM companies WHERE id = $1 FOR UPDATE",
+        "params": [
+          "c-novo-1"
+        ]
+      },
+      {
+        "text": "UPDATE companies\n        SET segment = $2,\n            segment_source = $3,\n            segment_suggested = CASE WHEN $5 THEN $6 ELSE segment_suggested END,\n            cnae_principal    = CASE WHEN $5 THEN $7 ELSE cnae_principal END,\n            cnae_descricao    = CASE WHEN $5 THEN $8 ELSE cnae_descricao END,\n            pdv_settings = COALESCE(pdv_settings, '{}'::jsonb) || $4::jsonb,\n            updated_at = NOW()\n      WHERE id = $1\n      RETURNING id, segment, segment_source, vertical_active, pdv_settings",
+        "params": [
+          "c-novo-1",
+          "outro",
+          "user",
+          "{\"os_enabled\":true}",
+          true,
+          null,
+          null,
+          null
+        ]
+      }
+    ],
+    "resultado": {
+      "segment": "outro",
+      "segment_source": "user",
+      "vertical_active": null,
+      "flags": {
+        "matcon_enabled": false,
+        "otica_enabled": false,
+        "os_enabled": true,
+        "studio_enabled": false
+      }
+    },
+    "erro": null,
+    "empresa": {
+      "id": "c-novo-1",
+      "plan": "negocio",
+      "vertical_active": null,
+      "pdv_settings": {
+        "os_enabled": true
+      },
+      "segment": "outro",
+      "segment_source": "user",
+      "segment_suggested": null,
+      "cnae_principal": null,
+      "cnae_descricao": null
+    }
+  },
+  "essencial|varejo|cnae|-": {
+    "sql": [
+      {
+        "text": "SELECT id, plan, vertical_active, pdv_settings, segment FROM companies WHERE id = $1 FOR UPDATE",
+        "params": [
+          "c-novo-1"
+        ]
+      },
+      {
+        "text": "UPDATE companies\n        SET segment = $2,\n            segment_source = $3,\n            segment_suggested = CASE WHEN $5 THEN $6 ELSE segment_suggested END,\n            cnae_principal    = CASE WHEN $5 THEN $7 ELSE cnae_principal END,\n            cnae_descricao    = CASE WHEN $5 THEN $8 ELSE cnae_descricao END,\n            pdv_settings = COALESCE(pdv_settings, '{}'::jsonb) || $4::jsonb,\n            updated_at = NOW()\n      WHERE id = $1\n      RETURNING id, segment, segment_source, vertical_active, pdv_settings",
+        "params": [
+          "c-novo-1",
+          "varejo",
+          "cnae",
+          "{}",
+          true,
+          "varejo",
+          "1813001",
+          "Impressao"
+        ]
+      }
+    ],
+    "resultado": {
+      "segment": "varejo",
+      "segment_source": "cnae",
+      "vertical_active": null,
+      "flags": {
+        "matcon_enabled": false,
+        "otica_enabled": false,
+        "os_enabled": false,
+        "studio_enabled": false
+      }
+    },
+    "erro": null,
+    "empresa": {
+      "id": "c-novo-1",
+      "plan": "essencial",
+      "vertical_active": null,
+      "pdv_settings": {},
+      "segment": "varejo",
+      "segment_source": "cnae",
+      "segment_suggested": "varejo",
+      "cnae_principal": "1813001",
+      "cnae_descricao": "Impressao"
+    }
+  },
+  "essencial|varejo|cnae|os": {
+    "sql": [
+      {
+        "text": "SELECT id, plan, vertical_active, pdv_settings, segment FROM companies WHERE id = $1 FOR UPDATE",
+        "params": [
+          "c-novo-1"
+        ]
+      },
+      {
+        "text": "UPDATE companies\n        SET segment = $2,\n            segment_source = $3,\n            segment_suggested = CASE WHEN $5 THEN $6 ELSE segment_suggested END,\n            cnae_principal    = CASE WHEN $5 THEN $7 ELSE cnae_principal END,\n            cnae_descricao    = CASE WHEN $5 THEN $8 ELSE cnae_descricao END,\n            pdv_settings = COALESCE(pdv_settings, '{}'::jsonb) || $4::jsonb,\n            updated_at = NOW()\n      WHERE id = $1\n      RETURNING id, segment, segment_source, vertical_active, pdv_settings",
+        "params": [
+          "c-novo-1",
+          "varejo",
+          "cnae",
+          "{\"os_enabled\":true}",
+          true,
+          "varejo",
+          "1813001",
+          "Impressao"
+        ]
+      }
+    ],
+    "resultado": {
+      "segment": "varejo",
+      "segment_source": "cnae",
+      "vertical_active": null,
+      "flags": {
+        "matcon_enabled": false,
+        "otica_enabled": false,
+        "os_enabled": true,
+        "studio_enabled": false
+      }
+    },
+    "erro": null,
+    "empresa": {
+      "id": "c-novo-1",
+      "plan": "essencial",
+      "vertical_active": null,
+      "pdv_settings": {
+        "os_enabled": true
+      },
+      "segment": "varejo",
+      "segment_source": "cnae",
+      "segment_suggested": "varejo",
+      "cnae_principal": "1813001",
+      "cnae_descricao": "Impressao"
+    }
+  },
+  "essencial|varejo|landing|-": {
+    "sql": [
+      {
+        "text": "SELECT id, plan, vertical_active, pdv_settings, segment FROM companies WHERE id = $1 FOR UPDATE",
+        "params": [
+          "c-novo-1"
+        ]
+      },
+      {
+        "text": "UPDATE companies\n        SET segment = $2,\n            segment_source = $3,\n            segment_suggested = CASE WHEN $5 THEN $6 ELSE segment_suggested END,\n            cnae_principal    = CASE WHEN $5 THEN $7 ELSE cnae_principal END,\n            cnae_descricao    = CASE WHEN $5 THEN $8 ELSE cnae_descricao END,\n            pdv_settings = COALESCE(pdv_settings, '{}'::jsonb) || $4::jsonb,\n            updated_at = NOW()\n      WHERE id = $1\n      RETURNING id, segment, segment_source, vertical_active, pdv_settings",
+        "params": [
+          "c-novo-1",
+          "varejo",
+          "landing",
+          "{}",
+          true,
+          null,
+          null,
+          null
+        ]
+      }
+    ],
+    "resultado": {
+      "segment": "varejo",
+      "segment_source": "landing",
+      "vertical_active": null,
+      "flags": {
+        "matcon_enabled": false,
+        "otica_enabled": false,
+        "os_enabled": false,
+        "studio_enabled": false
+      }
+    },
+    "erro": null,
+    "empresa": {
+      "id": "c-novo-1",
+      "plan": "essencial",
+      "vertical_active": null,
+      "pdv_settings": {},
+      "segment": "varejo",
+      "segment_source": "landing",
+      "segment_suggested": null,
+      "cnae_principal": null,
+      "cnae_descricao": null
+    }
+  },
+  "essencial|varejo|landing|os": {
+    "sql": [
+      {
+        "text": "SELECT id, plan, vertical_active, pdv_settings, segment FROM companies WHERE id = $1 FOR UPDATE",
+        "params": [
+          "c-novo-1"
+        ]
+      },
+      {
+        "text": "UPDATE companies\n        SET segment = $2,\n            segment_source = $3,\n            segment_suggested = CASE WHEN $5 THEN $6 ELSE segment_suggested END,\n            cnae_principal    = CASE WHEN $5 THEN $7 ELSE cnae_principal END,\n            cnae_descricao    = CASE WHEN $5 THEN $8 ELSE cnae_descricao END,\n            pdv_settings = COALESCE(pdv_settings, '{}'::jsonb) || $4::jsonb,\n            updated_at = NOW()\n      WHERE id = $1\n      RETURNING id, segment, segment_source, vertical_active, pdv_settings",
+        "params": [
+          "c-novo-1",
+          "varejo",
+          "landing",
+          "{\"os_enabled\":true}",
+          true,
+          null,
+          null,
+          null
+        ]
+      }
+    ],
+    "resultado": {
+      "segment": "varejo",
+      "segment_source": "landing",
+      "vertical_active": null,
+      "flags": {
+        "matcon_enabled": false,
+        "otica_enabled": false,
+        "os_enabled": true,
+        "studio_enabled": false
+      }
+    },
+    "erro": null,
+    "empresa": {
+      "id": "c-novo-1",
+      "plan": "essencial",
+      "vertical_active": null,
+      "pdv_settings": {
+        "os_enabled": true
+      },
+      "segment": "varejo",
+      "segment_source": "landing",
+      "segment_suggested": null,
+      "cnae_principal": null,
+      "cnae_descricao": null
+    }
+  },
+  "essencial|varejo|user|-": {
+    "sql": [
+      {
+        "text": "SELECT id, plan, vertical_active, pdv_settings, segment FROM companies WHERE id = $1 FOR UPDATE",
+        "params": [
+          "c-novo-1"
+        ]
+      },
+      {
+        "text": "UPDATE companies\n        SET segment = $2,\n            segment_source = $3,\n            segment_suggested = CASE WHEN $5 THEN $6 ELSE segment_suggested END,\n            cnae_principal    = CASE WHEN $5 THEN $7 ELSE cnae_principal END,\n            cnae_descricao    = CASE WHEN $5 THEN $8 ELSE cnae_descricao END,\n            pdv_settings = COALESCE(pdv_settings, '{}'::jsonb) || $4::jsonb,\n            updated_at = NOW()\n      WHERE id = $1\n      RETURNING id, segment, segment_source, vertical_active, pdv_settings",
+        "params": [
+          "c-novo-1",
+          "varejo",
+          "user",
+          "{}",
+          true,
+          null,
+          null,
+          null
+        ]
+      }
+    ],
+    "resultado": {
+      "segment": "varejo",
+      "segment_source": "user",
+      "vertical_active": null,
+      "flags": {
+        "matcon_enabled": false,
+        "otica_enabled": false,
+        "os_enabled": false,
+        "studio_enabled": false
+      }
+    },
+    "erro": null,
+    "empresa": {
+      "id": "c-novo-1",
+      "plan": "essencial",
+      "vertical_active": null,
+      "pdv_settings": {},
+      "segment": "varejo",
+      "segment_source": "user",
+      "segment_suggested": null,
+      "cnae_principal": null,
+      "cnae_descricao": null
+    }
+  },
+  "essencial|varejo|user|os": {
+    "sql": [
+      {
+        "text": "SELECT id, plan, vertical_active, pdv_settings, segment FROM companies WHERE id = $1 FOR UPDATE",
+        "params": [
+          "c-novo-1"
+        ]
+      },
+      {
+        "text": "UPDATE companies\n        SET segment = $2,\n            segment_source = $3,\n            segment_suggested = CASE WHEN $5 THEN $6 ELSE segment_suggested END,\n            cnae_principal    = CASE WHEN $5 THEN $7 ELSE cnae_principal END,\n            cnae_descricao    = CASE WHEN $5 THEN $8 ELSE cnae_descricao END,\n            pdv_settings = COALESCE(pdv_settings, '{}'::jsonb) || $4::jsonb,\n            updated_at = NOW()\n      WHERE id = $1\n      RETURNING id, segment, segment_source, vertical_active, pdv_settings",
+        "params": [
+          "c-novo-1",
+          "varejo",
+          "user",
+          "{\"os_enabled\":true}",
+          true,
+          null,
+          null,
+          null
+        ]
+      }
+    ],
+    "resultado": {
+      "segment": "varejo",
+      "segment_source": "user",
+      "vertical_active": null,
+      "flags": {
+        "matcon_enabled": false,
+        "otica_enabled": false,
+        "os_enabled": true,
+        "studio_enabled": false
+      }
+    },
+    "erro": null,
+    "empresa": {
+      "id": "c-novo-1",
+      "plan": "essencial",
+      "vertical_active": null,
+      "pdv_settings": {
+        "os_enabled": true
+      },
+      "segment": "varejo",
+      "segment_source": "user",
+      "segment_suggested": null,
+      "cnae_principal": null,
+      "cnae_descricao": null
+    }
+  },
+  "essencial|matcon|cnae|-": {
+    "sql": [
+      {
+        "text": "SELECT id, plan, vertical_active, pdv_settings, segment FROM companies WHERE id = $1 FOR UPDATE",
+        "params": [
+          "c-novo-1"
+        ]
+      },
+      {
+        "text": "UPDATE companies\n        SET segment = $2,\n            segment_source = $3,\n            segment_suggested = CASE WHEN $5 THEN $6 ELSE segment_suggested END,\n            cnae_principal    = CASE WHEN $5 THEN $7 ELSE cnae_principal END,\n            cnae_descricao    = CASE WHEN $5 THEN $8 ELSE cnae_descricao END,\n            pdv_settings = COALESCE(pdv_settings, '{}'::jsonb) || $4::jsonb,\n            updated_at = NOW()\n      WHERE id = $1\n      RETURNING id, segment, segment_source, vertical_active, pdv_settings",
+        "params": [
+          "c-novo-1",
+          "matcon",
+          "cnae",
+          "{\"matcon_enabled\":true}",
+          true,
+          "matcon",
+          "1813001",
+          "Impressao"
+        ]
+      }
+    ],
+    "resultado": {
+      "segment": "matcon",
+      "segment_source": "cnae",
+      "vertical_active": null,
+      "flags": {
+        "matcon_enabled": true,
+        "otica_enabled": false,
+        "os_enabled": false,
+        "studio_enabled": false
+      }
+    },
+    "erro": null,
+    "empresa": {
+      "id": "c-novo-1",
+      "plan": "essencial",
+      "vertical_active": null,
+      "pdv_settings": {
+        "matcon_enabled": true
+      },
+      "segment": "matcon",
+      "segment_source": "cnae",
+      "segment_suggested": "matcon",
+      "cnae_principal": "1813001",
+      "cnae_descricao": "Impressao"
+    }
+  },
+  "essencial|matcon|cnae|os": {
+    "sql": [
+      {
+        "text": "SELECT id, plan, vertical_active, pdv_settings, segment FROM companies WHERE id = $1 FOR UPDATE",
+        "params": [
+          "c-novo-1"
+        ]
+      },
+      {
+        "text": "UPDATE companies\n        SET segment = $2,\n            segment_source = $3,\n            segment_suggested = CASE WHEN $5 THEN $6 ELSE segment_suggested END,\n            cnae_principal    = CASE WHEN $5 THEN $7 ELSE cnae_principal END,\n            cnae_descricao    = CASE WHEN $5 THEN $8 ELSE cnae_descricao END,\n            pdv_settings = COALESCE(pdv_settings, '{}'::jsonb) || $4::jsonb,\n            updated_at = NOW()\n      WHERE id = $1\n      RETURNING id, segment, segment_source, vertical_active, pdv_settings",
+        "params": [
+          "c-novo-1",
+          "matcon",
+          "cnae",
+          "{\"matcon_enabled\":true,\"os_enabled\":true}",
+          true,
+          "matcon",
+          "1813001",
+          "Impressao"
+        ]
+      }
+    ],
+    "resultado": {
+      "segment": "matcon",
+      "segment_source": "cnae",
+      "vertical_active": null,
+      "flags": {
+        "matcon_enabled": true,
+        "otica_enabled": false,
+        "os_enabled": true,
+        "studio_enabled": false
+      }
+    },
+    "erro": null,
+    "empresa": {
+      "id": "c-novo-1",
+      "plan": "essencial",
+      "vertical_active": null,
+      "pdv_settings": {
+        "matcon_enabled": true,
+        "os_enabled": true
+      },
+      "segment": "matcon",
+      "segment_source": "cnae",
+      "segment_suggested": "matcon",
+      "cnae_principal": "1813001",
+      "cnae_descricao": "Impressao"
+    }
+  },
+  "essencial|matcon|landing|-": {
+    "sql": [
+      {
+        "text": "SELECT id, plan, vertical_active, pdv_settings, segment FROM companies WHERE id = $1 FOR UPDATE",
+        "params": [
+          "c-novo-1"
+        ]
+      },
+      {
+        "text": "UPDATE companies\n        SET segment = $2,\n            segment_source = $3,\n            segment_suggested = CASE WHEN $5 THEN $6 ELSE segment_suggested END,\n            cnae_principal    = CASE WHEN $5 THEN $7 ELSE cnae_principal END,\n            cnae_descricao    = CASE WHEN $5 THEN $8 ELSE cnae_descricao END,\n            pdv_settings = COALESCE(pdv_settings, '{}'::jsonb) || $4::jsonb,\n            updated_at = NOW()\n      WHERE id = $1\n      RETURNING id, segment, segment_source, vertical_active, pdv_settings",
+        "params": [
+          "c-novo-1",
+          "matcon",
+          "landing",
+          "{\"matcon_enabled\":true}",
+          true,
+          null,
+          null,
+          null
+        ]
+      }
+    ],
+    "resultado": {
+      "segment": "matcon",
+      "segment_source": "landing",
+      "vertical_active": null,
+      "flags": {
+        "matcon_enabled": true,
+        "otica_enabled": false,
+        "os_enabled": false,
+        "studio_enabled": false
+      }
+    },
+    "erro": null,
+    "empresa": {
+      "id": "c-novo-1",
+      "plan": "essencial",
+      "vertical_active": null,
+      "pdv_settings": {
+        "matcon_enabled": true
+      },
+      "segment": "matcon",
+      "segment_source": "landing",
+      "segment_suggested": null,
+      "cnae_principal": null,
+      "cnae_descricao": null
+    }
+  },
+  "essencial|matcon|landing|os": {
+    "sql": [
+      {
+        "text": "SELECT id, plan, vertical_active, pdv_settings, segment FROM companies WHERE id = $1 FOR UPDATE",
+        "params": [
+          "c-novo-1"
+        ]
+      },
+      {
+        "text": "UPDATE companies\n        SET segment = $2,\n            segment_source = $3,\n            segment_suggested = CASE WHEN $5 THEN $6 ELSE segment_suggested END,\n            cnae_principal    = CASE WHEN $5 THEN $7 ELSE cnae_principal END,\n            cnae_descricao    = CASE WHEN $5 THEN $8 ELSE cnae_descricao END,\n            pdv_settings = COALESCE(pdv_settings, '{}'::jsonb) || $4::jsonb,\n            updated_at = NOW()\n      WHERE id = $1\n      RETURNING id, segment, segment_source, vertical_active, pdv_settings",
+        "params": [
+          "c-novo-1",
+          "matcon",
+          "landing",
+          "{\"matcon_enabled\":true,\"os_enabled\":true}",
+          true,
+          null,
+          null,
+          null
+        ]
+      }
+    ],
+    "resultado": {
+      "segment": "matcon",
+      "segment_source": "landing",
+      "vertical_active": null,
+      "flags": {
+        "matcon_enabled": true,
+        "otica_enabled": false,
+        "os_enabled": true,
+        "studio_enabled": false
+      }
+    },
+    "erro": null,
+    "empresa": {
+      "id": "c-novo-1",
+      "plan": "essencial",
+      "vertical_active": null,
+      "pdv_settings": {
+        "matcon_enabled": true,
+        "os_enabled": true
+      },
+      "segment": "matcon",
+      "segment_source": "landing",
+      "segment_suggested": null,
+      "cnae_principal": null,
+      "cnae_descricao": null
+    }
+  },
+  "essencial|matcon|user|-": {
+    "sql": [
+      {
+        "text": "SELECT id, plan, vertical_active, pdv_settings, segment FROM companies WHERE id = $1 FOR UPDATE",
+        "params": [
+          "c-novo-1"
+        ]
+      },
+      {
+        "text": "UPDATE companies\n        SET segment = $2,\n            segment_source = $3,\n            segment_suggested = CASE WHEN $5 THEN $6 ELSE segment_suggested END,\n            cnae_principal    = CASE WHEN $5 THEN $7 ELSE cnae_principal END,\n            cnae_descricao    = CASE WHEN $5 THEN $8 ELSE cnae_descricao END,\n            pdv_settings = COALESCE(pdv_settings, '{}'::jsonb) || $4::jsonb,\n            updated_at = NOW()\n      WHERE id = $1\n      RETURNING id, segment, segment_source, vertical_active, pdv_settings",
+        "params": [
+          "c-novo-1",
+          "matcon",
+          "user",
+          "{\"matcon_enabled\":true}",
+          true,
+          null,
+          null,
+          null
+        ]
+      }
+    ],
+    "resultado": {
+      "segment": "matcon",
+      "segment_source": "user",
+      "vertical_active": null,
+      "flags": {
+        "matcon_enabled": true,
+        "otica_enabled": false,
+        "os_enabled": false,
+        "studio_enabled": false
+      }
+    },
+    "erro": null,
+    "empresa": {
+      "id": "c-novo-1",
+      "plan": "essencial",
+      "vertical_active": null,
+      "pdv_settings": {
+        "matcon_enabled": true
+      },
+      "segment": "matcon",
+      "segment_source": "user",
+      "segment_suggested": null,
+      "cnae_principal": null,
+      "cnae_descricao": null
+    }
+  },
+  "essencial|matcon|user|os": {
+    "sql": [
+      {
+        "text": "SELECT id, plan, vertical_active, pdv_settings, segment FROM companies WHERE id = $1 FOR UPDATE",
+        "params": [
+          "c-novo-1"
+        ]
+      },
+      {
+        "text": "UPDATE companies\n        SET segment = $2,\n            segment_source = $3,\n            segment_suggested = CASE WHEN $5 THEN $6 ELSE segment_suggested END,\n            cnae_principal    = CASE WHEN $5 THEN $7 ELSE cnae_principal END,\n            cnae_descricao    = CASE WHEN $5 THEN $8 ELSE cnae_descricao END,\n            pdv_settings = COALESCE(pdv_settings, '{}'::jsonb) || $4::jsonb,\n            updated_at = NOW()\n      WHERE id = $1\n      RETURNING id, segment, segment_source, vertical_active, pdv_settings",
+        "params": [
+          "c-novo-1",
+          "matcon",
+          "user",
+          "{\"matcon_enabled\":true,\"os_enabled\":true}",
+          true,
+          null,
+          null,
+          null
+        ]
+      }
+    ],
+    "resultado": {
+      "segment": "matcon",
+      "segment_source": "user",
+      "vertical_active": null,
+      "flags": {
+        "matcon_enabled": true,
+        "otica_enabled": false,
+        "os_enabled": true,
+        "studio_enabled": false
+      }
+    },
+    "erro": null,
+    "empresa": {
+      "id": "c-novo-1",
+      "plan": "essencial",
+      "vertical_active": null,
+      "pdv_settings": {
+        "matcon_enabled": true,
+        "os_enabled": true
+      },
+      "segment": "matcon",
+      "segment_source": "user",
+      "segment_suggested": null,
+      "cnae_principal": null,
+      "cnae_descricao": null
+    }
+  },
+  "essencial|otica|cnae|-": {
+    "sql": [
+      {
+        "text": "SELECT id, plan, vertical_active, pdv_settings, segment FROM companies WHERE id = $1 FOR UPDATE",
+        "params": [
+          "c-novo-1"
+        ]
+      },
+      {
+        "text": "UPDATE companies\n        SET segment = $2,\n            segment_source = $3,\n            segment_suggested = CASE WHEN $5 THEN $6 ELSE segment_suggested END,\n            cnae_principal    = CASE WHEN $5 THEN $7 ELSE cnae_principal END,\n            cnae_descricao    = CASE WHEN $5 THEN $8 ELSE cnae_descricao END,\n            pdv_settings = COALESCE(pdv_settings, '{}'::jsonb) || $4::jsonb,\n            updated_at = NOW()\n      WHERE id = $1\n      RETURNING id, segment, segment_source, vertical_active, pdv_settings",
+        "params": [
+          "c-novo-1",
+          "otica",
+          "cnae",
+          "{\"otica_enabled\":true}",
+          true,
+          "otica",
+          "1813001",
+          "Impressao"
+        ]
+      }
+    ],
+    "resultado": {
+      "segment": "otica",
+      "segment_source": "cnae",
+      "vertical_active": null,
+      "flags": {
+        "matcon_enabled": false,
+        "otica_enabled": true,
+        "os_enabled": false,
+        "studio_enabled": false
+      }
+    },
+    "erro": null,
+    "empresa": {
+      "id": "c-novo-1",
+      "plan": "essencial",
+      "vertical_active": null,
+      "pdv_settings": {
+        "otica_enabled": true
+      },
+      "segment": "otica",
+      "segment_source": "cnae",
+      "segment_suggested": "otica",
+      "cnae_principal": "1813001",
+      "cnae_descricao": "Impressao"
+    }
+  },
+  "essencial|otica|cnae|os": {
+    "sql": [
+      {
+        "text": "SELECT id, plan, vertical_active, pdv_settings, segment FROM companies WHERE id = $1 FOR UPDATE",
+        "params": [
+          "c-novo-1"
+        ]
+      },
+      {
+        "text": "UPDATE companies\n        SET segment = $2,\n            segment_source = $3,\n            segment_suggested = CASE WHEN $5 THEN $6 ELSE segment_suggested END,\n            cnae_principal    = CASE WHEN $5 THEN $7 ELSE cnae_principal END,\n            cnae_descricao    = CASE WHEN $5 THEN $8 ELSE cnae_descricao END,\n            pdv_settings = COALESCE(pdv_settings, '{}'::jsonb) || $4::jsonb,\n            updated_at = NOW()\n      WHERE id = $1\n      RETURNING id, segment, segment_source, vertical_active, pdv_settings",
+        "params": [
+          "c-novo-1",
+          "otica",
+          "cnae",
+          "{\"otica_enabled\":true,\"os_enabled\":true}",
+          true,
+          "otica",
+          "1813001",
+          "Impressao"
+        ]
+      }
+    ],
+    "resultado": {
+      "segment": "otica",
+      "segment_source": "cnae",
+      "vertical_active": null,
+      "flags": {
+        "matcon_enabled": false,
+        "otica_enabled": true,
+        "os_enabled": true,
+        "studio_enabled": false
+      }
+    },
+    "erro": null,
+    "empresa": {
+      "id": "c-novo-1",
+      "plan": "essencial",
+      "vertical_active": null,
+      "pdv_settings": {
+        "otica_enabled": true,
+        "os_enabled": true
+      },
+      "segment": "otica",
+      "segment_source": "cnae",
+      "segment_suggested": "otica",
+      "cnae_principal": "1813001",
+      "cnae_descricao": "Impressao"
+    }
+  },
+  "essencial|otica|landing|-": {
+    "sql": [
+      {
+        "text": "SELECT id, plan, vertical_active, pdv_settings, segment FROM companies WHERE id = $1 FOR UPDATE",
+        "params": [
+          "c-novo-1"
+        ]
+      },
+      {
+        "text": "UPDATE companies\n        SET segment = $2,\n            segment_source = $3,\n            segment_suggested = CASE WHEN $5 THEN $6 ELSE segment_suggested END,\n            cnae_principal    = CASE WHEN $5 THEN $7 ELSE cnae_principal END,\n            cnae_descricao    = CASE WHEN $5 THEN $8 ELSE cnae_descricao END,\n            pdv_settings = COALESCE(pdv_settings, '{}'::jsonb) || $4::jsonb,\n            updated_at = NOW()\n      WHERE id = $1\n      RETURNING id, segment, segment_source, vertical_active, pdv_settings",
+        "params": [
+          "c-novo-1",
+          "otica",
+          "landing",
+          "{\"otica_enabled\":true}",
+          true,
+          null,
+          null,
+          null
+        ]
+      }
+    ],
+    "resultado": {
+      "segment": "otica",
+      "segment_source": "landing",
+      "vertical_active": null,
+      "flags": {
+        "matcon_enabled": false,
+        "otica_enabled": true,
+        "os_enabled": false,
+        "studio_enabled": false
+      }
+    },
+    "erro": null,
+    "empresa": {
+      "id": "c-novo-1",
+      "plan": "essencial",
+      "vertical_active": null,
+      "pdv_settings": {
+        "otica_enabled": true
+      },
+      "segment": "otica",
+      "segment_source": "landing",
+      "segment_suggested": null,
+      "cnae_principal": null,
+      "cnae_descricao": null
+    }
+  },
+  "essencial|otica|landing|os": {
+    "sql": [
+      {
+        "text": "SELECT id, plan, vertical_active, pdv_settings, segment FROM companies WHERE id = $1 FOR UPDATE",
+        "params": [
+          "c-novo-1"
+        ]
+      },
+      {
+        "text": "UPDATE companies\n        SET segment = $2,\n            segment_source = $3,\n            segment_suggested = CASE WHEN $5 THEN $6 ELSE segment_suggested END,\n            cnae_principal    = CASE WHEN $5 THEN $7 ELSE cnae_principal END,\n            cnae_descricao    = CASE WHEN $5 THEN $8 ELSE cnae_descricao END,\n            pdv_settings = COALESCE(pdv_settings, '{}'::jsonb) || $4::jsonb,\n            updated_at = NOW()\n      WHERE id = $1\n      RETURNING id, segment, segment_source, vertical_active, pdv_settings",
+        "params": [
+          "c-novo-1",
+          "otica",
+          "landing",
+          "{\"otica_enabled\":true,\"os_enabled\":true}",
+          true,
+          null,
+          null,
+          null
+        ]
+      }
+    ],
+    "resultado": {
+      "segment": "otica",
+      "segment_source": "landing",
+      "vertical_active": null,
+      "flags": {
+        "matcon_enabled": false,
+        "otica_enabled": true,
+        "os_enabled": true,
+        "studio_enabled": false
+      }
+    },
+    "erro": null,
+    "empresa": {
+      "id": "c-novo-1",
+      "plan": "essencial",
+      "vertical_active": null,
+      "pdv_settings": {
+        "otica_enabled": true,
+        "os_enabled": true
+      },
+      "segment": "otica",
+      "segment_source": "landing",
+      "segment_suggested": null,
+      "cnae_principal": null,
+      "cnae_descricao": null
+    }
+  },
+  "essencial|otica|user|-": {
+    "sql": [
+      {
+        "text": "SELECT id, plan, vertical_active, pdv_settings, segment FROM companies WHERE id = $1 FOR UPDATE",
+        "params": [
+          "c-novo-1"
+        ]
+      },
+      {
+        "text": "UPDATE companies\n        SET segment = $2,\n            segment_source = $3,\n            segment_suggested = CASE WHEN $5 THEN $6 ELSE segment_suggested END,\n            cnae_principal    = CASE WHEN $5 THEN $7 ELSE cnae_principal END,\n            cnae_descricao    = CASE WHEN $5 THEN $8 ELSE cnae_descricao END,\n            pdv_settings = COALESCE(pdv_settings, '{}'::jsonb) || $4::jsonb,\n            updated_at = NOW()\n      WHERE id = $1\n      RETURNING id, segment, segment_source, vertical_active, pdv_settings",
+        "params": [
+          "c-novo-1",
+          "otica",
+          "user",
+          "{\"otica_enabled\":true}",
+          true,
+          null,
+          null,
+          null
+        ]
+      }
+    ],
+    "resultado": {
+      "segment": "otica",
+      "segment_source": "user",
+      "vertical_active": null,
+      "flags": {
+        "matcon_enabled": false,
+        "otica_enabled": true,
+        "os_enabled": false,
+        "studio_enabled": false
+      }
+    },
+    "erro": null,
+    "empresa": {
+      "id": "c-novo-1",
+      "plan": "essencial",
+      "vertical_active": null,
+      "pdv_settings": {
+        "otica_enabled": true
+      },
+      "segment": "otica",
+      "segment_source": "user",
+      "segment_suggested": null,
+      "cnae_principal": null,
+      "cnae_descricao": null
+    }
+  },
+  "essencial|otica|user|os": {
+    "sql": [
+      {
+        "text": "SELECT id, plan, vertical_active, pdv_settings, segment FROM companies WHERE id = $1 FOR UPDATE",
+        "params": [
+          "c-novo-1"
+        ]
+      },
+      {
+        "text": "UPDATE companies\n        SET segment = $2,\n            segment_source = $3,\n            segment_suggested = CASE WHEN $5 THEN $6 ELSE segment_suggested END,\n            cnae_principal    = CASE WHEN $5 THEN $7 ELSE cnae_principal END,\n            cnae_descricao    = CASE WHEN $5 THEN $8 ELSE cnae_descricao END,\n            pdv_settings = COALESCE(pdv_settings, '{}'::jsonb) || $4::jsonb,\n            updated_at = NOW()\n      WHERE id = $1\n      RETURNING id, segment, segment_source, vertical_active, pdv_settings",
+        "params": [
+          "c-novo-1",
+          "otica",
+          "user",
+          "{\"otica_enabled\":true,\"os_enabled\":true}",
+          true,
+          null,
+          null,
+          null
+        ]
+      }
+    ],
+    "resultado": {
+      "segment": "otica",
+      "segment_source": "user",
+      "vertical_active": null,
+      "flags": {
+        "matcon_enabled": false,
+        "otica_enabled": true,
+        "os_enabled": true,
+        "studio_enabled": false
+      }
+    },
+    "erro": null,
+    "empresa": {
+      "id": "c-novo-1",
+      "plan": "essencial",
+      "vertical_active": null,
+      "pdv_settings": {
+        "otica_enabled": true,
+        "os_enabled": true
+      },
+      "segment": "otica",
+      "segment_source": "user",
+      "segment_suggested": null,
+      "cnae_principal": null,
+      "cnae_descricao": null
+    }
+  },
+  "essencial|assistencia|cnae|-": {
+    "sql": [
+      {
+        "text": "SELECT id, plan, vertical_active, pdv_settings, segment FROM companies WHERE id = $1 FOR UPDATE",
+        "params": [
+          "c-novo-1"
+        ]
+      },
+      {
+        "text": "UPDATE companies\n        SET segment = $2,\n            segment_source = $3,\n            segment_suggested = CASE WHEN $5 THEN $6 ELSE segment_suggested END,\n            cnae_principal    = CASE WHEN $5 THEN $7 ELSE cnae_principal END,\n            cnae_descricao    = CASE WHEN $5 THEN $8 ELSE cnae_descricao END,\n            pdv_settings = COALESCE(pdv_settings, '{}'::jsonb) || $4::jsonb,\n            updated_at = NOW()\n      WHERE id = $1\n      RETURNING id, segment, segment_source, vertical_active, pdv_settings",
+        "params": [
+          "c-novo-1",
+          "assistencia",
+          "cnae",
+          "{\"os_enabled\":true}",
+          true,
+          "assistencia",
+          "1813001",
+          "Impressao"
+        ]
+      }
+    ],
+    "resultado": {
+      "segment": "assistencia",
+      "segment_source": "cnae",
+      "vertical_active": null,
+      "flags": {
+        "matcon_enabled": false,
+        "otica_enabled": false,
+        "os_enabled": true,
+        "studio_enabled": false
+      }
+    },
+    "erro": null,
+    "empresa": {
+      "id": "c-novo-1",
+      "plan": "essencial",
+      "vertical_active": null,
+      "pdv_settings": {
+        "os_enabled": true
+      },
+      "segment": "assistencia",
+      "segment_source": "cnae",
+      "segment_suggested": "assistencia",
+      "cnae_principal": "1813001",
+      "cnae_descricao": "Impressao"
+    }
+  },
+  "essencial|assistencia|cnae|os": {
+    "sql": [
+      {
+        "text": "SELECT id, plan, vertical_active, pdv_settings, segment FROM companies WHERE id = $1 FOR UPDATE",
+        "params": [
+          "c-novo-1"
+        ]
+      },
+      {
+        "text": "UPDATE companies\n        SET segment = $2,\n            segment_source = $3,\n            segment_suggested = CASE WHEN $5 THEN $6 ELSE segment_suggested END,\n            cnae_principal    = CASE WHEN $5 THEN $7 ELSE cnae_principal END,\n            cnae_descricao    = CASE WHEN $5 THEN $8 ELSE cnae_descricao END,\n            pdv_settings = COALESCE(pdv_settings, '{}'::jsonb) || $4::jsonb,\n            updated_at = NOW()\n      WHERE id = $1\n      RETURNING id, segment, segment_source, vertical_active, pdv_settings",
+        "params": [
+          "c-novo-1",
+          "assistencia",
+          "cnae",
+          "{\"os_enabled\":true}",
+          true,
+          "assistencia",
+          "1813001",
+          "Impressao"
+        ]
+      }
+    ],
+    "resultado": {
+      "segment": "assistencia",
+      "segment_source": "cnae",
+      "vertical_active": null,
+      "flags": {
+        "matcon_enabled": false,
+        "otica_enabled": false,
+        "os_enabled": true,
+        "studio_enabled": false
+      }
+    },
+    "erro": null,
+    "empresa": {
+      "id": "c-novo-1",
+      "plan": "essencial",
+      "vertical_active": null,
+      "pdv_settings": {
+        "os_enabled": true
+      },
+      "segment": "assistencia",
+      "segment_source": "cnae",
+      "segment_suggested": "assistencia",
+      "cnae_principal": "1813001",
+      "cnae_descricao": "Impressao"
+    }
+  },
+  "essencial|assistencia|landing|-": {
+    "sql": [
+      {
+        "text": "SELECT id, plan, vertical_active, pdv_settings, segment FROM companies WHERE id = $1 FOR UPDATE",
+        "params": [
+          "c-novo-1"
+        ]
+      },
+      {
+        "text": "UPDATE companies\n        SET segment = $2,\n            segment_source = $3,\n            segment_suggested = CASE WHEN $5 THEN $6 ELSE segment_suggested END,\n            cnae_principal    = CASE WHEN $5 THEN $7 ELSE cnae_principal END,\n            cnae_descricao    = CASE WHEN $5 THEN $8 ELSE cnae_descricao END,\n            pdv_settings = COALESCE(pdv_settings, '{}'::jsonb) || $4::jsonb,\n            updated_at = NOW()\n      WHERE id = $1\n      RETURNING id, segment, segment_source, vertical_active, pdv_settings",
+        "params": [
+          "c-novo-1",
+          "assistencia",
+          "landing",
+          "{\"os_enabled\":true}",
+          true,
+          null,
+          null,
+          null
+        ]
+      }
+    ],
+    "resultado": {
+      "segment": "assistencia",
+      "segment_source": "landing",
+      "vertical_active": null,
+      "flags": {
+        "matcon_enabled": false,
+        "otica_enabled": false,
+        "os_enabled": true,
+        "studio_enabled": false
+      }
+    },
+    "erro": null,
+    "empresa": {
+      "id": "c-novo-1",
+      "plan": "essencial",
+      "vertical_active": null,
+      "pdv_settings": {
+        "os_enabled": true
+      },
+      "segment": "assistencia",
+      "segment_source": "landing",
+      "segment_suggested": null,
+      "cnae_principal": null,
+      "cnae_descricao": null
+    }
+  },
+  "essencial|assistencia|landing|os": {
+    "sql": [
+      {
+        "text": "SELECT id, plan, vertical_active, pdv_settings, segment FROM companies WHERE id = $1 FOR UPDATE",
+        "params": [
+          "c-novo-1"
+        ]
+      },
+      {
+        "text": "UPDATE companies\n        SET segment = $2,\n            segment_source = $3,\n            segment_suggested = CASE WHEN $5 THEN $6 ELSE segment_suggested END,\n            cnae_principal    = CASE WHEN $5 THEN $7 ELSE cnae_principal END,\n            cnae_descricao    = CASE WHEN $5 THEN $8 ELSE cnae_descricao END,\n            pdv_settings = COALESCE(pdv_settings, '{}'::jsonb) || $4::jsonb,\n            updated_at = NOW()\n      WHERE id = $1\n      RETURNING id, segment, segment_source, vertical_active, pdv_settings",
+        "params": [
+          "c-novo-1",
+          "assistencia",
+          "landing",
+          "{\"os_enabled\":true}",
+          true,
+          null,
+          null,
+          null
+        ]
+      }
+    ],
+    "resultado": {
+      "segment": "assistencia",
+      "segment_source": "landing",
+      "vertical_active": null,
+      "flags": {
+        "matcon_enabled": false,
+        "otica_enabled": false,
+        "os_enabled": true,
+        "studio_enabled": false
+      }
+    },
+    "erro": null,
+    "empresa": {
+      "id": "c-novo-1",
+      "plan": "essencial",
+      "vertical_active": null,
+      "pdv_settings": {
+        "os_enabled": true
+      },
+      "segment": "assistencia",
+      "segment_source": "landing",
+      "segment_suggested": null,
+      "cnae_principal": null,
+      "cnae_descricao": null
+    }
+  },
+  "essencial|assistencia|user|-": {
+    "sql": [
+      {
+        "text": "SELECT id, plan, vertical_active, pdv_settings, segment FROM companies WHERE id = $1 FOR UPDATE",
+        "params": [
+          "c-novo-1"
+        ]
+      },
+      {
+        "text": "UPDATE companies\n        SET segment = $2,\n            segment_source = $3,\n            segment_suggested = CASE WHEN $5 THEN $6 ELSE segment_suggested END,\n            cnae_principal    = CASE WHEN $5 THEN $7 ELSE cnae_principal END,\n            cnae_descricao    = CASE WHEN $5 THEN $8 ELSE cnae_descricao END,\n            pdv_settings = COALESCE(pdv_settings, '{}'::jsonb) || $4::jsonb,\n            updated_at = NOW()\n      WHERE id = $1\n      RETURNING id, segment, segment_source, vertical_active, pdv_settings",
+        "params": [
+          "c-novo-1",
+          "assistencia",
+          "user",
+          "{\"os_enabled\":true}",
+          true,
+          null,
+          null,
+          null
+        ]
+      }
+    ],
+    "resultado": {
+      "segment": "assistencia",
+      "segment_source": "user",
+      "vertical_active": null,
+      "flags": {
+        "matcon_enabled": false,
+        "otica_enabled": false,
+        "os_enabled": true,
+        "studio_enabled": false
+      }
+    },
+    "erro": null,
+    "empresa": {
+      "id": "c-novo-1",
+      "plan": "essencial",
+      "vertical_active": null,
+      "pdv_settings": {
+        "os_enabled": true
+      },
+      "segment": "assistencia",
+      "segment_source": "user",
+      "segment_suggested": null,
+      "cnae_principal": null,
+      "cnae_descricao": null
+    }
+  },
+  "essencial|assistencia|user|os": {
+    "sql": [
+      {
+        "text": "SELECT id, plan, vertical_active, pdv_settings, segment FROM companies WHERE id = $1 FOR UPDATE",
+        "params": [
+          "c-novo-1"
+        ]
+      },
+      {
+        "text": "UPDATE companies\n        SET segment = $2,\n            segment_source = $3,\n            segment_suggested = CASE WHEN $5 THEN $6 ELSE segment_suggested END,\n            cnae_principal    = CASE WHEN $5 THEN $7 ELSE cnae_principal END,\n            cnae_descricao    = CASE WHEN $5 THEN $8 ELSE cnae_descricao END,\n            pdv_settings = COALESCE(pdv_settings, '{}'::jsonb) || $4::jsonb,\n            updated_at = NOW()\n      WHERE id = $1\n      RETURNING id, segment, segment_source, vertical_active, pdv_settings",
+        "params": [
+          "c-novo-1",
+          "assistencia",
+          "user",
+          "{\"os_enabled\":true}",
+          true,
+          null,
+          null,
+          null
+        ]
+      }
+    ],
+    "resultado": {
+      "segment": "assistencia",
+      "segment_source": "user",
+      "vertical_active": null,
+      "flags": {
+        "matcon_enabled": false,
+        "otica_enabled": false,
+        "os_enabled": true,
+        "studio_enabled": false
+      }
+    },
+    "erro": null,
+    "empresa": {
+      "id": "c-novo-1",
+      "plan": "essencial",
+      "vertical_active": null,
+      "pdv_settings": {
+        "os_enabled": true
+      },
+      "segment": "assistencia",
+      "segment_source": "user",
+      "segment_suggested": null,
+      "cnae_principal": null,
+      "cnae_descricao": null
+    }
+  },
+  "essencial|studio|cnae|-": {
+    "sql": [
+      {
+        "text": "SELECT id, plan, vertical_active, pdv_settings, segment FROM companies WHERE id = $1 FOR UPDATE",
+        "params": [
+          "c-novo-1"
+        ]
+      }
+    ],
+    "resultado": null,
+    "erro": {
+      "statusCode": 409,
+      "code": "STUDIO_PLAN_REQUIRED",
+      "message": "A frente Personalizados (Studio) so pode ser ativada nos planos Negocio, Expansao ou Personalizado. Plano atual: essencial."
+    },
+    "empresa": {
+      "id": "c-novo-1",
+      "plan": "essencial",
+      "vertical_active": null,
+      "pdv_settings": {},
+      "segment": null
+    }
+  },
+  "essencial|studio|cnae|os": {
+    "sql": [
+      {
+        "text": "SELECT id, plan, vertical_active, pdv_settings, segment FROM companies WHERE id = $1 FOR UPDATE",
+        "params": [
+          "c-novo-1"
+        ]
+      }
+    ],
+    "resultado": null,
+    "erro": {
+      "statusCode": 409,
+      "code": "STUDIO_PLAN_REQUIRED",
+      "message": "A frente Personalizados (Studio) so pode ser ativada nos planos Negocio, Expansao ou Personalizado. Plano atual: essencial."
+    },
+    "empresa": {
+      "id": "c-novo-1",
+      "plan": "essencial",
+      "vertical_active": null,
+      "pdv_settings": {},
+      "segment": null
+    }
+  },
+  "essencial|studio|landing|-": {
+    "sql": [
+      {
+        "text": "SELECT id, plan, vertical_active, pdv_settings, segment FROM companies WHERE id = $1 FOR UPDATE",
+        "params": [
+          "c-novo-1"
+        ]
+      }
+    ],
+    "resultado": null,
+    "erro": {
+      "statusCode": 409,
+      "code": "STUDIO_PLAN_REQUIRED",
+      "message": "A frente Personalizados (Studio) so pode ser ativada nos planos Negocio, Expansao ou Personalizado. Plano atual: essencial."
+    },
+    "empresa": {
+      "id": "c-novo-1",
+      "plan": "essencial",
+      "vertical_active": null,
+      "pdv_settings": {},
+      "segment": null
+    }
+  },
+  "essencial|studio|landing|os": {
+    "sql": [
+      {
+        "text": "SELECT id, plan, vertical_active, pdv_settings, segment FROM companies WHERE id = $1 FOR UPDATE",
+        "params": [
+          "c-novo-1"
+        ]
+      }
+    ],
+    "resultado": null,
+    "erro": {
+      "statusCode": 409,
+      "code": "STUDIO_PLAN_REQUIRED",
+      "message": "A frente Personalizados (Studio) so pode ser ativada nos planos Negocio, Expansao ou Personalizado. Plano atual: essencial."
+    },
+    "empresa": {
+      "id": "c-novo-1",
+      "plan": "essencial",
+      "vertical_active": null,
+      "pdv_settings": {},
+      "segment": null
+    }
+  },
+  "essencial|studio|user|-": {
+    "sql": [
+      {
+        "text": "SELECT id, plan, vertical_active, pdv_settings, segment FROM companies WHERE id = $1 FOR UPDATE",
+        "params": [
+          "c-novo-1"
+        ]
+      }
+    ],
+    "resultado": null,
+    "erro": {
+      "statusCode": 409,
+      "code": "STUDIO_PLAN_REQUIRED",
+      "message": "A frente Personalizados (Studio) so pode ser ativada nos planos Negocio, Expansao ou Personalizado. Plano atual: essencial."
+    },
+    "empresa": {
+      "id": "c-novo-1",
+      "plan": "essencial",
+      "vertical_active": null,
+      "pdv_settings": {},
+      "segment": null
+    }
+  },
+  "essencial|studio|user|os": {
+    "sql": [
+      {
+        "text": "SELECT id, plan, vertical_active, pdv_settings, segment FROM companies WHERE id = $1 FOR UPDATE",
+        "params": [
+          "c-novo-1"
+        ]
+      }
+    ],
+    "resultado": null,
+    "erro": {
+      "statusCode": 409,
+      "code": "STUDIO_PLAN_REQUIRED",
+      "message": "A frente Personalizados (Studio) so pode ser ativada nos planos Negocio, Expansao ou Personalizado. Plano atual: essencial."
+    },
+    "empresa": {
+      "id": "c-novo-1",
+      "plan": "essencial",
+      "vertical_active": null,
+      "pdv_settings": {},
+      "segment": null
+    }
+  },
+  "essencial|adega|cnae|-": {
+    "sql": [
+      {
+        "text": "SELECT id, plan, vertical_active, pdv_settings, segment FROM companies WHERE id = $1 FOR UPDATE",
+        "params": [
+          "c-novo-1"
+        ]
+      },
+      {
+        "text": "UPDATE companies\n        SET segment = $2,\n            segment_source = $3,\n            segment_suggested = CASE WHEN $5 THEN $6 ELSE segment_suggested END,\n            cnae_principal    = CASE WHEN $5 THEN $7 ELSE cnae_principal END,\n            cnae_descricao    = CASE WHEN $5 THEN $8 ELSE cnae_descricao END,\n            pdv_settings = COALESCE(pdv_settings, '{}'::jsonb) || $4::jsonb,\n            updated_at = NOW()\n      WHERE id = $1\n      RETURNING id, segment, segment_source, vertical_active, pdv_settings",
+        "params": [
+          "c-novo-1",
+          "adega",
+          "cnae",
+          "{}",
+          true,
+          "adega",
+          "1813001",
+          "Impressao"
+        ]
+      }
+    ],
+    "resultado": {
+      "segment": "adega",
+      "segment_source": "cnae",
+      "vertical_active": null,
+      "flags": {
+        "matcon_enabled": false,
+        "otica_enabled": false,
+        "os_enabled": false,
+        "studio_enabled": false
+      }
+    },
+    "erro": null,
+    "empresa": {
+      "id": "c-novo-1",
+      "plan": "essencial",
+      "vertical_active": null,
+      "pdv_settings": {},
+      "segment": "adega",
+      "segment_source": "cnae",
+      "segment_suggested": "adega",
+      "cnae_principal": "1813001",
+      "cnae_descricao": "Impressao"
+    }
+  },
+  "essencial|adega|cnae|os": {
+    "sql": [
+      {
+        "text": "SELECT id, plan, vertical_active, pdv_settings, segment FROM companies WHERE id = $1 FOR UPDATE",
+        "params": [
+          "c-novo-1"
+        ]
+      },
+      {
+        "text": "UPDATE companies\n        SET segment = $2,\n            segment_source = $3,\n            segment_suggested = CASE WHEN $5 THEN $6 ELSE segment_suggested END,\n            cnae_principal    = CASE WHEN $5 THEN $7 ELSE cnae_principal END,\n            cnae_descricao    = CASE WHEN $5 THEN $8 ELSE cnae_descricao END,\n            pdv_settings = COALESCE(pdv_settings, '{}'::jsonb) || $4::jsonb,\n            updated_at = NOW()\n      WHERE id = $1\n      RETURNING id, segment, segment_source, vertical_active, pdv_settings",
+        "params": [
+          "c-novo-1",
+          "adega",
+          "cnae",
+          "{\"os_enabled\":true}",
+          true,
+          "adega",
+          "1813001",
+          "Impressao"
+        ]
+      }
+    ],
+    "resultado": {
+      "segment": "adega",
+      "segment_source": "cnae",
+      "vertical_active": null,
+      "flags": {
+        "matcon_enabled": false,
+        "otica_enabled": false,
+        "os_enabled": true,
+        "studio_enabled": false
+      }
+    },
+    "erro": null,
+    "empresa": {
+      "id": "c-novo-1",
+      "plan": "essencial",
+      "vertical_active": null,
+      "pdv_settings": {
+        "os_enabled": true
+      },
+      "segment": "adega",
+      "segment_source": "cnae",
+      "segment_suggested": "adega",
+      "cnae_principal": "1813001",
+      "cnae_descricao": "Impressao"
+    }
+  },
+  "essencial|adega|landing|-": {
+    "sql": [
+      {
+        "text": "SELECT id, plan, vertical_active, pdv_settings, segment FROM companies WHERE id = $1 FOR UPDATE",
+        "params": [
+          "c-novo-1"
+        ]
+      },
+      {
+        "text": "UPDATE companies\n        SET segment = $2,\n            segment_source = $3,\n            segment_suggested = CASE WHEN $5 THEN $6 ELSE segment_suggested END,\n            cnae_principal    = CASE WHEN $5 THEN $7 ELSE cnae_principal END,\n            cnae_descricao    = CASE WHEN $5 THEN $8 ELSE cnae_descricao END,\n            pdv_settings = COALESCE(pdv_settings, '{}'::jsonb) || $4::jsonb,\n            updated_at = NOW()\n      WHERE id = $1\n      RETURNING id, segment, segment_source, vertical_active, pdv_settings",
+        "params": [
+          "c-novo-1",
+          "adega",
+          "landing",
+          "{}",
+          true,
+          null,
+          null,
+          null
+        ]
+      }
+    ],
+    "resultado": {
+      "segment": "adega",
+      "segment_source": "landing",
+      "vertical_active": null,
+      "flags": {
+        "matcon_enabled": false,
+        "otica_enabled": false,
+        "os_enabled": false,
+        "studio_enabled": false
+      }
+    },
+    "erro": null,
+    "empresa": {
+      "id": "c-novo-1",
+      "plan": "essencial",
+      "vertical_active": null,
+      "pdv_settings": {},
+      "segment": "adega",
+      "segment_source": "landing",
+      "segment_suggested": null,
+      "cnae_principal": null,
+      "cnae_descricao": null
+    }
+  },
+  "essencial|adega|landing|os": {
+    "sql": [
+      {
+        "text": "SELECT id, plan, vertical_active, pdv_settings, segment FROM companies WHERE id = $1 FOR UPDATE",
+        "params": [
+          "c-novo-1"
+        ]
+      },
+      {
+        "text": "UPDATE companies\n        SET segment = $2,\n            segment_source = $3,\n            segment_suggested = CASE WHEN $5 THEN $6 ELSE segment_suggested END,\n            cnae_principal    = CASE WHEN $5 THEN $7 ELSE cnae_principal END,\n            cnae_descricao    = CASE WHEN $5 THEN $8 ELSE cnae_descricao END,\n            pdv_settings = COALESCE(pdv_settings, '{}'::jsonb) || $4::jsonb,\n            updated_at = NOW()\n      WHERE id = $1\n      RETURNING id, segment, segment_source, vertical_active, pdv_settings",
+        "params": [
+          "c-novo-1",
+          "adega",
+          "landing",
+          "{\"os_enabled\":true}",
+          true,
+          null,
+          null,
+          null
+        ]
+      }
+    ],
+    "resultado": {
+      "segment": "adega",
+      "segment_source": "landing",
+      "vertical_active": null,
+      "flags": {
+        "matcon_enabled": false,
+        "otica_enabled": false,
+        "os_enabled": true,
+        "studio_enabled": false
+      }
+    },
+    "erro": null,
+    "empresa": {
+      "id": "c-novo-1",
+      "plan": "essencial",
+      "vertical_active": null,
+      "pdv_settings": {
+        "os_enabled": true
+      },
+      "segment": "adega",
+      "segment_source": "landing",
+      "segment_suggested": null,
+      "cnae_principal": null,
+      "cnae_descricao": null
+    }
+  },
+  "essencial|adega|user|-": {
+    "sql": [
+      {
+        "text": "SELECT id, plan, vertical_active, pdv_settings, segment FROM companies WHERE id = $1 FOR UPDATE",
+        "params": [
+          "c-novo-1"
+        ]
+      },
+      {
+        "text": "UPDATE companies\n        SET segment = $2,\n            segment_source = $3,\n            segment_suggested = CASE WHEN $5 THEN $6 ELSE segment_suggested END,\n            cnae_principal    = CASE WHEN $5 THEN $7 ELSE cnae_principal END,\n            cnae_descricao    = CASE WHEN $5 THEN $8 ELSE cnae_descricao END,\n            pdv_settings = COALESCE(pdv_settings, '{}'::jsonb) || $4::jsonb,\n            updated_at = NOW()\n      WHERE id = $1\n      RETURNING id, segment, segment_source, vertical_active, pdv_settings",
+        "params": [
+          "c-novo-1",
+          "adega",
+          "user",
+          "{}",
+          true,
+          null,
+          null,
+          null
+        ]
+      }
+    ],
+    "resultado": {
+      "segment": "adega",
+      "segment_source": "user",
+      "vertical_active": null,
+      "flags": {
+        "matcon_enabled": false,
+        "otica_enabled": false,
+        "os_enabled": false,
+        "studio_enabled": false
+      }
+    },
+    "erro": null,
+    "empresa": {
+      "id": "c-novo-1",
+      "plan": "essencial",
+      "vertical_active": null,
+      "pdv_settings": {},
+      "segment": "adega",
+      "segment_source": "user",
+      "segment_suggested": null,
+      "cnae_principal": null,
+      "cnae_descricao": null
+    }
+  },
+  "essencial|adega|user|os": {
+    "sql": [
+      {
+        "text": "SELECT id, plan, vertical_active, pdv_settings, segment FROM companies WHERE id = $1 FOR UPDATE",
+        "params": [
+          "c-novo-1"
+        ]
+      },
+      {
+        "text": "UPDATE companies\n        SET segment = $2,\n            segment_source = $3,\n            segment_suggested = CASE WHEN $5 THEN $6 ELSE segment_suggested END,\n            cnae_principal    = CASE WHEN $5 THEN $7 ELSE cnae_principal END,\n            cnae_descricao    = CASE WHEN $5 THEN $8 ELSE cnae_descricao END,\n            pdv_settings = COALESCE(pdv_settings, '{}'::jsonb) || $4::jsonb,\n            updated_at = NOW()\n      WHERE id = $1\n      RETURNING id, segment, segment_source, vertical_active, pdv_settings",
+        "params": [
+          "c-novo-1",
+          "adega",
+          "user",
+          "{\"os_enabled\":true}",
+          true,
+          null,
+          null,
+          null
+        ]
+      }
+    ],
+    "resultado": {
+      "segment": "adega",
+      "segment_source": "user",
+      "vertical_active": null,
+      "flags": {
+        "matcon_enabled": false,
+        "otica_enabled": false,
+        "os_enabled": true,
+        "studio_enabled": false
+      }
+    },
+    "erro": null,
+    "empresa": {
+      "id": "c-novo-1",
+      "plan": "essencial",
+      "vertical_active": null,
+      "pdv_settings": {
+        "os_enabled": true
+      },
+      "segment": "adega",
+      "segment_source": "user",
+      "segment_suggested": null,
+      "cnae_principal": null,
+      "cnae_descricao": null
+    }
+  },
+  "essencial|outro|cnae|-": {
+    "sql": [
+      {
+        "text": "SELECT id, plan, vertical_active, pdv_settings, segment FROM companies WHERE id = $1 FOR UPDATE",
+        "params": [
+          "c-novo-1"
+        ]
+      },
+      {
+        "text": "UPDATE companies\n        SET segment = $2,\n            segment_source = $3,\n            segment_suggested = CASE WHEN $5 THEN $6 ELSE segment_suggested END,\n            cnae_principal    = CASE WHEN $5 THEN $7 ELSE cnae_principal END,\n            cnae_descricao    = CASE WHEN $5 THEN $8 ELSE cnae_descricao END,\n            pdv_settings = COALESCE(pdv_settings, '{}'::jsonb) || $4::jsonb,\n            updated_at = NOW()\n      WHERE id = $1\n      RETURNING id, segment, segment_source, vertical_active, pdv_settings",
+        "params": [
+          "c-novo-1",
+          "outro",
+          "cnae",
+          "{}",
+          true,
+          "outro",
+          "1813001",
+          "Impressao"
+        ]
+      }
+    ],
+    "resultado": {
+      "segment": "outro",
+      "segment_source": "cnae",
+      "vertical_active": null,
+      "flags": {
+        "matcon_enabled": false,
+        "otica_enabled": false,
+        "os_enabled": false,
+        "studio_enabled": false
+      }
+    },
+    "erro": null,
+    "empresa": {
+      "id": "c-novo-1",
+      "plan": "essencial",
+      "vertical_active": null,
+      "pdv_settings": {},
+      "segment": "outro",
+      "segment_source": "cnae",
+      "segment_suggested": "outro",
+      "cnae_principal": "1813001",
+      "cnae_descricao": "Impressao"
+    }
+  },
+  "essencial|outro|cnae|os": {
+    "sql": [
+      {
+        "text": "SELECT id, plan, vertical_active, pdv_settings, segment FROM companies WHERE id = $1 FOR UPDATE",
+        "params": [
+          "c-novo-1"
+        ]
+      },
+      {
+        "text": "UPDATE companies\n        SET segment = $2,\n            segment_source = $3,\n            segment_suggested = CASE WHEN $5 THEN $6 ELSE segment_suggested END,\n            cnae_principal    = CASE WHEN $5 THEN $7 ELSE cnae_principal END,\n            cnae_descricao    = CASE WHEN $5 THEN $8 ELSE cnae_descricao END,\n            pdv_settings = COALESCE(pdv_settings, '{}'::jsonb) || $4::jsonb,\n            updated_at = NOW()\n      WHERE id = $1\n      RETURNING id, segment, segment_source, vertical_active, pdv_settings",
+        "params": [
+          "c-novo-1",
+          "outro",
+          "cnae",
+          "{\"os_enabled\":true}",
+          true,
+          "outro",
+          "1813001",
+          "Impressao"
+        ]
+      }
+    ],
+    "resultado": {
+      "segment": "outro",
+      "segment_source": "cnae",
+      "vertical_active": null,
+      "flags": {
+        "matcon_enabled": false,
+        "otica_enabled": false,
+        "os_enabled": true,
+        "studio_enabled": false
+      }
+    },
+    "erro": null,
+    "empresa": {
+      "id": "c-novo-1",
+      "plan": "essencial",
+      "vertical_active": null,
+      "pdv_settings": {
+        "os_enabled": true
+      },
+      "segment": "outro",
+      "segment_source": "cnae",
+      "segment_suggested": "outro",
+      "cnae_principal": "1813001",
+      "cnae_descricao": "Impressao"
+    }
+  },
+  "essencial|outro|landing|-": {
+    "sql": [
+      {
+        "text": "SELECT id, plan, vertical_active, pdv_settings, segment FROM companies WHERE id = $1 FOR UPDATE",
+        "params": [
+          "c-novo-1"
+        ]
+      },
+      {
+        "text": "UPDATE companies\n        SET segment = $2,\n            segment_source = $3,\n            segment_suggested = CASE WHEN $5 THEN $6 ELSE segment_suggested END,\n            cnae_principal    = CASE WHEN $5 THEN $7 ELSE cnae_principal END,\n            cnae_descricao    = CASE WHEN $5 THEN $8 ELSE cnae_descricao END,\n            pdv_settings = COALESCE(pdv_settings, '{}'::jsonb) || $4::jsonb,\n            updated_at = NOW()\n      WHERE id = $1\n      RETURNING id, segment, segment_source, vertical_active, pdv_settings",
+        "params": [
+          "c-novo-1",
+          "outro",
+          "landing",
+          "{}",
+          true,
+          null,
+          null,
+          null
+        ]
+      }
+    ],
+    "resultado": {
+      "segment": "outro",
+      "segment_source": "landing",
+      "vertical_active": null,
+      "flags": {
+        "matcon_enabled": false,
+        "otica_enabled": false,
+        "os_enabled": false,
+        "studio_enabled": false
+      }
+    },
+    "erro": null,
+    "empresa": {
+      "id": "c-novo-1",
+      "plan": "essencial",
+      "vertical_active": null,
+      "pdv_settings": {},
+      "segment": "outro",
+      "segment_source": "landing",
+      "segment_suggested": null,
+      "cnae_principal": null,
+      "cnae_descricao": null
+    }
+  },
+  "essencial|outro|landing|os": {
+    "sql": [
+      {
+        "text": "SELECT id, plan, vertical_active, pdv_settings, segment FROM companies WHERE id = $1 FOR UPDATE",
+        "params": [
+          "c-novo-1"
+        ]
+      },
+      {
+        "text": "UPDATE companies\n        SET segment = $2,\n            segment_source = $3,\n            segment_suggested = CASE WHEN $5 THEN $6 ELSE segment_suggested END,\n            cnae_principal    = CASE WHEN $5 THEN $7 ELSE cnae_principal END,\n            cnae_descricao    = CASE WHEN $5 THEN $8 ELSE cnae_descricao END,\n            pdv_settings = COALESCE(pdv_settings, '{}'::jsonb) || $4::jsonb,\n            updated_at = NOW()\n      WHERE id = $1\n      RETURNING id, segment, segment_source, vertical_active, pdv_settings",
+        "params": [
+          "c-novo-1",
+          "outro",
+          "landing",
+          "{\"os_enabled\":true}",
+          true,
+          null,
+          null,
+          null
+        ]
+      }
+    ],
+    "resultado": {
+      "segment": "outro",
+      "segment_source": "landing",
+      "vertical_active": null,
+      "flags": {
+        "matcon_enabled": false,
+        "otica_enabled": false,
+        "os_enabled": true,
+        "studio_enabled": false
+      }
+    },
+    "erro": null,
+    "empresa": {
+      "id": "c-novo-1",
+      "plan": "essencial",
+      "vertical_active": null,
+      "pdv_settings": {
+        "os_enabled": true
+      },
+      "segment": "outro",
+      "segment_source": "landing",
+      "segment_suggested": null,
+      "cnae_principal": null,
+      "cnae_descricao": null
+    }
+  },
+  "essencial|outro|user|-": {
+    "sql": [
+      {
+        "text": "SELECT id, plan, vertical_active, pdv_settings, segment FROM companies WHERE id = $1 FOR UPDATE",
+        "params": [
+          "c-novo-1"
+        ]
+      },
+      {
+        "text": "UPDATE companies\n        SET segment = $2,\n            segment_source = $3,\n            segment_suggested = CASE WHEN $5 THEN $6 ELSE segment_suggested END,\n            cnae_principal    = CASE WHEN $5 THEN $7 ELSE cnae_principal END,\n            cnae_descricao    = CASE WHEN $5 THEN $8 ELSE cnae_descricao END,\n            pdv_settings = COALESCE(pdv_settings, '{}'::jsonb) || $4::jsonb,\n            updated_at = NOW()\n      WHERE id = $1\n      RETURNING id, segment, segment_source, vertical_active, pdv_settings",
+        "params": [
+          "c-novo-1",
+          "outro",
+          "user",
+          "{}",
+          true,
+          null,
+          null,
+          null
+        ]
+      }
+    ],
+    "resultado": {
+      "segment": "outro",
+      "segment_source": "user",
+      "vertical_active": null,
+      "flags": {
+        "matcon_enabled": false,
+        "otica_enabled": false,
+        "os_enabled": false,
+        "studio_enabled": false
+      }
+    },
+    "erro": null,
+    "empresa": {
+      "id": "c-novo-1",
+      "plan": "essencial",
+      "vertical_active": null,
+      "pdv_settings": {},
+      "segment": "outro",
+      "segment_source": "user",
+      "segment_suggested": null,
+      "cnae_principal": null,
+      "cnae_descricao": null
+    }
+  },
+  "essencial|outro|user|os": {
+    "sql": [
+      {
+        "text": "SELECT id, plan, vertical_active, pdv_settings, segment FROM companies WHERE id = $1 FOR UPDATE",
+        "params": [
+          "c-novo-1"
+        ]
+      },
+      {
+        "text": "UPDATE companies\n        SET segment = $2,\n            segment_source = $3,\n            segment_suggested = CASE WHEN $5 THEN $6 ELSE segment_suggested END,\n            cnae_principal    = CASE WHEN $5 THEN $7 ELSE cnae_principal END,\n            cnae_descricao    = CASE WHEN $5 THEN $8 ELSE cnae_descricao END,\n            pdv_settings = COALESCE(pdv_settings, '{}'::jsonb) || $4::jsonb,\n            updated_at = NOW()\n      WHERE id = $1\n      RETURNING id, segment, segment_source, vertical_active, pdv_settings",
+        "params": [
+          "c-novo-1",
+          "outro",
+          "user",
+          "{\"os_enabled\":true}",
+          true,
+          null,
+          null,
+          null
+        ]
+      }
+    ],
+    "resultado": {
+      "segment": "outro",
+      "segment_source": "user",
+      "vertical_active": null,
+      "flags": {
+        "matcon_enabled": false,
+        "otica_enabled": false,
+        "os_enabled": true,
+        "studio_enabled": false
+      }
+    },
+    "erro": null,
+    "empresa": {
+      "id": "c-novo-1",
+      "plan": "essencial",
+      "vertical_active": null,
+      "pdv_settings": {
+        "os_enabled": true
+      },
+      "segment": "outro",
+      "segment_source": "user",
+      "segment_suggested": null,
+      "cnae_principal": null,
+      "cnae_descricao": null
+    }
+  }
+}

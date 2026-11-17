@@ -1002,6 +1002,7 @@ router.post('/me', requireAuth, async (req, res) => {
                 c.access_code_used, c.vertical_active, c.vertical, c.ai_enabled, c.ai_consent_at,
                 c.federation_id, c.segment,
                 c.is_sandbox,
+                (COALESCE(c.studio_settings->>'casa_negocio', '') = 'true') AS casa_negocio,
                 CASE
                   WHEN c.owner_id = $1 THEN 'owner'
                   ELSE COALESCE(cm.role_label, 'member')
@@ -1074,6 +1075,10 @@ router.post('/me', requireAuth, async (req, res) => {
       const trialCols = await trialP;
       companyOut = {
         ...shapeCompany(company, memberRole),
+        // 17/11/2026 (p-189): casa no Negocio (services/casaNegocio.js). So
+        // aparece quando ligada: para todas as outras empresas o /me e o de
+        // sempre. O app so le com a trava PERSONALIZADOS_LIBERADO.
+        ...(company.casa_negocio === true ? { casa_negocio: true } : {}),
         extra_seats_granted: extraMap.get(company.id) || 0,
         // { mode, ends_at, started_by_sale_at, dias_restantes, teto_em, ... }
         trial: trialRegra.montarTrial({ ...company, ...trialCols }),
