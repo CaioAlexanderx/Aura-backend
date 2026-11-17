@@ -375,3 +375,77 @@ describe('2c. pedido: o INSERT de digital_order_items de hoje', () => {
     expect(inserts.reduce((s, i) => s + i.params[6], 0)).toBeCloseTo(soma, 10);
   });
 });
+
+// ─────────────────────────────────────────────────────────────
+// 3. O servico comum (services/personalizavel.js) e a regra da rota
+// ─────────────────────────────────────────────────────────────
+describe('3. services/personalizavel.js', () => {
+  const svc = require('../src/services/personalizavel');
+  const { initialArtStatus } = require('../src/services/artReview');
+  const { cotarItens } = require('../src/services/precoDoStudio');
+  const { sanitizarAjustesDaArte } = require('../src/services/ajusteDaArte');
+
+  test('a rota usa a validacao do servico, nao uma copia', () => {
+    expect(validarDaRota).toBe(svc.validateCustomizationValues);
+    expect(svc.validarPersonalizacao).toBe(svc.validateCustomizationValues);
+  });
+
+  test.each(CASOS_DE_VALIDACAO)('validarPersonalizacao: %s', (_d, config, values, esperado) => {
+    expect(svc.validarPersonalizacao(config, values)).toBe(esperado);
+  });
+
+  // A mesma conta que a rota fazia antes: cotarItens com a validacao e a
+  // limpeza do ajuste da arte injetadas.
+  const comoAntes = (items, faixas) => cotarItens({
+    items, produtos: PRODUTOS, faixas,
+    validar: svc.validateCustomizationValues, sanear: sanitizarAjustesDaArte,
+  });
+
+  test.each(RECUSAS)('cotarPersonalizados recusa igual: %s', (_d, items, msg, indice) => {
+    expect(svc.cotarPersonalizados({ items, produtos: PRODUTOS, faixas: {} })).toEqual({ erro: msg, indice });
+    expect(comoAntes(items, {})).toEqual({ erro: msg, indice });
+  });
+
+  test.each(ACEITOS)('cotarPersonalizados precifica igual: %s', (_d, item, cot, ins) => {
+    const r = svc.cotarPersonalizados({ items: [item], produtos: PRODUTOS, faixas: {} });
+    expect(r).toEqual(comoAntes([item], {}));
+    expect(r.linhas[0].preco.preco_unitario).toBeCloseTo(cot.preco_unitario, 10);
+    expect(r.linhas[0].preco.total).toBeCloseTo(cot.total, 10);
+    expect(r.linhas[0].customization).toEqual(ins.customization);
+  });
+
+  test('cotarPersonalizados com faixa: igual ao de antes', () => {
+    const faixas = { p1: [{ min_qty: 10, unit_price: 40 }] };
+    const items = [{ product_id: 'p1', quantity: 10, customization: { art_service: 'none', cor: 'rosa', foto: 'u' } }];
+    const r = svc.cotarPersonalizados({ items, produtos: PRODUTOS, faixas });
+    expect(r).toEqual(comoAntes(items, faixas));
+    expect(r.subtotal).toBeCloseTo(425, 10);
+  });
+
+  test('prepararPersonalizacao e a limpeza do ajuste da arte', () => {
+    const [, item, , ins] = ACEITOS[3];
+    const cfg = PRODUTOS.p1.customization_config;
+    expect(svc.prepararPersonalizacao(item.customization, cfg)).toEqual(ins.customization);
+    expect(svc.prepararPersonalizacao(item.customization, cfg))
+      .toEqual(sanitizarAjustesDaArte(item.customization, cfg));
+  });
+
+  test.each(ACEITOS)('statusInicialDaArte: %s', (_d, item, _cot, ins) => {
+    const cfg = PRODUTOS[item.product_id].customization_config;
+    expect(svc.statusInicialDaArte(cfg, ins.customization)).toBe(ins.art_review_status);
+    expect(svc.statusInicialDaArte(cfg, ins.customization)).toBe(initialArtStatus(cfg, ins.customization));
+  });
+
+  test('statusInicialDaArte sem config ou sem customization: null', () => {
+    expect(svc.statusInicialDaArte(null, { foto: 'u' })).toBeNull();
+    expect(svc.statusInicialDaArte({ fields: [FOTO_OBRIG] }, null)).toBeNull();
+    expect(svc.statusInicialDaArte({ fields: [GALERIA] }, { tpl: 'tpl-1' })).toBe('pendente');
+  });
+
+  test('a API exportada e so esta', () => {
+    expect(Object.keys(svc).sort()).toEqual([
+      'cotarPersonalizados', 'prepararPersonalizacao', 'statusInicialDaArte',
+      'validarPersonalizacao', 'validateCustomizationValues',
+    ]);
+  });
+});

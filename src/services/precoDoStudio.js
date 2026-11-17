@@ -217,7 +217,9 @@ function precoDaLinha({ produto, faixas, quantidade, customization }) {
  *
  * `produtos` e o mapa id → linha de products ja filtrada pela visibilidade
  * da loja; `validar(cfg, customization)` e a validacao de campos
- * obrigatorios da rota (injetada para este modulo nao depender dela).
+ * obrigatorios (injetada para este modulo nao depender dela). As rotas
+ * nao chamam isto direto: chamam services/personalizavel.js
+ * (cotarPersonalizados), que fixa a validacao e a limpeza (p-174).
  *
  * `sanear(customization, cfg)` (opcional) devolve o customization limpo
  * — hoje, services/ajusteDaArte.js tirando ajuste da arte malformado. A
