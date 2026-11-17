@@ -8,6 +8,10 @@ const {
 
 const router = express.Router({ mergeParams: true });
 
+// 17/11/2026 (p-140): carimbo do inicio da requisicao do Caixa, antes da
+// autenticacao — so guarda a hora em req (services/vendaTiming.js).
+router.use('/pdv', require('../services/vendaTiming').carimbarInicio);
+
 router.use(requireAuth);
 router.use(requireCompanyAccess());
 
