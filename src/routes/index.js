@@ -65,6 +65,8 @@ router.use('/admin', require('./admin'));
 router.use('/admin', require('./adminAccessCodes'));
 router.use('/admin', require('./adminPlan'));
 router.use('/admin', require('./adminVertical'));
+// 17/11/2026 (p-189): casa no Negocio de UMA empresa (virada do Studio), so equipe.
+router.use('/admin', require('./adminCasaNegocio'));
 router.use('/admin', require('./adminKarate'));
 router.use('/admin', require('./adminSubVertical'));
 router.use('/admin', require('./adminSupport'));
