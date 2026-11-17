@@ -195,9 +195,7 @@ test('loja sem promocao: GET /products e variantes iguais, so com os campos novo
   const NOTA = ['nota_fiscal'];
   // 14/11/2026 (CP6 da revisao de cores): os nomes de cor das variantes, para a busca
   const CORES = ['variant_color_names'];
-  // 17/11/2026 (B2, p-61b): reserva calculada do pedido guardado no Caixa.
-  const RESERVA = ['reserved_qty', 'reserved_by_variant'];
-  expect(Object.keys(p).sort()).toEqual([...ANTES, ...NOVOS, ...NFSE, ...NOTA, ...CORES, ...RESERVA].sort());
+  expect(Object.keys(p).sort()).toEqual([...ANTES, ...NOVOS, ...NFSE, ...NOTA, ...CORES].sort());
   expect(p.nota_fiscal).toBeNull();
   expect(p).toMatchObject({ price: 59.9, promo_price: null, promo_starts_at: null, promo_ends_at: null, em_promocao: false, preco_efetivo: 59.9 });
 
