@@ -1,0 +1,275 @@
+// Jest Snapshot v1, https://goo.gl/fbAQLP
+
+exports[`rastro da rota grade com fornecedor novo e update_cost false 1`] = `
+[
+  [
+    "BEGIN",
+    [],
+  ],
+  [
+    "SELECT id, company_id, name, stock_qty, cost_price, weighted_avg_cost, supplier_id FROM products WHERE id = $1 AND (company_id = $2 OR ( is_group_shared = true AND company_id IN ( SELECT id FROM companies WHERE COALESCE(NULLIF(billing_owner_company_id, id), id) = ( SELECT COALESCE(NULLIF(billing_owner_company_id, id), id) FROM companies WHERE id = $2 ) ) )) FOR UPDATE",
+    [
+      "<id1>",
+      "<id2>",
+    ],
+  ],
+  [
+    "SELECT id, stock_qty FROM product_variants WHERE product_id = $1 AND is_active = true FOR UPDATE",
+    [
+      "<id1>",
+    ],
+  ],
+  [
+    "SELECT id, name, cnpj, phone FROM suppliers WHERE company_id IN ( SELECT id FROM companies WHERE COALESCE(NULLIF(billing_owner_company_id, id), id) = ( SELECT COALESCE(NULLIF(billing_owner_company_id, id), id) FROM companies WHERE id = $1 ) ) AND (($2::text <> '' AND cnpj = $2) OR ($2::text = '' AND lower(trim(name)) = lower($3))) ORDER BY (company_id = $1) DESC LIMIT 1",
+    [
+      "<id2>",
+      "",
+      "Rastro Novo",
+    ],
+  ],
+  [
+    "INSERT INTO suppliers (company_id, name, cnpj, phone) VALUES ($1, $2, $3, $4) RETURNING id, name, cnpj, phone",
+    [
+      "<id2>",
+      "Rastro Novo",
+      null,
+      null,
+    ],
+  ],
+  [
+    "UPDATE product_variants SET stock_qty = stock_qty + $1, updated_at = NOW() WHERE id = $2 AND product_id = $3",
+    [
+      2,
+      "<id3>",
+      "<id1>",
+    ],
+  ],
+  [
+    "UPDATE product_variants SET stock_qty = stock_qty + $1, updated_at = NOW() WHERE id = $2 AND product_id = $3",
+    [
+      3,
+      "<id4>",
+      "<id1>",
+    ],
+  ],
+  [
+    "UPDATE products SET weighted_avg_cost = $2, cost_price = CASE WHEN $3::boolean THEN ROUND($2::numeric, 2) ELSE cost_price END, updated_at = NOW() WHERE id = $1",
+    [
+      "<id1>",
+      11.4286,
+      false,
+    ],
+  ],
+  [
+    "SAVEPOINT ultima_compra",
+    [],
+  ],
+  [
+    "UPDATE products SET last_supplier_name = $2, last_supplier_cnpj = $3, last_supplier_phone = $4, last_purchase_unit_cost = COALESCE($5::numeric, last_purchase_unit_cost), last_purchase_at = NOW() WHERE id = $1",
+    [
+      "<id1>",
+      "Rastro Novo",
+      null,
+      null,
+      12,
+    ],
+  ],
+  [
+    "RELEASE SAVEPOINT ultima_compra",
+    [],
+  ],
+  [
+    "INSERT INTO product_suppliers (company_id, product_id, supplier_id, cost, is_main, last_purchase_at) VALUES ($1, $2, $3, $4, NOT EXISTS (SELECT 1 FROM product_suppliers WHERE product_id = $2 AND is_main), NOW()) ON CONFLICT (product_id, supplier_id) DO UPDATE SET cost = COALESCE(EXCLUDED.cost, product_suppliers.cost), last_purchase_at = NOW(), updated_at = NOW()",
+    [
+      "<id2>",
+      "<id1>",
+      "<id5>",
+      12,
+    ],
+  ],
+  [
+    "UPDATE products p SET supplier_id = s.id, supplier_name = s.name, supplier_cnpj = s.cnpj, updated_at = NOW() FROM product_suppliers ps JOIN suppliers s ON s.id = ps.supplier_id WHERE p.id = $1 AND ps.product_id = p.id AND ps.is_main AND p.supplier_id IS DISTINCT FROM s.id",
+    [
+      "<id1>",
+    ],
+  ],
+  [
+    "UPDATE products SET supplier_id = NULL, supplier_name = NULL, supplier_cnpj = NULL, updated_at = NOW() WHERE id = $1 AND supplier_id IS NOT NULL AND NOT EXISTS (SELECT 1 FROM product_suppliers WHERE product_id = $1 AND is_main)",
+    [
+      "<id1>",
+    ],
+  ],
+  [
+    "INSERT INTO stock_movements (product_id, company_id, type, quantity, reference_type, notes, supplier_id, unit_cost, variant_id) VALUES ($1, $2, 'in', $3, 'entrada', $4, $5, $6, $7)",
+    [
+      "<id1>",
+      "<id2>",
+      2,
+      null,
+      "<id5>",
+      12,
+      "<id3>",
+    ],
+  ],
+  [
+    "INSERT INTO stock_movements (product_id, company_id, type, quantity, reference_type, notes, supplier_id, unit_cost, variant_id) VALUES ($1, $2, 'in', $3, 'entrada', $4, $5, $6, $7)",
+    [
+      "<id1>",
+      "<id2>",
+      3,
+      null,
+      "<id5>",
+      12,
+      "<id4>",
+    ],
+  ],
+  [
+    "COMMIT",
+    [],
+  ],
+]
+`;
+
+exports[`rastro da rota produto simples com fornecedor, custo e nota 1`] = `
+[
+  [
+    "BEGIN",
+    [],
+  ],
+  [
+    "SELECT id, company_id, name, stock_qty, cost_price, weighted_avg_cost, supplier_id FROM products WHERE id = $1 AND (company_id = $2 OR ( is_group_shared = true AND company_id IN ( SELECT id FROM companies WHERE COALESCE(NULLIF(billing_owner_company_id, id), id) = ( SELECT COALESCE(NULLIF(billing_owner_company_id, id), id) FROM companies WHERE id = $2 ) ) )) FOR UPDATE",
+    [
+      "<id1>",
+      "<id2>",
+    ],
+  ],
+  [
+    "SELECT id, stock_qty FROM product_variants WHERE product_id = $1 AND is_active = true FOR UPDATE",
+    [
+      "<id1>",
+    ],
+  ],
+  [
+    "SELECT id, name, cnpj, phone FROM suppliers WHERE id = $1 AND company_id IN ( SELECT id FROM companies WHERE COALESCE(NULLIF(billing_owner_company_id, id), id) = ( SELECT COALESCE(NULLIF(billing_owner_company_id, id), id) FROM companies WHERE id = $2 ) )",
+    [
+      "<id3>",
+      "<id2>",
+    ],
+  ],
+  [
+    "UPDATE products SET stock_qty = stock_qty + $1, updated_at = NOW() WHERE id = $2",
+    [
+      20,
+      "<id1>",
+    ],
+  ],
+  [
+    "UPDATE products SET weighted_avg_cost = $2, cost_price = CASE WHEN $3::boolean THEN ROUND($2::numeric, 2) ELSE cost_price END, updated_at = NOW() WHERE id = $1",
+    [
+      "<id1>",
+      5.8333,
+      true,
+    ],
+  ],
+  [
+    "SAVEPOINT ultima_compra",
+    [],
+  ],
+  [
+    "UPDATE products SET last_supplier_name = $2, last_supplier_cnpj = $3, last_supplier_phone = $4, last_purchase_unit_cost = COALESCE($5::numeric, last_purchase_unit_cost), last_purchase_at = NOW() WHERE id = $1",
+    [
+      "<id1>",
+      "Rastro Alfa",
+      null,
+      null,
+      5.9,
+    ],
+  ],
+  [
+    "RELEASE SAVEPOINT ultima_compra",
+    [],
+  ],
+  [
+    "INSERT INTO product_suppliers (company_id, product_id, supplier_id, cost, is_main, last_purchase_at) VALUES ($1, $2, $3, $4, NOT EXISTS (SELECT 1 FROM product_suppliers WHERE product_id = $2 AND is_main), NOW()) ON CONFLICT (product_id, supplier_id) DO UPDATE SET cost = COALESCE(EXCLUDED.cost, product_suppliers.cost), last_purchase_at = NOW(), updated_at = NOW()",
+    [
+      "<id2>",
+      "<id1>",
+      "<id3>",
+      5.9,
+    ],
+  ],
+  [
+    "UPDATE products p SET supplier_id = s.id, supplier_name = s.name, supplier_cnpj = s.cnpj, updated_at = NOW() FROM product_suppliers ps JOIN suppliers s ON s.id = ps.supplier_id WHERE p.id = $1 AND ps.product_id = p.id AND ps.is_main AND p.supplier_id IS DISTINCT FROM s.id",
+    [
+      "<id1>",
+    ],
+  ],
+  [
+    "UPDATE products SET supplier_id = NULL, supplier_name = NULL, supplier_cnpj = NULL, updated_at = NOW() WHERE id = $1 AND supplier_id IS NOT NULL AND NOT EXISTS (SELECT 1 FROM product_suppliers WHERE product_id = $1 AND is_main)",
+    [
+      "<id1>",
+    ],
+  ],
+  [
+    "INSERT INTO stock_movements (product_id, company_id, type, quantity, reference_type, notes, supplier_id, unit_cost, variant_id) VALUES ($1, $2, 'in', $3, 'entrada', $4, $5, $6, $7)",
+    [
+      "<id1>",
+      "<id2>",
+      20,
+      "NF 1",
+      "<id3>",
+      5.9,
+      null,
+    ],
+  ],
+  [
+    "COMMIT",
+    [],
+  ],
+]
+`;
+
+exports[`rastro da rota sem fornecedor e sem custo 1`] = `
+[
+  [
+    "BEGIN",
+    [],
+  ],
+  [
+    "SELECT id, company_id, name, stock_qty, cost_price, weighted_avg_cost, supplier_id FROM products WHERE id = $1 AND (company_id = $2 OR ( is_group_shared = true AND company_id IN ( SELECT id FROM companies WHERE COALESCE(NULLIF(billing_owner_company_id, id), id) = ( SELECT COALESCE(NULLIF(billing_owner_company_id, id), id) FROM companies WHERE id = $2 ) ) )) FOR UPDATE",
+    [
+      "<id1>",
+      "<id2>",
+    ],
+  ],
+  [
+    "SELECT id, stock_qty FROM product_variants WHERE product_id = $1 AND is_active = true FOR UPDATE",
+    [
+      "<id1>",
+    ],
+  ],
+  [
+    "UPDATE products SET stock_qty = stock_qty + $1, updated_at = NOW() WHERE id = $2",
+    [
+      2,
+      "<id1>",
+    ],
+  ],
+  [
+    "INSERT INTO stock_movements (product_id, company_id, type, quantity, reference_type, notes, supplier_id, unit_cost, variant_id) VALUES ($1, $2, 'in', $3, 'entrada', $4, $5, $6, $7)",
+    [
+      "<id1>",
+      "<id2>",
+      2,
+      null,
+      null,
+      null,
+      null,
+    ],
+  ],
+  [
+    "COMMIT",
+    [],
+  ],
+]
+`;

@@ -24,29 +24,17 @@
 
 const router = require('express').Router({ mergeParams: true });
 const db = require('../config/database');
-const { companyGroupWhere, productVisibilityWhere } = require('../utils/companyGroup');
-const { onlyDigits, isValidCnpj } = require('../utils/cnpj');
+const { companyGroupWhere } = require('../utils/companyGroup');
+// O miolo da entrada (e os ajudantes que ela usa) mora no serviço desde o B1
+// (17/11/2026), para a entrada de vários itens usar o mesmo caminho.
 const {
-  custoMedioPonderado, lerEntrada, lerListaDeFornecedores, round,
+  lerEntrada, lerListaDeFornecedores, round,
+  falhaDeSchema, produtoVisivel, travarVariantes, conferirGrade, achaOuCriaFornecedor,
+  espelharPrincipal, darEntradaNoProduto,
 } = require('../services/entradaDeMercadoria');
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const num = (v) => (v === null || v === undefined ? null : Number(v));
-
-function falhaDeSchema(err) {
-  return err && (err.code === '42P01' || err.code === '42703');
-}
-
-async function produtoVisivel(conn, pid, cid, travar = false) {
-  const { rows } = await conn.query(
-    `SELECT id, company_id, name, stock_qty, cost_price, weighted_avg_cost, supplier_id
-       FROM products
-      WHERE id = $1 AND ${productVisibilityWhere('$2')}
-      ${travar ? 'FOR UPDATE' : ''}`,
-    [pid, cid]
-  );
-  return rows[0] || null;
-}
 
 async function listar(conn, pid) {
   const { rows } = await conn.query(
@@ -59,58 +47,6 @@ async function listar(conn, pid) {
     [pid]
   );
   return rows.map((r) => ({ ...r, cost: num(r.cost) }));
-}
-
-// Fornecedor existente (visível no grupo) ou novo, cadastrado na hora
-// (tela 3 do mockup). Dedupe: CNPJ, senão nome sem caixa.
-async function achaOuCriaFornecedor(conn, cid, body) {
-  if (body.supplier_id) {
-    const { rows } = await conn.query(
-      `SELECT id, name, cnpj, phone FROM suppliers WHERE id = $1 AND ${companyGroupWhere('$2')}`,
-      [String(body.supplier_id), cid]
-    );
-    return rows[0] ? { fornecedor: rows[0] } : { erro: 'Fornecedor não encontrado', status: 404 };
-  }
-  const novo = body.new_supplier;
-  if (!novo) return { fornecedor: null };
-  const nome = novo.name ? String(novo.name).trim().slice(0, 200) : '';
-  if (!nome) return { erro: 'Informe o nome do fornecedor', status: 400 };
-  const cnpj = novo.cnpj ? onlyDigits(String(novo.cnpj)) : '';
-  if (cnpj && !isValidCnpj(cnpj)) return { erro: 'CNPJ inválido', status: 400 };
-  const telefone = novo.phone ? String(novo.phone).trim().slice(0, 30) || null : null;
-  const { rows: achados } = await conn.query(
-    `SELECT id, name, cnpj, phone FROM suppliers
-      WHERE ${companyGroupWhere('$1')}
-        AND (($2::text <> '' AND cnpj = $2) OR ($2::text = '' AND lower(trim(name)) = lower($3)))
-      ORDER BY (company_id = $1) DESC
-      LIMIT 1`,
-    [cid, cnpj, nome]
-  );
-  if (achados[0]) return { fornecedor: achados[0] };
-  const { rows } = await conn.query(
-    `INSERT INTO suppliers (company_id, name, cnpj, phone) VALUES ($1, $2, $3, $4)
-     RETURNING id, name, cnpj, phone`,
-    [cid, nome, cnpj || null, telefone]
-  );
-  return { fornecedor: rows[0], criado: true };
-}
-
-// products.supplier_id espelha o principal (migration 424, decisão b).
-async function espelharPrincipal(conn, pid) {
-  await conn.query(
-    `UPDATE products p
-        SET supplier_id = s.id, supplier_name = s.name, supplier_cnpj = s.cnpj, updated_at = NOW()
-       FROM product_suppliers ps JOIN suppliers s ON s.id = ps.supplier_id
-      WHERE p.id = $1 AND ps.product_id = p.id AND ps.is_main
-        AND p.supplier_id IS DISTINCT FROM s.id`,
-    [pid]
-  );
-  await conn.query(
-    `UPDATE products SET supplier_id = NULL, supplier_name = NULL, supplier_cnpj = NULL, updated_at = NOW()
-      WHERE id = $1 AND supplier_id IS NOT NULL
-        AND NOT EXISTS (SELECT 1 FROM product_suppliers WHERE product_id = $1 AND is_main)`,
-    [pid]
-  );
 }
 
 // ─── GET /:pid/suppliers ─────────────────────────────────────
@@ -210,104 +146,20 @@ router.post('/:pid/stock-entries', async (req, res) => {
     const p = await produtoVisivel(client, pid, cid, true);
     if (!p) { await client.query('ROLLBACK'); return res.status(404).json({ error: 'Produto não encontrado' }); }
 
-    const { rows: variantes } = await client.query(
-      `SELECT id, stock_qty FROM product_variants WHERE product_id = $1 AND is_active = true FOR UPDATE`,
-      [pid]
-    );
-    const temGrade = variantes.length > 0;
-    const porGrade = entrada.itens.some((i) => i.variant_id);
-    if (temGrade && !porGrade) {
+    const variantes = await travarVariantes(client, pid);
+    const erroDeGrade = conferirGrade(entrada, variantes);
+    if (erroDeGrade) {
       await client.query('ROLLBACK');
-      return res.status(400).json({ error: 'Esse produto tem cor/tamanho: informe quantas chegaram de cada' });
-    }
-    if (!temGrade && porGrade) {
-      await client.query('ROLLBACK');
-      return res.status(400).json({ error: 'Esse produto não tem variantes' });
-    }
-    const daGrade = new Set(variantes.map((v) => v.id));
-    if (porGrade && entrada.itens.some((i) => !daGrade.has(i.variant_id))) {
-      await client.query('ROLLBACK');
-      return res.status(400).json({ error: 'Variante não é deste produto' });
+      return res.status(400).json({ error: erroDeGrade });
     }
 
     const forn = await achaOuCriaFornecedor(client, cid, req.body || {});
     if (forn.erro) { await client.query('ROLLBACK'); return res.status(forn.status).json({ error: forn.erro }); }
     const fornecedor = forn.fornecedor;
 
-    const estoqueAntes = temGrade
-      ? variantes.reduce((s, v) => s + (Number(v.stock_qty) || 0), 0)
-      : Number(p.stock_qty) || 0;
-    const custoAntes = num(p.weighted_avg_cost) !== null ? num(p.weighted_avg_cost)
-      : (num(p.cost_price) > 0 ? num(p.cost_price) : null);
-    const custoDepois = custoMedioPonderado({
-      estoqueAntes, custoAtual: custoAntes, quantidade: entrada.total, custoUnitario: entrada.custoUnitario,
+    const { estoqueAntes, custoAntes, custoDepois } = await darEntradaNoProduto(client, {
+      cid, produto: p, variantes, entrada, fornecedor,
     });
-
-    // 1. estoque
-    if (temGrade) {
-      for (const it of entrada.itens) {
-        await client.query(
-          `UPDATE product_variants SET stock_qty = stock_qty + $1, updated_at = NOW() WHERE id = $2 AND product_id = $3`,
-          [it.quantidade, it.variant_id, pid]
-        );
-      }
-    } else {
-      await client.query(`UPDATE products SET stock_qty = stock_qty + $1, updated_at = NOW() WHERE id = $2`, [entrada.total, pid]);
-    }
-
-    // 2. custo médio (só quando a entrada trouxe custo)
-    if (entrada.custoUnitario) {
-      await client.query(
-        `UPDATE products
-            SET weighted_avg_cost = $2,
-                cost_price = CASE WHEN $3::boolean THEN ROUND($2::numeric, 2) ELSE cost_price END,
-                updated_at = NOW()
-          WHERE id = $1`,
-        [pid, custoDepois, entrada.atualizarCusto]
-      );
-    }
-
-    // 3. última compra (colunas da 354; base sem elas segue sem)
-    if (fornecedor) {
-      await client.query('SAVEPOINT ultima_compra');
-      try {
-        await client.query(
-          `UPDATE products
-              SET last_supplier_name = $2, last_supplier_cnpj = $3, last_supplier_phone = $4,
-                  last_purchase_unit_cost = COALESCE($5::numeric, last_purchase_unit_cost),
-                  last_purchase_at = NOW()
-            WHERE id = $1`,
-          [pid, fornecedor.name, fornecedor.cnpj || null, fornecedor.phone || null, entrada.custoUnitario]
-        );
-        await client.query('RELEASE SAVEPOINT ultima_compra');
-      } catch (e) {
-        if (!falhaDeSchema(e)) throw e;
-        await client.query('ROLLBACK TO SAVEPOINT ultima_compra');
-      }
-
-      // 4. custo daquele fornecedor; o primeiro fornecedor vira o principal
-      await client.query(
-        `INSERT INTO product_suppliers (company_id, product_id, supplier_id, cost, is_main, last_purchase_at)
-         VALUES ($1, $2, $3, $4,
-                 NOT EXISTS (SELECT 1 FROM product_suppliers WHERE product_id = $2 AND is_main), NOW())
-         ON CONFLICT (product_id, supplier_id) DO UPDATE
-           SET cost = COALESCE(EXCLUDED.cost, product_suppliers.cost),
-               last_purchase_at = NOW(), updated_at = NOW()`,
-        [p.company_id, pid, fornecedor.id, entrada.custoUnitario]
-      );
-      await espelharPrincipal(client, pid);
-    }
-
-    // 5. movimentos
-    for (const it of entrada.itens) {
-      await client.query(
-        `INSERT INTO stock_movements
-           (product_id, company_id, type, quantity, reference_type, notes, supplier_id, unit_cost, variant_id)
-         VALUES ($1, $2, 'in', $3, 'entrada', $4, $5, $6, $7)`,
-        [pid, cid, it.quantidade, entrada.nota ? `NF ${entrada.nota}` : null,
-          fornecedor ? fornecedor.id : null, entrada.custoUnitario, it.variant_id]
-      );
-    }
 
     await client.query('COMMIT');
     res.status(201).json({
