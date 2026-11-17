@@ -48,6 +48,7 @@ const { requireAuth } = require('../middleware/auth');
 const db = require('../config/database');
 const { STUDIO_PLANS } = require('../services/segment');
 const pagamentoDoPedido = require('../services/pagamentoDoPedidoStudio');
+const { comItemEOrigem, NULL_ITEM_E_ORIGEM } = require('../services/itemEOrigemDoPedido');
 const { listaDaProducao: L } = require('./studioKdsApproval');
 
 router.use(requireAuth);
@@ -226,6 +227,7 @@ ${L.ITENS_E_APROVACAO_COLS}
         ...row,
       }));
       linhas = await comPagamentoPorLoja(linhas);
+      linhas = await comItemEOrigemPorLoja(linhas);
     } catch (errRica) {
       // Mesmo degrau do per-company: sem as colunas ricas, a lista sai com o
       // essencial da view em vez de 500.
@@ -252,6 +254,7 @@ ${L.ITENS_E_APROVACAO_COLS}
         card_image_source: null,
         card_customization: null,
         promised_date: null,
+        ...NULL_ITEM_E_ORIGEM,
       }));
       degraded = 'slim';
     }
@@ -301,6 +304,25 @@ async function comPagamentoPorLoja(linhas) {
     comSelo.forEach((o) => porId.set(`${o.company_id}:${o.source}:${o.id}`, o));
   }
   return linhas.map((o) => porId.get(`${o.company_id}:${o.source}:${o.id}`) || o);
+}
+
+// Item e origem (p-194), uma chamada por loja da página. Só acrescenta
+// campos; comItemEOrigem não lança, e se algo escapar a linha segue com null.
+async function comItemEOrigemPorLoja(linhas) {
+  const lojas = [...new Set(linhas.map((o) => String(o.company_id)))];
+  const porId = new Map();
+  for (const cid of lojas) {
+    const daLoja = linhas.filter((o) => String(o.company_id) === cid);
+    let comItem;
+    try {
+      comItem = await comItemEOrigem(db, cid, daLoja);
+    } catch (err) {
+      console.error('[meStudio] item e origem:', err.message);
+      comItem = daLoja.map((o) => ({ ...o, ...NULL_ITEM_E_ORIGEM }));
+    }
+    comItem.forEach((o) => porId.set(`${o.company_id}:${o.source}:${o.id}`, o));
+  }
+  return linhas.map((o) => porId.get(`${o.company_id}:${o.source}:${o.id}`) || { ...o, ...NULL_ITEM_E_ORIGEM });
 }
 
 // ─── GET /me/studio/quotes ───────────────────────────────────

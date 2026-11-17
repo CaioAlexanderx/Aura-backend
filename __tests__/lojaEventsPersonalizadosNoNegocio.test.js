@@ -115,3 +115,42 @@ describe('emitLojaEvent', () => {
     expect(consultasDaCasa()).toHaveLength(0);
   });
 });
+
+// ── p-194: o orçamento aprovado segue a mesma regra do pedido ──────────
+describe('loja_orcamento_aprovado (p-194)', () => {
+  const QID = 'aa000000-0000-0000-0000-0000000000a1';
+  const QUOTE = { id: QID, company_id: CID, vertical: 'studio', total: '300.00', customer_name: 'Marina', created_by: null };
+
+  test('routeForQuote: sem a marca, o /studio de sempre; com a marca, Personalizados', () => {
+    expect(lojaEvents.routeForQuote({ id: QID, vertical: 'studio' })).toBe(`/studio/gestao/orcamentos/${QID}`);
+    expect(lojaEvents.routeForQuote({ id: QID, vertical: 'studio', personalizados_no_negocio: true }))
+      .toBe(`/personalizados/orcamentos?orcamento=${QID}`);
+    expect(lojaEvents.routeForQuote({ id: QID, vertical: 'matcon', personalizados_no_negocio: true })).toBe('/matcon/orcamentos');
+  });
+
+  test('frente no Negócio: sino e navegador abrem /personalizados/orcamentos', async () => {
+    empresa = { vertical_active: null, studio_enabled: true };
+    await lojaEvents.emitLojaEvent('loja_orcamento_aprovado', QUOTE);
+    expect(criados[0].ctaRoute).toBe(`/personalizados/orcamentos?orcamento=${QID}`);
+    expect(webPush.notifyCompany.mock.calls[0][1].url).toBe(`/personalizados/orcamentos?orcamento=${QID}`);
+  });
+
+  test('vertical Studio: continua no /studio', async () => {
+    empresa = { vertical_active: 'studio', studio_enabled: true };
+    await lojaEvents.emitLojaEvent('loja_orcamento_aprovado', QUOTE);
+    expect(criados[0].ctaRoute).toBe(`/studio/gestao/orcamentos/${QID}`);
+  });
+
+  test('falha ao ler a empresa: o link de sempre, e o aviso sai', async () => {
+    empresa = new Error('db fora');
+    jest.spyOn(console, 'error').mockImplementation(() => {});
+    await lojaEvents.emitLojaEvent('loja_orcamento_aprovado', QUOTE);
+    expect(criados[0].ctaRoute).toBe(`/studio/gestao/orcamentos/${QID}`);
+  });
+
+  test('orçamento da Matcon não consulta a empresa', async () => {
+    await lojaEvents.emitLojaEvent('loja_orcamento_aprovado', { ...QUOTE, vertical: 'matcon' });
+    expect(criados[0].ctaRoute).toBe('/matcon/orcamentos');
+    expect(consultasDaCasa()).toHaveLength(0);
+  });
+});
