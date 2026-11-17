@@ -168,3 +168,41 @@ test('pedidos: card_customization sai null e a capa ganha a origem', async () =>
   expect(o).toHaveProperty('card_image_source');
   expect(o.company_id).toBe('a');
 });
+
+describe('pedidos: item e origem (p-194)', () => {
+  test('a venda do Caixa ganha item_name, item_quantity e a origem, por loja', async () => {
+    const sqls = simularBanco([loja('a')]);
+    const base = db.query.getMockImplementation();
+    db.query.mockImplementation(async (sql, params) => {
+      if (/FROM studio_orders o/.test(sql) && /ORDER BY/.test(sql)) {
+        return { rows: [{ id: 'o-1', company_id: 'a', source: 'pdv', pdv_sale_id: 's-1' }] };
+      }
+      if (/FROM sale_items si/.test(sql)) {
+        return { rows: [{ pedido: 's-1', item_name: 'Caneca', item_quantity: '2' }] };
+      }
+      return base(sql, params);
+    });
+    const res = await request(app).get('/me/studio/orders');
+    const o = res.body.orders[0];
+    expect(o).toMatchObject({ item_name: 'Caneca', item_quantity: 2, origin: 'caixa', company_id: 'a', company_name: 'Loja a' });
+    const consultaDoItem = sqls.length; // só leitura: a consulta de item é SELECT
+    expect(consultaDoItem).toBeGreaterThan(0);
+  });
+
+  test('se a consulta do item falhar, os campos ficam null e a lista sai', async () => {
+    simularBanco([loja('a')]);
+    const base = db.query.getMockImplementation();
+    jest.spyOn(console, 'error').mockImplementation(() => {});
+    db.query.mockImplementation(async (sql, params) => {
+      if (/FROM studio_orders o/.test(sql) && /ORDER BY/.test(sql)) {
+        return { rows: [{ id: 'o-1', company_id: 'a', source: 'pdv', pdv_sale_id: 's-1' }] };
+      }
+      if (/FROM sale_items si/.test(sql)) throw new Error('banco fora');
+      return base(sql, params);
+    });
+    const res = await request(app).get('/me/studio/orders');
+    expect(res.status).toBe(200);
+    expect(res.body.orders[0]).toMatchObject({ id: 'o-1', item_name: null, item_quantity: null });
+    expect(res.body.degraded).toBeUndefined();
+  });
+});
