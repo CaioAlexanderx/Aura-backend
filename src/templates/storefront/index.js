@@ -32,11 +32,8 @@ const campanha      = require('./parts/campanha');
 const promocao      = require('./parts/promocao');
 // p-180: selo, "a partir de" e "Personalizar" (so na loja com personalizavel).
 const personalizavel = require('./parts/personalizavel');
-<<<<<<< HEAD
 // p-182: a ponte com o personalizador no quadro (so na loja com personalizavel).
 const quadro         = require('./parts/quadro');
-=======
->>>>>>> origin/main
 const toast         = require('./parts/toast');
 const bootstrap     = require('./parts/bootstrap');
 // Regra da capa sem foto (iniciais + degrau do gradiente) — definida uma
@@ -102,10 +99,7 @@ function buildScript(storeData, escapedSlug, apiBase, textosDaFrente, opcoes) {
        + (comNaEntrega ? naEntrega.aplicar(checkout) : checkout)
        + pix
        + (comPersonalizavel ? personalizavel.aplicarNoDetalhe(detalheFinal) : detalheFinal)
-<<<<<<< HEAD
        + (comPersonalizavel ? quadro.PONTE : '')
-=======
->>>>>>> origin/main
        + toast
        + bootstrap;
 }
