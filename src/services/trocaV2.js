@@ -99,6 +99,17 @@
 //   troca_returned_items e envenenava o SUM da receita no relatorio de Vendas
 //   (zerava/quebrava). toFiniteNum() + backfill do preco original em
 //   validateReturnedItems + guarda nos INSERTs e em computeAndValidateTotals.
+//
+// 17/11/2026 (b-troca-prazo-nfce): a troca usa o MESMO prazo do cancelamento
+//   da NFC-e, por UF (services/nfcePrazoCancelamento.js; 30 min em SP, AP, RJ
+//   e MG). Antes escolhia cancel_reissue com NFC-e de ate 24 h e o
+//   cancelamento era recusado entre 30 min e 24 h. Agora:
+//   - per_origin: cancel_reissue so com NFC-e do gateway DENTRO do prazo;
+//     fora dele (ou NFC-e da emissao propria) -> devolucao_55, sem tentar
+//     cancelar;
+//   - cancel_reissue EXPLICITO (app antigo manda com venda de menos de 24 h):
+//     fora do prazo ou NFC-e da emissao propria vira devolucao_55 em vez de
+//     409/502. Quem pediu devolucao_55 ou none continua recebendo o que pediu.
 // ============================================================
 
 const db = require('../config/database');
@@ -108,6 +119,7 @@ const { resolveManualDiscount } = require('./descontoManual');
 const { productVisibilityWhere } = require('../utils/companyGroup');
 // p-92 (08/11/2026, migration 428): item novo da troca guarda se saiu na promocao.
 const vendaNaPromocao = require('./vendaNaPromocao');
+const { estrategiaDaTroca, prazoDeCancelamento } = require('./nfcePrazoCancelamento');
 const { findOwnerScopedCustomer, CUSTOMER_NOT_FOUND_BODY } = require('../utils/customerScope');
 
 const SP_DATE_NOW = "(NOW() AT TIME ZONE 'America/Sao_Paulo')::date";
@@ -280,10 +292,12 @@ async function lookupOriginSales(client, currentCompanyId, originalSaleIds) {
   }
 
   const nfceResp = await client.query(
-    `SELECT DISTINCT ON (sale_id) sale_id, id, nuvemfiscal_id, chave_acesso, authorized_at, numero, status
-       FROM nfce_emissions
-      WHERE sale_id IN (${idPlaceholders}) AND tipo = 'nfce' AND status = 'autorizada'
-      ORDER BY sale_id, created_at DESC`,
+    `SELECT DISTINCT ON (ne.sale_id) ne.sale_id, ne.id, ne.nuvemfiscal_id, ne.chave_acesso, ne.authorized_at, ne.numero, ne.status,
+            nc.uf AS config_uf
+       FROM nfce_emissions ne
+       LEFT JOIN nfce_config nc ON nc.company_id = ne.company_id
+      WHERE ne.sale_id IN (${idPlaceholders}) AND ne.tipo = 'nfce' AND ne.status = 'autorizada'
+      ORDER BY ne.sale_id, ne.created_at DESC`,
     originalSaleIds
   );
   const nfceBySale = new Map();
@@ -615,30 +629,29 @@ function computeAndValidateTotals({ returned_items, new_items, payment_splits, r
   };
 }
 
-function decideFiscalPerOrigin(originSales, returnedItems, requestedStrategy) {
+function decideFiscalPerOrigin(originSales, returnedItems, requestedStrategy, opts = {}) {
   const strategyMap = new Map();
   if (requestedStrategy === 'none') {
     for (const s of originSales) strategyMap.set(s.id, 'none');
     return strategyMap;
   }
   const involvedIds = new Set((returnedItems || []).map((r) => r.original_sale_id));
-  const now = Date.now();
+  const now = opts.now != null ? opts.now : Date.now();
   for (const s of originSales) {
     if (!involvedIds.has(s.id)) { strategyMap.set(s.id, 'none'); continue; }
-    if (requestedStrategy === 'cancel_reissue') { strategyMap.set(s.id, 'cancel_reissue'); continue; }
     if (requestedStrategy === 'devolucao_55') { strategyMap.set(s.id, 'devolucao_55'); continue; }
+    // 12/08/2026: cancel_reissue exige nuvemfiscal_id — o pre-cancelamento
+    // (preCancelNfces) e feito via gateway. NFC-e da engine propria (primaria
+    // desde 17/07) cai em devolucao_55, que vale em qualquer idade.
+    // 17/11/2026: e so DENTRO do prazo de cancelamento da UF (30 min em SP,
+    // AP, RJ e MG) — o mesmo do POST /nfce/:id/cancel. Antes eram 24 h.
+    // cancel_reissue explicito segue a mesma regra: fora do prazo nao tenta.
+    if (requestedStrategy === 'cancel_reissue') {
+      strategyMap.set(s.id, s.nfce ? estrategiaDaTroca(s.nfce, { uf: s.nfce.config_uf, now, env: opts.env }) : 'cancel_reissue');
+      continue;
+    }
     if (!s.nfce) { strategyMap.set(s.id, 'none'); continue; }
-    const ageHours = s.nfce.authorized_at
-      ? (now - new Date(s.nfce.authorized_at).getTime()) / 3600000
-      : 9999;
-    // 12/08/2026: cancel_reissue automatico exige nuvemfiscal_id — o
-    // pre-cancelamento (preCancelNfces) e feito via gateway. NFC-e emitida
-    // pela engine propria (primaria desde 17/07) nao tem esse id; antes o
-    // cancelamento era PULADO em silencio e a troca "dava certo" com a
-    // nota original ainda autorizada. Nota da engine cai em devolucao_55,
-    // que vale em qualquer idade.
-    const canGatewayCancel = !!s.nfce.nuvemfiscal_id;
-    strategyMap.set(s.id, (ageHours < 24 && canGatewayCancel) ? 'cancel_reissue' : 'devolucao_55');
+    strategyMap.set(s.id, estrategiaDaTroca(s.nfce, { uf: s.nfce.config_uf, now, env: opts.env }));
   }
   return strategyMap;
 }
@@ -662,15 +675,17 @@ async function preCancelNfces(originSales, strategyMap) {
       });
     }
 
-    const ageHours = s.nfce.authorized_at
-      ? (Date.now() - new Date(s.nfce.authorized_at).getTime()) / 3600000
-      : 9999;
-    if (ageHours >= 24) {
+    // 17/11/2026: guarda de seguranca — decideFiscalPerOrigin ja manda para a
+    // devolucao o que passou do prazo da UF. So chega aqui se o prazo vencer
+    // entre a decisao e esta linha.
+    const prazo = prazoDeCancelamento(s.nfce, { uf: s.nfce.config_uf });
+    if (!prazo.dentro) {
       throw new TrocaV2Error(409, {
-        error: `NFC-e da venda ${s.id} tem ${Math.round(ageHours)}h (>24h). Use nfce_strategy='devolucao_55' ou 'per_origin'.`,
+        error: `A NFC-e da venda ${s.id} passou do prazo de cancelamento (${prazo.minutos} min). Use nfce_strategy='devolucao_55' ou 'per_origin'.`,
+        code: 'NFCE_PRAZO_CANCELAMENTO_VENCIDO',
         original_sale_id: s.id,
         original_chave: s.nfce.chave_acesso,
-        age_hours: Math.round(ageHours * 10) / 10,
+        cancelavel_ate: prazo.ate,
       });
     }
 

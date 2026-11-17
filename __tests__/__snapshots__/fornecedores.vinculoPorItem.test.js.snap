@@ -1,0 +1,511 @@
+// Jest Snapshot v1, https://goo.gl/fbAQLP
+
+exports[`paridade: o corpo de hoje faz o mesmo que antes do B4 base sem a 424, is_main false 1`] = `
+{
+  "body": {
+    "is_main": false,
+    "unlink": false,
+    "updated": 0,
+  },
+  "comandos": [
+    {
+      "params": [
+        "bbbbbbbb-cccc-dddd-eeee-ffffffffffff",
+        "08c05f0e-b75b-4c12-870e-d7fb65f1dca0",
+      ],
+      "sql": "SELECT id, name, cnpj FROM suppliers s WHERE id = $1 AND company_id IN ( SELECT id FROM companies WHERE COALESCE(NULLIF(billing_owner_company_id, id), id) = ( SELECT COALESCE(NULLIF(billing_owner_company_id, id), id) FROM companies WHERE id = $2 ) )",
+    },
+    {
+      "params": [
+        [
+          "aaaaaaaa-bbbb-cccc-dddd-000000000001",
+        ],
+        "08c05f0e-b75b-4c12-870e-d7fb65f1dca0",
+        "bbbbbbbb-cccc-dddd-eeee-ffffffffffff",
+        null,
+        false,
+      ],
+      "sql": "INSERT INTO product_suppliers (company_id, product_id, supplier_id, cost, is_main) SELECT p.company_id, p.id, $3, $4, ($5::boolean OR NOT EXISTS (SELECT 1 FROM product_suppliers x WHERE x.product_id = p.id AND x.is_main)) FROM products p WHERE p.id = ANY($1::uuid[]) AND (p.company_id = $2 OR (p.is_group_shared = true AND p.company_id IN ( SELECT id FROM companies WHERE COALESCE(NULLIF(billing_owner_company_id, id), id) = ( SELECT COALESCE(NULLIF(billing_owner_company_id, id), id) FROM companies WHERE id = $2 ) ))) ON CONFLICT (product_id, supplier_id) DO UPDATE SET cost = COALESCE(EXCLUDED.cost, product_suppliers.cost), is_main = product_suppliers.is_main OR EXCLUDED.is_main, updated_at = NOW()",
+    },
+  ],
+  "status": 200,
+}
+`;
+
+exports[`paridade: o corpo de hoje faz o mesmo que antes do B4 base sem a 424, principal 1`] = `
+{
+  "body": {
+    "unlink": false,
+    "updated": 2,
+  },
+  "comandos": [
+    {
+      "params": [
+        "bbbbbbbb-cccc-dddd-eeee-ffffffffffff",
+        "08c05f0e-b75b-4c12-870e-d7fb65f1dca0",
+      ],
+      "sql": "SELECT id, name, cnpj FROM suppliers s WHERE id = $1 AND company_id IN ( SELECT id FROM companies WHERE COALESCE(NULLIF(billing_owner_company_id, id), id) = ( SELECT COALESCE(NULLIF(billing_owner_company_id, id), id) FROM companies WHERE id = $2 ) )",
+    },
+    {
+      "params": [
+        [
+          "aaaaaaaa-bbbb-cccc-dddd-000000000001",
+          "aaaaaaaa-bbbb-cccc-dddd-000000000002",
+        ],
+        "08c05f0e-b75b-4c12-870e-d7fb65f1dca0",
+        "bbbbbbbb-cccc-dddd-eeee-ffffffffffff",
+        "Brás Capas",
+        "12345678000190",
+      ],
+      "sql": "UPDATE products SET supplier_id = $3, supplier_name = $4, supplier_cnpj = $5, updated_at = NOW() WHERE id = ANY($1::uuid[]) AND (company_id = $2 OR (is_group_shared = true AND company_id IN ( SELECT id FROM companies WHERE COALESCE(NULLIF(billing_owner_company_id, id), id) = ( SELECT COALESCE(NULLIF(billing_owner_company_id, id), id) FROM companies WHERE id = $2 ) )))",
+    },
+    {
+      "params": [
+        [
+          "aaaaaaaa-bbbb-cccc-dddd-000000000001",
+          "aaaaaaaa-bbbb-cccc-dddd-000000000002",
+        ],
+        "bbbbbbbb-cccc-dddd-eeee-ffffffffffff",
+      ],
+      "sql": "UPDATE product_suppliers SET is_main = false, updated_at = NOW() WHERE product_id = ANY($1::uuid[]) AND supplier_id <> $2 AND is_main",
+    },
+  ],
+  "status": 200,
+}
+`;
+
+exports[`paridade: o corpo de hoje faz o mesmo que antes do B4 desvincular 1`] = `
+{
+  "body": {
+    "unlink": true,
+    "updated": 2,
+  },
+  "comandos": [
+    {
+      "params": [
+        "bbbbbbbb-cccc-dddd-eeee-ffffffffffff",
+        "08c05f0e-b75b-4c12-870e-d7fb65f1dca0",
+      ],
+      "sql": "SELECT id, name, cnpj FROM suppliers s WHERE id = $1 AND company_id IN ( SELECT id FROM companies WHERE COALESCE(NULLIF(billing_owner_company_id, id), id) = ( SELECT COALESCE(NULLIF(billing_owner_company_id, id), id) FROM companies WHERE id = $2 ) )",
+    },
+    {
+      "params": [
+        [
+          "aaaaaaaa-bbbb-cccc-dddd-000000000001",
+          "aaaaaaaa-bbbb-cccc-dddd-000000000002",
+        ],
+        "08c05f0e-b75b-4c12-870e-d7fb65f1dca0",
+        "bbbbbbbb-cccc-dddd-eeee-ffffffffffff",
+      ],
+      "sql": "UPDATE products SET supplier_id = NULL, supplier_name = NULL, supplier_cnpj = NULL, updated_at = NOW() WHERE id = ANY($1::uuid[]) AND (company_id = $2 OR (is_group_shared = true AND company_id IN ( SELECT id FROM companies WHERE COALESCE(NULLIF(billing_owner_company_id, id), id) = ( SELECT COALESCE(NULLIF(billing_owner_company_id, id), id) FROM companies WHERE id = $2 ) ))) AND supplier_id = $3",
+    },
+    {
+      "params": [
+        [
+          "aaaaaaaa-bbbb-cccc-dddd-000000000001",
+          "aaaaaaaa-bbbb-cccc-dddd-000000000002",
+        ],
+        "bbbbbbbb-cccc-dddd-eeee-ffffffffffff",
+      ],
+      "sql": "DELETE FROM product_suppliers WHERE product_id = ANY($1::uuid[]) AND supplier_id = $2",
+    },
+  ],
+  "status": 200,
+}
+`;
+
+exports[`paridade: o corpo de hoje faz o mesmo que antes do B4 desvincular com is_main false 1`] = `
+{
+  "body": {
+    "unlink": true,
+    "updated": 1,
+  },
+  "comandos": [
+    {
+      "params": [
+        "bbbbbbbb-cccc-dddd-eeee-ffffffffffff",
+        "08c05f0e-b75b-4c12-870e-d7fb65f1dca0",
+      ],
+      "sql": "SELECT id, name, cnpj FROM suppliers s WHERE id = $1 AND company_id IN ( SELECT id FROM companies WHERE COALESCE(NULLIF(billing_owner_company_id, id), id) = ( SELECT COALESCE(NULLIF(billing_owner_company_id, id), id) FROM companies WHERE id = $2 ) )",
+    },
+    {
+      "params": [
+        [
+          "aaaaaaaa-bbbb-cccc-dddd-000000000001",
+        ],
+        "08c05f0e-b75b-4c12-870e-d7fb65f1dca0",
+        "bbbbbbbb-cccc-dddd-eeee-ffffffffffff",
+      ],
+      "sql": "UPDATE products SET supplier_id = NULL, supplier_name = NULL, supplier_cnpj = NULL, updated_at = NOW() WHERE id = ANY($1::uuid[]) AND (company_id = $2 OR (is_group_shared = true AND company_id IN ( SELECT id FROM companies WHERE COALESCE(NULLIF(billing_owner_company_id, id), id) = ( SELECT COALESCE(NULLIF(billing_owner_company_id, id), id) FROM companies WHERE id = $2 ) ))) AND supplier_id = $3",
+    },
+    {
+      "params": [
+        [
+          "aaaaaaaa-bbbb-cccc-dddd-000000000001",
+        ],
+        "bbbbbbbb-cccc-dddd-eeee-ffffffffffff",
+      ],
+      "sql": "DELETE FROM product_suppliers WHERE product_id = ANY($1::uuid[]) AND supplier_id = $2",
+    },
+  ],
+  "status": 200,
+}
+`;
+
+exports[`paridade: o corpo de hoje faz o mesmo que antes do B4 fornecedor fora do grupo 1`] = `
+{
+  "body": {
+    "error": "Fornecedor nao encontrado",
+  },
+  "comandos": [
+    {
+      "params": [
+        "bbbbbbbb-cccc-dddd-eeee-ffffffffffff",
+        "08c05f0e-b75b-4c12-870e-d7fb65f1dca0",
+      ],
+      "sql": "SELECT id, name, cnpj FROM suppliers s WHERE id = $1 AND company_id IN ( SELECT id FROM companies WHERE COALESCE(NULLIF(billing_owner_company_id, id), id) = ( SELECT COALESCE(NULLIF(billing_owner_company_id, id), id) FROM companies WHERE id = $2 ) )",
+    },
+  ],
+  "status": 404,
+}
+`;
+
+exports[`paridade: o corpo de hoje faz o mesmo que antes do B4 is_main false, com custo 1`] = `
+{
+  "body": {
+    "is_main": false,
+    "unlink": false,
+    "updated": 3,
+  },
+  "comandos": [
+    {
+      "params": [
+        "bbbbbbbb-cccc-dddd-eeee-ffffffffffff",
+        "08c05f0e-b75b-4c12-870e-d7fb65f1dca0",
+      ],
+      "sql": "SELECT id, name, cnpj FROM suppliers s WHERE id = $1 AND company_id IN ( SELECT id FROM companies WHERE COALESCE(NULLIF(billing_owner_company_id, id), id) = ( SELECT COALESCE(NULLIF(billing_owner_company_id, id), id) FROM companies WHERE id = $2 ) )",
+    },
+    {
+      "params": [
+        [
+          "aaaaaaaa-bbbb-cccc-dddd-000000000001",
+          "aaaaaaaa-bbbb-cccc-dddd-000000000002",
+          "aaaaaaaa-bbbb-cccc-dddd-000000000003",
+        ],
+        "08c05f0e-b75b-4c12-870e-d7fb65f1dca0",
+        "bbbbbbbb-cccc-dddd-eeee-ffffffffffff",
+        3,
+        false,
+      ],
+      "sql": "INSERT INTO product_suppliers (company_id, product_id, supplier_id, cost, is_main) SELECT p.company_id, p.id, $3, $4, ($5::boolean OR NOT EXISTS (SELECT 1 FROM product_suppliers x WHERE x.product_id = p.id AND x.is_main)) FROM products p WHERE p.id = ANY($1::uuid[]) AND (p.company_id = $2 OR (p.is_group_shared = true AND p.company_id IN ( SELECT id FROM companies WHERE COALESCE(NULLIF(billing_owner_company_id, id), id) = ( SELECT COALESCE(NULLIF(billing_owner_company_id, id), id) FROM companies WHERE id = $2 ) ))) ON CONFLICT (product_id, supplier_id) DO UPDATE SET cost = COALESCE(EXCLUDED.cost, product_suppliers.cost), is_main = product_suppliers.is_main OR EXCLUDED.is_main, updated_at = NOW()",
+    },
+    {
+      "params": [
+        [
+          "aaaaaaaa-bbbb-cccc-dddd-000000000001",
+          "aaaaaaaa-bbbb-cccc-dddd-000000000002",
+          "aaaaaaaa-bbbb-cccc-dddd-000000000003",
+        ],
+      ],
+      "sql": "UPDATE products p SET supplier_id = s.id, supplier_name = s.name, supplier_cnpj = s.cnpj, updated_at = NOW() FROM product_suppliers ps JOIN suppliers s ON s.id = ps.supplier_id WHERE p.id = ANY($1::uuid[]) AND ps.product_id = p.id AND ps.is_main AND p.supplier_id IS NULL",
+    },
+  ],
+  "status": 200,
+}
+`;
+
+exports[`paridade: o corpo de hoje faz o mesmo que antes do B4 is_main false, sem custo 1`] = `
+{
+  "body": {
+    "is_main": false,
+    "unlink": false,
+    "updated": 2,
+  },
+  "comandos": [
+    {
+      "params": [
+        "bbbbbbbb-cccc-dddd-eeee-ffffffffffff",
+        "08c05f0e-b75b-4c12-870e-d7fb65f1dca0",
+      ],
+      "sql": "SELECT id, name, cnpj FROM suppliers s WHERE id = $1 AND company_id IN ( SELECT id FROM companies WHERE COALESCE(NULLIF(billing_owner_company_id, id), id) = ( SELECT COALESCE(NULLIF(billing_owner_company_id, id), id) FROM companies WHERE id = $2 ) )",
+    },
+    {
+      "params": [
+        [
+          "aaaaaaaa-bbbb-cccc-dddd-000000000001",
+          "aaaaaaaa-bbbb-cccc-dddd-000000000002",
+        ],
+        "08c05f0e-b75b-4c12-870e-d7fb65f1dca0",
+        "bbbbbbbb-cccc-dddd-eeee-ffffffffffff",
+        null,
+        false,
+      ],
+      "sql": "INSERT INTO product_suppliers (company_id, product_id, supplier_id, cost, is_main) SELECT p.company_id, p.id, $3, $4, ($5::boolean OR NOT EXISTS (SELECT 1 FROM product_suppliers x WHERE x.product_id = p.id AND x.is_main)) FROM products p WHERE p.id = ANY($1::uuid[]) AND (p.company_id = $2 OR (p.is_group_shared = true AND p.company_id IN ( SELECT id FROM companies WHERE COALESCE(NULLIF(billing_owner_company_id, id), id) = ( SELECT COALESCE(NULLIF(billing_owner_company_id, id), id) FROM companies WHERE id = $2 ) ))) ON CONFLICT (product_id, supplier_id) DO UPDATE SET cost = COALESCE(EXCLUDED.cost, product_suppliers.cost), is_main = product_suppliers.is_main OR EXCLUDED.is_main, updated_at = NOW()",
+    },
+    {
+      "params": [
+        [
+          "aaaaaaaa-bbbb-cccc-dddd-000000000001",
+          "aaaaaaaa-bbbb-cccc-dddd-000000000002",
+        ],
+      ],
+      "sql": "UPDATE products p SET supplier_id = s.id, supplier_name = s.name, supplier_cnpj = s.cnpj, updated_at = NOW() FROM product_suppliers ps JOIN suppliers s ON s.id = ps.supplier_id WHERE p.id = ANY($1::uuid[]) AND ps.product_id = p.id AND ps.is_main AND p.supplier_id IS NULL",
+    },
+  ],
+  "status": 200,
+}
+`;
+
+exports[`paridade: o corpo de hoje faz o mesmo que antes do B4 mais de 1000 1`] = `
+{
+  "body": {
+    "error": "No maximo 1000 produtos por vez",
+  },
+  "comandos": [],
+  "status": 400,
+}
+`;
+
+exports[`paridade: o corpo de hoje faz o mesmo que antes do B4 principal, com custo 1`] = `
+{
+  "body": {
+    "unlink": false,
+    "updated": 2,
+  },
+  "comandos": [
+    {
+      "params": [
+        "bbbbbbbb-cccc-dddd-eeee-ffffffffffff",
+        "08c05f0e-b75b-4c12-870e-d7fb65f1dca0",
+      ],
+      "sql": "SELECT id, name, cnpj FROM suppliers s WHERE id = $1 AND company_id IN ( SELECT id FROM companies WHERE COALESCE(NULLIF(billing_owner_company_id, id), id) = ( SELECT COALESCE(NULLIF(billing_owner_company_id, id), id) FROM companies WHERE id = $2 ) )",
+    },
+    {
+      "params": [
+        [
+          "aaaaaaaa-bbbb-cccc-dddd-000000000001",
+          "aaaaaaaa-bbbb-cccc-dddd-000000000002",
+        ],
+        "08c05f0e-b75b-4c12-870e-d7fb65f1dca0",
+        "bbbbbbbb-cccc-dddd-eeee-ffffffffffff",
+        "Brás Capas",
+        "12345678000190",
+      ],
+      "sql": "UPDATE products SET supplier_id = $3, supplier_name = $4, supplier_cnpj = $5, updated_at = NOW() WHERE id = ANY($1::uuid[]) AND (company_id = $2 OR (is_group_shared = true AND company_id IN ( SELECT id FROM companies WHERE COALESCE(NULLIF(billing_owner_company_id, id), id) = ( SELECT COALESCE(NULLIF(billing_owner_company_id, id), id) FROM companies WHERE id = $2 ) )))",
+    },
+    {
+      "params": [
+        [
+          "aaaaaaaa-bbbb-cccc-dddd-000000000001",
+          "aaaaaaaa-bbbb-cccc-dddd-000000000002",
+        ],
+        "bbbbbbbb-cccc-dddd-eeee-ffffffffffff",
+      ],
+      "sql": "UPDATE product_suppliers SET is_main = false, updated_at = NOW() WHERE product_id = ANY($1::uuid[]) AND supplier_id <> $2 AND is_main",
+    },
+    {
+      "params": [
+        [
+          "aaaaaaaa-bbbb-cccc-dddd-000000000001",
+          "aaaaaaaa-bbbb-cccc-dddd-000000000002",
+        ],
+        "08c05f0e-b75b-4c12-870e-d7fb65f1dca0",
+        "bbbbbbbb-cccc-dddd-eeee-ffffffffffff",
+        5.21,
+        true,
+      ],
+      "sql": "INSERT INTO product_suppliers (company_id, product_id, supplier_id, cost, is_main) SELECT p.company_id, p.id, $3, $4, ($5::boolean OR NOT EXISTS (SELECT 1 FROM product_suppliers x WHERE x.product_id = p.id AND x.is_main)) FROM products p WHERE p.id = ANY($1::uuid[]) AND (p.company_id = $2 OR (p.is_group_shared = true AND p.company_id IN ( SELECT id FROM companies WHERE COALESCE(NULLIF(billing_owner_company_id, id), id) = ( SELECT COALESCE(NULLIF(billing_owner_company_id, id), id) FROM companies WHERE id = $2 ) ))) ON CONFLICT (product_id, supplier_id) DO UPDATE SET cost = COALESCE(EXCLUDED.cost, product_suppliers.cost), is_main = product_suppliers.is_main OR EXCLUDED.is_main, updated_at = NOW()",
+    },
+  ],
+  "status": 200,
+}
+`;
+
+exports[`paridade: o corpo de hoje faz o mesmo que antes do B4 principal, custo em texto 1`] = `
+{
+  "body": {
+    "unlink": false,
+    "updated": 1,
+  },
+  "comandos": [
+    {
+      "params": [
+        "bbbbbbbb-cccc-dddd-eeee-ffffffffffff",
+        "08c05f0e-b75b-4c12-870e-d7fb65f1dca0",
+      ],
+      "sql": "SELECT id, name, cnpj FROM suppliers s WHERE id = $1 AND company_id IN ( SELECT id FROM companies WHERE COALESCE(NULLIF(billing_owner_company_id, id), id) = ( SELECT COALESCE(NULLIF(billing_owner_company_id, id), id) FROM companies WHERE id = $2 ) )",
+    },
+    {
+      "params": [
+        [
+          "aaaaaaaa-bbbb-cccc-dddd-000000000001",
+        ],
+        "08c05f0e-b75b-4c12-870e-d7fb65f1dca0",
+        "bbbbbbbb-cccc-dddd-eeee-ffffffffffff",
+        "Brás Capas",
+        "12345678000190",
+      ],
+      "sql": "UPDATE products SET supplier_id = $3, supplier_name = $4, supplier_cnpj = $5, updated_at = NOW() WHERE id = ANY($1::uuid[]) AND (company_id = $2 OR (is_group_shared = true AND company_id IN ( SELECT id FROM companies WHERE COALESCE(NULLIF(billing_owner_company_id, id), id) = ( SELECT COALESCE(NULLIF(billing_owner_company_id, id), id) FROM companies WHERE id = $2 ) )))",
+    },
+    {
+      "params": [
+        [
+          "aaaaaaaa-bbbb-cccc-dddd-000000000001",
+        ],
+        "bbbbbbbb-cccc-dddd-eeee-ffffffffffff",
+      ],
+      "sql": "UPDATE product_suppliers SET is_main = false, updated_at = NOW() WHERE product_id = ANY($1::uuid[]) AND supplier_id <> $2 AND is_main",
+    },
+    {
+      "params": [
+        [
+          "aaaaaaaa-bbbb-cccc-dddd-000000000001",
+        ],
+        "08c05f0e-b75b-4c12-870e-d7fb65f1dca0",
+        "bbbbbbbb-cccc-dddd-eeee-ffffffffffff",
+        7.5,
+        true,
+      ],
+      "sql": "INSERT INTO product_suppliers (company_id, product_id, supplier_id, cost, is_main) SELECT p.company_id, p.id, $3, $4, ($5::boolean OR NOT EXISTS (SELECT 1 FROM product_suppliers x WHERE x.product_id = p.id AND x.is_main)) FROM products p WHERE p.id = ANY($1::uuid[]) AND (p.company_id = $2 OR (p.is_group_shared = true AND p.company_id IN ( SELECT id FROM companies WHERE COALESCE(NULLIF(billing_owner_company_id, id), id) = ( SELECT COALESCE(NULLIF(billing_owner_company_id, id), id) FROM companies WHERE id = $2 ) ))) ON CONFLICT (product_id, supplier_id) DO UPDATE SET cost = COALESCE(EXCLUDED.cost, product_suppliers.cost), is_main = product_suppliers.is_main OR EXCLUDED.is_main, updated_at = NOW()",
+    },
+  ],
+  "status": 200,
+}
+`;
+
+exports[`paridade: o corpo de hoje faz o mesmo que antes do B4 principal, custo zero (manter) 1`] = `
+{
+  "body": {
+    "unlink": false,
+    "updated": 1,
+  },
+  "comandos": [
+    {
+      "params": [
+        "bbbbbbbb-cccc-dddd-eeee-ffffffffffff",
+        "08c05f0e-b75b-4c12-870e-d7fb65f1dca0",
+      ],
+      "sql": "SELECT id, name, cnpj FROM suppliers s WHERE id = $1 AND company_id IN ( SELECT id FROM companies WHERE COALESCE(NULLIF(billing_owner_company_id, id), id) = ( SELECT COALESCE(NULLIF(billing_owner_company_id, id), id) FROM companies WHERE id = $2 ) )",
+    },
+    {
+      "params": [
+        [
+          "aaaaaaaa-bbbb-cccc-dddd-000000000001",
+        ],
+        "08c05f0e-b75b-4c12-870e-d7fb65f1dca0",
+        "bbbbbbbb-cccc-dddd-eeee-ffffffffffff",
+        "Brás Capas",
+        "12345678000190",
+      ],
+      "sql": "UPDATE products SET supplier_id = $3, supplier_name = $4, supplier_cnpj = $5, updated_at = NOW() WHERE id = ANY($1::uuid[]) AND (company_id = $2 OR (is_group_shared = true AND company_id IN ( SELECT id FROM companies WHERE COALESCE(NULLIF(billing_owner_company_id, id), id) = ( SELECT COALESCE(NULLIF(billing_owner_company_id, id), id) FROM companies WHERE id = $2 ) )))",
+    },
+    {
+      "params": [
+        [
+          "aaaaaaaa-bbbb-cccc-dddd-000000000001",
+        ],
+        "bbbbbbbb-cccc-dddd-eeee-ffffffffffff",
+      ],
+      "sql": "UPDATE product_suppliers SET is_main = false, updated_at = NOW() WHERE product_id = ANY($1::uuid[]) AND supplier_id <> $2 AND is_main",
+    },
+    {
+      "params": [
+        [
+          "aaaaaaaa-bbbb-cccc-dddd-000000000001",
+        ],
+        "08c05f0e-b75b-4c12-870e-d7fb65f1dca0",
+        "bbbbbbbb-cccc-dddd-eeee-ffffffffffff",
+        null,
+        true,
+      ],
+      "sql": "INSERT INTO product_suppliers (company_id, product_id, supplier_id, cost, is_main) SELECT p.company_id, p.id, $3, $4, ($5::boolean OR NOT EXISTS (SELECT 1 FROM product_suppliers x WHERE x.product_id = p.id AND x.is_main)) FROM products p WHERE p.id = ANY($1::uuid[]) AND (p.company_id = $2 OR (p.is_group_shared = true AND p.company_id IN ( SELECT id FROM companies WHERE COALESCE(NULLIF(billing_owner_company_id, id), id) = ( SELECT COALESCE(NULLIF(billing_owner_company_id, id), id) FROM companies WHERE id = $2 ) ))) ON CONFLICT (product_id, supplier_id) DO UPDATE SET cost = COALESCE(EXCLUDED.cost, product_suppliers.cost), is_main = product_suppliers.is_main OR EXCLUDED.is_main, updated_at = NOW()",
+    },
+  ],
+  "status": 200,
+}
+`;
+
+exports[`paridade: o corpo de hoje faz o mesmo que antes do B4 principal, sem custo 1`] = `
+{
+  "body": {
+    "unlink": false,
+    "updated": 2,
+  },
+  "comandos": [
+    {
+      "params": [
+        "bbbbbbbb-cccc-dddd-eeee-ffffffffffff",
+        "08c05f0e-b75b-4c12-870e-d7fb65f1dca0",
+      ],
+      "sql": "SELECT id, name, cnpj FROM suppliers s WHERE id = $1 AND company_id IN ( SELECT id FROM companies WHERE COALESCE(NULLIF(billing_owner_company_id, id), id) = ( SELECT COALESCE(NULLIF(billing_owner_company_id, id), id) FROM companies WHERE id = $2 ) )",
+    },
+    {
+      "params": [
+        [
+          "aaaaaaaa-bbbb-cccc-dddd-000000000001",
+          "aaaaaaaa-bbbb-cccc-dddd-000000000002",
+        ],
+        "08c05f0e-b75b-4c12-870e-d7fb65f1dca0",
+        "bbbbbbbb-cccc-dddd-eeee-ffffffffffff",
+        "Brás Capas",
+        "12345678000190",
+      ],
+      "sql": "UPDATE products SET supplier_id = $3, supplier_name = $4, supplier_cnpj = $5, updated_at = NOW() WHERE id = ANY($1::uuid[]) AND (company_id = $2 OR (is_group_shared = true AND company_id IN ( SELECT id FROM companies WHERE COALESCE(NULLIF(billing_owner_company_id, id), id) = ( SELECT COALESCE(NULLIF(billing_owner_company_id, id), id) FROM companies WHERE id = $2 ) )))",
+    },
+    {
+      "params": [
+        [
+          "aaaaaaaa-bbbb-cccc-dddd-000000000001",
+          "aaaaaaaa-bbbb-cccc-dddd-000000000002",
+        ],
+        "bbbbbbbb-cccc-dddd-eeee-ffffffffffff",
+      ],
+      "sql": "UPDATE product_suppliers SET is_main = false, updated_at = NOW() WHERE product_id = ANY($1::uuid[]) AND supplier_id <> $2 AND is_main",
+    },
+    {
+      "params": [
+        [
+          "aaaaaaaa-bbbb-cccc-dddd-000000000001",
+          "aaaaaaaa-bbbb-cccc-dddd-000000000002",
+        ],
+        "08c05f0e-b75b-4c12-870e-d7fb65f1dca0",
+        "bbbbbbbb-cccc-dddd-eeee-ffffffffffff",
+        null,
+        true,
+      ],
+      "sql": "INSERT INTO product_suppliers (company_id, product_id, supplier_id, cost, is_main) SELECT p.company_id, p.id, $3, $4, ($5::boolean OR NOT EXISTS (SELECT 1 FROM product_suppliers x WHERE x.product_id = p.id AND x.is_main)) FROM products p WHERE p.id = ANY($1::uuid[]) AND (p.company_id = $2 OR (p.is_group_shared = true AND p.company_id IN ( SELECT id FROM companies WHERE COALESCE(NULLIF(billing_owner_company_id, id), id) = ( SELECT COALESCE(NULLIF(billing_owner_company_id, id), id) FROM companies WHERE id = $2 ) ))) ON CONFLICT (product_id, supplier_id) DO UPDATE SET cost = COALESCE(EXCLUDED.cost, product_suppliers.cost), is_main = product_suppliers.is_main OR EXCLUDED.is_main, updated_at = NOW()",
+    },
+  ],
+  "status": 200,
+}
+`;
+
+exports[`paridade: o corpo de hoje faz o mesmo que antes do B4 product_ids que não é lista 1`] = `
+{
+  "body": {
+    "error": "product_ids e obrigatorio",
+  },
+  "comandos": [],
+  "status": 400,
+}
+`;
+
+exports[`paridade: o corpo de hoje faz o mesmo que antes do B4 product_ids vazio 1`] = `
+{
+  "body": {
+    "error": "product_ids e obrigatorio",
+  },
+  "comandos": [],
+  "status": 400,
+}
+`;
+
+exports[`paridade: o corpo de hoje faz o mesmo que antes do B4 sem product_ids 1`] = `
+{
+  "body": {
+    "error": "product_ids e obrigatorio",
+  },
+  "comandos": [],
+  "status": 400,
+}
+`;
