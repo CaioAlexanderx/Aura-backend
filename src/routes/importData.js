@@ -28,6 +28,12 @@ const { avancarSemEsperar } = require('../services/onboardingProgress');
 const { gravarUltimaCompra, casarNotaComPedidos } = require('../services/matconPurchases');
 // t3-05: NCM fora da tabela da Receita so AVISA (ncm_avisos na resposta), nunca bloqueia a importacao.
 const { resumirAvisosNcm } = require('../services/ncmTable');
+// 17/11/2026 (b-import-grade): linhas do mesmo SKU com cor/tamanho viram
+// um produto com variantes, no formato do PUT /variations.
+const { montarGrades } = require('../services/importGrade');
+const { coerceColorHex, skuSuffixFromAttrs } = require('./productsVariations');
+const { proximosCodigos } = require('./productsBarcodeGenerate');
+const { companyGroupWhere } = require('../utils/companyGroup');
 
 // ─── Mapeamento de colunas — fuzzy match ────────────────────
 
@@ -471,6 +477,20 @@ router.post('/products/import', requireAuth, async (req, res) => {
     valores: [...unidadesDesconhecidas.keys()],
   };
 
+  // ── Grade (b-import-grade, 17/11/2026) ──────────────────
+  // Linhas com a mesma chave (SKU; sem SKU, nome + unidade + marca) e 2+
+  // combinacoes de cor/tamanho viram UM produto com variantes. As linhas da
+  // grade saem do caminho simples abaixo; sem grade nenhuma, `naGrade` fica
+  // vazio e tudo o que segue roda exatamente como antes (registro em
+  // tests/fixtures/importProdutosSemGrade.json).
+  const grades = montarGrades(valid, linhaDe, { coerceColorHex, skuSuffixFromAttrs });
+  const naGrade = grades.naGrade;
+  const avisosGrade = grades.avisos;
+  if (grades.erros.length) {
+    for (const e of grades.erros) errors.push({ ...e, row: rows[e.index] });
+    errors.sort((a, b) => a.index - b.index);
+  }
+
   // ── Duplicatas: dentro do lote e contra o banco ──────────
   // Antes: so o nome em minusculas. Deposito tem o mesmo nome em marcas
   // diferentes e em "pacote x unidade" / "metro x rolo" — 189 das 2.017
@@ -492,7 +512,26 @@ router.post('/products/import', requireAuth, async (req, res) => {
   const primeiraPorBarcode = new Map();
   const primeiraPorChave   = new Map(); // chave -> [{ sku, index }]
   const candidatos = [];
+  // A grade entra primeiro nas chaves do lote: linha avulsa com o mesmo
+  // nome/SKU de um modelo, ou com o codigo de barras de uma variante, vira
+  // duplicata dele. Codigo repetido entre variantes: a segunda perde o
+  // codigo da planilha e ganha um interno (aviso).
+  for (const m of grades.modelos) {
+    const chaveM = chaveProdutoImport(m.p.name, m.p.unit, m.p.brand);
+    if (!primeiraPorChave.has(chaveM)) primeiraPorChave.set(chaveM, []);
+    primeiraPorChave.get(chaveM).push({ sku: chaveSku(m.p.sku), index: m.linhas[0] });
+    for (const v of m.variantes) {
+      if (!v.barcode) continue;
+      if (primeiraPorBarcode.has(v.barcode)) {
+        avisosGrade.push(avisoCodigo(m, v, 'lote'));
+        v.barcode = null;
+        continue;
+      }
+      primeiraPorBarcode.set(v.barcode, v.linhas[0]);
+    }
+  }
   valid.forEach((p, k) => {
+    if (naGrade.has(k)) return;
     const index = linhaDe[k];
     const chave = chaveProdutoImport(p.name, p.unit, p.brand);
     const sku = chaveSku(p.sku);
@@ -526,7 +565,7 @@ router.post('/products/import', requireAuth, async (req, res) => {
       barcodeList.length > 0
         ? db.query(`SELECT id, barcode FROM products WHERE company_id=$1 AND barcode = ANY($2::text[])`, [companyId, barcodeList])
         : { rows: [] },
-      candidatos.length > 0
+      candidatos.length > 0 || grades.modelos.length > 0
         ? db.query(`SELECT id, name, unit, brand, sku FROM products WHERE company_id=$1`, [companyId])
         : { rows: [] },
     ]);
@@ -540,6 +579,57 @@ router.post('/products/import', requireAuth, async (req, res) => {
     console.error('[import-products] lookup error:', err.message);
     return res.status(500).json({ error: 'Erro ao verificar duplicatas', detail: err.message });
   }
+
+  // Grade contra o banco: modelo que ja existe (mesma chave nome+unidade+
+  // marca e SKU, a regra de sempre) sai inteiro, com todas as linhas em
+  // `duplicatas`. Codigo de barras de variante que ja existe no grupo (em
+  // produto ou variante) nao e regravado: a variante ganha um interno.
+  const modelos = [];
+  if (grades.modelos.length > 0) {
+    const codigosGrade = [];
+    for (const m of grades.modelos) for (const v of m.variantes) if (v.barcode) codigosGrade.push(v.barcode);
+    let codigosNoBanco = new Set();
+    try {
+      if (codigosGrade.length > 0) {
+        const { rows: usados } = await db.query(
+          `SELECT p.barcode AS code FROM products p
+            WHERE ${companyGroupWhere('$1', 'p.')} AND p.barcode = ANY($2::text[])
+           UNION
+           SELECT pv.barcode AS code FROM product_variants pv
+             JOIN products p ON p.id = pv.product_id
+            WHERE ${companyGroupWhere('$1', 'p.')} AND pv.barcode = ANY($2::text[])`,
+          [companyId, codigosGrade]
+        );
+        codigosNoBanco = new Set(usados.map((r) => r.code));
+      }
+    } catch (err) {
+      console.error('[import-products] lookup grade error:', err.message);
+      return res.status(500).json({ error: 'Erro ao verificar duplicatas', detail: err.message });
+    }
+    for (const m of grades.modelos) {
+      const chaveM = chaveProdutoImport(m.p.name, m.p.unit, m.p.brand);
+      const existente = mesmaPecaNoImport(existentesPorChave.get(chaveM), chaveSku(m.p.sku));
+      if (existente) {
+        for (const index of m.linhas) {
+          duplicatas.push(descrever({ ...m.p, barcode: null }, index, 'banco', { criterio: 'nome_unidade_marca', produto_id: existente.id }));
+        }
+        // o que nao entra nao gera aviso de grade
+        const fora = new Set(m.linhas);
+        for (let i = avisosGrade.length - 1; i >= 0; i--) {
+          if (avisosGrade[i].linhas.some((x) => fora.has(x))) avisosGrade.splice(i, 1);
+        }
+        continue;
+      }
+      for (const v of m.variantes) {
+        if (v.barcode && codigosNoBanco.has(v.barcode)) {
+          avisosGrade.push(avisoCodigo(m, v, 'banco'));
+          v.barcode = null;
+        }
+      }
+      modelos.push(m);
+    }
+  }
+  const variacoesAInserir = modelos.reduce((a, m) => a + m.variantes.length, 0);
 
   const toInsert = [];
   for (const { p, index, chave, sku } of candidatos) {
@@ -558,8 +648,53 @@ router.post('/products/import', requireAuth, async (req, res) => {
 
   // t3-05: NCM que a Receita nao conhece. Conta so o que vai entrar (toInsert);
   // so aparece na resposta quando ha algum.
-  const ncmAvisos = resumirAvisosNcm(toInsert);
+  const ncmAvisos = resumirAvisosNcm(modelos.length ? [...toInsert, ...modelos.map((m) => m.p)] : toInsert);
   const comNcmAvisos = ncmAvisos ? { ncm_avisos: ncmAvisos } : {};
+
+  // Resumo da grade para a previa ("N modelos com M variacoes"). So aparece
+  // quando ha grade: sem ela a resposta e a de sempre.
+  const comGrade = modelos.length > 0 || avisosGrade.length > 0 ? {
+    grade: {
+      modelos:   modelos.length,
+      variacoes: variacoesAInserir,
+      linhas:    modelos.reduce((a, m) => a + m.linhas.length, 0),
+      itens: modelos.slice(0, 50).map((m) => ({
+        nome:      m.p.name,
+        sku:       m.p.sku,
+        categoria: m.p.category,
+        preco:     m.p.price,
+        estoque:   m.p.stock_qty,
+        variacoes: m.variantes.length,
+        cores:     [...new Set(m.variantes.filter((v) => v.color_hex).map((v) => v.color_name || v.color_hex))],
+        tamanhos:  [...new Set(m.variantes.filter((v) => v.size).map((v) => v.size))],
+        linhas:    m.linhas,
+      })),
+    },
+    avisos_grade: avisosGrade,
+  } : {};
+
+  // Limite de produtos do plano (o mesmo do POST /products): o modelo com
+  // grade conta como UM produto, variacao nao conta. Plano lido da empresa
+  // (o do JWT pode estar velho); sem a coluna, vale o do token.
+  let limitePlano = null;
+  const aImportar = toInsert.length + modelos.length;
+  if (aImportar > 0 && !(req.user && req.user.role === 'admin')) {
+    try {
+      const { rows: lr } = await db.query(
+        `SELECT (SELECT plan FROM companies WHERE id = $1) AS plan,
+                (SELECT COUNT(*) FROM products WHERE company_id = $1) AS total_produtos`,
+        [companyId]
+      );
+      const limite = limiteDoPlano((lr[0] && lr[0].plan) || (req.user && req.user.plan));
+      const atual = parseInt(lr[0] && lr[0].total_produtos, 10) || 0;
+      if (atual + aImportar > limite) {
+        limitePlano = { limite, atual, a_importar: aImportar, disponivel: Math.max(0, limite - atual) };
+      }
+    } catch (err) {
+      console.error('[import-products] limite do plano:', err.message);
+    }
+  }
+  const comLimite = limitePlano ? { limite_plano: limitePlano } : {};
 
   if (dry_run) {
     return res.json({
@@ -571,10 +706,21 @@ router.post('/products/import', requireAuth, async (req, res) => {
       suggested_map: map,
       errors,
       preview:       valid.slice(0, 5),
-      a_importar:      toInsert.length,
+      a_importar:      aImportar,
       duplicate_count: duplicatas.length,
       duplicatas,
       unidades_desconhecidas: resumoUnidades,
+      ...comGrade,
+      ...comLimite,
+    });
+  }
+
+  if (limitePlano) {
+    return res.status(403).json({
+      error: `Esta importação passa do limite de ${limitePlano.limite} produtos do seu plano. `
+        + `Hoje a loja tem ${limitePlano.atual} e a planilha traz ${limitePlano.a_importar}; cabem ${limitePlano.disponivel}.`,
+      code: 'LIMITE_DE_PRODUTOS',
+      limite_plano: limitePlano,
     });
   }
 
@@ -631,6 +777,26 @@ router.post('/products/import', requireAuth, async (req, res) => {
     };
   }
 
+  // Grade primeiro, numa transacao so (produto + variantes + atributos +
+  // codigos internos): se falhar, nada da planilha foi gravado ainda.
+  let variacoesCriadas = 0;
+  if (modelos.length > 0) {
+    try {
+      const r = await gravarGrades({ companyId, batchId, modelos, comCardPrice: modelos.some((m) => m.p.card_price !== null) });
+      saved += r.produtos.length;
+      variacoesCriadas = r.variacoes;
+      if (r.cardPriceIgnorado) cardPriceIgnorado = true;
+      const parcial = await linkImportedCategories(db, companyId, r.produtos);
+      categorias.linked += parcial.linked;
+      for (const v of parcial.pending)   if (!categorias.pending.includes(v))   categorias.pending.push(v);
+      for (const v of parcial.ambiguous) if (!categorias.ambiguous.includes(v)) categorias.ambiguous.push(v);
+      if (parcial.skipped) categorias.skipped = true;
+    } catch (err) {
+      console.error('[import-products] grade DB error:', err.message);
+      return res.status(err.status || 500).json({ error: 'Erro ao salvar produtos com grade', detail: err.message });
+    }
+  }
+
   for (let i = 0; i < toInsert.length; i += CHUNK) {
     const chunk = toInsert.slice(i, i + CHUNK);
     if (!chunk.length) break;
@@ -674,7 +840,9 @@ router.post('/products/import', requireAuth, async (req, res) => {
          (company_id, module, format, total_rows, imported_rows, error_rows, batch_id, created_by, meta)
        VALUES ($1,'products','csv',$2,$3,$4,$5,$6,$7)`,
       [companyId, rows.length, saved, errors.length, batchId, req.user?.id || null,
-       JSON.stringify({ duplicates_skipped: dupes, column_map: map })]
+       JSON.stringify(modelos.length
+         ? { duplicates_skipped: dupes, column_map: map, grade: { modelos: modelos.length, variacoes: variacoesCriadas } }
+         : { duplicates_skipped: dupes, column_map: map })]
     );
   } catch (err) {
     console.error('[import-products] log error:', err.message);
@@ -703,8 +871,147 @@ router.post('/products/import', requireAuth, async (req, res) => {
     // So aparece quando a base ainda nao tem a migration 351.
     ...(cardPriceIgnorado ? { card_price_ignorado: true } : {}),
     ...comNcmAvisos,
+    ...(modelos.length || avisosGrade.length ? {
+      grade: { modelos: modelos.length, variacoes: variacoesCriadas },
+      avisos_grade: avisosGrade,
+    } : {}),
   });
 });
+
+// ─── Grade da importacao: helpers (b-import-grade, 17/11/2026) ─
+
+// Mesmo limite do POST /products (getPlanLimit em routes/products.js).
+function limiteDoPlano(plan) {
+  switch ((plan || '').toLowerCase()) {
+    case 'expansao':
+    case 'personalizado': return 999999;
+    case 'negocio':       return 7000;
+    default:              return 2000;
+  }
+}
+
+function avisoCodigo(m, v, origem) {
+  const onde = [v.color_name || v.color_hex, v.size].filter(Boolean).join(' ');
+  return {
+    tipo: 'codigo_repetido',
+    modelo: m.p.name, sku: m.p.sku || null, linhas: v.linhas, valores: [v.barcode],
+    mensagem: origem === 'banco'
+      ? `${m.p.name} ${onde}: o código ${v.barcode} já está em outro produto da loja. A variação ganha um código interno.`
+      : `${m.p.name} ${onde}: o código ${v.barcode} aparece em outra linha da planilha. A variação ganha um código interno.`,
+  };
+}
+
+/**
+ * Grava os modelos com grade numa transacao: produto pai (estoque = soma),
+ * variantes (sku_suffix, color_name, price_override, codigo) e atributos
+ * Cor/Tamanho, como o PUT /variations. Variante sem codigo na planilha
+ * ganha EAN-13 interno da serie 210 (services/gerarEan13.js), reservado
+ * com a mesma trava por grupo do POST /barcodes/generate.
+ * Ids gerados aqui: o vinculo pai -> variante nao depende da ordem do
+ * RETURNING. O desfazer do lote (DELETE products por import_batch_id)
+ * leva variantes e atributos junto (ON DELETE CASCADE).
+ */
+async function gravarGrades({ companyId, batchId, modelos, comCardPrice }) {
+  const tentar = async (incluirCardPrice) => {
+    const client = await db.connect();
+    try {
+      await client.query('BEGIN');
+      const semCodigo = modelos.reduce((a, m) => a + m.variantes.filter((v) => !v.barcode).length, 0);
+      let codigos = [];
+      if (semCodigo > 0) {
+        await client.query(
+          `SELECT pg_advisory_xact_lock(hashtext('ean13-gerar:' || (
+             SELECT COALESCE(NULLIF(billing_owner_company_id, id), id)::text
+               FROM companies WHERE id = $1
+           )))`,
+          [companyId]
+        );
+        codigos = await proximosCodigos(client, companyId, semCodigo);
+      }
+
+      const produtos = [];
+      const variantes = [];
+      const atributos = [];
+      for (const m of modelos) {
+        const pid = uuidv4();
+        produtos.push({ id: pid, p: m.p });
+        for (const v of m.variantes) {
+          const vid = uuidv4();
+          variantes.push({ id: vid, pid, v, barcode: v.barcode || codigos.shift() });
+          if (v.color_hex) atributos.push([vid, 'Cor', v.color_hex]);
+          if (v.size) atributos.push([vid, 'Tamanho', v.size]);
+        }
+      }
+
+      const CH = 100;
+      const inseridos = [];
+      for (let i = 0; i < produtos.length; i += CH) {
+        const chunk = produtos.slice(i, i + CH);
+        const params = [companyId, batchId];
+        const ph = [];
+        for (const { id, p } of chunk) {
+          const vals = [id, p.name, p.price, p.cost_price, p.stock_qty, p.stock_min,
+            p.sku, p.category, p.unit, p.description, p.ncm, p.brand];
+          if (incluirCardPrice) vals.push(p.card_price);
+          ph.push(`($1,${vals.map((val) => { params.push(val); return '$' + params.length; }).join(',')},$2)`);
+        }
+        const { rows: r } = await client.query(
+          `INSERT INTO products
+             (company_id, id, name, price, cost_price, stock_qty, stock_min,
+              sku, category, unit, description, ncm, brand${incluirCardPrice ? ', card_price' : ''}, import_batch_id)
+           VALUES ${ph.join(',')}
+           RETURNING id, category`,
+          params
+        );
+        inseridos.push(...r);
+      }
+      for (let i = 0; i < variantes.length; i += CH * 2) {
+        const chunk = variantes.slice(i, i + CH * 2);
+        const params = [];
+        const ph = [];
+        for (const { id, pid, v, barcode } of chunk) {
+          const vals = [id, pid, v.sku_suffix, v.stock_qty, barcode, v.color_name, v.price_override];
+          ph.push(`(${vals.map((val) => { params.push(val); return '$' + params.length; }).join(',')},true)`);
+        }
+        await client.query(
+          `INSERT INTO product_variants
+             (id, product_id, sku_suffix, stock_qty, barcode, color_name, price_override, is_active)
+           VALUES ${ph.join(',')}`,
+          params
+        );
+      }
+      for (let i = 0; i < atributos.length; i += CH * 4) {
+        const chunk = atributos.slice(i, i + CH * 4);
+        const params = [];
+        const ph = [];
+        for (const vals of chunk) {
+          ph.push(`(${vals.map((val) => { params.push(val); return '$' + params.length; }).join(',')})`);
+        }
+        await client.query(
+          `INSERT INTO product_variant_values (variant_id, attribute_name, value) VALUES ${ph.join(',')}`,
+          params
+        );
+      }
+      await client.query('COMMIT');
+      return { produtos: inseridos, variacoes: variantes.length };
+    } catch (err) {
+      try { await client.query('ROLLBACK'); } catch (_) { /* conexao ja caiu */ }
+      throw err;
+    } finally {
+      client.release();
+    }
+  };
+
+  try {
+    return await tentar(comCardPrice);
+  } catch (e) {
+    // Base sem a migration 351: grava sem o preco no cartao, como o simples.
+    if (e.code !== '42703' || !comCardPrice) throw e;
+    console.warn('[import-products] card_price ignorado na grade: base sem a migration 351');
+    const r = await tentar(false);
+    return { ...r, cardPriceIgnorado: true };
+  }
+}
 
 // ─── Parser NF-e XML nativo ───────────────────────────────────
 

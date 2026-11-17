@@ -7,6 +7,11 @@
 //                                wizard usa nos passos 1-3, sem emitir;
 //                                o POST aceita o mesmo corpo do emitir)
 //   POST /venda/:saleId/emitir   emite (contrato no PR / services/nfe55Venda)
+//   GET  /venda/:saleId/trocar-nfce  (17/11/2026) a venda com NFC-e
+//                                autorizada pode trocar a NFC-e pela NF-e?
+//                                Só lê: o app cancela a NFC-e pela rota de
+//                                sempre e depois abre o assistente
+//                                (services/nfe55Venda.situacaoDaTrocaPorNfe)
 //
 // Por que um router próprio e não o /nfce/emit: o /emit é a esteira do PDV
 // (contingência offline, fallback de gateway, homologação "stub", corpo com
@@ -124,6 +129,19 @@ async function previa(req, res) {
 
 router.get('/venda/:saleId/previa', requireAuth, previa);
 router.post('/venda/:saleId/previa', requireAuth, previa);
+
+// ── Trocar por NF-e (17/11/2026) ────────────────────────────
+
+router.get('/venda/:saleId/trocar-nfce', requireAuth, async (req, res) => {
+  try {
+    const r = await nfe55Venda.situacaoDaTrocaPorNfe(db, { companyId: req.params.id, saleId: req.params.saleId });
+    if (r.notFound) return res.status(404).json({ error: r.notFound.error, code: r.notFound.code });
+    return res.json(r);
+  } catch (err) {
+    console.error('[nfe55Venda] trocar-nfce error:', err);
+    return res.status(500).json({ error: 'Não deu para conferir a nota desta venda agora.' });
+  }
+});
 
 // ── Emissão ─────────────────────────────────────────────────
 

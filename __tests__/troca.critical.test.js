@@ -139,11 +139,21 @@ describe('troca — caminhos criticos', () => {
       expect(map.get('s2')).toBe('none');
     });
 
-    it('strategy=per_origin: NFC-e < 24h (gateway) => cancel_reissue', () => {
-      const sales = [makeSaleWithNfce('s1', 2)];
+    // 17/11/2026 (b-troca-prazo-nfce): o prazo e o do cancelamento da UF
+    // (30 min em SP), nao mais 24 h. Antes 2 h caia em cancel_reissue e a
+    // SEFAZ recusava o cancelamento.
+    it('strategy=per_origin: NFC-e de 10 min (gateway) => cancel_reissue', () => {
+      const sales = [makeSaleWithNfce('s1', 10 / 60)];
       const returned = [{ original_sale_id: 's1' }];
       const map = decideFiscalPerOrigin(sales, returned, 'per_origin');
       expect(map.get('s1')).toBe('cancel_reissue');
+    });
+
+    it('strategy=per_origin: NFC-e de 2 h (gateway) => devolucao_55, sem tentar cancelar', () => {
+      const sales = [makeSaleWithNfce('s1', 2)];
+      const returned = [{ original_sale_id: 's1' }];
+      const map = decideFiscalPerOrigin(sales, returned, 'per_origin');
+      expect(map.get('s1')).toBe('devolucao_55');
     });
 
     it('strategy=per_origin: NFC-e > 24h => devolucao_55', () => {
@@ -174,8 +184,8 @@ describe('troca — caminhos criticos', () => {
       expect(map.get('s1')).toBe('devolucao_55');
     });
 
-    it('origens sem returned_items ficam none mesmo com NFC-e < 24h', () => {
-      const sales = [makeSaleWithNfce('s1', 1), makeSaleWithNfce('s2', 1)];
+    it('origens sem returned_items ficam none mesmo com NFC-e no prazo', () => {
+      const sales = [makeSaleWithNfce('s1', 10 / 60), makeSaleWithNfce('s2', 10 / 60)];
       const returned = [{ original_sale_id: 's1' }]; // s2 nao tem devolucao
       const map = decideFiscalPerOrigin(sales, returned, 'per_origin');
       expect(map.get('s1')).toBe('cancel_reissue');

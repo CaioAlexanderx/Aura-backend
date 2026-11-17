@@ -87,7 +87,7 @@ function lookupComLog(lookup, etapa) {
 
 // O que o register recebeu e o que foi ao INSERT de companies.
 //   caminho: 'empresa_nova' | 'empresa_existente' | 'sem_empresa'
-function dadosDoCadastro({ cnpj, temCpf, taxRegimeDoCorpo, regimeDoCadastro, caminho, regimeGravado, companyId, selfServe, temCodigo, regimesValidos }) {
+function dadosDoCadastro({ cnpj, temCpf, taxRegimeDoCorpo, regimeDoCadastro, caminho, regimeGravado, companyId, selfServe, temCodigo, regimesValidos, decisao }) {
   let descartado = null;
   if (taxRegimeDoCorpo !== undefined && taxRegimeDoCorpo !== null && taxRegimeDoCorpo !== '' && !regimeDoCadastro) {
     descartado = temCpf ? 'conta com CPF' : 'fora da lista ' + (regimesValidos || []).join('/');
@@ -107,6 +107,11 @@ function dadosDoCadastro({ cnpj, temCpf, taxRegimeDoCorpo, regimeDoCadastro, cam
     company_id: companyId || null,
     self_serve: !!selfServe,
     tem_codigo: !!temCodigo,
+    // 17/11/2026 (b-tq-regime-cadastro): de onde veio o regime da empresa
+    // nova ('receita' | 'corpo' | 'padrao' | 'cpf') e por quê. 'corpo' e
+    // 'padrao' são o regime estimado: companies não tem coluna para isso.
+    origem_regime: novo && decisao ? decisao.origem : null,
+    motivo_regime: novo && decisao ? decisao.motivo : null,
   };
 }
 

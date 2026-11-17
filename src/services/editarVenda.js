@@ -45,6 +45,7 @@ const carneAuto = require('./credit/carneAuto');
 const { resolvePeriod, dueDateForIndex, MAX_INSTALLMENTS_CEILING, round2, validateFirstDueDate } = require('./credit/terms');
 const { CARD_FEE_KEY, insertCardFeeExpense } = require('./taxaDaMaquininha');
 const { findOwnerScopedCustomer } = require('../utils/customerScope');
+const { prazoDeCancelamento } = require('./nfcePrazoCancelamento');
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const DIA_RE = /^\d{4}-\d{2}-\d{2}$/;
@@ -264,7 +265,7 @@ SELECT s.id, s.company_id, s.sale_number, s.customer_id, s.seller_id, s.employee
             JOIN sales ts ON ts.id = tri.troca_sale_id
            WHERE tri.original_sale_id = s.id AND ts.company_id = s.company_id
              AND COALESCE(ts.status, 'completed') <> 'cancelled') x) AS devolucoes,
-       (SELECT json_build_object('id', n.id, 'numero', n.numero, 'authorized_at', n.authorized_at, 'tipo', COALESCE(n.tipo, 'nfce'))
+       (SELECT json_build_object('id', n.id, 'numero', n.numero, 'authorized_at', n.authorized_at, 'tipo', COALESCE(n.tipo, 'nfce'), 'chave_acesso', n.chave_acesso)
           FROM nfce_emissions n
          WHERE n.sale_id = s.id AND COALESCE(n.tipo, 'nfce') IN ('nfce', 'nfe') AND n.status = 'autorizada'
          ORDER BY n.created_at DESC LIMIT 1) AS nfce,
@@ -460,9 +461,10 @@ function travaDoDinheiro(ctx, perms) {
 
 function infoNfce(ctx, agora = Date.now()) {
   if (!ctx.nfce) return null;
-  const prazo = parseInt(process.env.NFCE_CANCEL_DEADLINE_MIN || '30', 10);
-  const aut = ctx.nfce.authorized_at ? new Date(ctx.nfce.authorized_at).getTime() : null;
-  const ate = aut ? new Date(aut + prazo * 60000) : null;
+  // 17/11/2026 (b-troca-prazo-nfce): prazo por UF da chave (30 min na NFC-e de
+  // SP, AP, RJ e MG; 24 h na NF-e 55) — o mesmo do POST /nfce/:id/cancel.
+  const prazo = prazoDeCancelamento(ctx.nfce, { now: agora });
+  const ate = prazo.ate ? new Date(prazo.ate) : null;
   const tipo = ctx.nfce.tipo === 'nfe' ? 'nfe' : 'nfce';
   return {
     id: ctx.nfce.id,
