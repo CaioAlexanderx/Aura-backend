@@ -53,6 +53,8 @@ const webPush = require('./webPush');
 // agrupa em rajada. Os dois pelo módulo, pelo mesmo motivo acima.
 const destinatariosDoAviso = require('./destinatariosDoAviso');
 const rajadaDeVendas = require('./rajadaDeVendas');
+// p-177: a mesma conta de "frente ligada" do resto do backend.
+const { frenteLigada } = require('./personalizadosAtivacao');
 
 const PREFIX = 'loja_';
 
@@ -101,7 +103,7 @@ async function casaDoPedido(payload) {
       [payload.company_id]
     );
     const c = rows && rows[0];
-    if (c && c.vertical_active !== 'studio' && c.studio_enabled === true) {
+    if (c && c.vertical_active !== 'studio' && frenteLigada({ studio_enabled: c.studio_enabled }, c.vertical_active)) {
       return { ...payload, personalizados_no_negocio: true };
     }
   } catch (err) {
