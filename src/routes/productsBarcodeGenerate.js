@@ -341,3 +341,6 @@ router.post('/barcodes/generate', async (req, res) => {
 module.exports = router;
 // Exposto só para os testes.
 module.exports._internals = { normalizarAlvos, podeEditarProduto };
+// 17/11/2026 (b-import-grade): a importacao com grade reserva os codigos
+// das variantes pela mesma serie e trava (ean13-gerar por grupo).
+module.exports.proximosCodigos = proximosCodigos;

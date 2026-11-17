@@ -314,7 +314,9 @@ describe('duplicata por nome + unidade + marca', () => {
 describe('duplicata no import com SKU', () => {
   const peca = (nome, sku, preco, tam) => ({ NOME: nome, 'VALOR DIN': preco, SKU: sku, TAMANHO: tam || '' });
 
-  test('lote: "Blusa" com SKUs diferentes entram todas; mesmo SKU (outro tamanho) vira duplicata', async () => {
+  // 17/11/2026 (b-import-grade): mesmo SKU em outro tamanho deixou de ser
+  // duplicata -- vira UM produto com as duas variacoes (grade).
+  test('lote: "Blusa" com SKUs diferentes entram todas; mesmo SKU (outro tamanho) vira grade', async () => {
     mockSql([]);
     const res = await request(app).post(url).set(auth).send({
       dry_run: true,
@@ -327,9 +329,9 @@ describe('duplicata no import com SKU', () => {
     });
     expect(res.status).toBe(200);
     expect(res.body.a_importar).toBe(3);
-    expect(res.body.duplicatas).toEqual([
-      expect.objectContaining({ index: 2, origem: 'lote', criterio: 'nome_unidade_marca', duplicata_de: 1 }),
-    ]);
+    expect(res.body.duplicatas).toEqual([]);
+    expect(res.body.grade).toMatchObject({ modelos: 1, variacoes: 2, linhas: 2 });
+    expect(res.body.grade.itens[0]).toMatchObject({ sku: 'C2020', tamanhos: ['M', 'G'] });
   });
 
   test('lote: um com SKU e outro sem continua duplicata (como antes)', async () => {
