@@ -640,3 +640,7 @@ router.put('/:pid/variations', async (req, res) => {
 });
 
 module.exports = router;
+// 17/11/2026 (b-import-grade): a importacao por planilha monta a grade no
+// mesmo formato deste PUT -- mesma leitura de cor e mesmo sku_suffix.
+module.exports.coerceColorHex = coerceColorHex;
+module.exports.skuSuffixFromAttrs = skuSuffixFromAttrs;

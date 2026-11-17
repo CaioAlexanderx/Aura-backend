@@ -49,6 +49,14 @@ function regimeDaReceita(rf) {
   const nao = (v) => String(v || '').trim().toLowerCase() === 'não' || String(v || '').trim().toLowerCase() === 'nao';
   if (simples && (sim(simples.mei) || sim(simples.simples) || nao(simples.simples))) {
     if (sim(simples.mei)) return { regime: 'mei', fonte: 'receita', confirmar: false };
+    // 17/11/2026 (b-tq-regime-cadastro): todo MEI também é optante do
+    // Simples. Quando a fonte diz "Simples: Sim" mas não diz nada do MEI
+    // (BrasilAPI e CNPJá devolvem null em `opcao_pelo_mei`/`simei.optant`
+    // quando não têm o dado), "Simples Nacional" não está confirmado: pode
+    // ser MEI. Fica estimado, para ninguém tratar como certo.
+    if (sim(simples.simples) && !sim(simples.mei) && !nao(simples.mei)) {
+      return { regime: 'simples_nacional', fonte: 'estimado', confirmar: true };
+    }
     if (sim(simples.simples)) return { regime: 'simples_nacional', fonte: 'receita', confirmar: false };
     return { regime: 'lucro_presumido', fonte: 'receita', confirmar: true };
   }

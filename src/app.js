@@ -173,41 +173,27 @@ app.use(sentryContext);
 // no Brasil) — verificado empiricamente que o dominio railway.app NAO
 // passa pelo Cloudflare (sem cf-ray; server: railway-hikari), entao
 // `trust proxy 1` esta correto e o problema era so o tamanho do balde.
-// authLimiter 10→20 e globalLimiter 300→600. Se um dia a API for
-// servida atras do Cloudflare (dominio proprio), revisar trust proxy.
+// authLimiter 10→20 e globalLimiter 300→600.
+// 17/11/2026 (b-tq-71): api.getaura.com.br, loja.getaura.com.br e os
+// dominios das lojas JA passam pelo Cloudflare (cf-ray; server: cloudflare).
+// La o req.ip e a borda do Cloudflare; a chave dos limites (chaveDoCliente)
+// usa o CF-Connecting-IP so quando o req.ip esta nas faixas do Cloudflare.
 
-// tq-71 (26/10/2026): ate aqui o authLimiter era registrado no apiRouter
-// DEPOIS das rotas de /auth (ver "Rotas da API" abaixo) e nunca rodava —
-// medido: 21 logins errados seguidos do mesmo IP davam 21 x 401. Agora ele
-// e montado no app ANTES do apiRouter. Mesmos limites de sempre (20 por IP
-// a cada 15 min). No login so a tentativa que falha conta
-// (skipSuccessfulRequests): a loja com varios funcionarios no mesmo IP que
-// entra certo nunca bate no teto; quem chuta senha bate.
-// O IP e o req.ip do `trust proxy 1`: o ultimo item do X-Forwarded-For,
-// posto pela borda da Railway — forjar o comeco do header nao muda o balde.
-const authLimiter = rateLimit({
-  windowMs:  15 * 60 * 1000,
-  max:       20,
-  message:   { error: 'Muitas tentativas. Tente novamente em 15 minutos.' },
-  standardHeaders: true,
-  legacyHeaders:   false,
-  skip: (req) => env.NODE_ENV === 'test',
-});
-
-const loginLimiter = rateLimit({
-  windowMs:  15 * 60 * 1000,
-  max:       20,
-  message:   { error: 'Muitas tentativas. Tente novamente em 15 minutos.' },
-  standardHeaders: true,
-  legacyHeaders:   false,
-  skipSuccessfulRequests: true,
-  skip: (req) => env.NODE_ENV === 'test',
-});
+// tq-71 (26/10/2026): o authLimiter era registrado no apiRouter DEPOIS das
+// rotas de /auth e nunca rodava (21 logins errados = 21 x 401). Passou a
+// ser montado no app ANTES do apiRouter.
+// b-tq-71 (17/11/2026): os limites da porta de entrada (login, 2FA,
+// cadastro, esqueci a senha, troca de senha, codigos e reenvios) foram
+// para middleware/limitesDeAcesso.js: chave por IP real (Cloudflare e
+// IPv6 /64 tratados) e por IP + e-mail no login e no esqueci a senha,
+// 429 com Retry-After e texto gentil. Limites e armazenamento: ver la.
+const { montarLimitesDeAcesso, chaveDoCliente } = require('./middleware/limitesDeAcesso');
 
 const cnpjLimiter = rateLimit({
   windowMs:  60 * 60 * 1000,
   max:       20,
   message:   { error: 'Limite de consultas CNPJ atingido. Tente novamente em 1 hora.' },
+  keyGenerator: chaveDoCliente,
   standardHeaders: true,
   legacyHeaders:   false,
   skip: (req) => env.NODE_ENV === 'test',
@@ -219,7 +205,12 @@ const globalLimiter = rateLimit({
   message:   { error: 'Muitas requisicoes. Tente novamente em 1 minuto.' },
   standardHeaders: true,
   legacyHeaders:   false,
-  skip: (req) => env.NODE_ENV === 'test',
+  keyGenerator: chaveDoCliente,
+  // b-tq-71: webhook (Asaas, Meta, Resend, Mercado Pago...) nao passa pelo
+  // limite: o provedor manda em rajada do mesmo IP, e cada rota ja se
+  // autentica pelo proprio token/assinatura. 429 la viraria reenvio e
+  // aviso de pagamento atrasado.
+  skip: (req) => env.NODE_ENV === 'test' || /^\/webhooks(\/|$)/i.test(req.path),
 });
 
 app.use('/api/v1', globalLimiter);
@@ -390,9 +381,7 @@ app.get('/', function(req, res) {
 // ── Rotas da API ────────────────────────────────────
 // Limitadores ANTES do apiRouter (tq-71): o Express roda as camadas na
 // ordem em que foram registradas; registrado depois, a rota responde antes.
-app.use('/api/v1/auth/login',           loginLimiter);
-app.use('/api/v1/auth/register',        authLimiter);
-app.use('/api/v1/auth/forgot-password', authLimiter);
+montarLimitesDeAcesso(app);
 // 26/10/2026: "Corrigir meu e-mail" (5 por hora por IP). O teto por usuario
 // fica na cadeia da rota, depois do requireAuth (middleware/limiteCorrigirEmail).
 app.use('/api/v1/auth/corrigir-email',  require('./middleware/limiteCorrigirEmail').porIp);
