@@ -535,9 +535,12 @@ async function montarNotaDaVenda(db, { companyId, saleId, body, buscarIbge = ibg
   const ufDest = dest.endereco.uf;
   if (ufDest === 'EX') return { ...bloqueio(422, 'NFE_EXTERIOR_FORA_DO_V1', MSG.exterior), faltantes };
   const interestadual = !!ufDest && ufDest !== ufEmitente;
-  if (interestadual && dest.indIEDest === '9') {
-    return { ...bloqueio(422, 'NFE_DIFAL_FORA_DO_V1', MSG.difal), faltantes };
-  }
+  // 17/11/2026 (decisão do Caio): Simples e MEI vendem para consumidor
+  // final de outra UF sem IE, sem o grupo ICMSUFDest. O STF suspendeu o
+  // DIFAL do Simples (ADI 5464; Tema 1.284) e a NT 2022.005 (NA01-20,
+  // exceção 12) dispensa o grupo para CRT=1. Para o MEI (CRT 4), a SVRS
+  // autorizou em homologação (RJ, 17/11) a mesma operação em 6102 sem o
+  // grupo. CFOP: Simples 6108, MEI 6102 (taxEngine.cfopVenda55).
   const indFinal = b.consumidor_final !== undefined && b.consumidor_final !== null
     ? (b.consumidor_final ? '1' : '0')
     : (dest.indIEDest === '1' ? '0' : '1');
@@ -571,7 +574,10 @@ async function montarNotaDaVenda(db, { companyId, saleId, body, buscarIbge = ibg
   const natOp = texto(b.natureza_operacao) || 'Venda de mercadoria';
   const observacoes = texto(b.observacoes);
 
-  const itemsComCfop = items.map((it) => ({ ...it, cfop: taxEngine.cfopVenda55(it.csosn, { interestadual }) }));
+  const itemsComCfop = items.map((it) => ({
+    ...it,
+    cfop: taxEngine.cfopVenda55(it.csosn, { interestadual, naoContribuinte: dest.indIEDest !== '1', mei: crt === 4 }),
+  }));
 
   const nfeData = {
     items: itemsComCfop,
