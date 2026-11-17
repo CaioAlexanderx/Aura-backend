@@ -358,13 +358,32 @@ async function handleSale(req, res, opts = {}) {
   const conexao = await db.connect();
   const client = timing.contar(conexao);
   timing.etapa('conexao');
-  // p-141 a p-143: decidido uma vez por venda. `contexto` (pdv_settings +
-  // sessao do caixa) e lido uma vez, logo depois da trava da chave; sem ele
-  // cada trecho le o que precisa, como sempre.
+  // p-141 a p-144: decidido uma vez por venda. `contexto` (pdv_settings +
+  // sessao do caixa, lidos na abertura) so existe quando a abertura em um
+  // envio aconteceu; sem ele cada trecho le o que precisa, como sempre.
   const rapido = vendaRapida.caminhoRapido();
-  timing.dado({ caminho: rapido ? 'rapido' : 'fila' });
   let contexto = null;
   try {
+    // p-144/p-143: BEGIN + trava e busca da chave + pdv_settings + sessao do
+    // caixa num envio so. null = nao abriu por ali (nada ficou aberto).
+    const aberta = rapido
+      ? await vendaRapida.abrir(client, { companyId: req.params.id, idemKey })
+      : null;
+    timing.dado({ caminho: rapido ? 'rapido' : 'fila', abertura: aberta ? 'um_envio' : 'fila' });
+    if (aberta) {
+      contexto = aberta.contexto;
+      // Mesma chave ja gerou venda: devolve a venda registrada, sem gravar nada.
+      if (aberta.jaFeita) {
+        await client.query('ROLLBACK');
+        const respondeu = await vendaIdempotente.responderRepeticao(res, { companyId: req.params.id, key: idemKey, itens: items });
+        if (respondeu) return;
+        return res.status(500).json({ error: 'Erro ao registrar venda' });
+      }
+      if (!sale_date && vendaRapida.caixaFechado(contexto)) {
+        await client.query('ROLLBACK');
+        return res.status(409).json(CAIXA_REQUIRED_BODY());
+      }
+    } else {
     await client.query('BEGIN');
     // Mesma chave ja gerou venda: devolve a venda registrada, sem gravar
     // nada. A trava faz a segunda requisicao simultanea esperar a primeira.
@@ -377,21 +396,13 @@ async function handleSale(req, res, opts = {}) {
         return res.status(500).json({ error: 'Erro ao registrar venda' });
       }
     }
-    // p-143: pdv_settings e sessao do caixa numa leitura so, usada pela
-    // conferencia do caixa, pelo "vender sem estoque", pelo pagamento e pela
-    // taxa da maquininha. null = nao leu por ali (segue como sempre).
-    if (rapido) contexto = await vendaRapida.lerContexto(client, req.params.id);
-    if (contexto) {
-      if (!sale_date && vendaRapida.caixaFechado(contexto)) {
-        await client.query('ROLLBACK');
-        return res.status(409).json(CAIXA_REQUIRED_BODY());
-      }
-    } else if (!sale_date) {
+    if (!sale_date) {
       const caixaCheck = await assertCaixaOpenOrAllowed(client, req.params.id);
       if (!caixaCheck.ok) {
         await client.query('ROLLBACK');
         return res.status(caixaCheck.status).json(caixaCheck.body);
       }
+    }
     }
     // F2: resolvido DENTRO da transacao -- se a venda falhar adiante, o
     // cadastro criado aqui volta atras junto. Antes do cupom, que precisa

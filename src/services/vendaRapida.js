@@ -1,5 +1,5 @@
 // ============================================================
-// AURA. — Venda do Caixa com menos idas ao banco (cards p-141 a p-144, em etapas;
+// AURA. — Venda do Caixa com menos idas ao banco (cards p-141 a p-144,
 // 17/11/2026)
 //
 // O servico e o banco ficam em regioes diferentes: cada `client.query` em
@@ -8,18 +8,19 @@
 // consultas que podem ir juntas, SEM mudar o que a venda grava nem o que ela
 // responde:
 //
+//   abrir()          BEGIN + trava da chave de idempotencia + busca da chave
+//                    + pdv_settings + sessao do caixa num envio so (p-144,
+//                    p-143). Antes: 3 a 6 idas.
 //   lerProdutos()    todos os produtos e variacoes da venda numa consulta,
 //                    com a promocao De/Por e a vendedora junto (p-141).
 //                    Antes: 1 por item, +1 por variacao, +2 da promocao,
 //                    +1 da vendedora.
 //   gravarItens()    sale_items, baixa de estoque, stock_movements, contador
-//                    da vendedora e uso do cupom num comando so (p-142).
-//                    Antes: 3 por item, +1 da vendedora, +1 do cupom.
-//   lerContexto()    pdv_settings + sessao do caixa numa leitura so (p-143).
-//                    Antes: ate 3 leituras do pdv_settings e 2 da sessao.
+//                    da vendedora e uso do cupom num comando so, que ja
+//                    devolve os itens da resposta (p-142, p-143). Antes: 3
+//                    por item, +1 da vendedora, +1 do cupom, +1 da releitura.
 //   gravarPagamentos() sale_payments e a receita no financeiro num comando
 //                    so (p-143). Antes: 1 por forma de pagamento + 1.
-//   Os itens da resposta saem do comando que os gravou (p-143), sem reler.
 //
 // O CAMINHO DE SEMPRE CONTINUA NO CODIGO (routes/pdv.js), intocado:
 //   - PDV_VENDA_CAMINHO=fila volta a venda inteira para ele, sem deploy de
@@ -30,7 +31,7 @@
 //   - __tests__/pdv.vendaRapida.banco.test.js roda cada cenario nos dois
 //     caminhos, no Postgres de verdade, e exige banco e resposta identicos.
 //
-// UMA DIFERENCA DE PROPOSITO (p-141/p-142): a leitura dos produtos trava as linhas
+// UMA DIFERENCA DE PROPOSITO (p-142): a leitura dos produtos trava as linhas
 // de estoque que a venda vai baixar (FOR NO KEY UPDATE, a mesma trava que o
 // UPDATE da baixa ja pegava, so que antes da conferencia). Duas vendas
 // simultaneas do ultimo item: a segunda espera a primeira, enxerga o saldo
@@ -48,30 +49,88 @@ const vendaNaPromocao = require('./vendaNaPromocao');
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const ehUuid = (v) => typeof v === 'string' && UUID_RE.test(v);
 
+// Mesmo formato que services/vendaIdempotente.js aceita no cabecalho.
+const CHAVE_RE = /^[A-Za-z0-9_-]{8,128}$/;
+
 function caminhoRapido() {
   return String(process.env.PDV_VENDA_CAMINHO || '').trim().toLowerCase() !== 'fila';
 }
 
-// ── lerContexto ──────────────────────────────────────────────
+// ── abrir ────────────────────────────────────────────────────
+// Um envio com varios comandos nao aceita parametros ($1). Os dois unicos
+// valores que entram no texto sao conferidos aqui, caractere a caractere:
+// o id da empresa (uuid minusculo) e a chave de idempotencia (letras,
+// numeros, _ e -). Nenhum dos dois formatos admite aspas ou barra.
+function textoSeguro(v) {
+  const s = String(v);
+  if (!/^[A-Za-z0-9_:-]+$/.test(s)) throw new Error('valor fora do formato para a abertura da venda');
+  return `'${s}'`;
+}
+
+// Se o envio unico falhar (por exemplo, um pooler que nao aceite varios
+// comandos de uma vez), a venda NAO cai: abre pelo caminho de sempre e este
+// processo para de tentar por um tempo.
+const PAUSA_DA_ABERTURA_MS = 5 * 60 * 1000;
+let aberturaPausadaAte = 0;
+
+function _resetarParaTeste() { aberturaPausadaAte = 0; }
+
+const SQL_CONTEXTO = (empresa) =>
+  `SELECT c.pdv_settings,
+          (SELECT s.id FROM caixa_sessoes s
+            WHERE s.company_id = c.id AND s.status = 'aberta' LIMIT 1) AS sessao_id
+     FROM companies c WHERE c.id = ${empresa}::uuid`;
+
 /**
- * pdv_settings da empresa e a sessao de caixa aberta, numa leitura so. E o
- * que a venda lia em ate cinco consultas (assertCaixaOpenOrAllowed, vender
- * sem estoque, sessao do pagamento, taxa da maquininha).
- * Devolve null quando o id da empresa foge do formato comum.
+ * Abre a transacao da venda num envio so.
+ *
+ * Com chave de idempotencia, os comandos sao os MESMOS de
+ * vendaIdempotente.travarEBuscar, na mesma ordem: a trava
+ * (pg_advisory_xact_lock) e depois a busca da venda da chave. Cada comando
+ * do envio e executado em separado pelo Postgres, entao a busca roda DEPOIS
+ * que a trava foi concedida e enxerga a venda que a outra requisicao acabou
+ * de gravar — a garantia contra venda em dobro e a mesma.
+ *
+ * Devolve:
+ *   { jaFeita, contexto: { pdvSettings, sessaoId } }  transacao aberta
+ *   null  nao abriu por aqui (nada ficou aberto): quem chamou abre pelo
+ *         caminho de sempre.
  */
-async function lerContexto(client, companyId) {
+async function abrir(client, { companyId, idemKey }) {
   if (!ehUuid(companyId)) return null;
-  const { rows } = await client.query(
-    `SELECT c.pdv_settings,
-            (SELECT s.id FROM caixa_sessoes s
-              WHERE s.company_id = c.id AND s.status = 'aberta' LIMIT 1) AS sessao_id
-       FROM companies c WHERE c.id = $1`,
-    [companyId]
-  );
-  const linha = rows[0] || null;
+  if (idemKey && !CHAVE_RE.test(String(idemKey))) return null;
+  if (Date.now() < aberturaPausadaAte) return null;
+
+  const empresa = textoSeguro(companyId);
+  const comandos = ['BEGIN'];
+  if (idemKey) {
+    comandos.push(`SELECT pg_advisory_xact_lock(hashtext(${textoSeguro(`pdv-sale:${companyId}:${idemKey}`)}::text))`);
+    comandos.push(`SELECT id FROM sales WHERE company_id = ${empresa}::uuid AND idempotency_key = ${textoSeguro(idemKey)}::text LIMIT 1`);
+  }
+  comandos.push(SQL_CONTEXTO(empresa));
+
+  let resultados;
+  try {
+    resultados = await client.query(comandos.join(';\n'));
+    if (!Array.isArray(resultados) || resultados.length !== comandos.length) {
+      throw new Error('a abertura em um envio nao devolveu um resultado por comando');
+    }
+  } catch (e) {
+    aberturaPausadaAte = Date.now() + PAUSA_DA_ABERTURA_MS;
+    console.warn('[PDV] abertura da venda em um envio falhou; seguindo pelo caminho de sempre:', e && e.message);
+    // O BEGIN pode ter entrado: garante que nada fica aberto antes de devolver.
+    try { await client.query('ROLLBACK'); } catch (_) { /* nada aberto */ }
+    return null;
+  }
+
+  const linhaDoContexto = resultados[resultados.length - 1].rows?.[0] || null;
+  const busca = idemKey ? resultados[resultados.length - 2] : null;
   return {
-    pdvSettings: linha ? (linha.pdv_settings || null) : null,
-    sessaoId: linha ? (linha.sessao_id || null) : null,
+    jaFeita: busca?.rows?.[0]?.id || null,
+    contexto: {
+      pdvSettings: linhaDoContexto ? (linhaDoContexto.pdv_settings || null) : null,
+      sessaoId: linhaDoContexto ? (linhaDoContexto.sessao_id || null) : null,
+    },
   };
 }
 
@@ -396,10 +455,11 @@ async function gravarPagamentos(client, { saleId, companyId, sessaoId, pagamento
 module.exports = {
   caminhoRapido,
   ehUuid,
-  lerContexto,
+  abrir,
   caixaFechado,
   lerProdutos,
   podeGravarDeUmaVez,
   gravarItens,
   gravarPagamentos,
+  _resetarParaTeste,
 };

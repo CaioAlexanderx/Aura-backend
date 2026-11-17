@@ -642,3 +642,130 @@ describe('caminho novo: resposta pelo comando que gravou os itens', () => {
   });
 });
 // <<< p-143
+
+// >>> p-144
+// ── Abertura em um envio (p-144) ─────────────────────────────
+describe('caminho novo: abertura da transacao em um envio', () => {
+  const vendaRapida = require('../src/services/vendaRapida');
+  const body = () => ({ items: [item(ID.ultimo, 1, 30)], payment_method: 'pix' });
+
+  beforeEach(() => { usarCaminho('rapido'); vendaRapida._resetarParaTeste(); });
+  afterAll(() => vendaRapida._resetarParaTeste());
+
+  const cenario = (nome) => CENARIOS.find((c) => c.nome.startsWith(nome));
+
+  // O que o card promete, contado na linha [pdv-sale-timing] (consultas do
+  // handleSale: da abertura ao COMMIT, mais as de depois do COMMIT).
+  test.each([
+    ['1 item, PIX', 6],
+    ['3 itens, vendedora e cliente', 7],
+    ['o mesmo produto e a mesma variante em duas linhas', 6],
+    ['caixa aberto, 3 formas de pagamento', 8],
+    ['crediario em 3 parcelas', 21],
+  ])('%s: no maximo %i idas', async (nome, teto) => {
+    const r = await rodar(cenario(nome), 'rapido');
+    expect(r.respostas[0].status).toBe(201);
+    expect(r.tempo.caminho).toBe('rapido');
+    expect(r.tempo.queries_tx + r.tempo.queries_pos).toBeLessThanOrEqual(teto);
+  });
+
+  test('BEGIN, trava, busca da chave e configuracao da loja vao num envio so', async () => {
+    await semear();
+    logSpy.mockClear();
+    const res = await postar({ body: body(), chave: 'chave-abertura-0001' });
+    expect(res.status).toBe(201);
+    const t = ultimaLinhaDeTempo();
+    expect(t.abertura).toBe('um_envio');
+    // Com a chave de idempotencia a venda de 1 item no PIX continua em 6 idas.
+    expect(t.queries_tx + t.queries_pos).toBeLessThanOrEqual(6);
+    await assentar();
+  });
+
+  test('mesma chave em duas requisicoes simultaneas do ULTIMO item: uma venda, as duas recebem 201 (repeticao, nao 409)', async () => {
+    for (let rodada = 0; rodada < 4; rodada++) {
+      await semear();
+      const chave = `chave-corrida-${rodada}-0001`;
+      const [a, b] = await Promise.all([postar({ body: body(), chave }), postar({ body: body(), chave })]);
+      expect([a.status, b.status]).toEqual([201, 201]);
+      expect(a.body.sale.id).toBe(b.body.sale.id);
+      expect([a.body.idempotent_replay, b.body.idempotent_replay].filter(Boolean)).toHaveLength(1);
+      expect(await contar('sales')).toBe(1);
+      expect(await saldo('products', ID.ultimo)).toBe(0);
+      expect(await contar('stock_movements')).toBe(1);
+      expect(await contar('transactions')).toBe(1);
+      await assentar();
+    }
+  });
+
+  test('a mesma chave depois: devolve a venda, sem gravar; com outros itens, 409 da chave', async () => {
+    await semear();
+    const chave = 'chave-repeticao-0001';
+    const primeira = await postar({ body: body(), chave });
+    await assentar();
+    const repeticao = await postar({ body: body(), chave });
+    const outra = await postar({ body: { items: [item(ID.simples, 1, 10)], payment_method: 'pix' }, chave });
+    expect([primeira.status, repeticao.status, outra.status]).toEqual([201, 201, 409]);
+    expect(repeticao.body.idempotent_replay).toBe(true);
+    expect(repeticao.body.sale.id).toBe(primeira.body.sale.id);
+    expect(outra.body.code).toBe('IDEMPOTENCY_KEY_REUSED');
+    expect(await contar('sales')).toBe(1);
+    expect(await saldo('products', ID.simples)).toBe(20);
+  });
+
+  test('se o envio unico falhar, a venda abre pelo caminho de sempre: sai igual e a chave continua valendo', async () => {
+    await semear();
+    const db = require('../src/config/database');
+    // A conexao desta venda recusa o envio com varios comandos DEPOIS de o
+    // BEGIN ter entrado (o pior caso: sobra uma transacao aberta e abortada).
+    db.connect.mockImplementationOnce(async () => {
+      const real = await pool.connect();
+      const falha = Object.create(real);
+      falha.query = (sql, ...resto) => (typeof sql === 'string' && /^BEGIN;/.test(sql)
+        ? real.query('BEGIN; SELECT 1/0')
+        : real.query(sql, ...resto));
+      falha.release = () => real.release();
+      return falha;
+    });
+    logSpy.mockClear();
+    const chave = 'chave-reserva-0001';
+    const res = await postar({ body: body(), chave });
+    expect(res.status).toBe(201);
+    expect(ultimaLinhaDeTempo().abertura).toBe('fila');
+    expect(await contar('sales')).toBe(1);
+    expect(await saldo('products', ID.ultimo)).toBe(0);
+    await assentar();
+
+    // Enquanto a pausa dura, as proximas vendas nem tentam o envio unico.
+    logSpy.mockClear();
+    const repeticao = await postar({ body: body(), chave });
+    expect(repeticao.status).toBe(201);
+    expect(repeticao.body.idempotent_replay).toBe(true);
+    expect(await contar('sales')).toBe(1);
+
+    // Passada a pausa, volta ao envio unico.
+    vendaRapida._resetarParaTeste();
+    logSpy.mockClear();
+    const nova = await postar({ body: { items: [item(ID.simples, 1, 10)], payment_method: 'pix' } });
+    expect(nova.status).toBe(201);
+    expect(ultimaLinhaDeTempo().abertura).toBe('um_envio');
+    await assentar();
+  });
+
+  test('caixa obrigatorio: sessao aberta entra no pagamento; fechada recusa antes de ler os produtos', async () => {
+    await semear({ settings: { caixa_enabled: true }, caixaAberto: true });
+    const aberta = await postar({ body: body() });
+    expect(aberta.status).toBe(201);
+    const { rows } = await pool.query(`SELECT sessao_id FROM sale_payments WHERE sale_id = $1`, [aberta.body.sale.id]);
+    expect(rows).toEqual([{ sessao_id: ID.sessao }]);
+    await assentar();
+
+    await semear({ settings: { caixa_enabled: true } });
+    logSpy.mockClear();
+    const fechada = await postar({ body: body() });
+    expect(fechada.status).toBe(409);
+    expect(fechada.body).toEqual({ error: 'Abra o caixa antes de finalizar a venda.', code: 'CAIXA_REQUIRED' });
+    // Abertura + ROLLBACK: nenhuma outra consulta.
+    expect(ultimaLinhaDeTempo().queries_tx).toBe(2);
+  });
+});
+// <<< p-144
