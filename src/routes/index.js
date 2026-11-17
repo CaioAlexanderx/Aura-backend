@@ -49,6 +49,8 @@ router.use('/me/credit', require('./creditResumoVencimento').meRouter);
 // Gestão Aura lê em screen_views. Empresa e usuário vêm do token.
 router.use('/usage', require('./usageScreens'));
 router.use('/usage', require('./usageConexao'));
+// 17/11/2026 (p-151): tempos da venda no Caixa, medidos no app (migration 455).
+router.use('/usage', require('./usagePdvTiming'));
 
 // 18/10/2026 (t3-05): GET /fiscal/ncm/:codigo — o NCM existe na tabela da Receita?
 router.use('/fiscal', require('./fiscalNcm'));
