@@ -123,6 +123,10 @@ function naEscolhaManual(cat) {
 const APELIDOS = {
   income: {
     'canal digital': ['vendas', 'loja online'],
+    // Pedido separado de venda (B4a, 17/11/2026): o sinal e a conta a
+    // receber do pedido sao receita de vendas (revisao da Celia).
+    'sinal de pedido': ['vendas'],
+    'pedido a receber': ['vendas'],
     venda: ['vendas'],
     servico: ['servicos'],
     servico_pj: ['servicos'],

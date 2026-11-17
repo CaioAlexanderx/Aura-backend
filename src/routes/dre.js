@@ -21,6 +21,16 @@ const DEFAULT_LINE_MAP = {
   'servico':          { line: 'receita_bruta',    group: 'Receita Bruta', sign: 1 },
   'servico_pj':       { line: 'receita_bruta',    group: 'Receita Bruta', sign: 1 },
   'receita_diversa':  { line: 'outras_receitas',  group: 'Outras Receitas', sign: 1 },
+  // Pedido separado de venda (B4a/B6, 17/11/2026, revisao da Celia): o sinal
+  // e receita de vendas (regime de caixa: entra no dia em que o dinheiro
+  // entrou), nao Adiantamento de clientes. A devolucao do sinal vai na MESMA
+  // linha: e lancamento expense, entao entra com valor negativo e o liquido
+  // do pedido cancelado da zero. Nunca em Despesas. "Pedido a receber" e
+  // pendente (o DRE so le confirmado); mapeado so para nunca cair em Outros.
+  'sinal de pedido':    { line: 'receita_bruta',  group: 'Receita Bruta', sign: 1 },
+  'devolução de sinal': { line: 'receita_bruta',  group: 'Receita Bruta', sign: 1 },
+  'devolucao de sinal': { line: 'receita_bruta',  group: 'Receita Bruta', sign: 1 },
+  'pedido a receber':   { line: 'receita_bruta',  group: 'Receita Bruta', sign: 1 },
   // Deduções
   'imposto':          { line: 'deducoes',         group: 'Deduções', sign: -1 },
   'das':              { line: 'deducoes',         group: 'Deduções', sign: -1 },

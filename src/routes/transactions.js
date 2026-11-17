@@ -418,6 +418,20 @@ router.patch('/:txId', async function(req, res) {
           code: 'CREDIT_STATUS_DERIVED',
         });
       }
+      // 17/11/2026 (B4a): o lancamento do pedido separado de venda so muda
+      // pelo pedido. Valor igual ao atual passa (o modal manda amount em todo
+      // Salvar); baixa, desfazer e valor diferente sao recusados.
+      if (cur && quadro.eDoPedido(cur)) {
+        var mudaStatus = req.body.status !== undefined && req.body.status !== cur.status;
+        var mudaValor = req.body.amount !== undefined && Math.abs(parseFloat(req.body.amount) - parseFloat(cur.amount)) > 0.005;
+        if (mudaStatus || mudaValor || paidAmount !== null) {
+          return res.status(409).json({
+            error: 'Este lançamento é de um pedido guardado no Caixa e muda pelo próprio pedido: o sinal, a conclusão no Caixa ou o cancelamento.',
+            code: 'PEDIDO_LANCAMENTO_DERIVADO',
+          });
+        }
+        delete req.body.amount;
+      }
       var link = cur ? resolveSaleLink(cur.idempotency_key) : null;
       if (req.body.amount !== undefined && link && link.source === 'credit') {
         if (Math.abs(parseFloat(req.body.amount) - parseFloat(cur.amount)) > 0.005) {
