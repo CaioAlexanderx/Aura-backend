@@ -97,20 +97,22 @@ const { cotarLote, codigoDoLote } = require('../services/studioLote');
 const { buildLadder } = require('../services/studioQtyTiers');
 const {
   computeBackDelta, computeMiddleDelta,
-  carregarFaixas, cotarItens, totaisDoPedido, prazoDaSacola, faixasDoProduto,
+  carregarFaixas, totaisDoPedido, prazoDaSacola, faixasDoProduto,
   itensParaCobranca, r2,
 } = require('../services/precoDoStudio');
 const { PRAZO_HORAS_STUDIO } = require('../jobs/lojaPixExpiradoJob');
 const { montarConfirmacao } = require('../services/confirmacaoDoPedido');
 const { politicaDeRevisoes } = require('../services/politicaDeRevisoes');
 const { montarRepeticao } = require('../services/repetirPedido');
-// Ajuste da arte na peca (posicao/escala/giro, fonte e tamanho do texto):
-// chaves laterais do customization, limpas antes de cotar e de gravar.
-const { sanitizarAjustesDaArte } = require('../services/ajusteDaArte');
 const { filtroDeFoto } = require('../services/catalogoPaginado');
 // Selo NOVO com a mesma regra da loja comum (redesign 09/2026).
 const { ehNovo } = require('../services/homeDaLoja');
-const { initialArtStatus } = require('../services/artReview');
+// Item personalizado (p-174): validacao da customization, cotacao (com a
+// limpeza do ajuste da arte) e status inicial da triagem num servico so,
+// o mesmo que a loja comum vai usar.
+const {
+  validateCustomizationValues, cotarPersonalizados, statusInicialDaArte,
+} = require('../services/personalizavel');
 // A MESMA validacao de CPF/CNPJ nas duas lojas (services/cpfCnpj.js).
 const { validateCpfCnpj } = require('../services/cpfCnpj');
 
@@ -610,100 +612,11 @@ router.get('/:slug/studio/products', async (req, res) => {
 });
 
 // ─────────────────────────────────────────────
-// Validacao de customization vs customization_config do produto
-//
-// 18/08/2026 — S0 (F1_CONTEUDO_STUDIO.md): a regra "todo campo required
-// e exigido isoladamente" tornava a compra IMPOSSIVEL em loja publicada.
-// A Sheid Mania marcou "Obrigatorio" em Texto, Foto do cliente, Template
-// da galeria e Cor ao mesmo tempo. A intencao da lojista e legitima ("o
-// cliente precisa me dizer o que estampar"), mas `image` e `template`
-// preenchem o MESMO slot de arte — o proprio motor visual le
-// `values.image || values.template` (compose3dMug.ts). Exigir os dois
-// juntos e uma condicao que nenhum cliente consegue satisfazer.
-//
-// Duas correcoes, ambas espelhadas em useStorefront.ts (commitConfigure)
-// no aura-app. As duas validacoes precisam concordar: divergencia entre
-// elas faz o app aceitar o item no carrinho e o backend recusar o pedido
-// no fechamento — o pior dos dois mundos pro cliente.
-//
-//   1. GRUPO DE ORIGEM DA ARTE: campos `image` e `template` do mesmo lado
-//      formam um grupo. Se ao menos um for required, basta UM preenchido.
-//      Com um unico campo do tipo no lado, o comportamento e identico ao
-//      anterior — nao ha relaxamento onde a lojista pediu um campo so.
-//      `art_service = 'designer'` ("crie minha arte pra mim") satisfaz o
-//      grupo inteiro: quem contratou a criacao nao tem arte pra enviar.
-//
-//   2. LADO INATIVO: campo `side: 'back'` so e exigido quando o verso
-//      esta ativo, replicando effectiveBackSelected do app. Antes, produto
-//      com verso opcional e campo obrigatorio no verso era aceito pelo app
-//      e recusado aqui.
+// Validacao de customization vs customization_config do produto, cotacao
+// do item personalizado e status inicial da arte: moram em
+// services/personalizavel.js desde o p-174 (17/11/2026), para a loja
+// comum usar as MESMAS regras. A rota so chama.
 // ─────────────────────────────────────────────
-const ART_SOURCE_TYPES = new Set(['image', 'template']);
-
-function isFilledValue(v) {
-  return !(v == null || (typeof v === 'string' && !v.trim()));
-}
-
-// Mesma regra de effectiveBackSelected (aura-app): verso sem cobranca
-// esta sempre ativo; com cobranca, depende da escolha do cliente.
-function backIsActive(config, values) {
-  if (!config || config.has_back !== true) return false;
-  if (config.back_charge_enabled !== true) return true;
-  return !!values && values.has_back_selected === true;
-}
-
-// Mesma regra do verso para a faixa central (caneca/copo).
-function middleIsActive(config, values) {
-  if (!config || config.has_middle !== true) return false;
-  if (config.middle_charge_enabled !== true) return true;
-  return !!values && values.has_middle_selected === true;
-}
-
-function fieldSideOf(f) {
-  if (!f) return 'front';
-  if (f.side === 'back') return 'back';
-  if (f.side === 'middle') return 'middle';
-  return 'front';
-}
-
-function validateCustomizationValues(config, values) {
-  if (!config || typeof config !== 'object') return null; // produto nao personalizavel
-  if (!values || typeof values !== 'object') {
-    return 'customization obrigatoria';
-  }
-  if (!Array.isArray(config.fields)) return null;
-
-  const backActive = backIsActive(config, values);
-  const middleActive = middleIsActive(config, values);
-  const ladoAtivo = (lado) =>
-    lado === 'back' ? backActive : lado === 'middle' ? middleActive : true;
-  const fields = config.fields.filter((f) => f && ladoAtivo(fieldSideOf(f)));
-
-  // "Crie minha arte pra mim" dispensa o cliente de enviar arte.
-  const artServiceHired = fields.some(
-    (f) => f.config && f.config.is_art_service === true && values[f.id] === 'designer'
-  );
-
-  // Grupo de origem da arte, por lado.
-  for (const side of ['front', 'back', 'middle']) {
-    const group = fields.filter(
-      (f) => ART_SOURCE_TYPES.has(f.type) && fieldSideOf(f) === side
-    );
-    if (!group.some((f) => f.required)) continue;
-    if (artServiceHired) continue;
-    if (group.some((f) => isFilledValue(values[f.id]))) continue;
-    const labels = group.map((f) => `"${f.label || f.id}"`).join(' ou ');
-    return `informe a arte em ${labels}`;
-  }
-
-  for (const f of fields) {
-    if (ART_SOURCE_TYPES.has(f.type)) continue; // ja coberto pelo grupo
-    if (f.required && !isFilledValue(values[f.id])) {
-      return `campo "${f.label || f.id}" obrigatorio`;
-    }
-  }
-  return null;
-}
 
 // ─────────────────────────────────────────────
 // POST /storefront/:slug/studio/upload
@@ -987,10 +900,7 @@ router.post('/:slug/studio/order', async (req, res) => {
     // preco de venda e decisao do servidor.
     const productMap = await produtosDoCorpo(cid, items);
     const faixas = await carregarFaixas(db, cid);
-    const cot = cotarItens({
-      items, produtos: productMap, faixas,
-      validar: validateCustomizationValues, sanear: sanitizarAjustesDaArte,
-    });
+    const cot = cotarPersonalizados({ items, produtos: productMap, faixas });
     if (cot.erro) return res.status(400).json({ error: cot.erro });
 
     const orderItems = cot.linhas.map(({ produto: p, quantidade: qty, customization, preco }) => {
@@ -1017,7 +927,7 @@ router.post('/:slug/studio/order', async (req, res) => {
         subtotal:      preco.total,
         customization: customization,
         // S5 — entra na fila de triagem so quem mandou arte propria.
-        art_review_status: initialArtStatus(p.customization_config, customization),
+        art_review_status: statusInicialDaArte(p.customization_config, customization),
         // metadata auxiliar (nao persistida — so resposta e cobranca)
         _base_price: preco.base,
         _choices_delta: preco.opcoes,
@@ -1413,10 +1323,7 @@ router.post('/:slug/studio/cotacao', async (req, res) => {
 
     const productMap = await produtosDoCorpo(cid, items);
     const faixas = await carregarFaixas(db, cid);
-    const cot = cotarItens({
-      items, produtos: productMap, faixas,
-      validar: validateCustomizationValues, sanear: sanitizarAjustesDaArte,
-    });
+    const cot = cotarPersonalizados({ items, produtos: productMap, faixas });
     if (cot.erro) return res.status(400).json({ error: cot.erro, indice: cot.indice });
 
     // Frete so quando a pessoa ja disse que quer receber em casa. Fora da
