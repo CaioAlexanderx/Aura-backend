@@ -265,14 +265,21 @@ function _payLabel(method) {
   return m[method] || method;
 }
 
+// 17/11/2026 (p-162): as consultas do cupom saem juntas. Cada ida ao banco
+// custa ~190 ms (Railway us-west x Supabase Sao Paulo, config/database.js);
+// em fila eram 4 idas antes do HTML (5 no crediario). Agora as 4 saem numa
+// rodada so; as parcelas continuam depois, so na venda no crediario (venda
+// comum nao consulta credit_installments). O resultado e o mesmo de antes,
+// campo a campo -- o HTML do cupom nao muda (cupom.logoDaLoja.test.js trava
+// byte a byte).
 async function _loadSaleData(saleId, companyId) {
-  const { rows: companyRows } = await db.query(
+  const companyQ = db.query(
     `SELECT legal_name, trade_name, cnpj, phone, logo_url,
             address_street, address_number, address_city, address_state
      FROM companies WHERE id=$1`, [companyId]
   );
   // P0 #6 FIX: prefer employee name (cashier) over user name (owner)
-  const { rows: saleRows } = await db.query(
+  const saleQ = db.query(
     `SELECT s.*,
             COALESCE(e.name, u.full_name) AS seller_name,
             c.name AS customer_name
@@ -282,8 +289,7 @@ async function _loadSaleData(saleId, companyId) {
      LEFT JOIN customers c ON c.id = s.customer_id
      WHERE s.id=$1 AND s.company_id=$2`, [saleId, companyId]
   );
-  if (!saleRows.length) return null;
-  const { rows: itensLidos } = await db.query(
+  const itemsQ = db.query(
     `SELECT si.*,
             COALESCE(p.name, si.product_name_snapshot) AS product_name,
             pv.sku_suffix AS variant_label,
@@ -296,6 +302,20 @@ async function _loadSaleData(saleId, companyId) {
      LEFT JOIN product_variants pv ON pv.id=si.variant_id
      WHERE si.sale_id=$1`, [saleId]
   );
+  const paymentsQ = db.query(
+    `SELECT method, amount FROM sale_payments WHERE sale_id=$1`, [saleId]
+  );
+  // Promise.allSettled: nenhuma rejeicao fica solta (unhandledRejection)
+  // quando outra consulta falha primeiro.
+  const settled = await Promise.allSettled([companyQ, saleQ, itemsQ, paymentsQ]);
+  const firstErr = settled.find((r) => r.status === 'rejected');
+  if (firstErr) throw firstErr.reason;
+  const [companyRes, saleRes, itemsRes, paymentsRes] = settled.map((r) => r.value);
+
+  const companyRows = companyRes.rows;
+  const saleRows = saleRes.rows;
+  if (!saleRows.length) return null;
+  const itensLidos = itemsRes.rows;
   // 14/11/2026 (decisao do Caio): o cupom sai com o NOME da cor ("Off White
   // · M"), o mesmo do Caixa, da nota e da vitrine (services/nomeDaCor.js),
   // e nao com o sku_suffix ("OFF WHITE-M"). Variante sem atributo segue com o
@@ -306,15 +326,13 @@ async function _loadSaleData(saleId, companyId) {
     const rotulo = rotuloDaVariante({ color_name: variant_color_name, sku_suffix: i.variant_label, attributes: variant_attrs });
     return rotulo ? { ...resto, variant_label: rotulo } : resto;
   });
-  const { rows: payments } = await db.query(
-    `SELECT method, amount FROM sale_payments WHERE sale_id=$1`, [saleId]
-  );
-  // 14/09/2026: parcelas do crediario para o cupom. So consulta quando a
-  // venda (ou parte dela) foi no crediario — credit_installments guarda o
-  // sale_id. Data ja formatada no SQL para nao depender do fuso do Node.
+  const payments = paymentsRes.rows;
   let installments = [];
   const isCrediario = String(saleRows[0].payment_method || '').toLowerCase() === 'crediario'
     || payments.some(p => String(p.method || '').toLowerCase() === 'crediario');
+  // 14/09/2026: parcelas do crediario para o cupom. So consulta quando a
+  // venda (ou parte dela) foi no crediario -- credit_installments guarda o
+  // sale_id. Data ja formatada no SQL para nao depender do fuso do Node.
   if (isCrediario) {
     try {
       const { rows } = await db.query(
