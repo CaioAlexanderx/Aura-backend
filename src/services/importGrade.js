@@ -231,7 +231,7 @@ function montarGrades(valid, linhaDe, deps) {
     const nomes = diferentes('name', (a, b) => chaveTexto(a) === chaveTexto(b));
     if (nomes) {
       avisos.push({ tipo: 'nome_diferente', ...rotulo, valores: nomes,
-        mensagem: `SKU ${base.sku}: linhas com nomes diferentes. O produto fica com o nome "${base.name}".` });
+        mensagem: `Código ${base.sku}: linhas com nomes diferentes. O produto fica com o nome "${base.name}".` });
     }
     const repetidas = [...celulas.values()].filter((c) => c.linhas.length > 1);
     if (repetidas.length) {
