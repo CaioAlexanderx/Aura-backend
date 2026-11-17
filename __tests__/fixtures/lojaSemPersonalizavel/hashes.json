@@ -1,0 +1,30 @@
+{
+  "loja_simples.home": {
+    "bytes": 320775,
+    "sha256": "a873efaf9346fc89efef7bd4af6e0de871ebacdce07a6db4f1729c9c9c8f6417"
+  },
+  "loja_simples.payload": {
+    "bytes": 5184,
+    "sha256": "4c2f85d75faf360a98f3b3d79880f5fba7437f3cc33628233c57504f4fea01d8"
+  },
+  "loja_categorias_promocao.home": {
+    "bytes": 336394,
+    "sha256": "f195c87600a870e267773f3f7f483b6ee0e50c2d5ad87036159112cf1e637708"
+  },
+  "loja_categorias_promocao.payload": {
+    "bytes": 12854,
+    "sha256": "3e184bd377425fdda01718d5f58f91184e1eaf340802c5b240870e9f239c1f1f"
+  },
+  "loja_variacao.home": {
+    "bytes": 326125,
+    "sha256": "923025a2a82100c98a2c375604a5ee7c8ff2b9a4d61a96bfb2e888b12b9ec4dc"
+  },
+  "loja_variacao.payload": {
+    "bytes": 10457,
+    "sha256": "f98b66fd987248b01a7ec2d18e983c527bb10d2b0cf757f99480b207b253e862"
+  },
+  "loja_variacao.peca": {
+    "bytes": 327536,
+    "sha256": "aad3b52178e3bdb24f34bd48608a8f6eb21df2bfa16cd71a771f3fac51999007"
+  }
+}

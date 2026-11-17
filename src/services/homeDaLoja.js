@@ -19,7 +19,7 @@
 
 function bd() { return require('../config/database'); }
 
-const { EM_ESTOQUE, COM_FOTO, NA_VITRINE, filtroDeFoto, VENDIDOS_RECENTES } = require('./catalogoPaginado');
+const { EM_ESTOQUE, PERSONALIZAVEL, COM_FOTO, NA_VITRINE, filtroDeFoto, VENDIDOS_RECENTES } = require('./catalogoPaginado');
 const { colunasPromo, colunasPromoNulas, comColunasPromo } = require('./precoEfetivo');
 
 /** Abaixo disto o bloco não aparece: um cartão sozinho lê como defeito. */
@@ -104,12 +104,18 @@ async function maisVendidos({ cid, visibilityWhere, exigeFoto }) {
  * Até 4 peças no limite, ordenadas por quem vendeu mais recentemente —
  * o que está acabando E tem procura vem antes do que está acabando por
  * falta dela.
+ *
+ * O personalizável fica de fora (p-179): ele entra na loja sem conferir
+ * estoque (exceção do EM_ESTOQUE) e o saldo dele, quase sempre 0, cairia
+ * no NO_LIMITE — "Últimas 0 unidades" de uma peça feita sob encomenda.
+ * Para quem não é personalizável o filtro é sempre verdadeiro.
  */
 async function ultimasUnidades({ cid, visibilityWhere, exigeFoto }) {
   const sql = (com) => `
     SELECT ${colunas(com)}, ${ESTOQUE_TOTAL} AS restam, ${VENDIDOS_RECENTES} AS vendidos
       FROM products
      WHERE ${filtrosBase(visibilityWhere, exigeFoto)}
+       AND NOT ${PERSONALIZAVEL}
        AND ${NO_LIMITE}
      ORDER BY vendidos DESC, restam ASC, created_at DESC
      LIMIT ${LIMITE_ULTIMAS_UNIDADES}`;

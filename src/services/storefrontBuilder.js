@@ -500,12 +500,26 @@ function listVisibilityWhere(cidParam) {
 // A pagina nasce com UMA pagina de produtos, nao com o catalogo. Antes
 // eram 500 (419 KB na Finesse) pra desenhar 24. O resto chega pela rota
 // /storefront/:slug/catalogo conforme a cliente navega.
-const { POR_PAGINA, EM_ESTOQUE, NA_VITRINE, filtroDeFoto, contarPorCategoria, arvoreDeCategorias, facetasDoCatalogo, faixaDePreco } = require('./catalogoPaginado');
+const { POR_PAGINA, EM_ESTOQUE, PERSONALIZAVEL, NA_VITRINE, filtroDeFoto, contarPorCategoria, arvoreDeCategorias, facetasDoCatalogo, faixaDePreco } = require('./catalogoPaginado');
 const LIMITE_DO_PAYLOAD = POR_PAGINA;
 
+/**
+ * Quantos produtos a loja tem, e se algum deles e personalizavel.
+ *
+ * `temPersonalizavel` (p-179, loja unica 3.2a): a loja mostra ao menos um
+ * produto ativo com is_personalizable e customization_config, visivel na
+ * vitrine (NA_VITRINE) e com foto quando a loja exige. E o que decide,
+ * nas proximas partes (p-180, p-182), se a pagina leva o CSS e o JS do
+ * personalizavel. Vai NA MESMA consulta da contagem, que ja percorre o
+ * catalogo inteiro da loja: nenhuma ida a mais ao banco.
+ *
+ * Falhou, as duas respostas sao as seguras: contagem 0 (a loja abre sem
+ * o aviso, como sempre) e sem personalizavel (a pagina de antes).
+ */
 async function contarProdutosDaLoja(cid, exigeFoto) {
   const sql = `
-    SELECT COUNT(*)::int AS n
+    SELECT COUNT(*)::int AS n,
+           COALESCE(bool_or(${PERSONALIZAVEL} AND ${NA_VITRINE}), false) AS tem_personalizavel
     FROM products
     WHERE ${listVisibilityWhere('$1')}
       AND is_active IS NOT FALSE
@@ -514,10 +528,11 @@ async function contarProdutosDaLoja(cid, exigeFoto) {
   `;
   try {
     const { rows } = await db.query(sql, [cid]);
-    return rows[0] ? rows[0].n : 0;
+    const r = rows[0] || {};
+    return { total: r.n || 0, temPersonalizavel: r.tem_personalizavel === true };
   } catch (e) {
     // Contagem e informativa: se falhar, a loja abre sem o aviso.
-    return 0;
+    return { total: 0, temPersonalizavel: false };
   }
 }
 
@@ -944,7 +959,7 @@ async function buildStorefront(config) {
   const exigeFoto = config.require_product_image === true;
 
   const products = await fetchStorefrontProducts(cid, featuredIds, hiddenIds, exigeFoto);
-  const catalogoTotal = await contarProdutosDaLoja(cid, exigeFoto);
+  const { total: catalogoTotal, temPersonalizavel } = await contarProdutosDaLoja(cid, exigeFoto);
   // Barra de categorias: vem do BANCO, nao dos produtos carregados. Ver
   // contarPorCategoria — com paginacao de 24, derivar da pagina mostrava
   // so as categorias que caiam nela.
@@ -1224,6 +1239,10 @@ async function buildStorefront(config) {
     storefront_url: urlDaLoja(config),
     // p-118: tem_promocao e campanha, so quando valem (services/campanhaDaLoja.js).
     ...chavesDaCampanha,
+    // p-179: so na loja que mostra produto personalizavel (ver
+    // contarProdutosDaLoja). Sem ele, a chave nao existe e o payload e a
+    // pagina saem byte a byte iguais (lojaSemPersonalizavel.fixture.test.js).
+    ...(temPersonalizavel ? { tem_personalizavel: true } : {}),
   };
 }
 
@@ -1231,6 +1250,9 @@ module.exports = {
   // parseHHMM so e exportado pra teste: ver __tests__/horario24h.test.js.
   // computeOpenState ja saia daqui embaixo.
   parseHHMM,
+  // So pra teste (p-179): a contagem e o tem_personalizavel no banco de
+  // verdade, em lojaTemPersonalizavel.banco.test.js.
+  contarProdutosDaLoja,
   buildStorefront, parseFeaturedIds, parseHiddenIds, computeOpenState,
   formasNaEntregaNoPayload,
   // URL propria do produto (08/09/2026).
