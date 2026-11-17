@@ -462,12 +462,25 @@ describe('POST /nfe55/venda/:saleId/emitir', () => {
     expect(p.body).toMatchObject({ pode_emitir: false, bloqueio: { code: 'NFE_REGIME_NORMAL_FORA_DO_V1' } });
   });
 
-  it('422 DIFAL: consumidor final de outra UF sem IE', async () => {
+  it('Simples: consumidor final de outra UF sem IE sai em 6108, sem ICMSUFDest (17/11)', async () => {
+    ctx.soap.autorizar.mockImplementation(async ({ signedNfeXml }) => AUTORIZADO(signedNfeXml));
     const r = await emitir(V_DIFAL);
-    expect(r.status).toBe(422);
-    expect(r.body.code).toBe('NFE_DIFAL_FORA_DO_V1');
-    expect(r.body.error).toMatch(/NFC-e/);
-    expect(state.reservas).toBe(0);
+    expect(r.status).toBe(201);
+    const xml = ctx.soap.autorizar.mock.calls[0][0].signedNfeXml;
+    expect(xml).toContain('<idDest>2</idDest>');
+    expect(xml).toContain('<CFOP>6108</CFOP>');
+    expect(xml).not.toContain('ICMSUFDest');
+  });
+
+  it('MEI: consumidor final de outra UF sem IE sai em 6102 (6108 é recusado ao MEI), sem ICMSUFDest', async () => {
+    state.company.tax_regime = 'mei';
+    ctx.soap.autorizar.mockImplementation(async ({ signedNfeXml }) => AUTORIZADO(signedNfeXml));
+    const r = await emitir(V_DIFAL);
+    expect(r.status).toBe(201);
+    const xml = ctx.soap.autorizar.mock.calls[0][0].signedNfeXml;
+    expect(xml).toContain('<CFOP>6102</CFOP>');
+    expect(xml).not.toContain('<CFOP>6108</CFOP>');
+    expect(xml).not.toContain('ICMSUFDest');
   });
 
   it('outra UF com cliente contribuinte sai 6102', async () => {
