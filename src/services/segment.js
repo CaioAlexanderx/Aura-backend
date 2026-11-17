@@ -42,6 +42,7 @@
 'use strict';
 
 const AppError = require('../errors/AppError');
+const { marcaDaAtivacao, sqlMarcaSeAusente } = require('./personalizadosAtivacao');
 
 const SEGMENTS = ['varejo', 'matcon', 'otica', 'assistencia', 'studio', 'adega', 'outro'];
 const SEGMENT_SOURCES = ['cnae', 'landing', 'user', 'staff'];
@@ -153,12 +154,22 @@ async function setCompanyVertical(conn, companyId, vertical, oldVertical, { best
 
   const sync = async () => {
     if (vertical === 'studio') {
+      // 17/11/2026 (p-172): primeira vez ligada -> grava a data de ativacao
+      // (services/personalizadosAtivacao.js). O pdv_settings do RETURNING
+      // acima e o de antes desta sincronizacao. A guarda no SQL nunca troca
+      // uma data ja gravada.
+      const marca = marcaDaAtivacao({
+        antes: rows[0] ? rows[0].pdv_settings : null,
+        verticalAntes: oldVertical,
+        ligadaDepois: true,
+      });
       await conn.query(
         `UPDATE companies
            SET pdv_settings = COALESCE(pdv_settings, '{}'::jsonb)
                              || jsonb_build_object('studio_enabled', true)
+                             || ${sqlMarcaSeAusente('$2')}
          WHERE id = $1`,
-        [companyId]
+        [companyId, marca]
       );
     } else if (oldVertical === 'studio') {
       // desativando o studio — desliga o toggle pra nao vazar telas
