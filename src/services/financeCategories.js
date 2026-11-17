@@ -123,10 +123,6 @@ function naEscolhaManual(cat) {
 const APELIDOS = {
   income: {
     'canal digital': ['vendas', 'loja online'],
-    // Pedido separado de venda (B4a, 17/11/2026): o sinal e a conta a
-    // receber do pedido sao receita de vendas (revisao da Celia).
-    'sinal de pedido': ['vendas'],
-    'pedido a receber': ['vendas'],
     venda: ['vendas'],
     servico: ['servicos'],
     servico_pj: ['servicos'],
@@ -163,10 +159,26 @@ const APELIDOS = {
   },
 };
 
-// Textos da federacao de karate (anuidade): fora da migracao.
+// Pedido separado de venda (B4a/B6, 17/11/2026, revisao da Celia). Casados
+// ANTES dos prefixos de resolverTexto: "Devolucao de sinal" comeca com
+// "devolu" e cairia em "Trocas e devolucoes" (linha deducoes do DRE).
+//   - "Sinal de pedido" e "Pedido a receber" (income) sao Vendas
+//     (receita_vendas).
+//   - "Devolucao de sinal" (expense) vai na MESMA linha do sinal com valor
+//     negativo. Nenhuma categoria de despesa tem linha de receita
+//     (DRE_LINES.expense), entao ela nao liga a categoria nenhuma: fica fora
+//     da migracao e da contagem, como a anuidade. Ligar a qualquer despesa
+//     ou a "Trocas e devolucoes" a poria em Despesas ou em deducoes.
+const TEXTOS_DO_PEDIDO = {
+  income: { 'sinal de pedido': ['vendas'], 'pedido a receber': ['vendas'] },
+  expense: { 'devolucao de sinal': null },
+};
+
+// Textos da federacao de karate (anuidade) e a devolucao do sinal do pedido:
+// fora da migracao.
 function foraDaMigracao(texto) {
   const n = normalizarNome(texto);
-  return !n || /^annuity_/.test(n) || n === 'anuidade';
+  return !n || /^annuity_/.test(n) || n === 'anuidade' || n === 'devolucao de sinal';
 }
 
 // ── Indice em memoria das categorias de uma loja ────────────────────────
@@ -198,7 +210,10 @@ function resolverTexto(kind, texto, indice) {
   const direto = indice.topo.get(kind + '|' + n);
   if (direto) return direto;
   let alvo = null;
-  if (/^crediario/.test(n)) alvo = kind === 'income' ? ['crediario'] : null;
+  if (TEXTOS_DO_PEDIDO[kind] && Object.prototype.hasOwnProperty.call(TEXTOS_DO_PEDIDO[kind], n)) {
+    alvo = TEXTOS_DO_PEDIDO[kind][n];
+    if (!alvo) return null;
+  } else if (/^crediario/.test(n)) alvo = kind === 'income' ? ['crediario'] : null;
   else if (/^troca/.test(n) || /^devolu/.test(n)) alvo = ['trocas e devolucoes'];
   else if (APELIDOS[kind] && APELIDOS[kind][n]) alvo = APELIDOS[kind][n];
   else if (APELIDOS[kind] && APELIDOS[kind][n.replace(/\s+/g, '_')]) alvo = APELIDOS[kind][n.replace(/\s+/g, '_')];

@@ -80,6 +80,26 @@ describe('chaves e categorias', () => {
     expect(cat.PADROES.find((p) => p.kind === 'income' && p.name === 'Vendas').dre).toBe('receita_vendas');
   });
 
+  test('guarda: "Devolução de sinal" NAO cai em deducoes pelo prefixo "devolu"', () => {
+    let n = 0;
+    const rows = [];
+    cat.linhasDosPadroes(cat.PADROES).forEach((l) => {
+      n += 1;
+      const pai = l.parent ? rows.find((r) => !r.parent_id && r.kind === l.kind && r.name === l.parent) : null;
+      rows.push({ id: 'c' + n, kind: l.kind, parent_id: pai ? pai.id : null, name: l.name, name_norm: cat.normalizarNome(l.name), is_system: l.is_system, archived_at: null });
+    });
+    const idx = cat.montarIndice(rows);
+    for (const t of ['Devolução de sinal', 'devolucao de sinal', '  DEVOLUÇÃO   DE SINAL ']) {
+      expect(cat.resolverTexto('expense', t, idx)).toBeNull();
+      expect(cat.foraDaMigracao(t)).toBe(true);
+    }
+    // O prefixo continua valendo para a devolucao de venda de sempre.
+    expect(cat.resolverTexto('expense', 'devolucao', idx).name).toBe('Trocas e devoluções');
+    expect(cat.resolverTexto('expense', 'Devolução de venda', idx).name).toBe('Trocas e devoluções');
+    expect(cat.foraDaMigracao('Sinal de pedido')).toBe(false);
+    expect(cat.resolverTexto('income', 'Sinal de pedido', idx).name).toBe('Vendas');
+  });
+
   test('o Financeiro reconhece o lancamento do pedido (e so ele)', () => {
     expect(quadro.eDoPedido({ idempotency_key: 'pedido-areceber-1' })).toBe(true);
     expect(quadro.eDoPedido({ idempotency_key: 'pedido-sinal-1' })).toBe(true);
