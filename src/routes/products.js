@@ -73,6 +73,12 @@ const {
 const { lerCamposNfse, camposNfseDaLinha, COLUNAS_SELECT: COLS_NFSE } = require('../services/camposNfseDoItem');
 // Migration 442 — em que nota o item sai ('nfce' | 'nfse' | null = segue o tipo).
 const { lerNotaFiscal, notaFiscalOut } = require('../services/notaDoItem');
+// B2 (p-61b, 17/11/2026): reserva calculada do pedido guardado no Caixa.
+// Uma consulta a mais, so com produto de id uuid na pagina; falhou, reserva 0.
+// Atras da trava PEDIDO_LIBERADO (a mesma do B1): desligada, nenhuma consulta
+// nova e a resposta sai byte a byte igual a de antes.
+const { lerReservasSemFalhar, reservadoDoProduto, reservasPorVariante } = require('../services/reservaDoPedido');
+const { pedidoLiberado } = require('../services/pedidoBalcao');
 
 // ─── Fase 1 fornecedores (16/09/2026) ────────────────────────
 //
@@ -375,6 +381,20 @@ router.get('/', async (req, res) => {
       // 427 (De/Por): sem promocao, promo_* nulos e preco_efetivo = price.
       ...camposDoProduto(r, agora),
     }));
+
+    // B2: pecas separadas em pedidos do balcao abertos. stock_qty continua o
+    // da prateleira; "livres para vender" = estoque - reserved_qty (no app).
+    // reserved_by_variant: { <variant_id>: qtd } so com as variantes que tem
+    // reserva ({} quando nenhuma) — o Caixa avisa no toque da variante sem
+    // outra ida ao servidor. Os GET de variantes (um produto e lote, usado
+    // pelas etiquetas) nao mudam.
+    if (pedidoLiberado(req)) {
+      const reservas = await lerReservasSemFalhar(db, cid, products.map((p) => p.id), 'products');
+      for (const p of products) {
+        p.reserved_qty = reservadoDoProduto(reservas, p.id);
+        p.reserved_by_variant = reservasPorVariante(reservas, p.id);
+      }
+    }
 
     res.json({ products, total: parseInt(countRes.rows[0]?.total) || 0, limit, offset, plan_limit: planLimit });
   } catch (err) { console.error('[products] list error:', err.message); res.status(500).json({ error: 'Erro ao listar produtos' }); }

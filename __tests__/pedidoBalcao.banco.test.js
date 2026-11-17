@@ -102,7 +102,7 @@ beforeAll(async () => {
 
   const produto = (id, empresa, nome, preco, estoque) =>
     q(`INSERT INTO products (id, company_id, name, price, stock_qty) VALUES ($1, $2, $3, $4, $5)`, [id, empresa, nome, preco, estoque]);
-  await produto(ID.camiseta, ID.loja, 'Camiseta basica', 59.9, 4);
+  await produto(ID.camiseta, ID.loja, 'Camiseta basica', 59.9, 100);
   await produto(ID.caneca, ID.loja, 'Caneca personalizada', 35, 10);
   await produto(ID.daFilial, ID.filial, 'Bone da filial', 20, 3);
   await produto(ID.daOutra, ID.deFora, 'Produto de outro dono', 9, 9);
