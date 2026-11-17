@@ -101,6 +101,8 @@ const nfseAutomatica = require('../services/nfseAutomatica');
 const nfseAutomaticaRepo = require('../services/nfseAutomaticaRepo');
 // 12/11/2026: prazo do vale-troca da loja da venda (pdv_settings).
 const { prazoDoValeEmDias } = require('../utils/valeTrocaPrazo');
+// 17/11/2026 (b-troca-prazo-nfce): previa do caminho fiscal da troca por venda.
+const { previaFiscalDaTroca, SQL_NFCE_DA_TROCA } = require('../services/nfcePrazoCancelamento');
 // 17/11/2026 (p-140): uma linha de log por venda com o tempo de cada etapa.
 const vendaTiming = require('../services/vendaTiming');
 // 17/11/2026 (p-141 a p-144): a venda com menos idas ao banco. O caminho de
@@ -1422,6 +1424,16 @@ router.post('/troca/:trocaSaleId/reemitir-fiscal', async (req, res) => {
 // da loja QUE VENDEU (pdv_settings.vale_troca_prazo_dias, 1-365, ausente = 30).
 // No grupo multi-CNPJ a venda pode ser de outra filial, e o app nao le o
 // pdv_settings dela. Campo novo, nada renomeado; pedido da loja online nao traz.
+// 17/11/2026 (b-troca-prazo-nfce): cada venda traz a previa fiscal da troca
+// (nfce_troca_estrategia 'cancel_reissue' | 'devolucao_55' | 'none',
+// nfce_cancelavel_ate, nfce_prazo_minutos, nfce_uf, nfce_authorized_at) com o
+// MESMO prazo por UF que o POST /troca usa. Campos novos; nada renomeado.
+function comPreviaFiscal(r) {
+  Object.assign(r, previaFiscalDaTroca(r.has_nfce ? r.nfce_da_troca : null));
+  delete r.nfce_da_troca;
+  return r;
+}
+
 router.get('/sales-for-troca', async (req, res) => {
   const { q, customer_id, order_number, nfce_chave, days=90, limit=50 } = req.query;
   const winDays = Math.max(1, Math.min(parseInt(days,10)||90, 365));
@@ -1465,6 +1477,7 @@ router.get('/sales-for-troca', async (req, res) => {
               COALESCE(s.type,'sale') AS origin_type,
               (COALESCE(s.type,'sale')='troca') AS is_troca_origin,
               EXISTS (SELECT 1 FROM nfce_emissions nf WHERE nf.sale_id=s.id AND nf.tipo='nfce' AND nf.status='autorizada') AS has_nfce,
+              ${SQL_NFCE_DA_TROCA},
               MAX(comp.pdv_settings->>'vale_troca_prazo_dias') AS vale_troca_prazo_raw,
               COUNT(si.id) AS item_count,
               COALESCE(json_agg(json_build_object(
@@ -1486,6 +1499,7 @@ router.get('/sales-for-troca', async (req, res) => {
     for (const r of rows) {
       r.vale_troca_prazo_dias = prazoDoValeEmDias(r.vale_troca_prazo_raw);
       delete r.vale_troca_prazo_raw;
+      comPreviaFiscal(r);
     }
     // 27/10/2026: pedidos elegiveis da loja online entram na mesma lista
     // (origin_kind='digital_order'). Best-effort: falha nao derruba a busca.
@@ -1539,6 +1553,7 @@ router.get('/sales-by-product-barcode', async (req, res) => {
               COALESCE(s.type,'sale') AS origin_type,
               (COALESCE(s.type,'sale')='troca') AS is_troca_origin,
               EXISTS (SELECT 1 FROM nfce_emissions nf WHERE nf.sale_id=s.id AND nf.tipo='nfce' AND nf.status='autorizada') AS has_nfce,
+              ${SQL_NFCE_DA_TROCA},
               COUNT(si.id) AS item_count,
               COALESCE(json_agg(json_build_object(
                 'product_id',si.product_id,'variant_id',si.variant_id,
@@ -1555,6 +1570,7 @@ router.get('/sales-by-product-barcode', async (req, res) => {
         ORDER BY s.created_at DESC LIMIT ${lim}`,
       [req.params.id, alts]
     );
+    rows.forEach(comPreviaFiscal);
     // 27/10/2026: pedidos da loja online com o item bipado (ver acima).
     res.json(await juntarComPedidos(rows, () => buscarPedidosParaTroca(db, req.params.id, {
       barcodes: alts, days: winDays, limit: lim,
