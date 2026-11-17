@@ -54,6 +54,13 @@ const MODULE_PLAN_MAP = {
   'matcon.entregas':      'essencial',
   'matcon.profissionais': 'essencial',
   'matcon.compras':       'essencial',
+  // 17/11/2026 (B3, p-61c) — Pedido separado de venda: a aba Pedidos em
+  // Vendas e o "Guardar > Pedido" do Caixa. Chave propria (espelha o mod do
+  // app; nunca herdar o de outra tela). Essencial, pela pendencia 1 do
+  // mockup aprovado em 17/11: e o "deixa separado" de toda loja. Sem gate de
+  // rota: /pedidos fica atras da trava PEDIDO_LIBERADO. Tambem e chave de
+  // permissao do membro (permissions['vendas.pedidos']), lida por /me/pedidos.
+  'vendas.pedidos':       'essencial',
 
   // Negócio+
   folha:          'negocio',

@@ -35,6 +35,8 @@ router.use('/me', require('./meAggregates'));
 router.use('/me', require('./meEstoquePorLoja'));
 // 17/11/2026 (p-186): Personalizados na visao consolidada (GET /me/studio/orders|quotes).
 router.use('/me', require('./meStudio'));
+// 17/11/2026 (B3, p-61c): pedidos guardados no Caixa de todas as lojas (GET /me/pedidos).
+router.use('/me', require('./mePedidos'));
 // Fase 1 · consentimento (340): GET /me/whatsapp/consent/summary.
 router.use('/me', require('./customerConsent').meRouter);
 
