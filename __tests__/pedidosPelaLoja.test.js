@@ -14,7 +14,7 @@
 'use strict';
 
 jest.mock('../src/services/cacheDaPaginaDaLoja', () => ({
-  esquecerPagina: jest.fn(), paginaLembrada: jest.fn(() => null), lembrarPagina: jest.fn(),
+  esquecerPagina: jest.fn(), paginaLembrada: jest.fn(() => null), entradaLembrada: jest.fn(() => null), lembrarPagina: jest.fn(),
 }));
 
 const express = require('express');

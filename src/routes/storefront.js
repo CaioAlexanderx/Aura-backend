@@ -76,7 +76,7 @@ const { createMpPixPayment, createMpPreference } = require('../services/mpServic
 const mpGatewaySvc = require('../services/mpGateway');
 const { calculateShippingQuote } = require('../services/shippingQuote');
 // A home da loja sai da memoria por 60 s (10/09/2026).
-const { paginaLembrada, lembrarPagina } = require('../services/cacheDaPaginaDaLoja');
+const { entradaLembrada, lembrarPagina } = require('../services/cacheDaPaginaDaLoja');
 const { COURIER, validateCourierPickup } = require('../services/courierPickup');
 const { lerAtribuicao, gravarAtribuicao } = require('../services/atribuicaoDoPedido');
 const lojaEvents          = require('../services/lojaEvents');
@@ -339,13 +339,14 @@ async function servirPaginaDaLoja(req, res, produtoId, { somenteStudio = false, 
     // montada na hora: o navegador nao distingue.
     const ehHome = !produtoId && !somenteStudio && !String(req.url || '').includes('?');
     if (ehHome) {
-      const guardada = paginaLembrada(slug);
+      // A CSP sai da entrada guardada, a mesma da pagina montada (p-180).
+      const guardada = entradaLembrada(slug);
       if (guardada) {
-        res.setHeader('Content-Security-Policy', STOREFRONT_CSP);
+        res.setHeader('Content-Security-Policy', guardada.csp || STOREFRONT_CSP);
         res.removeHeader('X-Frame-Options');
         res.setHeader('Content-Type', 'text/html; charset=utf-8');
         res.setHeader('X-Aura-Cache', 'hit');
-        return res.send(guardada);
+        return res.send(guardada.html);
       }
     }
     const { rows } = await db.query(
@@ -413,11 +414,15 @@ async function servirPaginaDaLoja(req, res, produtoId, { somenteStudio = false, 
       if (peca) data.produto_inicial = peca;
       else data.produto_ausente = true;
     }
-    res.setHeader('Content-Security-Policy', STOREFRONT_CSP);
+    // Hoje a CSP e a mesma em todas as lojas comuns; o p-182 (quadro do
+    // personalizador) a amplia so na loja com personalizavel. Ela e
+    // guardada junto com o HTML, para o hit de 60 s responder a mesma.
+    const csp = STOREFRONT_CSP;
+    res.setHeader('Content-Security-Policy', csp);
     res.removeHeader('X-Frame-Options');
     res.setHeader('Content-Type', 'text/html; charset=utf-8');
     const html = fotosPeloDominioProprio(buildStorefrontPage(data, slug));
-    if (ehHome) { lembrarPagina(slug, html); res.setHeader('X-Aura-Cache', 'miss'); }
+    if (ehHome) { lembrarPagina(slug, html, csp); res.setHeader('X-Aura-Cache', 'miss'); }
     res.send(html);
   } catch (err) {
     console.error('storefront page error:', err);

@@ -81,6 +81,8 @@ const { textosDaFrente } = require('./textosDaFrente');
 // p-118 (14/11/2026, migration 451): campanha de Black Friday da loja e o
 // sinal tem_promocao sobre o catalogo inteiro.
 const { resumoDasPromocoes, chavesDoPayload } = require('./campanhaDaLoja');
+// p-180 (loja unica 3.2b): o banner A da loja com personalizavel.
+const { montarBanner: montarBannerPersonalizados } = require('./bannerPersonalizados');
 
 /**
  * Os selos padrao, DERIVADOS do que a lojista ligou (decisao 7, 02/09/2026).
@@ -500,7 +502,7 @@ function listVisibilityWhere(cidParam) {
 // A pagina nasce com UMA pagina de produtos, nao com o catalogo. Antes
 // eram 500 (419 KB na Finesse) pra desenhar 24. O resto chega pela rota
 // /storefront/:slug/catalogo conforme a cliente navega.
-const { POR_PAGINA, EM_ESTOQUE, PERSONALIZAVEL, NA_VITRINE, filtroDeFoto, contarPorCategoria, arvoreDeCategorias, facetasDoCatalogo, faixaDePreco } = require('./catalogoPaginado');
+const { POR_PAGINA, EM_ESTOQUE, PERSONALIZAVEL, COLUNA_PERSONALIZAVEL, NA_VITRINE, filtroDeFoto, contarPorCategoria, arvoreDeCategorias, facetasDoCatalogo, faixaDePreco } = require('./catalogoPaginado');
 const LIMITE_DO_PAYLOAD = POR_PAGINA;
 
 /**
@@ -658,6 +660,9 @@ function montarProdutoPublico(p, { variantsByProduct, categoryById, primaryLinkB
     is_new: ehNovo(p.created_at),
     stock_qty: p.stock_qty, in_stock: inStock, variants: pvariants,
     ...(promo ? { preco_de: parseFloat(p.price), em_promocao: true, promo_ends_at: promo.promo_ends_at } : {}),
+    // p-180: so na peca personalizavel (selo, "a partir de", botao
+    // "Personalizar"). As outras nao ganham a chave: payload igual.
+    ...(p.personalizavel === true ? { personalizavel: true } : {}),
   };
 }
 
@@ -672,7 +677,8 @@ async function produtoPublicoPorId({ cid, id, exigeFoto, mostrarPrecos }) {
   if (!/^[0-9a-f-]{36}$/i.test(String(id || ''))) return null;
   const sql = (com) => `
     SELECT id, name, description, price, image_url, image_thumb_url, gallery_urls, category, stock_qty, created_at,
-           material, medidas, cuidados, duration_minutes, ${com ? colunasPromo() : colunasPromoNulas()}
+           material, medidas, cuidados, duration_minutes, ${com ? colunasPromo() : colunasPromoNulas()},
+           ${COLUNA_PERSONALIZAVEL}
     FROM products
     WHERE ${listVisibilityWhere('$1')}
       AND id = $2
@@ -843,7 +849,8 @@ async function fetchStorefrontProducts(cid, featuredIds, _hiddenIds, exigeFoto) 
     // escrita duas vezes. O array segue como ORDEM da curadoria.
     const sql = (com) => `
       SELECT id, name, description, price, image_url, image_thumb_url, gallery_urls, category, stock_qty, created_at,
-             material, medidas, cuidados, duration_minutes, ${com ? colunasPromo() : colunasPromoNulas()}
+             material, medidas, cuidados, duration_minutes, ${com ? colunasPromo() : colunasPromoNulas()},
+             ${COLUNA_PERSONALIZAVEL}
       FROM products
       WHERE ${visibility}
         AND is_active IS NOT FALSE
@@ -859,7 +866,8 @@ async function fetchStorefrontProducts(cid, featuredIds, _hiddenIds, exigeFoto) 
 
   const sql = (com) => `
     SELECT id, name, description, price, image_url, image_thumb_url, gallery_urls, category, stock_qty, created_at,
-           material, medidas, cuidados, duration_minutes, ${com ? colunasPromo() : colunasPromoNulas()}
+           material, medidas, cuidados, duration_minutes, ${com ? colunasPromo() : colunasPromoNulas()},
+           ${COLUNA_PERSONALIZAVEL}
     FROM products
     WHERE ${visibility}
       AND is_active IS NOT FALSE
@@ -1069,14 +1077,23 @@ async function buildStorefront(config) {
   const payOnDeliveryEnabled = !!config.pay_on_delivery_enabled;
 
   const banners = parseBanners(config.banners, config.cover_url, config.tagline, config.description);
-  const serviceCards = parseServiceCards(config.service_cards, {
+  // O que a lojista LIGOU: os selos padrao e a faixa do banner A (p-180)
+  // leem do mesmo objeto.
+  const cfgDosSelos = {
     has_pix: hasPix, has_card: hasMpGateway && cardEnabled, pay_on_delivery_enabled: payOnDeliveryEnabled,
     delivery_enabled: config.delivery_enabled || false,
     delivery_free_above_amount: config.delivery_free_above_amount,
     delivery_eta_text: config.delivery_eta_text || null,
     pickup_enabled: config.pickup_enabled !== false, pickup_eta_text: config.pickup_eta_text || null,
     whatsapp: config.whatsapp || null,
-  });
+  };
+  const serviceCards = parseServiceCards(config.service_cards, cfgDosSelos);
+  // p-180: o banner A so existe na loja com personalizavel E com o modelo
+  // escolhido no Meu Site (banner_personalizados.ativo). Sem isso, nenhuma
+  // consulta a mais e nenhuma chave nova: a home de hoje.
+  const bannerPersonalizado = temPersonalizavel
+    ? await montarBannerPersonalizados({ config, cid, visibilityWhere: listVisibilityWhere('$1'), cfgDosSelos })
+    : null;
 
   const businessHours = parseBusinessHours(config.business_hours);
   // always_open chega undefined enquanto a migration 310 nao rodou; o
@@ -1243,6 +1260,8 @@ async function buildStorefront(config) {
     // contarProdutosDaLoja). Sem ele, a chave nao existe e o payload e a
     // pagina saem byte a byte iguais (lojaSemPersonalizavel.fixture.test.js).
     ...(temPersonalizavel ? { tem_personalizavel: true } : {}),
+    // p-180: o banner A da home (bannerPersonalizados.js), so quando vale.
+    ...(bannerPersonalizado ? { banner_personalizado: bannerPersonalizado } : {}),
   };
 }
 
