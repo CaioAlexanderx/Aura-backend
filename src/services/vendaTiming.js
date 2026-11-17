@@ -121,7 +121,9 @@ function iniciar(req) {
         if (!ligado()) return;
         const fim = agora();
         const linha = {
-          status: res && typeof res.statusCode === 'number' ? res.statusCode : null,
+          // Nada foi enviado (a venda lancou sem responder): null, e nao o
+          // 200 que o Express traz de padrao.
+          status: res && res.headersSent !== false && typeof res.statusCode === 'number' ? res.statusCode : null,
           total_ms: ms(fim - t0),
           pre_ms: preMs,
           etapas: Object.fromEntries(Object.entries(etapas).map(([k, v]) => [k, ms(v)])),
@@ -138,11 +140,20 @@ function iniciar(req) {
   };
 }
 
-/** Forma de pagamento como rotulo curto (o campo vem do app). */
+// Formas de pagamento que o app e o backend usam. O campo vem do app e e
+// texto livre: qualquer coisa fora desta lista vira "outro", para nenhum
+// texto digitado (nome, telefone) chegar ao log.
+const METODOS = new Set([
+  'dinheiro', 'pix', 'cartao', 'debito', 'credito', 'crediario', 'sinal',
+  'misto', 'transferencia', 'boleto', 'cheque', 'voucher', 'vale_troca',
+]);
+
+/** Forma de pagamento como rotulo de lista fechada. */
 function rotuloDoMetodo(v) {
   try {
-    return String(v || '').toLowerCase().replace(/[^a-z0-9_-]/g, '').slice(0, 20) || null;
-  } catch (_) { return null; }
+    const m = String(v || '').trim().toLowerCase();
+    return METODOS.has(m) ? m : 'outro';
+  } catch (_) { return 'outro'; }
 }
 
-module.exports = { PREFIXO, iniciar, carimbarInicio, rotuloDoMetodo };
+module.exports = { PREFIXO, METODOS, iniciar, carimbarInicio, rotuloDoMetodo };
