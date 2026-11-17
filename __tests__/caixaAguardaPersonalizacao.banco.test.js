@@ -128,7 +128,7 @@ describe('fn_sales_studio_production_status · banco', () => {
       prod[cid] = { pers: uuid(), comum: uuid() };
       await client.query(
         `INSERT INTO products (id, company_id, name, price, stock_qty, is_personalizable, customization_config)
-         VALUES ($1, $3, 'Caneca com nome', 30, NULL, true, $4::jsonb),
+         VALUES ($1, $3, 'Caneca com nome', 30, 0, true, $4::jsonb),
                 ($2, $3, 'Sacola', 5, 10, false, NULL)`,
         [prod[cid].pers, prod[cid].comum, cid, cfg]
       );
