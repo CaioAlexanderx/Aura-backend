@@ -101,6 +101,8 @@ const nfseAutomatica = require('../services/nfseAutomatica');
 const nfseAutomaticaRepo = require('../services/nfseAutomaticaRepo');
 // 12/11/2026: prazo do vale-troca da loja da venda (pdv_settings).
 const { prazoDoValeEmDias } = require('../utils/valeTrocaPrazo');
+// 17/11/2026 (p-140): uma linha de log por venda com o tempo de cada etapa.
+const vendaTiming = require('../services/vendaTiming');
 
 const fmt = (v) => parseFloat(v || 0).toFixed(2);
 const SP_DATE_NOW = "(NOW() AT TIME ZONE 'America/Sao_Paulo')::date";
@@ -329,7 +331,26 @@ async function handleSale(req, res, opts = {}) {
   // 17/10/2026 (tq-15): null = venda sem chave, exatamente como antes.
   const idemKey = await vendaIdempotente.chaveDaVenda(req);
 
-  const client = await db.connect();
+  // p-140: so mede. `client` conta as consultas e repassa cada uma, igual,
+  // para a conexao do pool (services/vendaTiming.js).
+  const timing = vendaTiming.iniciar(req);
+  timing.dado({
+    company_id: req.params.id,
+    itens: items.length,
+    itens_com_variante: items.filter((i) => i && i.variant_id).length,
+    metodo: vendaTiming.rotuloDoMetodo(payment_method || payments?.[0]?.method || 'dinheiro'),
+    pagamentos: Array.isArray(payments) ? payments.length : 0,
+    cliente: !!(customer_id || req.body?.customer || req.body?.customer_name),
+    vendedora: !!employee_id,
+    cupom: !!coupon_code,
+    crediario: !!isCrediario,
+    sinal: !!opts.signalSale,
+    retroativa: !!sale_date,
+    chave_idempotencia: !!idemKey,
+  });
+  const conexao = await db.connect();
+  const client = timing.contar(conexao);
+  timing.etapa('conexao');
   try {
     await client.query('BEGIN');
     // Mesma chave ja gerou venda: devolve a venda registrada, sem gravar
@@ -374,6 +395,7 @@ async function handleSale(req, res, opts = {}) {
       await client.query('ROLLBACK');
       return res.status(422).json(entrega.erro);
     }
+    timing.etapa('abertura');
     let subtotal = 0;
     const enrichedItems = [];
     const productNames = [];
@@ -445,6 +467,7 @@ async function handleSale(req, res, opts = {}) {
       productNames.push(productName);
       enrichedItems.push({ ...item, product_name_snapshot: productName, cost_price: costPrice, item_discount: itemDiscount, line_total: lineTotal, stock_company_id: stockCompanyId });
     }
+    timing.etapa('itens_validacao');
     // Cupom e desconto manual SOMAM. O PDV mostra `subtotal - manual - cupom`
     // na tela e manda os dois campos no mesmo body; enquanto isto aqui era
     // if/else-if, o backend descartava o desconto manual em silencio e gravava
@@ -515,6 +538,7 @@ async function handleSale(req, res, opts = {}) {
       creditAmount = (rawCreditAmount > 0 && customerId) ? rawCreditAmount : 0;
     }
     const cashAmount = parseFloat((totalAmount - creditAmount).toFixed(2));
+    timing.etapa('cupom_vendedora');
     // tq-15: com chave, ela entra no MESMO INSERT (o indice unico parcial da
     // 390 e a garantia final). Sem chave, o SQL e o de sempre.
     const idemCol = idemKey ? ',idempotency_key' : '';
@@ -573,6 +597,7 @@ async function handleSale(req, res, opts = {}) {
       });
       if (retrato) sale.delivery_address = retrato;
     }
+    timing.etapa('insert_venda');
 
     // p-92 (migration 428): preco_lista ("De") e em_promocao de cada item,
     // pela regra do preco efetivo no relogio do servidor. So grava: o
@@ -629,6 +654,7 @@ async function handleSale(req, res, opts = {}) {
     if (couponId) {
       await client.query(`UPDATE coupons SET current_uses=current_uses+1,updated_at=NOW() WHERE id=$1`, [couponId]);
     }
+    timing.etapa('itens_estoque');
 
     // F1 (29/05/2026): crediario atomico DENTRO da transacao principal.
     // createCreditSale grava debit + A Receber + agenda parcelas (se installments>1).
@@ -693,6 +719,7 @@ async function handleSale(req, res, opts = {}) {
         createdBy:    req.user?.id || null,
       });
     }
+    timing.etapa('crediario');
 
     let activeSessaoId = null;
     try {
@@ -764,6 +791,8 @@ async function handleSale(req, res, opts = {}) {
       saleDate:     sale_date || null,
       itemsSummary: productNames.slice(0, 3).join(', '),
     });
+    timing.dado({ caixa_sessao: !!activeSessaoId, taxa_maquininha: !!cardFee });
+    timing.etapa('pagamento_financeiro');
 
     // Matcon M1: venda que nasceu de um orcamento (body.quote_id) grava o
     // vinculo e cria a 1a entrega. Sem quote_id nao faz nada. Erro aqui
@@ -790,8 +819,11 @@ async function handleSale(req, res, opts = {}) {
       // 392 (tc-04): cobranca parcial — a comanda continua aberta com o resto.
       if (comandaResult.comanda_open) sale.comanda_open = true;
     }
+    timing.etapa('ganchos');
 
     await client.query('COMMIT');
+    timing.dado({ sale_id: sale.id });
+    timing.etapa('commit');
 
     // 13/10/2026: a primeira venda dispara o trial do self-service
     // (services/trialRegra). Sem await e sem lancar: nunca atrasa nem derruba
@@ -827,16 +859,16 @@ async function handleSale(req, res, opts = {}) {
     // nfse_tomador da venda (440) vai junto, em memoria.
     nfseAutomatica.aoFinalizarVenda({ companyId: req.params.id, saleId: sale.id, tomador: nfseTomador.tomador });
 
-    const { rows: saleItems } = await db.query(
+    const { rows: saleItems } = await timing.foraDaTransacao(db.query(
       `SELECT si.*, p.name AS product_name FROM sale_items si
        LEFT JOIN products p ON p.id=si.product_id WHERE si.sale_id=$1`, [sale.id]
-    );
+    ));
     let creditInfo = null;
     if (creditAmount > 0) {
-      const { rows: bal } = await db.query(
+      const { rows: bal } = await timing.foraDaTransacao(db.query(
         `SELECT balance FROM customer_credit_balances WHERE customer_id=$1 AND company_id=$2`,
         [customerId, req.params.id]
-      );
+      ));
       creditInfo = {
         debited: creditAmount,
         new_balance: parseFloat(bal[0]?.balance || 0),
@@ -880,6 +912,7 @@ async function handleSale(req, res, opts = {}) {
     // tq-15: a repeticao da mesma chave devolve este mesmo corpo.
     if (idemKey) vendaIdempotente.guardarResposta({ companyId: req.params.id, saleId: sale.id, corpo });
     res.status(201).json(corpo);
+    timing.etapa('resposta');
   } catch (e) {
     await client.query('ROLLBACK');
     // tq-15: outra requisicao com a mesma chave gravou primeiro (o indice
@@ -909,7 +942,11 @@ async function handleSale(req, res, opts = {}) {
     }
     console.error('[PDV] Erro ao registrar venda:', e.message);
     res.status(500).json({ error: 'Erro ao registrar venda' });
-  } finally { client.release(); }
+  } finally {
+    conexao.release();
+    // p-140: depois da resposta e da conexao devolvida; nunca lanca.
+    timing.emitir(res);
+  }
 }
 
 router.post('/sale', (req, res) => handleSale(req, res));
