@@ -32,20 +32,28 @@ const SP_DATE_NOW = "(NOW() AT TIME ZONE 'America/Sao_Paulo')::date";
 // Fora de escopo por decisao: taxa por parcelamento e conciliacao de repasse.
 const CARD_FEE_KEY = (saleId) => 'pdv-card-fee-' + saleId;
 
-async function insertCardFeeExpense(client, { companyId, saleId, cardBase, createdBy, saleDate, itemsSummary }) {
+// 17/11/2026 (p-143): `pdvSettings` e opcional. A venda do Caixa ja leu o
+// pdv_settings da empresa na abertura da transacao e o entrega aqui; quem nao
+// passa (o Editar venda) continua lendo, como sempre. `null` = empresa sem
+// configuracao (sem taxa).
+async function insertCardFeeExpense(client, { companyId, saleId, cardBase, createdBy, saleDate, itemsSummary, pdvSettings }) {
   const credBase = parseFloat((cardBase?.cartao || 0).toFixed(2));
   const debBase  = parseFloat((cardBase?.debito || 0).toFixed(2));
   const pixBase  = parseFloat((cardBase?.pix || 0).toFixed(2));
   if (credBase <= 0 && debBase <= 0 && pixBase <= 0) return null;
 
   let settings = null;
-  try {
-    const { rows } = await client.query(`SELECT pdv_settings FROM companies WHERE id = $1`, [companyId]);
-    settings = rows[0]?.pdv_settings || null;
-  } catch (e) {
-    // Empresa/coluna indisponivel: a venda NAO pode cair por causa da taxa.
-    console.warn('[PDV] card fee fail-open:', e.message);
-    return null;
+  if (pdvSettings !== undefined) {
+    settings = pdvSettings || null;
+  } else {
+    try {
+      const { rows } = await client.query(`SELECT pdv_settings FROM companies WHERE id = $1`, [companyId]);
+      settings = rows[0]?.pdv_settings || null;
+    } catch (e) {
+      // Empresa/coluna indisponivel: a venda NAO pode cair por causa da taxa.
+      console.warn('[PDV] card fee fail-open:', e.message);
+      return null;
+    }
   }
   if (!settings?.card_fee_enabled) return null;
 

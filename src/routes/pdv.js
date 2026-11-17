@@ -81,7 +81,7 @@ const matconSaleHooks = require('../services/matconSaleHooks');
 // 09/10/2026 (migration 368): venda com `comanda_id` fecha a comanda do Caixa.
 const comandaSaleHooks = require('../services/comandaSaleHooks');
 // 06/10/2026: chave "vender sem estoque" — ver cabecalho do util.
-const { vendaSemEstoqueLiberada } = require('../utils/vendaSemEstoque');
+const { vendaSemEstoqueLiberada, lerVendaSemEstoque } = require('../utils/vendaSemEstoque');
 const { productVisibilityWhere } = require('../utils/companyGroup');
 const { iniciarTrialPelaPrimeiraVenda } = require('../services/trialRegra');
 const { avancarSemEsperar } = require('../services/onboardingProgress');
@@ -103,6 +103,9 @@ const nfseAutomaticaRepo = require('../services/nfseAutomaticaRepo');
 const { prazoDoValeEmDias } = require('../utils/valeTrocaPrazo');
 // 17/11/2026 (p-140): uma linha de log por venda com o tempo de cada etapa.
 const vendaTiming = require('../services/vendaTiming');
+// 17/11/2026 (p-141 a p-144): a venda com menos idas ao banco. O caminho de
+// sempre continua aqui, em cada `else` (PDV_VENDA_CAMINHO=fila volta a ele).
+const vendaRapida = require('../services/vendaRapida');
 
 const fmt = (v) => parseFloat(v || 0).toFixed(2);
 const SP_DATE_NOW = "(NOW() AT TIME ZONE 'America/Sao_Paulo')::date";
@@ -122,6 +125,8 @@ function calcCreditAmount({ payment_method, payments, totalAmount }) {
   return 0;
 }
 
+const CAIXA_REQUIRED_BODY = () => ({ error: 'Abra o caixa antes de finalizar a venda.', code: 'CAIXA_REQUIRED' });
+
 async function assertCaixaOpenOrAllowed(client, companyId) {
   try {
     const { rows: cfgRows } = await client.query(
@@ -134,7 +139,7 @@ async function assertCaixaOpenOrAllowed(client, companyId) {
       [companyId]
     );
     if (sessoes.length > 0) return { ok: true };
-    return { ok: false, status: 409, body: { error: 'Abra o caixa antes de finalizar a venda.', code: 'CAIXA_REQUIRED' } };
+    return { ok: false, status: 409, body: CAIXA_REQUIRED_BODY() };
   } catch (e) {
     console.warn('[PDV] assertCaixaOpenOrAllowed fail-open:', e.message);
     return { ok: true };
@@ -353,7 +358,32 @@ async function handleSale(req, res, opts = {}) {
   const conexao = await db.connect();
   const client = timing.contar(conexao);
   timing.etapa('conexao');
+  // p-141 a p-144: decidido uma vez por venda. `contexto` (pdv_settings +
+  // sessao do caixa, lidos na abertura) so existe quando a abertura em um
+  // envio aconteceu; sem ele cada trecho le o que precisa, como sempre.
+  const rapido = vendaRapida.caminhoRapido();
+  let contexto = null;
   try {
+    // p-144/p-143: BEGIN + trava e busca da chave + pdv_settings + sessao do
+    // caixa num envio so. null = nao abriu por ali (nada ficou aberto).
+    const aberta = rapido
+      ? await vendaRapida.abrir(client, { companyId: req.params.id, idemKey })
+      : null;
+    timing.dado({ caminho: rapido ? 'rapido' : 'fila', abertura: aberta ? 'um_envio' : 'fila' });
+    if (aberta) {
+      contexto = aberta.contexto;
+      // Mesma chave ja gerou venda: devolve a venda registrada, sem gravar nada.
+      if (aberta.jaFeita) {
+        await client.query('ROLLBACK');
+        const respondeu = await vendaIdempotente.responderRepeticao(res, { companyId: req.params.id, key: idemKey, itens: items });
+        if (respondeu) return;
+        return res.status(500).json({ error: 'Erro ao registrar venda' });
+      }
+      if (!sale_date && vendaRapida.caixaFechado(contexto)) {
+        await client.query('ROLLBACK');
+        return res.status(409).json(CAIXA_REQUIRED_BODY());
+      }
+    } else {
     await client.query('BEGIN');
     // Mesma chave ja gerou venda: devolve a venda registrada, sem gravar
     // nada. A trava faz a segunda requisicao simultanea esperar a primeira.
@@ -372,6 +402,7 @@ async function handleSale(req, res, opts = {}) {
         await client.query('ROLLBACK');
         return res.status(caixaCheck.status).json(caixaCheck.body);
       }
+    }
     }
     // F2: resolvido DENTRO da transacao -- se a venda falhar adiante, o
     // cadastro criado aqui volta atras junto. Antes do cupom, que precisa
@@ -408,7 +439,22 @@ async function handleSale(req, res, opts = {}) {
     // p-92: produtos ja validados para a empresa (so eles ganham a marcacao
     // de promocao no sale_items).
     const produtosVisiveis = new Set();
-    for (const item of items) {
+    // p-141: todos os produtos e variacoes da venda numa consulta (com a
+    // promocao De/Por e a vendedora junto). null = algum id foge do formato
+    // comum e a venda le item a item, como sempre. As regras abaixo (ordem
+    // dos itens, mensagens, 409) sao as mesmas nos dois casos: so muda de
+    // onde vem a linha lida.
+    let comPromocao = false;
+    let leitura = null;
+    if (rapido) {
+      comPromocao = !sale_date
+        && await vendaNaPromocao.colunasPresentes((sql, params) => client.query(sql, params));
+      leitura = await vendaRapida.lerProdutos(client, {
+        companyId: req.params.id, items, employeeId: employee_id, comPromocao,
+      });
+    }
+    for (const [idx, item] of items.entries()) {
+      const lido = leitura ? leitura.porItem[idx] : null;
       const qty = parseFloat(item.quantity);
       const unitPrice = parseFloat(item.unit_price);
       // Desconto por item (lapis do PDV): unit_price mantem o preco de tabela
@@ -428,7 +474,7 @@ async function handleSale(req, res, opts = {}) {
         // stock_company_id caía na própria matriz (baixa no lugar errado).
         // Produto compartilhado é UMA linha para o grupo: a baixa vai na
         // linha da dona (stock_company_id), nos dois sentidos.
-        const { rows: p } = await client.query(
+        const { rows: p } = lido ? { rows: lido.p } : await client.query(
           `SELECT p.name, p.cost_price, p.stock_qty, p.company_id AS stock_company_id
            FROM products p JOIN companies c ON c.id=$2
            WHERE p.id=$1 AND ${productVisibilityWhere('$2', 'p.')}`,
@@ -442,7 +488,7 @@ async function handleSale(req, res, opts = {}) {
           let stockAvailable = parseFloat(p[0].stock_qty);
           let stockLabel = p[0].name;
           if (item.variant_id) {
-            const { rows: v } = await client.query(
+            const { rows: v } = lido ? { rows: lido.v } : await client.query(
               `SELECT stock_qty, sku_suffix FROM product_variants WHERE id=$1 AND product_id=$2`,
               [item.variant_id, item.product_id]
             );
@@ -453,7 +499,10 @@ async function handleSale(req, res, opts = {}) {
           }
           if (!sale_date && stockAvailable < qty) {
             if (semEstoqueLiberado === undefined) {
-              semEstoqueLiberado = await vendaSemEstoqueLiberada(client, req.params.id);
+              // p-143: com o pdv_settings ja lido na abertura, nao rele.
+              semEstoqueLiberado = contexto
+                ? lerVendaSemEstoque(contexto.pdvSettings)
+                : await vendaSemEstoqueLiberada(client, req.params.id);
             }
             if (!semEstoqueLiberado) {
               await client.query('ROLLBACK');
@@ -515,9 +564,12 @@ async function handleSale(req, res, opts = {}) {
     );
     const totalAmount = parseFloat((subtotal - discountAmt).toFixed(2));
     if (employee_id) {
-      const { rows: empCheck } = await client.query(
-        `SELECT id FROM employees WHERE id=$1 AND company_id=$2`, [employee_id, req.params.id]
-      );
+      // p-141: a leitura dos produtos ja trouxe se a vendedora e da empresa.
+      const empCheck = (leitura && leitura.vendedora !== undefined)
+        ? (leitura.vendedora ? [{ id: employee_id }] : [])
+        : (await client.query(
+          `SELECT id FROM employees WHERE id=$1 AND company_id=$2`, [employee_id, req.params.id]
+        )).rows;
       if (!empCheck.length) { await client.query('ROLLBACK'); return res.status(400).json({ error: 'Funcionario nao encontrado nesta empresa' }); }
     }
     // F2: no sinal o saldo e DERIVADO do total calculado aqui no servidor,
@@ -606,9 +658,22 @@ async function handleSale(req, res, opts = {}) {
     // unit_price e os totais continuam os que o app mandou. Venda com data
     // retroativa fica sem marcacao (NULL = nao sabemos). Base sem as colunas:
     // null aqui e o INSERT e o de sempre (services/vendaNaPromocao.js).
-    const marcacoes = sale_date
-      ? null
-      : await vendaNaPromocao.marcarItens((sql, params) => client.query(sql, params), enrichedItems, { visiveis: produtosVisiveis });
+    // p-141: no caminho novo a marcacao ja veio com a leitura dos produtos
+    // (mesma conta, vendaNaPromocao.marcacaoDoItem).
+    let marcacoes;
+    if (sale_date) marcacoes = null;
+    else if (leitura) marcacoes = comPromocao ? enrichedItems.map((_, idx) => leitura.porItem[idx]?.marcacao || vendaNaPromocao.NULO) : null;
+    else marcacoes = await vendaNaPromocao.marcarItens((sql, params) => client.query(sql, params), enrichedItems, { visiveis: produtosVisiveis });
+    // p-142: sale_items, baixa do estoque, stock_movements, contador da
+    // vendedora e uso do cupom num comando so. Devolve os itens ja no formato
+    // da resposta (p-143). null = o caso pede o laco de sempre (nada gravado).
+    const itensGravados = rapido
+      ? await vendaRapida.gravarItens(client, {
+        saleId: sale.id, companyId: req.params.id, itens: enrichedItems, marcacoes,
+        employeeId: employee_id || null, totalAmount, couponId,
+      })
+      : null;
+    if (!itensGravados) {
     for (const [idx, item] of enrichedItems.entries()) {
       const marca = marcacoes ? marcacoes[idx] : null;
       await client.query(
@@ -655,6 +720,7 @@ async function handleSale(req, res, opts = {}) {
     }
     if (couponId) {
       await client.query(`UPDATE coupons SET current_uses=current_uses+1,updated_at=NOW() WHERE id=$1`, [couponId]);
+    }
     }
     timing.etapa('itens_estoque');
 
@@ -724,6 +790,10 @@ async function handleSale(req, res, opts = {}) {
     timing.etapa('crediario');
 
     let activeSessaoId = null;
+    if (contexto) {
+      // p-143: a sessao aberta ja foi lida na abertura da transacao.
+      activeSessaoId = contexto.sessaoId;
+    } else {
     try {
       const sessRes = await client.query(
         `SELECT id FROM caixa_sessoes WHERE company_id=$1 AND status='aberta' LIMIT 1`,
@@ -731,10 +801,57 @@ async function handleSale(req, res, opts = {}) {
       );
       activeSessaoId = sessRes?.rows?.[0]?.id || null;
     } catch (sessErr) {}
+    }
     // Base da taxa da maquininha: acumulada a partir dos sale_payments que
     // realmente entraram, cada forma na sua aliquota. 'pix' entra na base
     // sempre; so vira taxa se a empresa preencheu card_fee_pix_pct.
     const cardBase = { cartao: 0, debito: 0, pix: 0 };
+    if (rapido) {
+      // p-143: as mesmas linhas de sale_payments e a mesma receita, num
+      // comando so. As regras (quem entra, em que ordem, base da taxa, texto
+      // do lancamento) sao as do bloco de sempre, logo abaixo.
+      const pagamentos = [];
+      if (Array.isArray(payments) && payments.length > 0) {
+        for (const p of payments) {
+          const m = (p.method || '').toLowerCase();
+          if (m === 'crediario') continue;
+          const amt = parseFloat(p.value ?? p.amount ?? 0);
+          if (amt <= 0) continue;
+          pagamentos.push({ method: p.method, amount: amt });
+          if (m === 'cartao' || m === 'debito' || m === 'pix') cardBase[m] += amt;
+        }
+      } else if (cashAmount > 0) {
+        const fallbackMethod = (payment_method || 'dinheiro').toLowerCase();
+        if (fallbackMethod !== 'crediario') {
+          pagamentos.push({ method: fallbackMethod, amount: cashAmount });
+          if (fallbackMethod === 'cartao' || fallbackMethod === 'debito' || fallbackMethod === 'pix') {
+            cardBase[fallbackMethod] += cashAmount;
+          }
+        }
+      }
+      let receita = null;
+      if (cashAmount > 0) {
+        const itemsSummary = productNames.slice(0, 3).join(', ');
+        let payLabel = payment_method || 'dinheiro';
+        if (Array.isArray(payments) && payments.length > 0) {
+          const nonCredit = payments.find(p => (p.method || '').toLowerCase() !== 'crediario');
+          if (nonCredit) payLabel = nonCredit.method;
+        }
+        receita = {
+          amount: cashAmount,
+          description: sale_date
+            ? `Venda (retroativa) - ${itemsSummary} (${payLabel})`
+            : `Venda PDV - ${itemsSummary} (${payLabel})`,
+          createdBy: req.user?.id || null,
+          idempotencyKey: 'pdv-sale-' + sale.id,
+          saleDate: sale_date || null,
+          spDateNow: SP_DATE_NOW,
+        };
+      }
+      await vendaRapida.gravarPagamentos(client, {
+        saleId: sale.id, companyId: req.params.id, sessaoId: activeSessaoId, pagamentos, receita,
+      });
+    } else {
     if (Array.isArray(payments) && payments.length > 0) {
       for (const p of payments) {
         const m = (p.method || '').toLowerCase();
@@ -782,6 +899,7 @@ async function handleSale(req, res, opts = {}) {
         txParams
       );
     }
+    }
 
     // Taxa da maquininha: despesa propria, logo apos a receita da venda.
     // Fica DENTRO da transacao -- a despesa nasce e morre junto com a venda.
@@ -792,6 +910,8 @@ async function handleSale(req, res, opts = {}) {
       createdBy:    req.user?.id || null,
       saleDate:     sale_date || null,
       itemsSummary: productNames.slice(0, 3).join(', '),
+      // p-143: pdv_settings ja lido na abertura (undefined = le la, como sempre).
+      pdvSettings:  contexto ? contexto.pdvSettings : undefined,
     });
     timing.dado({ caixa_sessao: !!activeSessaoId, taxa_maquininha: !!cardFee });
     timing.etapa('pagamento_financeiro');
@@ -861,10 +981,12 @@ async function handleSale(req, res, opts = {}) {
     // nfse_tomador da venda (440) vai junto, em memoria.
     nfseAutomatica.aoFinalizarVenda({ companyId: req.params.id, saleId: sale.id, tomador: nfseTomador.tomador });
 
-    const { rows: saleItems } = await timing.foraDaTransacao(db.query(
+    // p-143: os itens da resposta vieram do comando que os gravou (mesmas
+    // colunas da releitura, na ordem do carrinho). Sem eles, rele como sempre.
+    const saleItems = itensGravados || (await timing.foraDaTransacao(db.query(
       `SELECT si.*, p.name AS product_name FROM sale_items si
        LEFT JOIN products p ON p.id=si.product_id WHERE si.sale_id=$1`, [sale.id]
-    ));
+    ))).rows;
     let creditInfo = null;
     if (creditAmount > 0) {
       const { rows: bal } = await timing.foraDaTransacao(db.query(
