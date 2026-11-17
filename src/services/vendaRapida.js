@@ -15,6 +15,11 @@
 //   gravarItens()    sale_items, baixa de estoque, stock_movements, contador
 //                    da vendedora e uso do cupom num comando so (p-142).
 //                    Antes: 3 por item, +1 da vendedora, +1 do cupom.
+//   lerContexto()    pdv_settings + sessao do caixa numa leitura so (p-143).
+//                    Antes: ate 3 leituras do pdv_settings e 2 da sessao.
+//   gravarPagamentos() sale_payments e a receita no financeiro num comando
+//                    so (p-143). Antes: 1 por forma de pagamento + 1.
+//   Os itens da resposta saem do comando que os gravou (p-143), sem reler.
 //
 // O CAMINHO DE SEMPRE CONTINUA NO CODIGO (routes/pdv.js), intocado:
 //   - PDV_VENDA_CAMINHO=fila volta a venda inteira para ele, sem deploy de
@@ -45,6 +50,35 @@ const ehUuid = (v) => typeof v === 'string' && UUID_RE.test(v);
 
 function caminhoRapido() {
   return String(process.env.PDV_VENDA_CAMINHO || '').trim().toLowerCase() !== 'fila';
+}
+
+// ── lerContexto ──────────────────────────────────────────────
+/**
+ * pdv_settings da empresa e a sessao de caixa aberta, numa leitura so. E o
+ * que a venda lia em ate cinco consultas (assertCaixaOpenOrAllowed, vender
+ * sem estoque, sessao do pagamento, taxa da maquininha).
+ * Devolve null quando o id da empresa foge do formato comum.
+ */
+async function lerContexto(client, companyId) {
+  if (!ehUuid(companyId)) return null;
+  const { rows } = await client.query(
+    `SELECT c.pdv_settings,
+            (SELECT s.id FROM caixa_sessoes s
+              WHERE s.company_id = c.id AND s.status = 'aberta' LIMIT 1) AS sessao_id
+       FROM companies c WHERE c.id = $1`,
+    [companyId]
+  );
+  const linha = rows[0] || null;
+  return {
+    pdvSettings: linha ? (linha.pdv_settings || null) : null,
+    sessaoId: linha ? (linha.sessao_id || null) : null,
+  };
+}
+
+/** A loja exige caixa aberto e nao ha sessao aberta? (mesma regra de assertCaixaOpenOrAllowed) */
+function caixaFechado(contexto) {
+  const exige = !!(contexto && contexto.pdvSettings && contexto.pdvSettings.caixa_enabled);
+  return exige && !contexto.sessaoId;
 }
 
 // ── lerProdutos ──────────────────────────────────────────────
@@ -208,8 +242,9 @@ function podeGravarDeUmaVez(itens) {
  *     do produto e o produto e da empresa dona;
  *   - um stock_movements 'out' por linha com produto.
  *
- * Devolve os itens gravados, na ordem do carrinho (si.* + product_name), ou
- * null quando o caso pede o caminho de sempre (nada foi gravado).
+ * Devolve os itens gravados, na ordem do carrinho, no formato da releitura
+ * que a resposta fazia (si.* + product_name), ou null quando o caso pede o
+ * caminho de sempre (nada foi gravado).
  */
 async function gravarItens(client, {
   saleId, companyId, itens, marcacoes, employeeId, totalAmount, couponId,
@@ -310,10 +345,61 @@ async function gravarItens(client, {
   return rows;
 }
 
+// ── gravarPagamentos ─────────────────────────────────────────
+/**
+ * sale_payments (uma linha por forma de pagamento, na ordem) e a receita da
+ * venda no financeiro, num comando so. `receita` e null quando a venda nao
+ * tem valor a vista. Os textos dos INSERT sao os de sempre.
+ */
+async function gravarPagamentos(client, { saleId, companyId, sessaoId, pagamentos, receita }) {
+  const temPagamentos = pagamentos.length > 0;
+  if (!temPagamentos && !receita) return;
+
+  const insertPagamentos =
+    `INSERT INTO sale_payments (sale_id,company_id,method,amount,sessao_id)
+     SELECT $1::uuid, $2::uuid, t.method, t.amount, $3::uuid
+       FROM unnest($4::text[], $5::numeric[]) WITH ORDINALITY AS t(method, amount, ord)
+      ORDER BY t.ord
+     ON CONFLICT DO NOTHING`;
+  const paramsPagamentos = [
+    saleId, companyId, sessaoId || null,
+    pagamentos.map((p) => p.method), pagamentos.map((p) => p.amount),
+  ];
+  if (!receita) {
+    await client.query(insertPagamentos, paramsPagamentos);
+    return;
+  }
+
+  const base = temPagamentos ? paramsPagamentos.length : 0;
+  const n = (k) => `$${base + k}`;
+  const params = [
+    ...(temPagamentos ? paramsPagamentos : []),
+    companyId, receita.amount, receita.description, receita.createdBy, receita.idempotencyKey,
+  ];
+  let dueDateExpr = receita.spDateNow;
+  if (receita.saleDate) {
+    params.push(receita.saleDate);
+    dueDateExpr = `${n(6)}::date`;
+  }
+  await client.query(
+    `${temPagamentos ? `WITH pagamentos AS (
+     ${insertPagamentos}
+     )
+     ` : ''}INSERT INTO transactions
+       (company_id,type,status,amount,description,category,due_date,paid_at,created_by,idempotency_key)
+     VALUES (${n(1)},'income','confirmed',${n(2)},${n(3)},'Vendas',${dueDateExpr},NOW(),${n(4)},${n(5)})
+     ON CONFLICT (idempotency_key) DO NOTHING`,
+    params
+  );
+}
+
 module.exports = {
   caminhoRapido,
   ehUuid,
+  lerContexto,
+  caixaFechado,
   lerProdutos,
   podeGravarDeUmaVez,
   gravarItens,
+  gravarPagamentos,
 };

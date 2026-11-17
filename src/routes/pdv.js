@@ -81,7 +81,7 @@ const matconSaleHooks = require('../services/matconSaleHooks');
 // 09/10/2026 (migration 368): venda com `comanda_id` fecha a comanda do Caixa.
 const comandaSaleHooks = require('../services/comandaSaleHooks');
 // 06/10/2026: chave "vender sem estoque" — ver cabecalho do util.
-const { vendaSemEstoqueLiberada } = require('../utils/vendaSemEstoque');
+const { vendaSemEstoqueLiberada, lerVendaSemEstoque } = require('../utils/vendaSemEstoque');
 const { productVisibilityWhere } = require('../utils/companyGroup');
 const { iniciarTrialPelaPrimeiraVenda } = require('../services/trialRegra');
 const { avancarSemEsperar } = require('../services/onboardingProgress');
@@ -125,6 +125,8 @@ function calcCreditAmount({ payment_method, payments, totalAmount }) {
   return 0;
 }
 
+const CAIXA_REQUIRED_BODY = () => ({ error: 'Abra o caixa antes de finalizar a venda.', code: 'CAIXA_REQUIRED' });
+
 async function assertCaixaOpenOrAllowed(client, companyId) {
   try {
     const { rows: cfgRows } = await client.query(
@@ -137,7 +139,7 @@ async function assertCaixaOpenOrAllowed(client, companyId) {
       [companyId]
     );
     if (sessoes.length > 0) return { ok: true };
-    return { ok: false, status: 409, body: { error: 'Abra o caixa antes de finalizar a venda.', code: 'CAIXA_REQUIRED' } };
+    return { ok: false, status: 409, body: CAIXA_REQUIRED_BODY() };
   } catch (e) {
     console.warn('[PDV] assertCaixaOpenOrAllowed fail-open:', e.message);
     return { ok: true };
@@ -356,9 +358,12 @@ async function handleSale(req, res, opts = {}) {
   const conexao = await db.connect();
   const client = timing.contar(conexao);
   timing.etapa('conexao');
-  // p-141: decidido uma vez por venda (PDV_VENDA_CAMINHO=fila = caminho de sempre).
+  // p-141 a p-143: decidido uma vez por venda. `contexto` (pdv_settings +
+  // sessao do caixa) e lido uma vez, logo depois da trava da chave; sem ele
+  // cada trecho le o que precisa, como sempre.
   const rapido = vendaRapida.caminhoRapido();
   timing.dado({ caminho: rapido ? 'rapido' : 'fila' });
+  let contexto = null;
   try {
     await client.query('BEGIN');
     // Mesma chave ja gerou venda: devolve a venda registrada, sem gravar
@@ -372,7 +377,16 @@ async function handleSale(req, res, opts = {}) {
         return res.status(500).json({ error: 'Erro ao registrar venda' });
       }
     }
-    if (!sale_date) {
+    // p-143: pdv_settings e sessao do caixa numa leitura so, usada pela
+    // conferencia do caixa, pelo "vender sem estoque", pelo pagamento e pela
+    // taxa da maquininha. null = nao leu por ali (segue como sempre).
+    if (rapido) contexto = await vendaRapida.lerContexto(client, req.params.id);
+    if (contexto) {
+      if (!sale_date && vendaRapida.caixaFechado(contexto)) {
+        await client.query('ROLLBACK');
+        return res.status(409).json(CAIXA_REQUIRED_BODY());
+      }
+    } else if (!sale_date) {
       const caixaCheck = await assertCaixaOpenOrAllowed(client, req.params.id);
       if (!caixaCheck.ok) {
         await client.query('ROLLBACK');
@@ -474,7 +488,10 @@ async function handleSale(req, res, opts = {}) {
           }
           if (!sale_date && stockAvailable < qty) {
             if (semEstoqueLiberado === undefined) {
-              semEstoqueLiberado = await vendaSemEstoqueLiberada(client, req.params.id);
+              // p-143: com o pdv_settings ja lido na abertura, nao rele.
+              semEstoqueLiberado = contexto
+                ? lerVendaSemEstoque(contexto.pdvSettings)
+                : await vendaSemEstoqueLiberada(client, req.params.id);
             }
             if (!semEstoqueLiberado) {
               await client.query('ROLLBACK');
@@ -762,6 +779,10 @@ async function handleSale(req, res, opts = {}) {
     timing.etapa('crediario');
 
     let activeSessaoId = null;
+    if (contexto) {
+      // p-143: a sessao aberta ja foi lida na abertura da transacao.
+      activeSessaoId = contexto.sessaoId;
+    } else {
     try {
       const sessRes = await client.query(
         `SELECT id FROM caixa_sessoes WHERE company_id=$1 AND status='aberta' LIMIT 1`,
@@ -769,10 +790,57 @@ async function handleSale(req, res, opts = {}) {
       );
       activeSessaoId = sessRes?.rows?.[0]?.id || null;
     } catch (sessErr) {}
+    }
     // Base da taxa da maquininha: acumulada a partir dos sale_payments que
     // realmente entraram, cada forma na sua aliquota. 'pix' entra na base
     // sempre; so vira taxa se a empresa preencheu card_fee_pix_pct.
     const cardBase = { cartao: 0, debito: 0, pix: 0 };
+    if (rapido) {
+      // p-143: as mesmas linhas de sale_payments e a mesma receita, num
+      // comando so. As regras (quem entra, em que ordem, base da taxa, texto
+      // do lancamento) sao as do bloco de sempre, logo abaixo.
+      const pagamentos = [];
+      if (Array.isArray(payments) && payments.length > 0) {
+        for (const p of payments) {
+          const m = (p.method || '').toLowerCase();
+          if (m === 'crediario') continue;
+          const amt = parseFloat(p.value ?? p.amount ?? 0);
+          if (amt <= 0) continue;
+          pagamentos.push({ method: p.method, amount: amt });
+          if (m === 'cartao' || m === 'debito' || m === 'pix') cardBase[m] += amt;
+        }
+      } else if (cashAmount > 0) {
+        const fallbackMethod = (payment_method || 'dinheiro').toLowerCase();
+        if (fallbackMethod !== 'crediario') {
+          pagamentos.push({ method: fallbackMethod, amount: cashAmount });
+          if (fallbackMethod === 'cartao' || fallbackMethod === 'debito' || fallbackMethod === 'pix') {
+            cardBase[fallbackMethod] += cashAmount;
+          }
+        }
+      }
+      let receita = null;
+      if (cashAmount > 0) {
+        const itemsSummary = productNames.slice(0, 3).join(', ');
+        let payLabel = payment_method || 'dinheiro';
+        if (Array.isArray(payments) && payments.length > 0) {
+          const nonCredit = payments.find(p => (p.method || '').toLowerCase() !== 'crediario');
+          if (nonCredit) payLabel = nonCredit.method;
+        }
+        receita = {
+          amount: cashAmount,
+          description: sale_date
+            ? `Venda (retroativa) - ${itemsSummary} (${payLabel})`
+            : `Venda PDV - ${itemsSummary} (${payLabel})`,
+          createdBy: req.user?.id || null,
+          idempotencyKey: 'pdv-sale-' + sale.id,
+          saleDate: sale_date || null,
+          spDateNow: SP_DATE_NOW,
+        };
+      }
+      await vendaRapida.gravarPagamentos(client, {
+        saleId: sale.id, companyId: req.params.id, sessaoId: activeSessaoId, pagamentos, receita,
+      });
+    } else {
     if (Array.isArray(payments) && payments.length > 0) {
       for (const p of payments) {
         const m = (p.method || '').toLowerCase();
@@ -820,6 +888,7 @@ async function handleSale(req, res, opts = {}) {
         txParams
       );
     }
+    }
 
     // Taxa da maquininha: despesa propria, logo apos a receita da venda.
     // Fica DENTRO da transacao -- a despesa nasce e morre junto com a venda.
@@ -830,6 +899,8 @@ async function handleSale(req, res, opts = {}) {
       createdBy:    req.user?.id || null,
       saleDate:     sale_date || null,
       itemsSummary: productNames.slice(0, 3).join(', '),
+      // p-143: pdv_settings ja lido na abertura (undefined = le la, como sempre).
+      pdvSettings:  contexto ? contexto.pdvSettings : undefined,
     });
     timing.dado({ caixa_sessao: !!activeSessaoId, taxa_maquininha: !!cardFee });
     timing.etapa('pagamento_financeiro');
@@ -899,10 +970,12 @@ async function handleSale(req, res, opts = {}) {
     // nfse_tomador da venda (440) vai junto, em memoria.
     nfseAutomatica.aoFinalizarVenda({ companyId: req.params.id, saleId: sale.id, tomador: nfseTomador.tomador });
 
-    const { rows: saleItems } = await timing.foraDaTransacao(db.query(
+    // p-143: os itens da resposta vieram do comando que os gravou (mesmas
+    // colunas da releitura, na ordem do carrinho). Sem eles, rele como sempre.
+    const saleItems = itensGravados || (await timing.foraDaTransacao(db.query(
       `SELECT si.*, p.name AS product_name FROM sale_items si
        LEFT JOIN products p ON p.id=si.product_id WHERE si.sale_id=$1`, [sale.id]
-    ));
+    ))).rows;
     let creditInfo = null;
     if (creditAmount > 0) {
       const { rows: bal } = await timing.foraDaTransacao(db.query(

@@ -606,3 +606,39 @@ describe('concorrencia: vendas simultaneas do ultimo item (caminho novo)', () =>
     }
   });
 });
+
+// >>> p-143
+// ── Resposta pelo RETURNING (p-143) ──────────────────────────
+describe('caminho novo: resposta pelo comando que gravou os itens', () => {
+  const cenario = (nome) => CENARIOS.find((c) => c.nome.startsWith(nome));
+
+  test('os itens da resposta vem na ordem do carrinho', async () => {
+    for (const nome of ['3 itens', 'item avulso', 'o mesmo produto', 'quantidade fracionada']) {
+      const c = cenario(nome);
+      const r = await rodar(c, 'rapido');
+      const pedido = c.body.items.map((i) =>
+        `${i.product_id || null}|${i.variant_id || null}|${Number(i.quantity).toFixed(3)}|${Number(i.unit_price).toFixed(2)}`
+          .replace(UUID_RE, (id) => NOME_DO_ID.get(id.toLowerCase()) || '<novo>'));
+      expect(r.respostas[0].status).toBe(201);
+      expect(r.respostas[0].ordemDosItens).toEqual(pedido);
+    }
+  });
+
+  test('o numero de idas nao cresce com o numero de itens', async () => {
+    const com = async (n) => {
+      const items = Array.from({ length: n }, (_, i) => (i % 2 ? item(ID.simples, 1, 10) : item(ID.daFilial, 0.5, 7.5)));
+      const r = await rodar({ body: { items, payment_method: 'pix' } }, 'rapido');
+      expect(r.respostas[0].status).toBe(201);
+      return r.tempo.queries_tx + r.tempo.queries_pos;
+    };
+    expect(await com(8)).toBe(await com(1));
+  });
+
+  test('PDV_VENDA_CAMINHO=fila volta ao caminho de sempre', async () => {
+    const r = await rodar(cenario('1 item, PIX'), 'fila');
+    expect(r.respostas[0].status).toBe(201);
+    expect(r.tempo.caminho).toBe('fila');
+    expect(r.tempo.queries_tx + r.tempo.queries_pos).toBeGreaterThanOrEqual(14);
+  });
+});
+// <<< p-143
