@@ -77,6 +77,7 @@
 
 const pool = require('../config/database');
 const AppError = require('../errors/AppError');
+const { rotuloDaVariante } = require('./nomeDaCor');
 
 const TIPOS_DE_MOVIMENTO = ['sangria', 'suprimento'];
 const MOTIVO_MAX = 200;
@@ -447,6 +448,188 @@ async function calcularMetricas(companyId, sessaoId, openedAt, closedAt) {
   return result;
 }
 
+// ── Trocas e devoluções da sessão (16/11/2026) ────────────────────────────
+// O fechamento mostra "Vendas do período" (sem troca, #1039) e "Entradas no
+// caixa" (por forma de pagamento). Num dia com troca os dois diferem pela
+// diferença paga e pelo que voltou ao cliente, e o papel não dizia por quê.
+// Esta lista vai na resposta do fechar() para o relatório e a tela explicarem
+// a conta. Não entra no snapshot caixa_fechamentos (sem migration).
+//
+// Troca da sessão = sale type='troca', não cancelada, com sale_payments OU
+// troca_payouts desta sessão, gravados por esta empresa. A sale da troca pode
+// estar no CNPJ da venda original (multi-CNPJ: trocaV2 grava a sale na
+// empresa da venda de origem e os pagamentos na empresa do caixa), por isso o
+// filtro de empresa fica no pagamento, não na sale. A troca par a par só tem
+// a row negativa em sale_payments, e ela também leva o sessao_id.
+
+const MOTIVO_TROCA_SEM_DADOS = new Set(['42P01', '42703']);
+
+function trocasVazias() {
+  return {
+    trocas: [],
+    trocas_resumo: {
+      quantidade: 0,
+      pecas_devolvidas: 0,
+      pecas_levadas: 0,
+      diferenca_recebida: 0,
+      devolvido_cliente: 0,
+    },
+  };
+}
+
+function nomeDoItemLevado(row) {
+  const nome = String(row.product_name || row.product_name_snapshot || 'Produto').trim() || 'Produto';
+  let rotulo = row.variant_label ? String(row.variant_label).trim() : '';
+  if (row.variant_id && Array.isArray(row.variant_attrs) && row.variant_attrs.length) {
+    // O mesmo rótulo do cupom (print.js): nome da cor, não o sku_suffix.
+    rotulo = rotuloDaVariante({
+      color_name: row.variant_color_name,
+      sku_suffix: row.variant_label,
+      attributes: row.variant_attrs,
+    }) || rotulo;
+  }
+  return rotulo ? `${nome} (${rotulo})` : nome;
+}
+
+function porMetodo(rows) {
+  const metodos = rows
+    .map((r) => ({ method: r.method, amount: r2(r.total) }))
+    .filter((m) => m.amount > 0);
+  return { total: r2(metodos.reduce((s, m) => s + m.amount, 0)), metodos };
+}
+
+async function listarTrocasDaSessao(companyId, sessaoId) {
+  try {
+    const { rows: trocaRows } = await pool.query(
+      `WITH da_sessao AS (
+         SELECT pay.sale_id AS id
+           FROM sale_payments pay
+          WHERE pay.sessao_id = $2 AND pay.company_id = $1
+         UNION
+         SELECT po.troca_sale_id AS id
+           FROM troca_payouts po
+          WHERE po.sessao_id = $2 AND po.company_id = $1
+       )
+       SELECT s.id, s.created_at
+         FROM sales s
+         JOIN da_sessao ds ON ds.id = s.id
+        WHERE COALESCE(s.type, 'sale') = 'troca'
+          AND COALESCE(s.status, 'completed') <> 'cancelled'
+        ORDER BY s.created_at, s.id`,
+      [companyId, sessaoId]
+    );
+    if (!trocaRows.length) return trocasVazias();
+
+    const ids = trocaRows.map((t) => t.id);
+
+    const { rows: devRows } = await pool.query(
+      `SELECT tri.troca_sale_id,
+              COALESCE(NULLIF(TRIM(tri.product_name_snapshot), ''), p.name, 'Produto') AS product_name_snapshot,
+              tri.quantity, tri.unit_price
+         FROM troca_returned_items tri
+         LEFT JOIN products p ON p.id = tri.product_id
+        WHERE tri.troca_sale_id = ANY($1::uuid[])
+        ORDER BY tri.created_at, tri.id`,
+      [ids]
+    );
+
+    // Mesmo nome do cupom da troca (print.js): products.name, senão o
+    // snapshot; variante pelo rótulo com o nome da cor.
+    const { rows: levRows } = await pool.query(
+      `SELECT si.sale_id, si.variant_id, si.quantity, si.unit_price, si.total_price,
+              si.product_name_snapshot,
+              COALESCE(p.name, si.product_name_snapshot) AS product_name,
+              pv.sku_suffix AS variant_label,
+              pv.color_name AS variant_color_name,
+              (SELECT json_agg(json_build_object('attribute', pvv.attribute_name, 'value', pvv.value)
+                               ORDER BY pvv.attribute_name)
+                 FROM product_variant_values pvv WHERE pvv.variant_id = pv.id) AS variant_attrs
+         FROM sale_items si
+         LEFT JOIN products p ON p.id = si.product_id
+         LEFT JOIN product_variants pv ON pv.id = si.variant_id
+        WHERE si.sale_id = ANY($1::uuid[])
+        ORDER BY si.sale_id, si.id`,
+      [ids]
+    );
+
+    // Só as rows POSITIVAS: a negativa (-valor devolvido) é o artefato
+    // contábil da trocaV2, não dinheiro que entrou.
+    const { rows: recRows } = await pool.query(
+      `SELECT pay.sale_id, pay.method,
+              COALESCE(SUM(pay.amount), 0)::numeric(12,2) AS total
+         FROM sale_payments pay
+        WHERE pay.sale_id = ANY($1::uuid[])
+          AND pay.company_id = $2
+          AND pay.amount > 0
+        GROUP BY pay.sale_id, pay.method
+        ORDER BY pay.sale_id, pay.method`,
+      [ids, companyId]
+    );
+
+    const { rows: poRows } = await pool.query(
+      `SELECT po.troca_sale_id, po.method,
+              COALESCE(SUM(po.amount), 0)::numeric(12,2) AS total
+         FROM troca_payouts po
+        WHERE po.troca_sale_id = ANY($1::uuid[])
+          AND po.company_id = $2
+        GROUP BY po.troca_sale_id, po.method
+        ORDER BY po.troca_sale_id, po.method`,
+      [ids, companyId]
+    );
+
+    const resumo = trocasVazias().trocas_resumo;
+    const trocas = trocaRows.map((t) => {
+      const devolvidos = devRows
+        .filter((r) => r.troca_sale_id === t.id)
+        .map((r) => ({
+          product_name_snapshot: r.product_name_snapshot,
+          quantity: parseFloat(r.quantity) || 0,
+          unit_price: r2(r.unit_price),
+        }));
+      const levados = levRows
+        .filter((r) => r.sale_id === t.id)
+        .map((r) => {
+          const quantity = parseFloat(r.quantity) || 0;
+          const unit_price = r2(r.unit_price);
+          const total = r.total_price != null ? r2(r.total_price) : r2(quantity * unit_price);
+          return { product_name: nomeDoItemLevado(r), quantity, unit_price, total_price: total };
+        });
+      const recebido = porMetodo(recRows.filter((r) => r.sale_id === t.id));
+      const payouts = poRows.filter((r) => r.troca_sale_id === t.id);
+      const devolvido_cliente = porMetodo(payouts.filter((r) => r.method !== 'crediario_credito'));
+      const credito_carteira = porMetodo(payouts.filter((r) => r.method === 'crediario_credito')).total;
+
+      resumo.quantidade += 1;
+      resumo.pecas_devolvidas += devolvidos.reduce((s, d) => s + d.quantity * d.unit_price, 0);
+      resumo.pecas_levadas += levados.reduce((s, l) => s + l.total_price, 0);
+      resumo.diferenca_recebida += recebido.total;
+      resumo.devolvido_cliente += devolvido_cliente.total;
+
+      return {
+        id: t.id,
+        created_at: t.created_at,
+        tipo: levados.length ? 'troca' : 'devolucao',
+        devolvidos,
+        levados,
+        recebido,
+        devolvido_cliente,
+        credito_carteira,
+      };
+    });
+
+    for (const k of Object.keys(resumo)) if (k !== 'quantidade') resumo[k] = r2(resumo[k]);
+    return { trocas, trocas_resumo: resumo };
+  } catch (err) {
+    // Deploy parcial (tabela/coluna da troca ausente): o fechamento sai como
+    // antes, sem a lista. Qualquer outro erro também não derruba: a lista é
+    // lida DEPOIS do COMMIT, e o fechamento já está gravado.
+    if (!MOTIVO_TROCA_SEM_DADOS.has(err.code)) {
+      console.error('[caixa] trocas da sessão:', err.message);
+    }
+    return trocasVazias();
+  }
+}
+
 // ── Operações públicas ────────────────────────────────────────────────────
 
 /**
@@ -531,6 +714,8 @@ async function getStatus(companyId) {
  *   - total_devolucoes (reembolsos de troca que saíram do caixa)
  *   - sessao_label (#XXXXX baseado no UUID, util pra exibir/PDF)
  *   - closed_at (timestamp de fechamento)
+ *   - trocas / trocas_resumo (16/11/2026): trocas e devoluções da sessão,
+ *     vazio quando não houve. Fora do snapshot.
  */
 async function fechar(companyId, userId, dinheiroContado, observacao = null) {
   await assertCaixaEnabled(companyId);
@@ -614,6 +799,11 @@ async function fechar(companyId, userId, dinheiroContado, observacao = null) {
     closedAt
   );
 
+  // 16/11/2026: as trocas e devoluções da sessão, para o relatório e a tela
+  // explicarem a diferença entre Vendas e Entradas. Best-effort, como as
+  // métricas: nunca derruba o fechamento já gravado.
+  const { trocas, trocas_resumo } = await listarTrocasDaSessao(companyId, sessao.id);
+
   // Placar do dia no WhatsApp do dono (13/10/2026). Fire-and-forget: o
   // fechamento ja esta gravado e a resposta nao espera a fila. Desligado por
   // padrao; sem WhatsApp vira audit 'placar.sem_canal' e segue.
@@ -635,6 +825,8 @@ async function fechar(companyId, userId, dinheiroContado, observacao = null) {
     total_devolucoes: totais.devolucoes,
     total_sangrias: mov.sangrias,
     total_suprimentos: mov.suprimentos,
+    trocas,
+    trocas_resumo,
   };
 }
 
