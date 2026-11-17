@@ -34,6 +34,8 @@ const promocao      = require('./parts/promocao');
 const personalizavel = require('./parts/personalizavel');
 // p-182: a ponte com o personalizador no quadro (so na loja com personalizavel).
 const quadro         = require('./parts/quadro');
+// p-183: o personalizado no checkout e no pedido (so na loja com personalizavel).
+const pedidoPz       = require('./parts/pedido_personalizado');
 const toast         = require('./parts/toast');
 const bootstrap     = require('./parts/bootstrap');
 // Regra da capa sem foto (iniciais + degrau do gradiente) — definida uma
@@ -79,6 +81,7 @@ function buildScript(storeData, escapedSlug, apiBase, textosDaFrente, opcoes) {
   const detalhe      = comPromocao ? promocao.aplicarNoDetalhe(detalheBase) : detalheBase;
   const cartao       = comPromocao ? promocao.aplicarNoCartao(card) : card;
   const detalheFinal = daCampanha ? campanha.aplicarNoDetalhe(detalhe) : detalhe;
+  const checkoutDaLoja = comNaEntrega ? naEntrega.aplicar(checkout) : checkout;
   return prelude(storeData, escapedSlug, apiBase)
        + init
        + stateUtils
@@ -94,12 +97,12 @@ function buildScript(storeData, escapedSlug, apiBase, textosDaFrente, opcoes) {
        + tiraCategorias
        + (daCampanha ? campanha.aplicarNaHome(home, daCampanha) : home)
        + filtros
-       + (comPersonalizavel ? quadro.aplicarNaSacola(sacola) : sacola)
+       + (comPersonalizavel ? pedidoPz.aplicarNoResumo(quadro.aplicarNaSacola(sacola)) : sacola)
        + (comPersonalizavel ? quadro.aplicarNoCarrinho(cart) : cart)
-       + (comNaEntrega ? naEntrega.aplicar(checkout) : checkout)
+       + (comPersonalizavel ? pedidoPz.aplicarNoCheckout(checkoutDaLoja) : checkoutDaLoja)
        + pix
        + (comPersonalizavel ? personalizavel.aplicarNoDetalhe(detalheFinal) : detalheFinal)
-       + (comPersonalizavel ? quadro.PONTE : '')
+       + (comPersonalizavel ? quadro.PONTE + pedidoPz.EXTRA : '')
        + toast
        + bootstrap;
 }

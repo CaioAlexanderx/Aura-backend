@@ -155,7 +155,7 @@ describe('a pagina da loja', () => {
     expect(csp.split('; frame-src')[0]).toMatch(/form-action 'self'$/);
     expect(r.text).toContain("var FONTE_DO_QUADRO='aura:personalizador'");
     expect(r.text).toContain("window.addEventListener('aura:personalizar'");
-    expect(r.text).toContain('if(i.personalizado) return htmlDoItemPersonalizado(i);');
+    expect(r.text).toContain('if(i.personalizado||linhaPendente(i)) return htmlDoItemPersonalizado(i);');
     expect(r.text).toMatch(/<style>\.pz-selo\{[^<]*\.pzq-veu\{[^<]*<\/style>\n<\/head>/);
 
     const hit = await request(app).get(`/api/v1/storefront/${loja.config.slug}/page`);
@@ -470,7 +470,9 @@ describe('a sacola com o personalizado', () => {
     expect(() => quadro.aplicarNoCarrinho(cartSrc)).not.toThrow();
     const s = quadro.aplicarNaSacola(sacolaSrc);
     expect(s).toContain('if(i.personalizado&&!itemPersonalizadoDaSacola(cart[i.key],i)) delete cart[i.key];');
-    expect(s.length - sacolaSrc.length).toBeLessThan(200);
+    // p-183: a conferencia leva o personalizado (assinatura, corpo, resposta).
+    expect(s).toContain('var corpo={ items:itens.map(itemParaOServidor) };');
+    expect(s.length - sacolaSrc.length).toBeLessThan(800);
   });
 
   test('a linha da sacola: miniatura, "Personalizada", resumo, Editar e Remover, e o aviso da arte', () => {
@@ -519,21 +521,34 @@ describe('a sacola com o personalizado', () => {
     expect(api.itemPersonalizadoDaSacola({}, { key: `pz-${CANECA}-a`, product_id: CANECA, customization: [1] })).toBe(false);
   });
 
-  test('a conferencia do preco de agora (p-124) manda so as pecas de prateleira', async () => {
-    const src = quadro.aplicarNaSacola(sacolaSrc);
+  test('a conferencia do preco de agora (p-124) leva o personalizado com o customization (p-183)', async () => {
+    const src = quadro.aplicarNaSacola(sacolaSrc) + quadro.PONTE;
     const corpos = [];
     const cart = {
       p1: { key: 'p1', product_id: '0b1a1111-0000-4000-8000-000000000001', variant_id: null, name: 'Bolsa', price: 219.9, qty: 1 },
-      pz: { key: 'pz', product_id: CANECA, variant_id: null, name: 'Caneca', price: 38, qty: 2, personalizado: true, customization: {} },
+      pz: { key: 'pz', product_id: CANECA, variant_id: null, name: 'Caneca', price: 38, subtotal: 76, qty: 2, personalizado: true, customization: { nome: 'Ana' } },
     };
-    const conferir = new Function('cart', 'fetch', 'API_BASE', 'SLUG', 'cartKey', 'updateCartUI', 'fmt', 'esc', '__S',
-      `${src}\nreturn conferirPrecosDaSacola;`)(
+    const conferir = new Function('window', 'document', 'location', 'PROD_MAP', 'cart', 'fetch', 'API_BASE', 'SLUG', 'cartKey', 'updateCartUI', 'fmt', 'esc', '__S',
+      `${src}
+return conferirPrecosDaSacola;`)(
+      { addEventListener() {} }, { addEventListener() {}, getElementById: () => null }, { pathname: '/atelie', origin: ORIGEM }, {},
       cart,
-      async (_u, o) => { corpos.push(JSON.parse(o.body)); return { ok: true, json: async () => ({ itens: [{ indice: 0, product_id: cart.p1.product_id, preco: 219.9 }] }) }; },
+      async (_u, o) => {
+        corpos.push(JSON.parse(o.body));
+        return { ok: true, json: async () => ({ itens: [
+          { indice: 0, product_id: cart.p1.product_id, preco: 219.9 },
+          { indice: 1, product_id: CANECA, variant_id: null, personalizado: true, preco: 40, subtotal: 95, disponivel: true },
+        ] }) };
+      },
       '', 'atelie', (p, v) => p + (v ? ':' + v : ''), () => {}, (v) => String(v), (s) => s, {});
-    await conferir();
-    expect(corpos).toEqual([{ items: [{ product_id: cart.p1.product_id, variant_id: null, quantity: 1 }] }]);
-    expect(cart.pz.price).toBe(38);
+    const r = await conferir();
+    expect(corpos).toEqual([{ items: [
+      { product_id: cart.p1.product_id, variant_id: null, quantity: 1 },
+      { product_id: CANECA, quantity: 2, customization: { nome: 'Ana' } },
+    ] }]);
+    // O personalizado acerta o preco e a linha inteira (com a arte).
+    expect(cart.pz).toMatchObject({ price: 40, subtotal: 95, pendente: false });
+    expect(r.subiram).toEqual([{ nome: 'Caneca', de: 76, para: 95 }]);
   });
 });
 

@@ -30,10 +30,23 @@
 //      `customization` e a quantidade do item; o `confirmou` com
 //      `editando: true` troca o item no lugar.
 //
-// O preco do item e o que o quadro mostrou (preco.unitario): so para a
-// sacola. O pedido recota no servidor (p-183/p-184). Por isso o item
-// personalizado fica fora da conferencia de preco da sacola (p-124), que
-// so conhece o preco de prateleira da peca.
+// O preco do item e o que o quadro mostrou (preco.unitario, sem a arte, e
+// preco.total, a linha inteira com a arte): so para a sacola. O pedido
+// recota no servidor (p-184).
+//
+// p-183 (loja unica 3.3c, 17/11/2026): o checkout leva o personalizado.
+//   - A linha vale `subtotal` (a arte e cobrada uma vez por linha, entao
+//     price x qty nao fecha): totalDaLinha() em todo lugar que soma.
+//   - A conferencia do preco de agora (p-124) manda o personalizado com o
+//     `customization` (POST /sacola/precos, contrato do p-184) e acerta
+//     `price` e `subtotal` pela resposta. O pedido criado acerta igual.
+//   - Peca personalizavel na sacola SEM a escolha (sacola guardada antes
+//     de a loja ter o personalizador; o servidor responde motivo
+//     'personalizacao') ou com a escolha que nao passa mais (a lojista
+//     mudou os campos) fica `pendente`: a linha pede "Personalizar" e o
+//     pedido nao sai ate a cliente escolher. Era o 400 que a sacola antiga
+//     recebia (risco deixado pelo p-182).
+//   - O resumo do checkout e o pedido: parts/pedido_personalizado.js.
 'use strict';
 
 const PONTE = `
@@ -87,6 +100,20 @@ function customizationSegura(c){
   return c;
 }
 
+/** A linha inteira do personalizado (com a arte), ou o reserva. */
+function subtotalValido(v,reserva){
+  var n=(v==null||v==='')?NaN:Number(v);
+  return (isFinite(n)&&n>=0)?Math.round(n*100)/100:reserva;
+}
+/** O que a linha da sacola soma. O personalizado vale o subtotal (p-183). */
+function totalDaLinha(i){
+  if(i&&i.personalizado&&i.subtotal!=null&&isFinite(Number(i.subtotal))) return Number(i.subtotal);
+  return i.price*i.qty;
+}
+/** A peca vai pelo personalizador e ainda nao tem a escolha que vale. */
+function linhaPendente(i){ return !!(i&&i.pendente); }
+var REV_DO_PZ=0;
+
 /** O item da sacola a partir do confirmou, ou null se ele nao fecha. */
 function itemDoConfirmado(d,produtoId){
   if(!d||d.produto_id!==produtoId) return null;
@@ -97,6 +124,7 @@ function itemDoConfirmado(d,produtoId){
   var p=PROD_MAP[produtoId];
   var nome=(typeof d.nome==='string'&&d.nome.trim())?d.nome.trim().slice(0,160):(p?p.name:'Peça personalizada');
   return { product_id:produtoId, variant_id:null, name:nome, price:Math.round(unit*100)/100,
+    subtotal:subtotalValido(preco.total,Math.round(unit*q*100)/100),
     image_url:miniaturaSegura(d.miniatura)||(p?miniaturaSegura(p.thumb_url||p.image_url):null),
     qty:Math.min(q,9999), personalizado:true, customization:c, resumo:resumoSeguro(d.resumo),
     preco_fonte:preco.fonte==='servidor'?'servidor':'estimativa' };
@@ -109,6 +137,9 @@ function novaChavePz(produtoId){ return 'pz-'+produtoId+'-'+Date.now().toString(
 function guardarPersonalizado(item,chave){
   if(chave&&cart[chave]&&cart[chave].personalizado){ item.key=chave; }
   else { item.key=novaChavePz(item.product_id); }
+  // A assinatura da conferencia de preco (p-124) muda com a escolha nova.
+  item.rev=++REV_DO_PZ;
+  if(typeof erroDaPersonalizacao!=='undefined') erroDaPersonalizacao='';
   cart[item.key]=item;
   updateCartUI();
   if(typeof renderProducts==='function') renderProducts();
@@ -125,24 +156,74 @@ function itemPersonalizadoDaSacola(item,salvo){
   item.resumo=resumoSeguro(salvo.resumo);
   item.image_url=miniaturaSegura(salvo.image_url);
   item.preco_fonte=salvo.preco_fonte==='servidor'?'servidor':'estimativa';
+  item.subtotal=subtotalValido(salvo.subtotal,Math.round(item.price*item.qty*100)/100);
   if(typeof salvo.name==='string'&&salvo.name.trim()) item.name=salvo.name.trim().slice(0,160);
   return true;
+}
+
+/**
+ * O item como o servidor le (POST /order e POST /sacola/precos, p-184): o
+ * personalizado vai com o customization e sem variante; o resto, como
+ * sempre. A linha pendente sem escolha vai como peca comum e volta com o
+ * motivo 'personalizacao'.
+ */
+function itemParaOServidor(i){
+  if(i.personalizado&&i.customization) return { product_id:i.product_id, quantity:i.qty, customization:i.customization };
+  return { product_id:i.product_id, variant_id:i.variant_id||null, quantity:i.qty };
+}
+
+/**
+ * A resposta do servidor para uma linha (conferencia ou pedido criado).
+ * null = nao e assunto do personalizado (segue a regra de sempre).
+ * 'mudou' / 'igual' = tratada aqui. Subiu: entra em subiram pela linha.
+ */
+function tratarLinhaPersonalizada(i,r,subiram){
+  var recusou=r.disponivel===false&&r.motivo==='personalizacao';
+  if(!i.personalizado){
+    if(!recusou) return null;
+    if(i.pendente) return 'igual';
+    i.pendente=true; return 'mudou';
+  }
+  if(recusou){ if(i.pendente) return 'igual'; i.pendente=true; return 'mudou'; }
+  if(r.preco==null||r.subtotal==null) return 'igual';
+  var preco=Number(r.preco), sub=Number(r.subtotal);
+  if(!isFinite(preco)||preco<0||!isFinite(sub)||sub<0) return 'igual';
+  var antes=totalDaLinha(i), era=i.pendente;
+  i.pendente=false;
+  if(centavosDe(sub)===centavosDe(antes)&&centavosDe(preco)===centavosDe(i.price)) return era?'mudou':'igual';
+  if(centavosDe(sub)>centavosDe(antes)) subiram.push({ nome:i.name, de:antes, para:sub });
+  i.price=centavosDe(preco)/100; i.subtotal=centavosDe(sub)/100;
+  return 'mudou';
 }
 
 /** A linha do personalizado na sacola: miniatura, resumo, Editar e Remover. */
 function htmlDoItemPersonalizado(i){
   var img=i.image_url?'<img src="'+escAtributoPz(i.image_url)+'" alt="">':'<span class="product-ph-initials" style="font-size:22px;">'+esc(INICIAIS(i.name))+'</span>';
-  var resumo=(i.resumo||[]).map(function(r){ return esc(r); }).join(' · ');
   var un=i.qty===1?'1 unidade':i.qty+' unidades';
-  return '<div class="cart-item pzq-item"><div class="cart-item-img">'+img+'</div>'
+  return '<div class="cart-item pzq-item'+(linhaPendente(i)?' pzq-pendente':'')+'"><div class="cart-item-img">'+img+'</div>'
     +'<div class="cart-item-info"><div class="cart-item-name">'+esc(i.name)+' <span class="pzq-pill">Personalizada</span></div>'
-    +'<div class="pzq-resumo">'+(resumo?resumo+'<br>':'')+un+'</div>'
-    +'<div class="pzq-acoes"><button type="button" data-pzq-editar="'+escAtributoPz(i.key)+'">Editar</button>'
-    +'<button type="button" data-pzq-remover="'+escAtributoPz(i.key)+'">Remover</button></div></div>'
-    +'<div class="cart-item-right"><div class="cart-item-total">'+fmt(i.price*i.qty)+'</div></div></div>';
+    +'<div class="pzq-resumo">'+textoDoResumoPz(i)+un+'</div>'
+    +acoesDoPz(i)+'</div>'
+    +'<div class="cart-item-right"><div class="cart-item-total">'+fmt(totalDaLinha(i))+'</div></div></div>';
+}
+/** O que a cliente escolheu, ou o que falta (linha pendente). Com <br> no fim. */
+function textoDoResumoPz(i){
+  if(linhaPendente(i)){
+    return '<span class="pzq-falta">'+(i.personalizado
+      ?'Revise a personalização desta peça antes de finalizar.'
+      :'Falta escolher a personalização desta peça.')+'</span><br>';
+  }
+  var resumo=(i.resumo||[]).map(function(r){ return esc(r); }).join(' · ');
+  return resumo?resumo+'<br>':'';
+}
+/** "Editar" (ou "Personalizar", sem a escolha) e "Remover". */
+function acoesDoPz(i){
+  var rotulo=(linhaPendente(i)&&!i.personalizado)?'Personalizar':'Editar';
+  return '<div class="pzq-acoes"><button type="button" data-pzq-editar="'+escAtributoPz(i.key)+'">'+rotulo+'</button>'
+    +'<button type="button" data-pzq-remover="'+escAtributoPz(i.key)+'">Remover</button></div>';
 }
 function avisoDoPersonalizado(){
-  var tem=Object.values(cart).some(function(i){ return i.personalizado; });
+  var tem=Object.values(cart).some(function(i){ return i.personalizado||linhaPendente(i); });
   return tem?'<p class="pzq-aviso">Peças personalizadas são feitas sob encomenda. Depois do pagamento, a gente mostra a arte para você aprovar, e só então produz.</p>':'';
 }
 
@@ -172,7 +253,8 @@ function abrirQuadro(produtoId,chave){
   document.body.appendChild(veu);
   var iframe=veu.querySelector('iframe');
   QUADRO={ veu:veu, iframe:iframe, produto_id:produtoId, chave:chave||null, pronto:false,
-    foco:document.activeElement, overflow:document.body.style.overflow, timer:null };
+    foco:document.activeElement, overflow:document.body.style.overflow, timer:null,
+    doCheckout:checkoutAbertoPz() };
   document.body.style.overflow='hidden';
   iframe.addEventListener('load',function(){ conferirQuadroCarregado(iframe); });
   QUADRO.timer=setTimeout(function(){ if(QUADRO&&!QUADRO.pronto) mostrarSaidaDoQuadro('demora'); },ESPERA_DO_QUADRO);
@@ -224,16 +306,23 @@ function tratarMensagemDoQuadro(d){
     if(QUADRO.timer){ clearTimeout(QUADRO.timer); QUADRO.timer=null; }
     QUADRO.veu.classList.add('pzq-pronto');
     var item=QUADRO.chave&&cart[QUADRO.chave];
-    if(item&&item.personalizado) enviarAoQuadro({ tipo:'editar', customization:item.customization, quantidade:item.qty });
+    if(item&&item.personalizado&&item.customization) enviarAoQuadro({ tipo:'editar', customization:item.customization, quantidade:item.qty });
     try{ QUADRO.iframe.focus(); }catch(_){}
     return;
   }
   if(d.tipo==='confirmou'){
     var novo=itemDoConfirmado(d,QUADRO.produto_id);
     if(!novo){ if(typeof showToast==='function') showToast('Não deu para guardar a peça. Tente de novo.'); return; }
-    guardarPersonalizado(novo,d.editando===true?QUADRO.chave:null);
+    // A linha sem a escolha (sacola antiga) sai: a nova toma o lugar dela.
+    var alvo=QUADRO.chave, antiga=alvo&&cart[alvo];
+    if(antiga&&!antiga.personalizado&&linhaPendente(antiga)){ delete cart[alvo]; alvo=null; }
+    else if(d.editando!==true) alvo=null;
+    var doCheckout=QUADRO.doCheckout;
+    guardarPersonalizado(novo,alvo);
     fecharQuadro(true);
-    openCart();
+    // Do resumo do checkout, a cliente volta para o checkout (p-183).
+    if(doCheckout){ if(typeof aposMudarOPreco==='function') aposMudarOPreco(); }
+    else openCart();
     return;
   }
   if(d.tipo==='cancelou'){ fecharQuadro(); return; }
@@ -255,11 +344,20 @@ document.addEventListener('click',function(ev){
   if(!t) return;
   if(t.hasAttribute('data-pzq-fechar')){ fecharQuadro(); return; }
   var k=t.getAttribute('data-pzq-editar')||t.getAttribute('data-pzq-remover');
-  var i=cart[k]; if(!i||!i.personalizado) return;
-  if(t.hasAttribute('data-pzq-remover')){ changeQty(k,-i.qty); return; }
+  var i=cart[k]; if(!i||!(i.personalizado||linhaPendente(i))) return;
+  if(t.hasAttribute('data-pzq-remover')){
+    changeQty(k,-i.qty);
+    if(checkoutAbertoPz()&&typeof aposMudarOPreco==='function') aposMudarOPreco();
+    return;
+  }
   closeCart();
   abrirQuadro(i.product_id,k);
 });
+/** O checkout esta aberto? (Editar pelo resumo dele, p-183.) */
+function checkoutAbertoPz(){
+  var ov=document.getElementById('checkoutOverlay');
+  return !!(ov&&ov.classList&&ov.classList.contains('open'));
+}
 document.addEventListener('keydown',function(ev){ if(QUADRO&&ev.key==='Escape') fecharQuadro(); });
 `;
 
@@ -271,11 +369,25 @@ const TROCAS_DA_SACOLA = [
     'cart[i.key]={ key:i.key, product_id:i.product_id, variant_id:i.variant_id||null, name:nome, price:Number(i.price), image_url:i.image_url||null, qty:Math.round(i.qty) };\n'
       + '      if(i.personalizado&&!itemPersonalizadoDaSacola(cart[i.key],i)) delete cart[i.key];\n',
   ],
-  // A conferencia do preco de agora (p-124) so conhece o preco de
-  // prateleira: o personalizado fica fora (o pedido recota no servidor).
+  // p-183: a conferencia do preco de agora (p-124) leva o personalizado
+  // com o customization (POST /sacola/precos aceita desde o p-184).
   [
-    "  var itens=Object.values(cart);\n  if(!itens.length||typeof fetch!=='function') return Promise.resolve(null);",
-    "  var itens=Object.values(cart).filter(function(i){ return !i.personalizado; });\n  if(!itens.length||typeof fetch!=='function') return Promise.resolve(null);",
+    "function assinaturaDaSacola(){ return Object.values(cart).map(function(i){ return i.key+'x'+i.qty; }).join('|'); }",
+    "function assinaturaDaSacola(){ return Object.values(cart).map(function(i){ return i.key+'x'+i.qty+(i.personalizado?'~'+(i.rev||0):''); }).join('|'); }",
+  ],
+  [
+    "  var corpo={ items:itens.map(function(i){ return { product_id:i.product_id, variant_id:i.variant_id||null, quantity:i.qty }; }) };",
+    "  var corpo={ items:itens.map(itemParaOServidor) };",
+  ],
+  // A resposta do personalizado traz subtotal (com a arte) e o motivo.
+  [
+    "    return { key:key, preco:r[campo] };",
+    "    return { key:key, preco:r[campo], subtotal:r.subtotal, disponivel:r.disponivel, motivo:r.motivo };",
+  ],
+  // O personalizado e a linha pendente seguem tratarLinhaPersonalizada.
+  [
+    "    if(!r||r.preco==null) return;\n    var i=cart[r.key]; if(!i) return;\n",
+    "    if(!r) return;\n    var pz=cart[r.key]?tratarLinhaPersonalizada(cart[r.key],r,subiram):null;\n    if(pz){ if(pz==='mudou') mudou=true; return; }\n    if(r.preco==null) return;\n    var i=cart[r.key]; if(!i) return;\n",
   ],
 ];
 
@@ -283,7 +395,12 @@ const TROCAS_DO_CARRINHO = [
   // A linha do personalizado (miniatura, resumo, Editar, Remover).
   [
     "+Object.values(cart).map(function(i){\n",
-    "+Object.values(cart).map(function(i){\n    if(i.personalizado) return htmlDoItemPersonalizado(i);\n",
+    "+Object.values(cart).map(function(i){\n    if(i.personalizado||linhaPendente(i)) return htmlDoItemPersonalizado(i);\n",
+  ],
+  // p-183: a linha do personalizado vale o subtotal (a arte entra uma vez).
+  [
+    "function getSubtotal(){return Object.values(cart).reduce(function(s,i){return s+i.price*i.qty;},0);}",
+    "function getSubtotal(){return Object.values(cart).reduce(function(s,i){return s+totalDaLinha(i);},0);}",
   ],
   // O aviso da aprovacao da arte, depois dos itens (mockup p-132).
   [
@@ -304,7 +421,7 @@ function trocar(src, trocas, nome) {
   return out;
 }
 
-/** sacola.js com o personalizado guardado e fora da conferencia de preco. */
+/** sacola.js com o personalizado guardado e na conferencia de preco (p-183). */
 function aplicarNaSacola(sacolaSrc) {
   return trocar(sacolaSrc, TROCAS_DA_SACOLA, 'sacola');
 }
