@@ -205,6 +205,29 @@ function fonteDaCapa(row) {
 const PROMISED_COL = `
               (SELECT s2.promised_date FROM sales s2 WHERE s2.id = o.pdv_sale_id) AS promised_date,`;
 
+// Quantidade de itens e aprovacoes do pedido. Ultimas colunas do SELECT
+// (sem virgula no fim). 17/11/2026 (p-186): saiu do handler para a lista
+// consolidada /me/studio/orders (routes/meStudio.js) contar igual.
+const ITENS_E_APROVACAO_COLS = `
+              CASE
+                WHEN o.source = 'digital' THEN
+                  (SELECT COUNT(*) FROM digital_order_items oi WHERE oi.order_id = o.digital_order_id)
+                WHEN o.source = 'pdv' THEN
+                  (SELECT COUNT(*) FROM sale_items si WHERE si.sale_id = o.pdv_sale_id)
+                WHEN o.source = 'marketplace' THEN
+                  (SELECT CASE
+                    WHEN mo.items IS NULL THEN 0
+                    WHEN jsonb_typeof(mo.items) = 'array' THEN jsonb_array_length(mo.items)
+                    ELSE 0
+                  END FROM marketplace_orders mo WHERE mo.id = o.marketplace_order_id)
+                ELSE 0
+              END AS item_count,
+              (SELECT a.mockup_url FROM studio_approval_links a
+                WHERE a.order_id = o.digital_order_id AND a.status = 'pending'
+                ORDER BY a.created_at DESC LIMIT 1) AS pending_approval_url,
+              (SELECT COUNT(*) FROM studio_approval_links a
+                WHERE a.order_id = o.digital_order_id) AS approval_count`;
+
 // Campos de saldo nulos — mantem o shape identico nos fallbacks slim/raw, pra
 // que o app nunca precise checar se o campo existe.
 const NULL_BALANCE = {
@@ -522,24 +545,7 @@ ${withBalance ? BALANCE_COLS : ''}
               o.marketplace_order_id,
               o.marketplace_platform,
               o.customization_collected_at,
-              CASE
-                WHEN o.source = 'digital' THEN
-                  (SELECT COUNT(*) FROM digital_order_items oi WHERE oi.order_id = o.digital_order_id)
-                WHEN o.source = 'pdv' THEN
-                  (SELECT COUNT(*) FROM sale_items si WHERE si.sale_id = o.pdv_sale_id)
-                WHEN o.source = 'marketplace' THEN
-                  (SELECT CASE
-                    WHEN mo.items IS NULL THEN 0
-                    WHEN jsonb_typeof(mo.items) = 'array' THEN jsonb_array_length(mo.items)
-                    ELSE 0
-                  END FROM marketplace_orders mo WHERE mo.id = o.marketplace_order_id)
-                ELSE 0
-              END AS item_count,
-              (SELECT a.mockup_url FROM studio_approval_links a
-                WHERE a.order_id = o.digital_order_id AND a.status = 'pending'
-                ORDER BY a.created_at DESC LIMIT 1) AS pending_approval_url,
-              (SELECT COUNT(*) FROM studio_approval_links a
-                WHERE a.order_id = o.digital_order_id) AS approval_count
+${ITENS_E_APROVACAO_COLS}
          FROM studio_orders o${withBalance ? BALANCE_LATERAL : ''}
         WHERE ${where}
         ORDER BY o.created_at DESC
@@ -1148,3 +1154,20 @@ router.post('/approval/:approvalId/cancel', async function(req, res) {
 
 module.exports = router;
 module.exports._motivoParaNaoMudarEtapa = motivoParaNaoMudarEtapa;
+// 17/11/2026 (p-186): pedacos da lista da Producao reusados pela visao
+// consolidada /me/studio/orders (routes/meStudio.js), para o cartao sair
+// igual nas duas telas. Quem mudar um deles muda as duas listas.
+module.exports.listaDaProducao = {
+  VALID_PRODUCTION_STATUS,
+  ETAPA_DO_PEDIDO,
+  BALANCE_LATERAL,
+  BALANCE_COLS,
+  CARD_IMAGE_COL,
+  CARD_SOURCE_COLS,
+  PROMISED_COL,
+  ITENS_E_APROVACAO_COLS,
+  NULL_BALANCE,
+  fonteDaCapa,
+  hasInstallmentsTable,
+  hasPromisedDate,
+};
