@@ -246,6 +246,45 @@ describe('(5)-(6) POST /collection/trigger/:iid', () => {
   });
 });
 
+describe('(8) falha no historico nunca derruba o aviso manual', () => {
+  it('INSERT com erro: devolve o texto, loga e desfaz so o savepoint', async () => {
+    const stmts = [];
+    const client = {
+      query: jest.fn((sql) => {
+        const s = String(sql);
+        stmts.push(s.trim().split(/\r?\n/)[0].trim());
+        if (s.includes('-- cred:notice-evento')) return Promise.reject(erro23502());
+        return Promise.resolve({ rows: [] });
+      }),
+    };
+    mockBanco();
+    const r = await collectionNotice.buildNotice(client, {
+      companyId: COMPANY, installmentId: 'inst-1', template: 'atraso_1', channel: 'whatsapp',
+      row: parcela({ due_date: '2026-09-11' }),
+    });
+    expect(r.message).toMatch(/Ana Souza/);
+    expect(stmts).toContain('SAVEPOINT cred_notice_evento');
+    expect(stmts).toContain('ROLLBACK TO SAVEPOINT cred_notice_evento');
+    expect(errSpy).toHaveBeenCalled();
+  });
+
+  it('POST wa.me com INSERT falhando responde 200 com o texto', async () => {
+    const visto = mockBanco({ parcelas: [parcela({ due_date: '2026-09-11' })] });
+    const base = db.query.getMockImplementation();
+    db.query.mockImplementation((sql, params) => {
+      if (String(sql).includes('-- cred:notice-evento')) return Promise.reject(erro23502());
+      return base(sql, params);
+    });
+    const res = await request(buildCreditApp())
+      .post(`/companies/${COMPANY}/credit/collection/trigger/inst-1`)
+      .set('Authorization', 'Bearer ' + token)
+      .send({ template: 'atraso_1' });
+    expect(res.status).toBe(200);
+    expect(res.body.message).toMatch(/Ana Souza/);
+    expect(visto.noticeEventos).toHaveLength(0);
+  });
+});
+
 describe('(7) migration 430', () => {
   const sql = fs.readFileSync(
     path.join(__dirname, '..', 'migrations', '430_credit_collection_events_alinha.sql'), 'utf8'

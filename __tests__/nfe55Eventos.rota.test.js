@@ -245,7 +245,10 @@ describe('POST /nfce/:id/cancel (rota antiga)', () => {
   it('NFC-e continua igual: endpoint da NFC-e e prazo de 30 min', async () => {
     const vencida = await post(`/nfce/${EM(4)}/cancel`, { reason: JUST });
     expect(vencida.status).toBe(400);
-    expect(vencida.body.error).toMatch(/Prazo de cancelamento expirado \(30 min/);
+    // 17/11/2026 (b-troca-prazo-nfce): prazo por UF e texto gentil com o caminho.
+    expect(vencida.body.code).toBe('NFCE_PRAZO_CANCELAMENTO_VENCIDO');
+    expect(vencida.body.caminho).toBe('devolucao');
+    expect(vencida.body.error).toMatch(/até 30 minutos depois da autorização/);
     expect(state.soap).toHaveLength(0);
     const ok = await post(`/nfce/${EM(5)}/cancel`, { reason: JUST });
     expect(ok.status).toBe(200);

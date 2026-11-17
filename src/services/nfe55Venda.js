@@ -39,6 +39,7 @@ const {
 const { separarServicos, pagamentosDosProdutos } = require('./nfceSemServico');
 const { ibgePeloCep } = require('./ibgePeloCep');
 const { CNPJ_REQUIRED_CODE, CNPJ_REQUIRED_MSG } = require('./documentoEmpresa');
+const { prazoDeCancelamento } = require('./nfcePrazoCancelamento');
 
 function onlyDigits(s) { return String(s == null ? '' : s).replace(/\D/g, ''); }
 function texto(v) {
@@ -268,6 +269,71 @@ async function nfeDeVendaQueTrava(db, companyId, saleId) {
   if (!ehUuid(String(saleId || ''))) return null;
   const rows = await notasDaVenda(db, companyId, saleId);
   return rows.find((r) => r.tipo === 'nfe' && ['autorizada', 'processando', 'denegada'].includes(r.status)) || null;
+}
+
+// ── Trocar por NF-e (17/11/2026) ────────────────────────────
+//
+// A venda tem NFC-e autorizada e a lojista quer a NF-e no lugar. Dentro do
+// prazo de cancelamento da NFC-e, o app cancela a NFC-e pela rota de sempre
+// (POST /companies/:id/nfce/:nfceId/cancel, evento 110111 na SEFAZ) e, com o
+// cancelamento autorizado, abre o assistente da NF-e. A trava "uma nota de
+// produtos por venda" não muda: NFC-e cancelada não trava (STATUS_QUE_TRAVAM).
+//
+// Esta função só LÊ e diz ao app o que mostrar. Não cancela nem emite nada:
+// nota fiscal é sempre manual, pelo botão e com a confirmação da lojista.
+//
+// situacao:
+//   sem_nfce          venda sem NFC-e autorizada (a tela de hoje)
+//   nfce_pendente     NFC-e em processando, contingência ou denegada
+//   ja_tem_nfe        a venda já tem NF-e de venda
+//   fora_da_aura      NFC-e emitida pelo gateway: o cancelamento não passa
+//                     pelo evento 110111 da Aura, então a troca não é oferecida
+//   nfe_indisponivel  a loja não emitiria a NF-e desta venda (UF, regime,
+//                     certificado...). A NFC-e nunca é cancelada para depois
+//                     descobrir que a NF-e não sai
+//   fora_do_prazo     passou o prazo de cancelamento da NFC-e
+//   pode_trocar       dá para cancelar a NFC-e e emitir a NF-e
+//
+// Prazo: services/nfcePrazoCancelamento.prazoDeCancelamento (por UF,
+// b-troca-prazo-nfce), o MESMO que a rota de cancelamento
+// (services/nfceCancelamento.js) usa para recusar fora do prazo. Sem
+// authorized_at não dá para afirmar o prazo: oferece a troca e deixa a SEFAZ
+// decidir (habilitar, nunca bloquear; se ela recusar, o assistente não abre).
+//
+// Multi-CNPJ: tudo com o companyId da loja da venda (sales.company_id).
+async function situacaoDaTrocaPorNfe(db, { companyId, saleId, now = Date.now() }) {
+  const rows = await notasDaVenda(db, companyId, saleId);
+  const nfce = rows.find((r) => r.tipo === 'nfce' && r.status === 'autorizada') || null;
+  const resposta = (situacao, extra) => ({
+    situacao,
+    nfce: nfce ? {
+      id: nfce.id, numero: nfce.numero, serie: nfce.serie, authorized_at: nfce.authorized_at || null,
+      cancelavel_ate: null, prazo_minutos: null, uf: null,
+    } : null,
+    bloqueio: null,
+    ...(extra || {}),
+  });
+
+  if (!nfce) {
+    const pendente = rows.some((r) => r.tipo === 'nfce' && STATUS_QUE_TRAVAM.includes(r.status));
+    return resposta(pendente ? 'nfce_pendente' : 'sem_nfce');
+  }
+  if (rows.some((r) => r.tipo === 'nfe' && STATUS_QUE_TRAVAM.includes(r.status))) return resposta('ja_tem_nfe');
+  if (!nfce.xml_signed) return resposta('fora_da_aura');
+
+  const m = await montarNotaDaVenda(db, { companyId, saleId, body: {} });
+  if (m.bloqueio && m.bloqueio.status === 404) return { notFound: m.bloqueio };
+  let bloqueio = m.bloqueio ? { code: m.bloqueio.code, error: m.bloqueio.error } : null;
+  if (!bloqueio) {
+    const cert = await motivoCertificado(db, companyId);
+    if (cert) bloqueio = { code: 'NFE_CERTIFICADO', error: cert };
+  }
+  if (bloqueio) return resposta('nfe_indisponivel', { bloqueio });
+
+  const prazo = prazoDeCancelamento(nfce, { uf: m.config && m.config.uf, now });
+  const r = resposta(prazo.dentro || prazo.desconhecido ? 'pode_trocar' : 'fora_do_prazo');
+  Object.assign(r.nfce, { cancelavel_ate: prazo.ate, prazo_minutos: prazo.minutos, uf: prazo.uf });
+  return r;
 }
 
 // ── Destinatário ────────────────────────────────────────────
@@ -678,6 +744,7 @@ async function salvarNoCadastro(db, companyId, customerId, dest) {
 
 module.exports = {
   montarNotaDaVenda, resolverDestinatario, notasDaVenda, nfeDeVendaQueTrava, salvarNoCadastro,
+  situacaoDaTrocaPorNfe,
   motivoCertificado, ufsHabilitadas, mensagemUfNaoHabilitada, ieValida, ieSpValida, ratearFrete,
   pagamentoDaNota, STATUS_QUE_TRAVAM, MSG, _resetCaches,
 };
