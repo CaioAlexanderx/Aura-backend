@@ -31,6 +31,8 @@ const campanhaDaLoja = require('./storefront/parts/campanha');
 const { temPromocaoNoPayload } = require('./storefront/parts/promocao');
 // p-180: o produto personalizavel e o banner A (so com tem_personalizavel).
 const personalizavelDaLoja = require('./storefront/parts/personalizavel');
+// p-182: o quadro do personalizador e a sacola mista (so com tem_personalizavel).
+const quadroDaLoja = require('./storefront/parts/quadro');
 // tq-61: o numero do wa.me com o 55 — uma regra so (services/whatsappDaLoja.js).
 const { numeroDoWhatsapp } = require('../services/whatsappDaLoja');
 
@@ -172,7 +174,7 @@ function buildStorefrontPage(data, slug) {
     ? personalizavelDaLoja.bannerHtml(data.banner_personalizado, { urlDaLoja: data.storefront_url || site.storefront_url || '' })
     : '';
   const cssDoPersonalizavel = comPersonalizavel
-    ? `<style>${personalizavelDaLoja.cssDe({ primary, comBanner: !!heroPersonalizado })}</style>
+    ? `<style>${personalizavelDaLoja.cssDe({ primary, comBanner: !!heroPersonalizado })}${quadroDaLoja.CSS}</style>
 `
     : '';
 

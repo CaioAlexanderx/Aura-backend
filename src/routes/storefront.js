@@ -55,13 +55,15 @@ const {
 // personalizados, nao a loja comum. Ver services/vitrineStudioShell.js.
 const {
   ehLojaStudio, montarVitrineStudio, cspDaVitrineStudio, metatagsDaVitrineStudio,
+  // p-182: o personalizador no quadro da loja comum.
+  cspDoQuadro, montarQuadroDoPersonalizador, paginaDoQuadroIndisponivel,
 } = require('../services/vitrineStudioShell');
 // Loja comum que recebe um endereco da vitrine Studio volta para a home
 // pelo mesmo host por onde chegou (BE-1).
 const { caminhoDaHomeDaLoja } = require('../middleware/customDomain');
 // Fotos pelo r2.getaura.com.br em vez do r2.dev (tq-65) — ver o servico.
 const { fotosPeloDominioProprio, fotosPeloDominioProprioNoJson } = require('../services/fotosPeloDominioProprio');
-const { paginaDoCatalogo, facetasDoCatalogo, faixaDePreco } = require('../services/catalogoPaginado');
+const { paginaDoCatalogo, facetasDoCatalogo, faixaDePreco, PERSONALIZAVEL } = require('../services/catalogoPaginado');
 const { normalizarTamanho } = require('../services/tamanhosDaLoja');
 const { generatePix }     = require('../services/pixService');
 // p-85 (427) + p-124: as pecas do pedido e o preco efetivo (De/Por). O mesmo
@@ -127,6 +129,17 @@ const STOREFRONT_CSP = [
   "base-uri 'self'",
   "form-action 'self'",
 ].join('; ');
+
+// p-182 (loja unica 3.3b): a loja com peca personalizavel abre o
+// personalizador num quadro servido pelo PROPRIO host da loja
+// (/<slug>/personalizar/<id>, abaixo). `frame-src 'self'` diz isso com
+// todas as letras: hoje o default-src 'self' ja cobre, e a linha segura o
+// quadro se alguem apertar o default-src. So nessa loja: a de quem nao tem
+// personalizavel sai com a CSP de sempre, byte a byte.
+const STOREFRONT_CSP_COM_QUADRO = STOREFRONT_CSP + "; frame-src 'self'";
+function cspDaLoja(data) {
+  return data && data.tem_personalizavel === true ? STOREFRONT_CSP_COM_QUADRO : STOREFRONT_CSP;
+}
 
 router.get('/:slug', async (req, res) => {
   try {
@@ -414,10 +427,10 @@ async function servirPaginaDaLoja(req, res, produtoId, { somenteStudio = false, 
       if (peca) data.produto_inicial = peca;
       else data.produto_ausente = true;
     }
-    // Hoje a CSP e a mesma em todas as lojas comuns; o p-182 (quadro do
-    // personalizador) a amplia so na loja com personalizavel. Ela e
-    // guardada junto com o HTML, para o hit de 60 s responder a mesma.
-    const csp = STOREFRONT_CSP;
+    // A CSP ganha `frame-src 'self'` so na loja com personalizavel (p-182,
+    // o quadro do personalizador). Ela e guardada junto com o HTML (p-180),
+    // para o hit de 60 s responder a mesma da pagina montada.
+    const csp = cspDaLoja(data);
     res.setHeader('Content-Security-Policy', csp);
     res.removeHeader('X-Frame-Options');
     res.setHeader('Content-Type', 'text/html; charset=utf-8');
@@ -435,6 +448,66 @@ router.get('/:slug/page', (req, res) => servirPaginaDaLoja(req, res, null));
 // aqui pelo middleware de dominio (customDomain.js) sem regra nova: ele
 // so cola o caminho que sobrou depois do slug.
 router.get('/:slug/p/:id', (req, res) => servirPaginaDaLoja(req, res, req.params.id));
+
+/**
+ * O personalizador no quadro da loja comum (p-182, loja unica 3.3b).
+ *
+ * A loja com peca personalizavel abre esta pagina num iframe quando a
+ * cliente toca em "Personalizar" (parts/quadro.js). E a casca do app (a
+ * mesma da vitrine Studio), servida pelo host da loja: a rota do app
+ * `/[slug]/personalizar/[id]` (p-181, app#1300) desenha so o personalizador
+ * e conversa com a loja por postMessage, na mesma origem.
+ *
+ *   loja.getaura.com.br/<slug>/personalizar/<id> -> aqui (middleware de dominio)
+ *   www.dominio-proprio/personalizar/<id>         -> aqui (idem)
+ *
+ * So abre para loja publicada e peca personalizavel dela (a mesma regra da
+ * grade, catalogoPaginado PERSONALIZAVEL). O resto recebe a pagina de
+ * falha, com a marca que a loja le para oferecer o WhatsApp. Nunca
+ * indexada, nunca guardada no navegador, e so a propria loja enquadra.
+ */
+const UUID_DA_PECA = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+async function servirQuadroDoPersonalizador(req, res) {
+  const responder = (status, html) => {
+    res.setHeader('Content-Security-Policy', cspDoQuadro(STOREFRONT_API_BASE));
+    res.removeHeader('X-Frame-Options');
+    res.setHeader('Content-Type', 'text/html; charset=utf-8');
+    res.setHeader('Cache-Control', 'no-store');
+    res.setHeader('X-Robots-Tag', 'noindex, nofollow');
+    return res.status(status).send(html);
+  };
+  try {
+    const slug = String(req.params.slug || '').toLowerCase().trim();
+    const id = String(req.params.id || '').trim();
+    if (!slug || !UUID_DA_PECA.test(id)) return responder(404, paginaDoQuadroIndisponivel());
+    const { rows: lojas } = await db.query(
+      `SELECT company_id FROM digital_channel_config WHERE slug = $1 AND is_published = true`, [slug]);
+    if (!lojas.length) return responder(404, paginaDoQuadroIndisponivel());
+    const { rows: pecas } = await db.query(
+      `SELECT 1 FROM products
+        WHERE ${listVisibilityWhere('$1')}
+          AND id = $2
+          AND is_active IS NOT FALSE
+          AND ${PERSONALIZAVEL}
+        LIMIT 1`, [lojas[0].company_id, id]);
+    if (!pecas.length) return responder(404, paginaDoQuadroIndisponivel());
+    const forcarCasca = typeof req.query._casca === 'string' && req.query._casca !== '';
+    const pagina = await montarQuadroDoPersonalizador(slug, id, { forcarCasca });
+    if (!pagina) return responder(503, paginaDoQuadroIndisponivel());
+    return responder(200, pagina);
+  } catch (err) {
+    console.error('[storefront] quadro do personalizador:', err.message);
+    return responder(500, paginaDoQuadroIndisponivel());
+  }
+}
+router.get('/:slug/personalizar/:id', servirQuadroDoPersonalizador);
+// O quadro recarregado no dominio proprio: a barra do quadro virou
+// /<slug>/personalizar/<id> (scriptDoCaminhoDoQuadro) e o middleware poe o
+// slug na frente de novo. So quando os dois slugs sao o mesmo.
+router.get('/:slug/:repetido/personalizar/:id', (req, res, next) => {
+  if (String(req.params.repetido).toLowerCase() !== String(req.params.slug).toLowerCase()) return next();
+  return servirQuadroDoPersonalizador(req, res);
+});
 
 /**
  * As paginas da vitrine Studio nova (BE-1, 25/09/2026).
