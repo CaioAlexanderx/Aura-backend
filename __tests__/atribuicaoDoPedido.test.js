@@ -170,3 +170,14 @@ describe('POST do pedido grava a atribuicao nas duas lojas', () => {
     });
   });
 });
+
+describe('origens do painel nao entram pela loja (B1, 17/11)', () => {
+  test.each(['balcao', 'BALCAO', ' balcao ', 'orcamento', 'Orcamento'])('"%s" vira sem origem', (origem) => {
+    expect(lerAtribuicao({ origem })).toBeNull();
+    expect(lerAtribuicao({ origem, hub_conversation_id: CONVERSA })).toEqual({ origem: null, hub_conversation_id: CONVERSA });
+  });
+  test('as outras origens seguem como hoje', () => {
+    expect(lerAtribuicao({ origem: 'aurinha' })).toEqual({ origem: 'aurinha', hub_conversation_id: null });
+    expect(lerAtribuicao({ origem: 'balcao-x' })).toEqual({ origem: 'balcao-x', hub_conversation_id: null });
+  });
+});

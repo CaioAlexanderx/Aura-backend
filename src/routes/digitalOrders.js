@@ -54,6 +54,25 @@ async function avisoComLoja(cid, order, passo) {
   }
 }
 
+// 17/11/2026 (B1): pedido guardado no Caixa (origem 'balcao', migration 459).
+// Mora em digital_orders, mas nao e da loja online: as acoes do Canal que
+// avisam a cliente ou mexem no Financeiro o recusam.
+const ORIGEM_BALCAO = 'balcao';
+const PEDIDO_DO_BALCAO_BODY = Object.freeze({
+  error: 'Este pedido foi guardado no Caixa. Acompanhe pela aba Pedidos, em Vendas.',
+  code: 'PEDIDO_DO_BALCAO',
+});
+
+async function ehPedidoDoBalcao(cid, oid) {
+  try {
+    const { rows } = await db.query(
+      `SELECT origem FROM digital_orders WHERE id = $1 AND company_id = $2`, [oid, cid]);
+    return !!rows[0] && rows[0].origem === ORIGEM_BALCAO;
+  } catch (_) {
+    return false; // id malformado ou base sem a coluna: segue o caminho de hoje
+  }
+}
+
 /** A loja usa a fila com aceite (formas de pagar na entrega marcadas)? */
 async function lojaComAceite(cid) {
   try {
@@ -67,7 +86,7 @@ async function lojaComAceite(cid) {
 
 // GET — Lista pedidos com filtro por status e paginação
 // Fila de pedidos (10/09/2026): consulta e apresentacao em um servico testavel.
-const { montarConsultaDaFila, apresentarLinhaDaFila, nomeLegivelDoItem } = require('../services/filaDePedidos');
+const { montarConsultaDaFila, apresentarLinhaDaFila, nomeLegivelDoItem, FORA_DO_BALCAO } = require('../services/filaDePedidos');
 
 // Cache por processo: a base ja tem as colunas da migration 420?
 let filaComEntrega = true;
@@ -111,7 +130,7 @@ router.get('/', async (req, res) => {
         COUNT(*) FILTER (WHERE status = 'delivered')::int            AS delivered,
         COUNT(*) FILTER (WHERE status = 'cancelled')::int            AS cancelled,
         COUNT(*) FILTER (WHERE status = 'cancelled' AND payment_status = 'expired')::int AS expired
-      FROM digital_orders WHERE company_id = $1
+      FROM digital_orders WHERE company_id = $1 AND ${FORA_DO_BALCAO}
     `, [cid]);
 
     res.json({
@@ -195,6 +214,12 @@ router.patch('/:oid/status', requireRole('client', 'analyst', 'admin'), async (r
       [oid, cid]
     );
     if (!rows.length) return res.status(404).json({ error: 'Pedido não encontrado' });
+    // 17/11/2026 (B1): o pedido guardado no Caixa nao anda por aqui. Esta
+    // rota manda e-mail a cliente, grava no sino, confirma com baixa
+    // (onOrderConfirmed) e, no 'delivered', quita o a receber como receita
+    // (quitarNaEntrega) — tudo errado para o pedido do balcao, que conclui
+    // pela venda e cancela pela rota propria.
+    if (await ehPedidoDoBalcao(cid, oid)) return res.status(409).json(PEDIDO_DO_BALCAO_BODY);
 
     const current = rows[0].status;
     if (current === 'delivered' || current === 'cancelled') {
@@ -354,6 +379,8 @@ router.post('/:oid/refuse', requireRole('client', 'analyst', 'admin'), async (re
 router.post('/:oid/out-for-delivery', requireRole('client', 'analyst', 'admin'), async (req, res) => {
   const { id: cid, oid } = req.params;
   try {
+    // B1: o pedido do balcao (preparing/ready) nao sai para entrega pelo Canal.
+    if (await ehPedidoDoBalcao(cid, oid)) return res.status(409).json(PEDIDO_DO_BALCAO_BODY);
     const { order, jaSaiu } = await aceite.saiuParaEntrega({ orderId: oid, companyId: cid });
     res.json({ order, ja_saiu: jaSaiu, aviso_whatsapp: await avisoComLoja(cid, order, 'saiu') });
     if (jaSaiu) return;

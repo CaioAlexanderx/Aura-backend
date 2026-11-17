@@ -525,6 +525,7 @@ async function blocoLojaOnline(companyId, { period }) {
             COALESCE(SUM(total) FILTER (WHERE status::text = ANY($4::text[])), 0)    AS valor
        FROM digital_orders
       WHERE company_id = $1
+        AND origem IS DISTINCT FROM 'balcao' -- B1 (17/11): pedido do Caixa nao e da loja online
         AND (created_at ${SP}) >= $2::timestamp AND (created_at ${SP}) < $3::timestamp`,
     [companyId, period.startDate, addDias(period.endDate, 1), STATUS_CONFIRMADO]
   );

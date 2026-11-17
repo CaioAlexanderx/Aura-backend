@@ -21,6 +21,11 @@
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const ORIGEM_MAX = 32;
+// 17/11/2026 (B1): origens que o PAINEL grava ('balcao' = pedido guardado no
+// Caixa, migration 459; 'orcamento' = reservada ao orcamento aceito, B7a). A
+// loja online nao pode grava-las pela atribuicao: um pedido da loja com
+// origem 'balcao' sumiria da fila do Canal. Vira "sem origem".
+const ORIGENS_DO_PAINEL = new Set(['balcao', 'orcamento']);
 
 /**
  * Le a atribuicao do corpo do pedido. Devolve null quando nao ha nada
@@ -28,7 +33,8 @@ const ORIGEM_MAX = 32;
  */
 function lerAtribuicao(body) {
   const b = body || {};
-  const origem = typeof b.origem === 'string' ? b.origem.trim().slice(0, ORIGEM_MAX) : '';
+  const lida = typeof b.origem === 'string' ? b.origem.trim().slice(0, ORIGEM_MAX) : '';
+  const origem = ORIGENS_DO_PAINEL.has(lida.toLowerCase()) ? '' : lida;
   const conv = typeof b.hub_conversation_id === 'string' ? b.hub_conversation_id.trim() : '';
   const hubConversationId = conv && UUID.test(conv) ? conv : null;
   if (!origem && !hubConversationId) return null;
@@ -56,4 +62,4 @@ function gravarAtribuicao(db, { orderId, companyId, atribuicao, rotulo = 'STOREF
     });
 }
 
-module.exports = { lerAtribuicao, gravarAtribuicao, ORIGEM_MAX };
+module.exports = { lerAtribuicao, gravarAtribuicao, ORIGEM_MAX, ORIGENS_DO_PAINEL };
