@@ -109,6 +109,8 @@ router.get('/cnpj/:cnpj', async (req, res) => {
 
 // ─── POST /:sid/products — vincular produtos em lote ────────
 // Body: { product_ids: [...], unlink?: boolean, is_main?: boolean, cost?: number }
+//   ou (B4, 17/11/2026) { items: [{ product_id, cost?, supplier_code? }], ... }
+//   — custo e código por produto; ver vincularPorItem logo abaixo.
 //
 // 03/11/2026 (migration 424, mockup tela 9): o vínculo também grava em
 // product_suppliers (fornecedores do produto, cada um com o seu custo).
@@ -171,6 +173,98 @@ async function vincularEmProductSuppliers(ids, cid, sid, principal, custo) {
   }
 }
 
+// ─── 17/11/2026 (B4, Fase 4 do Estoque): custo e código POR PRODUTO ──
+// Body: { items: [{ product_id, cost?, supplier_code? }], is_main?, unlink? }
+//
+// A "lista do fornecedor" sem quantidade (app: Fornecedores → "Importar a
+// lista deste fornecedor") liga cada produto com o custo DELE e guarda o
+// código que o fornecedor usa. Não mexe em estoque nem em custo do produto:
+// só em product_suppliers (e no espelho products.supplier_id, pela mesma
+// regra do corpo antigo).
+//
+// O corpo antigo { product_ids, cost } NÃO passa por aqui: segue no caminho
+// de sempre, byte a byte (teste de paridade em fornecedores.vinculoPorItem).
+//
+//   - cost do item: > 0, senão vale o `cost` do corpo (o mesmo de antes) e,
+//     sem nenhum dos dois, o custo gravado fica (COALESCE, como antes);
+//   - supplier_code: texto até 60 (o mesmo corte do stock-receipts); vazio
+//     ou ausente mantém o código gravado;
+//   - produto repetido na lista: vale a ÚLTIMA linha (uma linha por par no
+//     INSERT; com duas o ON CONFLICT do Postgres recusaria o comando);
+//   - quem não vê custo: nenhum custo é gravado (o código, sim).
+const MAX_CODIGO_FORNECEDOR = 60;
+
+function custoPositivo(v) {
+  if (v === undefined || v === null || v === '') return null;
+  const n = Number(v);
+  return Number.isFinite(n) && n > 0 ? n : null;
+}
+
+// Devolve { itens: [{ id, cost, code }] } ou { erro }. Sem banco.
+function lerItensDoVinculo(body, ocultarCusto) {
+  const lista = body.items;
+  if (!lista.length) return { erro: 'items e obrigatorio' };
+  if (lista.length > MAX_VINCULO_LOTE) return { erro: `No maximo ${MAX_VINCULO_LOTE} produtos por vez` };
+  const custoGeral = ocultarCusto ? null : custoPositivo(body.cost);
+  const porProduto = new Map();
+  for (const it of lista) {
+    if (!it || typeof it !== 'object' || it.product_id === undefined || it.product_id === null || it.product_id === '') {
+      return { erro: 'Cada item precisa de product_id' };
+    }
+    const id = String(it.product_id);
+    const custo = ocultarCusto ? null : (custoPositivo(it.cost) ?? custoGeral);
+    const code = it.supplier_code === undefined || it.supplier_code === null
+      ? null : String(it.supplier_code).trim().slice(0, MAX_CODIGO_FORNECEDOR) || null;
+    porProduto.delete(id); // a última linha vale, na posição dela
+    porProduto.set(id, { id, cost: custo, code });
+  }
+  return { itens: [...porProduto.values()] };
+}
+
+// Igual a vincularEmProductSuppliers, com custo e código de cada produto.
+// Devolve os ids que ficaram ligados (produto visível para a loja).
+async function vincularItensEmProductSuppliers(itens, cid, sid, principal) {
+  const ids = itens.map((i) => i.id);
+  const visivelP = `(p.company_id = $2 OR (p.is_group_shared = true AND ${companyGroupWhere('$2', 'p.')}))`;
+  try {
+    if (principal) {
+      await db.query(
+        `UPDATE product_suppliers SET is_main = false, updated_at = NOW()
+          WHERE product_id = ANY($1::uuid[]) AND supplier_id <> $2 AND is_main`,
+        [ids, sid]
+      );
+    }
+    const { rows } = await db.query(
+      `INSERT INTO product_suppliers (company_id, product_id, supplier_id, cost, supplier_code, is_main)
+       SELECT p.company_id, p.id, $3, i.cost, i.code,
+              ($6::boolean OR NOT EXISTS (SELECT 1 FROM product_suppliers x WHERE x.product_id = p.id AND x.is_main))
+         FROM unnest($1::uuid[], $4::numeric[], $5::text[]) AS i(pid, cost, code)
+         JOIN products p ON p.id = i.pid
+        WHERE ${visivelP}
+       ON CONFLICT (product_id, supplier_id) DO UPDATE
+         SET cost = COALESCE(EXCLUDED.cost, product_suppliers.cost),
+             supplier_code = COALESCE(EXCLUDED.supplier_code, product_suppliers.supplier_code),
+             is_main = product_suppliers.is_main OR EXCLUDED.is_main,
+             updated_at = NOW()
+       RETURNING product_id`,
+      [ids, cid, sid, itens.map((i) => i.cost), itens.map((i) => i.code), principal]
+    );
+    if (!principal) {
+      // Produto que ganhou o primeiro fornecedor por aqui: espelha em products.
+      await db.query(
+        `UPDATE products p SET supplier_id = s.id, supplier_name = s.name, supplier_cnpj = s.cnpj, updated_at = NOW()
+           FROM product_suppliers ps JOIN suppliers s ON s.id = ps.supplier_id
+          WHERE p.id = ANY($1::uuid[]) AND ps.product_id = p.id AND ps.is_main AND p.supplier_id IS NULL`,
+        [ids]
+      );
+    }
+    return { ligados: rows.map((r) => String(r.product_id)), semTabela: false };
+  } catch (err) {
+    if (err.code === '42P01') return { ligados: [], semTabela: true };
+    throw err;
+  }
+}
+
 async function desvincularEmProductSuppliers(ids, sid) {
   try {
     await db.query(`DELETE FROM product_suppliers WHERE product_id = ANY($1::uuid[]) AND supplier_id = $2`, [ids, sid]);
@@ -179,10 +273,71 @@ async function desvincularEmProductSuppliers(ids, sid) {
   }
 }
 
+router.post('/:sid/products', async (req, res, next) => {
+  if (req.body && Array.isArray(req.body.items)) return vincularPorItem(req, res);
+  return next();
+});
+
+// B4: o corpo com `items`. Mesmo fornecedor, mesma visibilidade e o mesmo
+// is_main/unlink do corpo antigo; só o custo e o código são por produto.
+async function vincularPorItem(req, res) {
+  const cid = req.params.id;
+  const sid = req.params.sid;
+  const ocultarCusto = !!(req.estoqueConsulta && (req.estoqueConsulta.ativo || req.estoqueConsulta.ocultarCusto));
+  const lido = lerItensDoVinculo(req.body, ocultarCusto);
+  if (lido.erro) return res.status(400).json({ error: lido.erro });
+  const itens = lido.itens;
+  const ids = itens.map((i) => i.id);
+  const unlink = req.body.unlink === true;
+  const principal = req.body.is_main !== false;
+
+  try {
+    const { rows: sup } = await db.query(
+      `SELECT id, name, cnpj FROM suppliers s WHERE id = $1 AND ${companyGroupWhere('$2')}`,
+      [sid, cid]
+    );
+    if (!sup.length) return res.status(404).json({ error: 'Fornecedor nao encontrado' });
+
+    const visivel = `(company_id = $2 OR (is_group_shared = true AND ${companyGroupWhere('$2')}))`;
+    if (unlink) {
+      const upd = await db.query(
+        `UPDATE products SET supplier_id = NULL, supplier_name = NULL, supplier_cnpj = NULL, updated_at = NOW()
+          WHERE id = ANY($1::uuid[]) AND ${visivel} AND supplier_id = $3`,
+        [ids, cid, sid]
+      );
+      await desvincularEmProductSuppliers(ids, sid);
+      return res.json({ updated: upd.rowCount, unlink });
+    }
+    let updated = null;
+    if (principal) {
+      const upd = await db.query(
+        `UPDATE products SET supplier_id = $3, supplier_name = $4, supplier_cnpj = $5, updated_at = NOW()
+          WHERE id = ANY($1::uuid[]) AND ${visivel}`,
+        [ids, cid, sid, sup[0].name, sup[0].cnpj]
+      );
+      updated = upd.rowCount;
+    }
+    const { ligados, semTabela } = await vincularItensEmProductSuppliers(itens, cid, sid, principal);
+    const ligadosSet = new Set(ligados);
+    res.json({
+      updated: updated === null ? ligados.length : updated,
+      unlink,
+      is_main: principal,
+      // Sem a 424 a lista por produto não existe: não dá para dizer quem ficou de fora.
+      linked: semTabela ? null : ligados.length,
+      not_found: semTabela ? [] : ids.filter((id) => !ligadosSet.has(id)),
+    });
+  } catch (err) {
+    if (err.code === '22P02') return res.status(400).json({ error: 'product_id invalido' });
+    console.error('[suppliers] link items error:', err.message);
+    res.status(500).json({ error: 'Erro ao vincular produtos' });
+  }
+}
+
 router.post('/:sid/products', async (req, res) => {
   const cid = req.params.id;
   const sid = req.params.sid;
-  const ids = Array.isArray(req.body && req.body.product_ids) ? req.body.product_ids.map(String) : null;
+  const ids =Array.isArray(req.body && req.body.product_ids) ? req.body.product_ids.map(String) : null;
   const unlink = req.body && req.body.unlink === true;
   if (!ids || !ids.length) return res.status(400).json({ error: 'product_ids e obrigatorio' });
   if (ids.length > MAX_VINCULO_LOTE) return res.status(400).json({ error: `No maximo ${MAX_VINCULO_LOTE} produtos por vez` });
