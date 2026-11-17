@@ -55,6 +55,8 @@ const { productVisibilityWhere } = require('../utils/companyGroup');
 const { findOwnerScopedCustomer } = require('../utils/customerScope');
 const { normalizarTelefone } = require('../utils/telefone');
 const { mesmosItens, INDICE } = require('./pedidoOnlineIdempotente');
+const { lerReservas, reservadoDaVariante } = require('./reservaDoPedido');
+const { vendaSemEstoqueLiberada } = require('../utils/vendaSemEstoque');
 
 const ORIGEM_BALCAO = 'balcao';
 const MAX_ITENS = 100;
@@ -219,7 +221,8 @@ async function conferirProdutos(client, companyId, itens) {
   const ids = [...new Set(itens.filter((i) => i.product_id).map((i) => i.product_id))];
   if (!ids.length) return;
   const { rows } = await client.query(
-    `SELECT p.id, p.name
+    `SELECT p.id, p.name, p.stock_qty,
+            (p.is_personalizable IS TRUE AND p.customization_config IS NOT NULL) AS sob_encomenda
        FROM products p
       WHERE p.id = ANY($1::uuid[])
         AND ${productVisibilityWhere('$2', 'p.')}`,
@@ -230,7 +233,7 @@ async function conferirProdutos(client, companyId, itens) {
   let variantes = new Map();
   if (vids.length) {
     const { rows: vs } = await client.query(
-      `SELECT id, product_id, sku_suffix FROM product_variants WHERE id = ANY($1::uuid[])`,
+      `SELECT id, product_id, sku_suffix, stock_qty FROM product_variants WHERE id = ANY($1::uuid[])`,
       [vids]
     );
     variantes = new Map(vs.map((v) => [String(v.id), v]));
@@ -243,14 +246,62 @@ async function conferirProdutos(client, companyId, itens) {
     }
     // Nome gravado: o do cadastro (o do corpo so vale para item sem cadastro).
     it.nome = p.name || it.nome;
+    it.sobEncomenda = p.sob_encomenda === true;
+    it.estoque = Number(p.stock_qty) || 0;
     if (it.variant_id) {
       const v = variantes.get(it.variant_id);
       if (!v || String(v.product_id) !== it.product_id) {
         throw erro(422, `"${it.nome}": essa variação não é deste produto.`, 'PEDIDO_ITEM_INVALIDO');
       }
       if (!it.variant_label && v.sku_suffix) it.variant_label = String(v.sku_suffix).slice(0, 120);
+      it.estoque = Number(v.stock_qty) || 0;
     }
   }
+}
+
+/**
+ * B2 (p-61b): o pedido so separa o que esta livre. Livre = estoque da
+ * prateleira (da variante, ou do produto sem variante — a mesma leitura do
+ * POST /pdv/sale) menos o que ja esta reservado em outros pedidos do balcao
+ * abertos do grupo. Peca sob encomenda e item sem cadastro nao sao
+ * conferidos. Devolve a lista do que falta ([] = tudo livre).
+ */
+async function conferirSaldo(client, companyId, itens) {
+  const linhas = new Map();
+  for (const it of itens) {
+    if (!it.product_id || it.sobEncomenda) continue;
+    const k = `${it.product_id}|${it.variant_id || ''}`;
+    const l = linhas.get(k) || { it, quantidade: 0 };
+    l.quantidade += it.quantity;
+    linhas.set(k, l);
+  }
+  if (!linhas.size) return [];
+  const reservas = await lerReservas(client, companyId, [...linhas.values()].map((l) => l.it.product_id));
+  const faltas = [];
+  for (const { it, quantidade } of linhas.values()) {
+    const reservado = reservadoDaVariante(reservas, it.product_id, it.variant_id);
+    const livre = Math.max(0, it.estoque - reservado);
+    if (livre < quantidade) {
+      faltas.push({
+        product_id: it.product_id,
+        variant_id: it.variant_id || null,
+        nome: it.nome + (it.variant_label ? ` (${it.variant_label})` : ''),
+        quantidade,
+        estoque: it.estoque,
+        reservado,
+        livre,
+      });
+    }
+  }
+  return faltas;
+}
+
+function fraseDaFalta(f) {
+  const n = (x) => String(x).replace('.', ',');
+  if (f.reservado > 0) {
+    return `"${f.nome}": só ${n(f.livre)} livre${f.livre === 1 ? '' : 's'} (${n(f.reservado)} já separada${f.reservado === 1 ? '' : 's'} em outro pedido).`;
+  }
+  return `"${f.nome}": só ${n(f.livre)} no estoque.`;
 }
 
 async function resolverCliente(client, companyId, dados) {
@@ -341,6 +392,7 @@ async function guardarPedido({ companyId, userId, body, chave, hoje }) {
   const client = await db.connect();
   let orderId;
   let repetidoDe = null;
+  let avisos = [];
   try {
     await client.query('BEGIN');
     if (chave) {
@@ -349,6 +401,12 @@ async function guardarPedido({ companyId, userId, body, chave, hoje }) {
       if (ja) throw Object.assign(new Error('repetido'), { [REPETIDO]: ja });
     }
     await conferirProdutos(client, companyId, dados.itens);
+    // B2: sem saldo livre, o pedido nao separa (409). Com "vender sem estoque"
+    // ligado (allow_sale_without_stock), entra com o aviso.
+    avisos = await conferirSaldo(client, companyId, dados.itens);
+    if (avisos.length && !(await vendaSemEstoqueLiberada(client, companyId))) {
+      throw erro(409, `Não dá para separar: ${avisos.map(fraseDaFalta).join(' ')}`, 'PEDIDO_SEM_SALDO', { faltas: avisos });
+    }
     const cliente = await resolverCliente(client, companyId, dados);
 
     const { rows: [o] } = await client.query(
@@ -392,7 +450,7 @@ async function guardarPedido({ companyId, userId, body, chave, hoje }) {
   }
   if (repetidoDe) return responderRepeticao(companyId, repetidoDe, dados.itens);
   const pedido = await lerPedidoCompleto(db, companyId, orderId);
-  return { status: 201, pedido, repetido: false };
+  return { status: 201, pedido, repetido: false, avisos };
 }
 
 async function buscarPorChave(q, companyId, chave) {

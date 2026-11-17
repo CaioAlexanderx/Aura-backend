@@ -9,8 +9,9 @@
 // responderia 403 para o Essencial (o requirePlan de um router.use vale para
 // todo caminho abaixo dele).
 //
-// POST /pedidos           → 201 {order} (B1 / p-61a)
+// POST /pedidos           → 201 {order, avisos} (B1 / p-61a; avisos do B2)
 //                           200 {order, idempotent_replay} na mesma chave
+//                           409 PEDIDO_SEM_SALDO {faltas} sem saldo livre (B2)
 //
 // Trava: PEDIDO_LIBERADO (services/pedidoBalcao.js). Desligada, so a
 // equipe Aura usa; para o lojista a rota responde 404 como se nao existisse.
@@ -28,6 +29,7 @@ function falhar(res, err, contexto) {
       error: err.message,
       code: err.code,
       ...(err.order_id ? { order_id: err.order_id } : {}),
+      ...(err.faltas ? { faltas: err.faltas } : {}),
     });
   }
   // Migration 459 ainda nao aplicada (deploy parcial).
@@ -61,7 +63,9 @@ router.post('/', async (req, res) => {
       res.set('Idempotent-Replayed', 'true');
       return res.status(200).json({ order: r.pedido, idempotent_replay: true });
     }
-    return res.status(201).json({ order: r.pedido });
+    // B2: com "vender sem estoque" ligado, o que passou do saldo livre vem
+    // em `avisos` (mesmo formato de `faltas` do 409). [] = tudo livre.
+    return res.status(201).json({ order: r.pedido, avisos: r.avisos || [] });
   } catch (err) {
     return falhar(res, err, 'guardar');
   }
