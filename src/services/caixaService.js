@@ -73,6 +73,27 @@
 //   suprimentos no dinheiro_esperado e grava os totais no snapshot
 //   (total_sangrias/total_suprimentos). Tudo defensivo à migration ausente
 //   (42P01/42703, cache de módulo), como manda o CLAUDE.md.
+//
+// 17/11/2026 (B4b / p-62b, pedido separado de venda, migration 461):
+// - O sinal do pedido do balcão entra no caixa da sessão, na forma em que foi
+//   pago, e SAI do total_outros (lá ele contava como "outra entrada"):
+//     dinheiro  movimento 'sinal_pedido' da sessão (sinalDoPedido.js grava,
+//               com o caixa aberto) → soma em totais.dinheiro e, por isso,
+//               no dinheiro esperado;
+//     Pix / crédito / débito  a entrada "Sinal de pedido" (chave
+//               pedido-sinal-<pedido>) com paid_at na janela da sessão, com
+//               a forma lida de studio_payments → totais.pix /
+//               cartao_credito / cartao_debito. Nenhum desses exige caixa.
+//   A devolução do sinal em dinheiro (movimento 'devolucao_sinal', B6) sai de
+//   totais.dinheiro, como o reembolso da troca. Pix e estorno do sinal não
+//   passam pela gaveta (B6 só registra).
+// - totais.geral continua a soma das formas: o sinal já estava nele (via
+//   outros) e continua, agora na forma certa.
+// - O detalhamento vai em `sinais_pedido` (status, fechamento, detalhe da
+//   sessão) SÓ quando a sessão teve sinal ou devolução: a loja sem pedido
+//   recebe exatamente a mesma resposta de antes, chave por chave.
+// - removerMovimento só desfaz sangria e suprimento: o movimento do sinal é
+//   o espelho de um lançamento do Financeiro e não se apaga pela gaveta.
 // ============================================================
 
 const pool = require('../config/database');
@@ -261,6 +282,7 @@ async function calcularTotais(companyId, sessaoId, openedAt, closedAt) {
            idempotency_key NOT LIKE 'pdv-sale-%'
            AND idempotency_key NOT LIKE 'pdv-troca-%'
            AND idempotency_key NOT LIKE 'pdv-credit-receivable-%'
+           AND idempotency_key NOT LIKE 'pedido-sinal-%'
          )
        )`,
     [companyId, openedAt, until]
@@ -361,6 +383,17 @@ async function calcularTotais(companyId, sessaoId, openedAt, closedAt) {
     if (err.code !== '42P01' && err.code !== '42703') throw err;
   }
 
+  // 17/11/2026 (B4b): o sinal do pedido do balcão na forma em que foi pago, e
+  // a devolução dele em dinheiro. null = a sessão não teve nenhum (a loja sem
+  // pedido não passa por nada daqui além das duas leituras).
+  const sinais = await calcularSinaisDoPedido(companyId, sessaoId, openedAt, until);
+  if (sinais) {
+    totais.dinheiro       += sinais.dinheiro - sinais.devolvido_dinheiro;
+    totais.pix            += sinais.pix;
+    totais.cartao_credito += sinais.cartao_credito;
+    totais.cartao_debito  += sinais.cartao_debito;
+  }
+
   totais.geral = Object.values(totais).reduce((acc, v) => acc + v, 0);
   for (const k of Object.keys(totais)) {
     totais[k] = Math.round(totais[k] * 100) / 100;
@@ -368,7 +401,77 @@ async function calcularTotais(companyId, sessaoId, openedAt, closedAt) {
   // Informativo (NÃO entra em totais.geral nem é persistido em
   // caixa_fechamentos — a tabela é snapshot imutável de colunas fixas).
   totais.devolucoes = Math.round(devolucoes * 100) / 100;
+  // B4b: informativo, JÁ SOMADO nas formas acima. Só aparece quando houve.
+  if (sinais) totais.sinais_pedido = sinais;
   return totais;
+}
+
+/**
+ * 17/11/2026 (B4b): sinais de pedido do balcão da sessão, por forma, e a
+ * devolução de sinal em dinheiro. Devolve null quando não houve nenhum.
+ *   dinheiro            movimentos 'sinal_pedido' da sessão
+ *   devolvido_dinheiro  movimentos 'devolucao_sinal' da sessão (B6)
+ *   pix / cartao_*      entradas "Sinal de pedido" (pedido-sinal-<pedido>)
+ *                       com paid_at na janela, forma de studio_payments.
+ *                       O dinheiro fica de fora daqui: entra pelo movimento,
+ *                       que é o que diz em que gaveta ele está.
+ *   total               dinheiro + pix + cartões (o que entrou de sinal)
+ * Defensivo a deploy parcial (42P01/42703): sem as tabelas, null.
+ */
+async function calcularSinaisDoPedido(companyId, sessaoId, openedAt, until) {
+  const s = { dinheiro: 0, pix: 0, cartao_credito: 0, cartao_debito: 0, total: 0, devolvido_dinheiro: 0 };
+  let houve = false;
+  try {
+    if (movimentosDisponiveis !== false) {
+      const { rows } = await pool.query(
+        `SELECT tipo, COALESCE(SUM(valor), 0)::numeric(12,2) AS total
+           FROM caixa_movimentos
+          WHERE sessao_id = $1 AND tipo IN ('sinal_pedido', 'devolucao_sinal')
+          GROUP BY tipo`,
+        [sessaoId]
+      );
+      for (const row of rows) {
+        const v = parseFloat(row.total) || 0;
+        if (row.tipo === 'sinal_pedido') s.dinheiro = r2(v);
+        else if (row.tipo === 'devolucao_sinal') s.devolvido_dinheiro = r2(v);
+        houve = true;
+      }
+    }
+  } catch (err) {
+    if (err.code !== '42P01' && err.code !== '42703') throw err;
+  }
+  try {
+    const { rows } = await pool.query(
+      `SELECT COALESCE(sp.forma, CASE sp.method WHEN 'pix' THEN 'pix' WHEN 'card' THEN 'cartao' WHEN 'cash' THEN 'dinheiro' END) AS forma,
+              COALESCE(SUM(t.amount), 0)::numeric(12,2) AS total
+         FROM transactions t
+         JOIN studio_payments sp
+           ON t.idempotency_key = 'pedido-sinal-' || sp.order_id::text
+          AND sp.company_id = t.company_id
+          AND sp.kind = 'deposit' AND sp.status = 'paid'
+        WHERE t.company_id = $1
+          AND t.type = 'income'
+          AND t.status = 'confirmed'
+          AND t.idempotency_key LIKE 'pedido-sinal-%'
+          AND t.paid_at >= $2
+          AND t.paid_at < $3
+        GROUP BY 1`,
+      [companyId, openedAt, until]
+    );
+    for (const row of rows) {
+      const v = r2(row.total);
+      if (!(v > 0)) continue;
+      if (row.forma === 'pix') { s.pix = r2(s.pix + v); houve = true; }
+      else if (row.forma === 'cartao') { s.cartao_credito = r2(s.cartao_credito + v); houve = true; }
+      else if (row.forma === 'debito') { s.cartao_debito = r2(s.cartao_debito + v); houve = true; }
+      // dinheiro: pelo movimento da sessão (acima).
+    }
+  } catch (err) {
+    if (err.code !== '42P01' && err.code !== '42703') throw err;
+  }
+  if (!houve) return null;
+  s.total = r2(s.dinheiro + s.pix + s.cartao_credito + s.cartao_debito);
+  return s;
 }
 
 /**
@@ -827,6 +930,8 @@ async function fechar(companyId, userId, dinheiroContado, observacao = null) {
     total_suprimentos: mov.suprimentos,
     trocas,
     trocas_resumo,
+    // B4b: só quando a sessão teve sinal de pedido (já somado nas formas).
+    ...(totais.sinais_pedido ? { sinais_pedido: totais.sinais_pedido } : {}),
   };
 }
 
@@ -914,7 +1019,10 @@ async function removerMovimento(companyId, movimentoId) {
   let rowCount = 0;
   try {
     const r = await pool.query(
-      `DELETE FROM caixa_movimentos WHERE id = $1 AND company_id = $2 AND sessao_id = $3`,
+      // B4b: só sangria e suprimento. O sinal do pedido e a devolução dele
+      // espelham um lançamento do Financeiro: desfazer é pelo pedido.
+      `DELETE FROM caixa_movimentos WHERE id = $1 AND company_id = $2 AND sessao_id = $3
+          AND tipo IN ('sangria', 'suprimento')`,
       [movimentoId, companyId, sessao.id]
     );
     rowCount = r.rowCount;
@@ -1024,7 +1132,12 @@ async function getSessao(companyId, sessaoId) {
   if (!rows.length) throw new AppError('Sessão não encontrada', 404);
   // 30/10/2026 (422): as movimentações da sessão, para o detalhe e o PDF.
   const movimentos = await listarMovimentosDaSessao(rows[0].id);
-  return { ...rows[0], movimentos };
+  // B4b: os sinais de pedido da sessão (já somados nas formas do snapshot).
+  // Só aparece quando houve: a sessão sem pedido responde como antes.
+  const sinais = await calcularSinaisDoPedido(
+    companyId, rows[0].id, rows[0].opened_at, rows[0].closed_at || new Date()
+  );
+  return { ...rows[0], movimentos, ...(sinais ? { sinais_pedido: sinais } : {}) };
 }
 
 module.exports = {

@@ -21,6 +21,8 @@
 //                           409 PEDIDO_SINAL_JA_PAGO (um sinal por pedido)
 //                           409 PEDIDO_FECHADO (concluido ou cancelado)
 //                           422 PEDIDO_SINAL_MAIOR / _VALOR / _FORMA
+//                           409 CAIXA_REQUIRED (B4b): sinal em dinheiro com o
+//                               caixa ligado e fechado (tambem no POST /pedidos)
 //        method: dinheiro | pix | cartao (credito) | debito. Regras do
 //        dinheiro em services/sinalDoPedido.js.
 // POST /pedidos/:oid/cancelar (B6 / p-62e)

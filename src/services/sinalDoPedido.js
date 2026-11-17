@@ -30,9 +30,14 @@
 // o sinal ja registrado; outro sinal no mesmo pedido e 409. O resto se paga
 // na conclusao.
 //
-// O CAIXA (sessao, dinheiro esperado) e do card B4b: aqui o sinal em
-// dinheiro so e registrado. O fechamento ainda nao le o sinal (fica em
-// "outras entradas" ate o B4b), e nada chama esta rota antes do app de 02/12.
+// O CAIXA (B4b / p-62b): o sinal em DINHEIRO, com o caixa ligado
+// (pdv_settings.caixa_enabled), exige caixa aberto: 409 CAIXA_REQUIRED, o
+// mesmo codigo da venda, e nada e gravado. Com o caixa aberto ele vira o
+// movimento 'sinal_pedido' da sessao (migration 461), que o fechamento soma
+// no dinheiro da gaveta (services/caixaService.js). Pix e cartao nao exigem
+// caixa: o fechamento os le pela chave pedido-sinal-<pedido> na janela da
+// sessao. Sem o caixa ligado, nada muda. Nada chama esta rota antes do app de
+// 02/12 (trava PEDIDO_LIBERADO).
 //
 // Multi-CNPJ: tudo na company_id da loja do pedido (a do :id, conferida pelo
 // requireCompanyAccess; o pedido e lido com company_id = $loja).
@@ -172,6 +177,23 @@ function apresentarSinal(sp) {
 }
 
 /**
+ * B4b: a sessao de caixa que recebe o sinal em dinheiro. Caixa desligado na
+ * loja: { ligado: false, sessaoId: null } (nada muda). Ligado e sem sessao
+ * aberta: { ligado: true, sessaoId: null } (quem chama responde 409). Mesma
+ * leitura de routes/pdv.js (assertCaixaOpenOrAllowed), sem o "fail-open":
+ * aqui um erro de banco derruba o sinal (nada e gravado) em vez de deixar o
+ * dinheiro fora da gaveta.
+ */
+async function sessaoDoCaixa(client, companyId) {
+  const { rows } = await client.query(`SELECT pdv_settings FROM companies WHERE id = $1`, [companyId]);
+  const ligado = !!(rows[0] && rows[0].pdv_settings && rows[0].pdv_settings.caixa_enabled);
+  if (!ligado) return { ligado: false, sessaoId: null };
+  const { rows: s } = await client.query(
+    `SELECT id FROM caixa_sessoes WHERE company_id = $1 AND status = 'aberta' LIMIT 1`, [companyId]);
+  return { ligado: true, sessaoId: s[0] ? s[0].id : null };
+}
+
+/**
  * Registra o sinal num pedido JA TRAVADO (SELECT ... FOR UPDATE) pela
  * transacao de quem chama. `pedido` = linha de digital_orders (id,
  * order_number, total, promised_date). Nao confere situacao nem sinal
@@ -186,6 +208,17 @@ async function registrarSinal(client, { companyId, pedido, itens, valor, forma, 
   const f = FORMAS[forma];
   if (!f) throw erro(422, 'Forma do sinal inválida.', 'PEDIDO_SINAL_FORMA');
   const resumo = resumoDosItens(itens);
+
+  // 0. B4b: sinal em dinheiro com o caixa ligado exige caixa aberto (409 da
+  //    venda), antes de gravar qualquer coisa.
+  let sessaoId = null;
+  if (forma === 'dinheiro') {
+    const caixa = await sessaoDoCaixa(client, companyId);
+    if (caixa.ligado && !caixa.sessaoId) {
+      throw erro(409, 'Abra o caixa antes de receber o sinal em dinheiro.', 'CAIXA_REQUIRED');
+    }
+    sessaoId = caixa.sessaoId;
+  }
 
   // 1. O marco do sinal.
   const { rows: [marco] } = await client.query(
@@ -203,6 +236,15 @@ async function registrarSinal(client, { companyId, pedido, itens, valor, forma, 
      VALUES ($1, 'income', 'confirmed', $2, $3, '${CATEGORIA_SINAL}', ${SP_DATE_NOW}, NOW(), $4, $5)`,
     [companyId, v, descricao, userId || null, CHAVE_SINAL(pedido.id)]
   );
+
+  // 2b. B4b: o dinheiro do sinal entra na gaveta da sessao aberta.
+  if (sessaoId) {
+    await client.query(
+      `INSERT INTO caixa_movimentos (company_id, sessao_id, tipo, valor, motivo, created_by)
+       VALUES ($1, $2, 'sinal_pedido', $3, $4, $5)`,
+      [companyId, sessaoId, v, `Sinal do pedido ${pedido.order_number}`.slice(0, 200), userId || null]
+    );
+  }
 
   // 3. Baixa parcial da conta a receber. Pedido guardado antes deste card
   //    (sem conta) ganha a conta agora, pelo valor cheio, e baixa em seguida.
@@ -244,7 +286,7 @@ async function registrarSinal(client, { companyId, pedido, itens, valor, forma, 
       itemsSummary: `Sinal do pedido ${pedido.order_number}`,
     });
   }
-  return { valor: v, forma, saldo, taxa, pago_em: marco ? marco.paid_at : null };
+  return { valor: v, forma, saldo, taxa, pago_em: marco ? marco.paid_at : null, movimento_caixa: !!sessaoId };
 }
 
 /**
@@ -337,5 +379,6 @@ module.exports = {
   receberSinal,
   lerSinalPago,
   apresentarSinal,
+  sessaoDoCaixa,
   resumoDosItens,
 };

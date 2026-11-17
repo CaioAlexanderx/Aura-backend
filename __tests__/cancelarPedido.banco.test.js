@@ -229,10 +229,15 @@ describe('cenario da Celia: cancelamento com devolucao em dinheiro', () => {
     expect(r.body.expenses).toBe(100);
   });
 
-  test('o fechamento de caixa de hoje nao muda ate o B4b (le so sangria e suprimento)', async () => {
+  // B4b (p-62b): o fechamento passou a ler a devolucao em dinheiro. O sinal
+  // entrou no Pix (fica no Pix da sessao) e os 100 sairam da gaveta.
+  test('B4b: a devolucao em dinheiro sai do dinheiro esperado; o sinal fica no Pix', async () => {
     const depois = (await caixaService.getStatus(ID.loja)).sessao_ativa;
-    expect(depois.dinheiro_em_caixa).toBe(gavetaAntes);
+    expect(depois.dinheiro_em_caixa).toBe(Math.round((gavetaAntes - 100) * 100) / 100);
     expect(depois.sangrias).toBe(0);
+    expect(depois.totais_ao_vivo.pix).toBe(100);
+    expect(depois.totais_ao_vivo.outros).toBe(0);
+    expect(depois.totais_ao_vivo.sinais_pedido).toMatchObject({ pix: 100, dinheiro: 0, devolvido_dinheiro: 100, total: 100 });
   });
 
   test('a reserva some sozinha', async () => {
