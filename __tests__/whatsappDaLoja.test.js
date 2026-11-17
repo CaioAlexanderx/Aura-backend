@@ -117,9 +117,15 @@ describe('todo wa.me da vitrine passa pela regra unica', () => {
     expect(achados.filter((a) => a.startsWith('SEM REGRA'))).toEqual([]);
     // Os lugares que montam wa.me na loja comum (bloco da home, pedido
     // confirmado, pagina do produto e, p-180, o "Personalizar" sem o
+<<<<<<< HEAD
     // quadro do personalizador; p-182, a saida quando o quadro nao abre) —
     // se aparecer outro, ele tem de usar numeroDoWhatsapp e entrar aqui.
     expect(achados.map((a) => a.split(':')[0]).sort()).toEqual(['personalizavel.js', 'pix.js', 'product_detail.js', 'quadro.js', 'storefrontHtml.js', 'storefrontHtml.js']);
+=======
+    // quadro do personalizador) — se aparecer outro, ele tem de usar
+    // numeroDoWhatsapp e entrar aqui.
+    expect(achados.map((a) => a.split(':')[0]).sort()).toEqual(['personalizavel.js', 'pix.js', 'product_detail.js', 'storefrontHtml.js', 'storefrontHtml.js']);
+>>>>>>> origin/main
   });
 
   test('a pagina da loja sai com wa.me/55', () => {

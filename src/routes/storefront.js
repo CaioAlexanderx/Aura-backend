@@ -432,10 +432,17 @@ async function servirPaginaDaLoja(req, res, produtoId, { somenteStudio = false, 
       if (peca) data.produto_inicial = peca;
       else data.produto_ausente = true;
     }
+<<<<<<< HEAD
     // A CSP ganha `frame-src 'self'` so na loja com personalizavel (p-182,
     // o quadro do personalizador). Ela e guardada junto com o HTML (p-180),
     // para o hit de 60 s responder a mesma da pagina montada.
     const csp = cspDaLoja(data);
+=======
+    // Hoje a CSP e a mesma em todas as lojas comuns; o p-182 (quadro do
+    // personalizador) a amplia so na loja com personalizavel. Ela e
+    // guardada junto com o HTML, para o hit de 60 s responder a mesma.
+    const csp = STOREFRONT_CSP;
+>>>>>>> origin/main
     res.setHeader('Content-Security-Policy', csp);
     res.removeHeader('X-Frame-Options');
     res.setHeader('Content-Type', 'text/html; charset=utf-8');
