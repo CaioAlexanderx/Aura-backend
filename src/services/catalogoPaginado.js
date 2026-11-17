@@ -57,6 +57,14 @@ const PERSONALIZAVEL = `(
   AND products.customization_config IS NOT NULL
 )`;
 
+/**
+ * A coluna `personalizavel` das consultas que montam o cartao (p-180): o
+ * builder so poe `personalizavel: true` no produto quando ela vem
+ * verdadeira. Para quem nao e personalizavel a chave nao existe e o
+ * payload sai como antes.
+ */
+const COLUNA_PERSONALIZAVEL = `${PERSONALIZAVEL} AS personalizavel`;
+
 const EM_ESTOQUE = `(
   ${PERSONALIZAVEL}
   OR CASE WHEN EXISTS (
@@ -389,7 +397,8 @@ async function paginaDoCatalogo({
   // p-85 (427): promo_* para o De/Por da vitrine (montarProdutoPublico).
   const { rows: produtos } = await comColunasPromo((com) => bd().query(
     `SELECT id, name, description, price, image_url, image_thumb_url, gallery_urls, category, stock_qty, created_at,
-            material, medidas, cuidados, duration_minutes, ${com ? colunasPromo() : colunasPromoNulas()}
+            material, medidas, cuidados, duration_minutes, ${com ? colunasPromo() : colunasPromoNulas()},
+            ${COLUNA_PERSONALIZAVEL}
      FROM products
      WHERE ${where}
      ORDER BY ${ordenacao}
@@ -714,7 +723,7 @@ function janelaDePaginas(atual, totalPaginas, vizinhas = 1) {
 }
 
 module.exports = {
-  POR_PAGINA, LIMITE_MAXIMO, EM_ESTOQUE, PERSONALIZAVEL, COM_FOTO, NA_VITRINE, filtroDeFoto, EM_PROMOCAO_NO_AR, PRECO_NA_VITRINE,
+  POR_PAGINA, LIMITE_MAXIMO, EM_ESTOQUE, PERSONALIZAVEL, COLUNA_PERSONALIZAVEL, COM_FOTO, NA_VITRINE, filtroDeFoto, EM_PROMOCAO_NO_AR, PRECO_NA_VITRINE,
   JANELA_DE_VENDAS_DIAS, VENDIDOS_RECENTES,
   arvoreDeCategorias, facetasDoCatalogo, faixaDePreco, condicaoDeCategoria,
   paginaDoCatalogo, contarPorCategoria, janelaDePaginas, normalizar, ordemSql,

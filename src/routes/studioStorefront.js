@@ -230,7 +230,19 @@ function montarSite(config, nomeDaEmpresa) {
     // Chave da vitrine nova por loja (25/09/2026). Só escolhe a tela que
     // o app desenha; ver services/vitrineV2.js.
     vitrine_v2: vitrineV2Ligada(config.studio_settings),
+    // p-182 (pedido do p-181): o dominio proprio ATIVO da loja, para o
+    // personalizador no quadro aceitar a loja servida por ele. Sem dominio
+    // ativo a chave nao existe e o payload sai como antes.
+    ...dominioProprioAtivo(config),
   };
+}
+
+/** { dominio_proprio } so com o dominio ativo; senao {}. */
+function dominioProprioAtivo(config) {
+  const d = config && config.custom_domain_status === 'active' && typeof config.custom_domain === 'string'
+    ? config.custom_domain.trim().toLowerCase()
+    : '';
+  return d ? { dominio_proprio: d } : {};
 }
 
 // ─────────────────────────────────────────────

@@ -89,7 +89,7 @@ describe('onde a vitrine aplica', () => {
   const rota = fs.readFileSync(path.join(__dirname, '../src/routes/storefront.js'), 'utf8');
   test('a pagina da loja (e a copia guardada da home sai ja trocada)', () => {
     expect(rota).toContain('const html = fotosPeloDominioProprio(buildStorefrontPage(data, slug));');
-    expect(rota.indexOf('const html = fotosPeloDominioProprio(')).toBeLessThan(rota.indexOf('lembrarPagina(slug, html)'));
+    expect(rota.indexOf('const html = fotosPeloDominioProprio(')).toBeLessThan(rota.indexOf('lembrarPagina(slug, html'));
   });
   test('as paginas seguintes do catalogo e a galeria da peca', () => {
     expect(rota).toContain('res.json(fotosPeloDominioProprioNoJson({\n      products: pagina.produtos.map(');

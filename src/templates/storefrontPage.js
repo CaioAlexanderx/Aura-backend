@@ -29,6 +29,10 @@ const buildScript   = require('./storefrontScript');
 // p-119b: faixa de Black Friday (so com payload.campanha no ar).
 const campanhaDaLoja = require('./storefront/parts/campanha');
 const { temPromocaoNoPayload } = require('./storefront/parts/promocao');
+// p-180: o produto personalizavel e o banner A (so com tem_personalizavel).
+const personalizavelDaLoja = require('./storefront/parts/personalizavel');
+// p-182: o quadro do personalizador e a sacola mista (so com tem_personalizavel).
+const quadroDaLoja = require('./storefront/parts/quadro');
 // tq-61: o numero do wa.me com o 55 — uma regra so (services/whatsappDaLoja.js).
 const { numeroDoWhatsapp } = require('../services/whatsappDaLoja');
 
@@ -161,6 +165,19 @@ function buildStorefrontPage(data, slug) {
   // ela LIGOU (frete gratis, troca, Pix). Nunca uma frase inventada.
   const announcementFinal = announcementBar || escHtml(site.announcement_auto || '');
 
+  // p-180 (loja unica 3.2b): tem_personalizavel so existe no payload da
+  // loja que mostra peca personalizavel (p-179). Sem ele: nenhum CSS, JS ou
+  // HTML novo, e a pagina sai byte a byte igual
+  // (__tests__/lojaSemPersonalizavel.fixture.test.js).
+  const comPersonalizavel = data.tem_personalizavel === true;
+  const heroPersonalizado = comPersonalizavel && data.banner_personalizado
+    ? personalizavelDaLoja.bannerHtml(data.banner_personalizado, { urlDaLoja: data.storefront_url || site.storefront_url || '' })
+    : '';
+  const cssDoPersonalizavel = comPersonalizavel
+    ? `<style>${personalizavelDaLoja.cssDe({ primary, comBanner: !!heroPersonalizado })}${quadroDaLoja.CSS}</style>
+`
+    : '';
+
   const css    = buildStyles(primary, accent, dark, font);
   const body   = buildHtmlBody({
     siteName, tagline, logoInTopbar, logoNoRodape, contactBar,
@@ -184,6 +201,7 @@ function buildStorefrontPage(data, slug) {
     // Instagram, TikTok e Facebook do rodape — ja normalizados pelo
     // builder (services/redesSociais.js).
     redes: (data.contact && data.contact.redes) || [],
+    ...(heroPersonalizado ? { heroPronto: heroPersonalizado } : {}),
   });
   // tq-44: o checkout com a escolha da forma de pagar na entrega so entra
   // na loja que marcou as formas (a chave so existe nela).
@@ -201,6 +219,7 @@ function buildStorefrontPage(data, slug) {
     // pagina so carrega a primeira pagina de pecas, e uma peca em promocao
     // que chega depois pela paginacao tambem precisa do riscado.
     promocao: data.tem_promocao === true || temPromocaoNoPayload(data),
+    personalizavel: comPersonalizavel,
   });
   const corpo = campanha ? campanhaDaLoja.aplicarNoCorpo(body, campanha) : body;
   const cssDaCampanha = campanha ? `<style>${campanhaDaLoja.cssDe(campanha)}</style>\n` : '';
@@ -261,7 +280,7 @@ ${logoUrl ? `<link rel="icon" href="${logoUrl}" type="image/png">` : ''}
 <style>
 ${css}
 </style>
-${cssDaCampanha}</head>
+${cssDaCampanha}${cssDoPersonalizavel}</head>
 <body class="${bodyClasses}">
 
 ${corpo}

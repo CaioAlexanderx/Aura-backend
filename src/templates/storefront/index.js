@@ -30,6 +30,10 @@ const naEntrega     = require('./parts/na_entrega');
 const campanha      = require('./parts/campanha');
 // p-119a: o "De" riscado e a etiqueta "-N%" (so na loja com promocao no ar).
 const promocao      = require('./parts/promocao');
+// p-180: selo, "a partir de" e "Personalizar" (so na loja com personalizavel).
+const personalizavel = require('./parts/personalizavel');
+// p-182: a ponte com o personalizador no quadro (so na loja com personalizavel).
+const quadro         = require('./parts/quadro');
 const toast         = require('./parts/toast');
 const bootstrap     = require('./parts/bootstrap');
 // Regra da capa sem foto (iniciais + degrau do gradiente) — definida uma
@@ -70,8 +74,11 @@ function buildScript(storeData, escapedSlug, apiBase, textosDaFrente, opcoes) {
   // A campanha ja validada (parts/campanha.js campanhaNoAr), ou null.
   const daCampanha   = (opcoes && opcoes.campanha) || null;
   const comPromocao  = !!(opcoes && opcoes.promocao);
+  const comPersonalizavel = !!(opcoes && opcoes.personalizavel);
   const detalheBase  = detalheDoProduto(textosDaFrente);
   const detalhe      = comPromocao ? promocao.aplicarNoDetalhe(detalheBase) : detalheBase;
+  const cartao       = comPromocao ? promocao.aplicarNoCartao(card) : card;
+  const detalheFinal = daCampanha ? campanha.aplicarNoDetalhe(detalhe) : detalhe;
   return prelude(storeData, escapedSlug, apiBase)
        + init
        + stateUtils
@@ -81,17 +88,18 @@ function buildScript(storeData, escapedSlug, apiBase, textosDaFrente, opcoes) {
        + fonteDasFaixas
        + fonteDasFotos
        + fonteDoWhatsapp
-       + (comPromocao ? promocao.aplicarNoCartao(card) : card)
+       + (comPersonalizavel ? personalizavel.aplicarNoCartao(cartao) : cartao)
        + (daCampanha ? campanha.aplicarNosProdutos(products) : products)
        + categorias
        + tiraCategorias
        + (daCampanha ? campanha.aplicarNaHome(home, daCampanha) : home)
        + filtros
-       + sacola
-       + cart
+       + (comPersonalizavel ? quadro.aplicarNaSacola(sacola) : sacola)
+       + (comPersonalizavel ? quadro.aplicarNoCarrinho(cart) : cart)
        + (comNaEntrega ? naEntrega.aplicar(checkout) : checkout)
        + pix
-       + (daCampanha ? campanha.aplicarNoDetalhe(detalhe) : detalhe)
+       + (comPersonalizavel ? personalizavel.aplicarNoDetalhe(detalheFinal) : detalheFinal)
+       + (comPersonalizavel ? quadro.PONTE : '')
        + toast
        + bootstrap;
 }
