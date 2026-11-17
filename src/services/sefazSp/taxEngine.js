@@ -51,9 +51,12 @@ function cfopForCsosn(csosn) {
 // 17/11/2026: cliente de outra UF que NÃO é contribuinte do ICMS (sem IE,
 // indIEDest 9, ou isento, indIEDest 2) sai em 6108 ("venda ... destinada a
 // não contribuinte"), com ou sem ST. 6102/6404 ficam para o contribuinte.
-function cfopVenda55(csosn, { interestadual = false, naoContribuinte = false } = {}) {
+// MEI (CRT 4) NÃO: a SEFAZ recusa 6108 para o MEI (cStat 337, "CFOP
+// inválido para emitente MEI"), medido em homologação no RJ em 17/11; o
+// MEI segue em 6102/6404, que a SVRS autorizou para não contribuinte.
+function cfopVenda55(csosn, { interestadual = false, naoContribuinte = false, mei = false } = {}) {
   const st = String(csosn) === '500';
-  if (interestadual && naoContribuinte) return '6108';
+  if (interestadual && naoContribuinte && !mei) return '6108';
   if (interestadual) return st ? '6404' : '6102';
   return st ? '5405' : '5102';
 }

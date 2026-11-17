@@ -263,10 +263,13 @@ describe('NF-e 55 de venda — opções e recusas do v1', () => {
     expect(() => buildInfNfe55Venda({ ...EMITENTE, tax_regime: 'lucro_presumido' }, {
       items: [ITEM()], dest: DEST_CNPJ_SP, payments: [], serie: 2, numero: 1,
     }, OPTS)).toThrow(/regime normal/);
-    // MEI (CRT 4) não está na exceção 12 da NA01-20: segue fora.
-    expect(() => buildInfNfe55Venda({ ...EMITENTE, tax_regime: 'mei' }, {
+    // MEI (CRT 4): monta em 6102 (6108 é recusado ao MEI, cStat 337), sem ICMSUFDest.
+    const mei = buildInfNfe55Venda({ ...EMITENTE, tax_regime: 'mei' }, {
       items: [ITEM()], dest: { ...DEST_CPF_SP, endereco: { ...DEST_CNPJ_MG.endereco } }, payments: [], serie: 2, numero: 1,
-    }, OPTS)).toThrow(/MEI vendendo para não contribuinte/);
+    }, OPTS);
+    expect(mei.infNfeXml).toContain('<CFOP>6102</CFOP>');
+    expect(mei.infNfeXml).not.toContain('<CFOP>6108</CFOP>');
+    expect(mei.infNfeXml).not.toContain('ICMSUFDest');
     expect(() => build({ dest: { ...DEST_CNPJ_SP, endereco: { ...DEST_CNPJ_SP.endereco, uf: 'EX' } } })).toThrow(/exterior/);
   });
   it('contribuinte sem IE não monta', () => {
