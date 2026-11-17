@@ -324,7 +324,9 @@ async function lerPedidoCompleto(q, companyId, orderId) {
   const { rows } = await q.query(
     `SELECT id, order_number, origem, status, payment_status, customer_id, customer_name,
             customer_phone, subtotal, discount_amount, total, promised_date::text AS promised_date,
-            notes, created_by, confirmed_at, created_at
+            notes, created_by, confirmed_at, created_at,
+            delivered_at, cancelled_at, cancel_reason,
+            to_jsonb(digital_orders)->>'refund_kind' AS refund_kind
        FROM digital_orders WHERE id = $1 AND company_id = $2`,
     [orderId, companyId]
   );
@@ -356,6 +358,12 @@ function apresentarPedido(o, itens) {
     created_by: o.created_by || null,
     confirmed_at: o.confirmed_at,
     created_at: o.created_at,
+    // B6: o cancelamento (motivo e o que foi feito do sinal). to_jsonb no
+    // SELECT: sem a 461 aplicada, refund_kind vem null em vez de 42703.
+    delivered_at: o.delivered_at || null,
+    cancelled_at: o.cancelled_at || null,
+    cancel_reason: o.cancel_reason || null,
+    refund_kind: o.refund_kind || null,
     items: (itens || []).map((i) => {
       const quantity = Number(i.quantity);
       const unitPrice = Number(i.unit_price);

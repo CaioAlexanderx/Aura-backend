@@ -23,6 +23,12 @@
 //                           422 PEDIDO_SINAL_MAIOR / _VALOR / _FORMA
 //        method: dinheiro | pix | cartao (credito) | debito. Regras do
 //        dinheiro em services/sinalDoPedido.js.
+// POST /pedidos/:oid/cancelar (B6 / p-62e)
+//        {refund_kind: 'credito'|'devolucao', refund_method: 'dinheiro'|'pix'|'estorno', reason?}
+//                         → 200 {order, cancelamento, ja_estava}
+//                           409 PEDIDO_JA_CONCLUIDO / CAIXA_REQUIRED (dinheiro com caixa fechado)
+//                           422 PEDIDO_DESTINO_DO_SINAL / PEDIDO_DEVOLUCAO_FORMA / CREDITO_EXIGE_CLIENTE
+//        Sem sinal, refund_kind nao e pedido. Regras em services/cancelarPedido.js.
 // GET  /pedidos           → {orders, situacao, kpis, counts, pagination} (B3)
 //        ?situacao=abertos|aguardando|separando|prontos|concluidos|cancelados|todos
 //        &atrasados=1 &q= &page= &limit=   (regras em services/listaDePedidos.js)
@@ -45,6 +51,7 @@ const db = require('../config/database');
 const pedidoBalcao = require('../services/pedidoBalcao');
 const listaDePedidos = require('../services/listaDePedidos');
 const sinalDoPedido = require('../services/sinalDoPedido');
+const cancelarPedido = require('../services/cancelarPedido');
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const NAO_ENCONTRADO = { error: 'Pedido não encontrado.', code: 'PEDIDO_NAO_ENCONTRADO' };
@@ -151,6 +158,25 @@ router.post('/:oid/sinal', async (req, res) => {
     return res.status(201).json({ order, sinal: r.sinal, taxa: r.taxa });
   } catch (err) {
     return falhar(res, err, 'sinal', 'Não deu para registrar o sinal agora. Nada foi lançado. Tente de novo em instantes.');
+  }
+});
+
+// B6 (p-62e): cancelar. O sinal vira credito na ficha ou e devolvido; a
+// conta a receber vai a 'cancelled'. Sem e-mail e sem sino.
+router.post('/:oid/cancelar', async (req, res) => {
+  const { id: cid, oid } = req.params;
+  if (!UUID_RE.test(String(oid))) return res.status(404).json(NAO_ENCONTRADO);
+  try {
+    const r = await cancelarPedido.cancelarPedido(db, {
+      companyId: cid,
+      orderId: oid,
+      body: req.body,
+      userId: req.user && req.user.id,
+    });
+    const order = await sinalDoPedido.comSinal(db, await pedidoBalcao.lerPedidoCompleto(db, cid, oid));
+    return res.json({ order, cancelamento: r.cancelamento, ja_estava: r.ja_estava });
+  } catch (err) {
+    return falhar(res, err, 'cancelar', 'Não deu para cancelar o pedido agora. Nada foi alterado. Tente de novo em instantes.');
   }
 });
 
