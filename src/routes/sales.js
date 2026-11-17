@@ -62,6 +62,18 @@
 //   nos EUA, banco em SP: ~190 ms cada). O cancel chama
 //   matconSaleHooks.afterSaleCancel: entregas da venda saem da esteira e o
 //   orcamento volta a poder virar pedido.
+//
+// 17/11/2026 (b-troca-prazo-nfce) — a nota da venda no cancelamento:
+//   - GET /:sale_id: cada nota autorizada (NFC-e ou NF-e de venda) traz
+//     `cancelamento` { uf, prazo_minutos, ate, dentro } — o MESMO prazo por UF
+//     do POST /nfce/:id/cancel (services/nfcePrazoCancelamento.js).
+//   - POST /:sale_id/cancel com `cancelar_nota: true`: depois do COMMIT da
+//     venda, cancela a nota na SEFAZ pelo mesmo servico da rota da nota
+//     (services/nfceCancelamento.js), so DENTRO do prazo. Fora do prazo nao
+//     tenta. Sem o campo, nada fiscal acontece (como antes). A resposta traz
+//     `nota` { situacao, mensagem, ... } quando a venda tem nota autorizada:
+//     'cancelada' | 'nao_cancelada' | 'mantida' | 'fora_do_prazo'. Nada e
+//     emitido sozinho: a NF-e de devolucao continua pelo Caixa (Trocar).
 // ============================================================
 
 const router = require('express').Router({ mergeParams: true });
@@ -75,6 +87,16 @@ const { hasSaleHiddenColumn, visibleInListCond } = require('../utils/saleHidden'
 const matconSaleHooks = require('../services/matconSaleHooks');
 const comandaSaleHooks = require('../services/comandaSaleHooks');
 const editarVenda = require('../services/editarVenda');
+const { prazoDeCancelamento } = require('../services/nfcePrazoCancelamento');
+const nfceCancelamento = require('../services/nfceCancelamento');
+const { TEXTOS_PRAZO_NFCE } = require('../services/textosPrazoNfce');
+
+// Prazo de cancelamento de uma nota autorizada da venda (null nos outros casos).
+function cancelamentoDaNota(r, now) {
+  if (!r || r.status !== 'autorizada' || (r.tipo !== 'nfce' && r.tipo !== 'nfe')) return null;
+  const p = prazoDeCancelamento(r, { uf: r.config_uf, now: now });
+  return { uf: p.uf, prazo_minutos: p.minutos, ate: p.ate, dentro: p.dentro };
+}
 
 // Lancamento financeiro da venda, pra UI abrir "Editar lancamento".
 //
@@ -430,11 +452,13 @@ router.get('/:sale_id', asyncHandler(async (req, res) => {
   let fiscal = [];
   try {
     const fRes = await pool.query(
-      'SELECT id, tipo, status, numero, serie, chave_acesso, pdf_url, qr_code, ' +
-      '       url_consulta, error_message, created_at, authorized_at ' +
-      'FROM nfce_emissions WHERE sale_id = $1 ORDER BY created_at DESC',
+      'SELECT ne.id, ne.tipo, ne.status, ne.numero, ne.serie, ne.chave_acesso, ne.pdf_url, ne.qr_code, ' +
+      '       ne.url_consulta, ne.error_message, ne.created_at, ne.authorized_at, nc.uf AS config_uf ' +
+      'FROM nfce_emissions ne LEFT JOIN nfce_config nc ON nc.company_id = ne.company_id ' +
+      'WHERE ne.sale_id = $1 ORDER BY ne.created_at DESC',
       [saleId]
     );
+    const agora = Date.now();
     fiscal = fRes.rows.map(function(r) {
       return {
         id: r.id,
@@ -449,6 +473,8 @@ router.get('/:sale_id', asyncHandler(async (req, res) => {
         error_message: r.error_message,
         created_at: r.created_at,
         authorized_at: r.authorized_at,
+        // 17/11/2026: prazo de cancelamento por UF (so nota autorizada).
+        cancelamento: cancelamentoDaNota(r, agora),
       };
     });
   } catch (e) {
@@ -676,11 +702,51 @@ router.post('/:sale_id/hide', asyncHandler(async (req, res) => {
   res.json({ ok: true, sale_id: saleId, hidden_at: sale.hidden_at, already_hidden: true });
 }));
 
+// 17/11/2026: o que acontece com a nota autorizada no cancelar venda.
+async function notaNoCancelamento(n, { cancelarNota, reason, companyId, userId }) {
+  const p = prazoDeCancelamento(n, { uf: n.config_uf });
+  const base = {
+    id: n.id, tipo: n.tipo, numero: n.numero,
+    rotulo: n.tipo === 'nfe' ? 'NF-e' : 'NFC-e',
+    uf: p.uf, prazo_minutos: p.minutos, cancelavel_ate: p.ate,
+  };
+  // Sem authorized_at nao da para afirmar o prazo: trata como dentro e deixa
+  // a SEFAZ decidir (habilitar, nunca bloquear).
+  const dentro = p.dentro || p.desconhecido;
+  if (!dentro) {
+    return { ...base, situacao: 'fora_do_prazo', caminho: 'devolucao', mensagem: TEXTOS_PRAZO_NFCE.notaForaDoPrazo(n, p) };
+  }
+  if (!cancelarNota) {
+    return { ...base, situacao: 'mantida', mensagem: TEXTOS_PRAZO_NFCE.notaMantidaNoPrazo(n, p) };
+  }
+  try {
+    const r = await nfceCancelamento.cancelarEmissao(pool, {
+      companyId: companyId, nfceId: n.id, userId: userId,
+      reason: TEXTOS_PRAZO_NFCE.motivoDaNotaNaVendaCancelada(reason),
+    });
+    if (r.status === 200) {
+      return { ...base, situacao: 'cancelada', mensagem: TEXTOS_PRAZO_NFCE.vendaENotaCanceladas(n) };
+    }
+    const code = r.body && r.body.code;
+    if (code === 'NFCE_PRAZO_CANCELAMENTO_VENCIDO' || code === 'NFE_PRAZO_CANCELAMENTO_VENCIDO') {
+      return { ...base, situacao: 'fora_do_prazo', caminho: 'devolucao', mensagem: TEXTOS_PRAZO_NFCE.notaForaDoPrazo(n, p) };
+    }
+    const cStat = r.body && r.body.cStat ? 'código ' + r.body.cStat : null;
+    return { ...base, situacao: 'nao_cancelada', erro: (r.body && r.body.error) || null, mensagem: TEXTOS_PRAZO_NFCE.notaNaoCancelada(n, cStat) };
+  } catch (e) {
+    console.error('[sales] cancelar nota da venda:', e && e.message);
+    return { ...base, situacao: 'nao_cancelada', erro: (e && e.message) || null, mensagem: TEXTOS_PRAZO_NFCE.notaNaoCancelada(n, null) };
+  }
+}
+
 // POST /companies/:id/sales/:sale_id/cancel  (troca-aware)
 router.post('/:sale_id/cancel', asyncHandler(async (req, res) => {
   const companyId = req.params.id;
   const saleId = req.params.sale_id;
   const reason = ((req.body && req.body.reason) || '').toString().trim().slice(0, 200);
+  // 17/11/2026: so com pedido explicito da lojista (escolha no app).
+  const cancelarNota = !!(req.body && (req.body.cancelar_nota === true || req.body.cancelar_nota === 'true'));
+  let notaDaVenda = null;
 
   const client = await pool.connect();
   try {
@@ -719,6 +785,23 @@ router.post('/:sale_id/cancel', asyncHandler(async (req, res) => {
     let devolucaoUndo = null;
     if (isDevolucao) {
       devolucaoUndo = await cancelDevolucao(client, { companyId: companyId, devolucaoSaleId: saleId });
+    }
+
+    // 17/11/2026: nota autorizada da venda comum (NFC-e ou NF-e de venda).
+    // Troca e devolucao tem caminho fiscal proprio (abaixo / NF-e de devolucao).
+    if (!isTroca && !isDevolucao) {
+      try {
+        const nRes = await client.query(
+          'SELECT ne.id, ne.tipo, ne.status, ne.numero, ne.chave_acesso, ne.authorized_at, nc.uf AS config_uf ' +
+          'FROM nfce_emissions ne LEFT JOIN nfce_config nc ON nc.company_id = ne.company_id ' +
+          "WHERE ne.sale_id = $1 AND ne.tipo IN ('nfce', 'nfe') AND ne.status = 'autorizada' " +
+          'ORDER BY ne.created_at DESC LIMIT 1',
+          [saleId]
+        );
+        notaDaVenda = (nRes && nRes.rows && nRes.rows[0]) || null;
+      } catch (e) {
+        if (e.code !== '42P01' && e.code !== '42703') throw e;
+      }
     }
 
     // Repoe estoque dos itens da venda (na troca = itens NOVOS levados)
@@ -888,6 +971,14 @@ router.post('/:sale_id/cancel', asyncHandler(async (req, res) => {
     await comandaSaleHooks.afterSaleCancel(client, { companyId: companyId, saleId: saleId });
 
     await client.query('COMMIT');
+
+    // 17/11/2026: a nota depois do COMMIT (a conexao da transacao nao fica
+    // presa na chamada a SEFAZ). Falha aqui nao desfaz o cancelamento da venda.
+    let nota = null;
+    if (notaDaVenda) {
+      nota = await notaNoCancelamento(notaDaVenda, { cancelarNota, reason, companyId, userId: req.user && req.user.id });
+    }
+
     res.json({
       ok: true,
       sale_id: saleId,
@@ -904,6 +995,7 @@ router.post('/:sale_id/cancel', asyncHandler(async (req, res) => {
       troca_tx_removed: trocaTxRemoved,
       payouts_reversed: payoutsReversed,
       fiscal_warnings: fiscalWarnings,
+      nota: nota,
       devolucao_undo: devolucaoUndo,
       deliveries_cancelled: matconUndo.deliveries_cancelled,
     });

@@ -1,0 +1,358 @@
+{
+  "previa": {
+    "status": 200,
+    "body": {
+      "dry_run": true,
+      "total": 10,
+      "valid": 9,
+      "error_count": 1,
+      "suggested_map": {
+        "nome do produto": "name",
+        "preco de venda (r$)": "price",
+        "preco de custo (r$)": "cost_price",
+        "estoque atual": "stock_qty",
+        "estoque minimo": "stock_min",
+        "codigo de barras (ean)": "barcode",
+        "sku / codigo interno": "sku",
+        "categoria": "category",
+        "cor": "color",
+        "tamanho": "size",
+        "unidade": "unit",
+        "preco no cartao": "card_price"
+      },
+      "errors": [
+        {
+          "index": 7,
+          "error": "Preço de venda inválido ou ausente",
+          "row": {
+            "nome do produto": "Sem Preco",
+            "preco de venda (r$)": "",
+            "preco de custo (r$)": "",
+            "estoque atual": "1",
+            "estoque minimo": "",
+            "codigo de barras (ean)": "",
+            "sku / codigo interno": "SP-1",
+            "categoria": "",
+            "cor": "",
+            "tamanho": "",
+            "unidade": "un",
+            "preco no cartao": ""
+          }
+        }
+      ],
+      "preview": [
+        {
+          "name": "Camiseta Azul M",
+          "price": 79.9,
+          "card_price": null,
+          "cost_price": 35,
+          "stock_qty": 50,
+          "stock_min": 10,
+          "barcode": "7891234567890",
+          "sku": "CAM-AZM",
+          "category": "Vestuário",
+          "color": "#0000FF",
+          "size": "M",
+          "unit": "un",
+          "brand": null,
+          "description": null,
+          "ncm": null
+        },
+        {
+          "name": "Vestido Temis",
+          "price": 185,
+          "card_price": 199.9,
+          "cost_price": null,
+          "stock_qty": 4,
+          "stock_min": null,
+          "barcode": "3125580047102",
+          "sku": "18345775",
+          "category": "Vestido",
+          "color": "#000000",
+          "size": "U",
+          "unit": "un",
+          "brand": null,
+          "description": null,
+          "ncm": null
+        },
+        {
+          "name": "Blusa",
+          "price": 59.9,
+          "card_price": null,
+          "cost_price": 20,
+          "stock_qty": 3,
+          "stock_min": null,
+          "barcode": null,
+          "sku": "B8449",
+          "category": "Blusa",
+          "color": null,
+          "size": null,
+          "unit": "un",
+          "brand": null,
+          "description": null,
+          "ncm": null
+        },
+        {
+          "name": "Blusa",
+          "price": 64.9,
+          "card_price": null,
+          "cost_price": 22,
+          "stock_qty": 2,
+          "stock_min": null,
+          "barcode": null,
+          "sku": "B8450",
+          "category": "Blusa",
+          "color": null,
+          "size": null,
+          "unit": "un",
+          "brand": null,
+          "description": null,
+          "ncm": null
+        },
+        {
+          "name": "Blusa",
+          "price": 59.9,
+          "card_price": null,
+          "cost_price": 20,
+          "stock_qty": 3,
+          "stock_min": null,
+          "barcode": null,
+          "sku": "B8449",
+          "category": "Blusa",
+          "color": null,
+          "size": null,
+          "unit": "un",
+          "brand": null,
+          "description": null,
+          "ncm": null
+        }
+      ],
+      "a_importar": 6,
+      "duplicate_count": 3,
+      "duplicatas": [
+        {
+          "index": 4,
+          "origem": "lote",
+          "criterio": "nome_unidade_marca",
+          "duplicata_de": 2,
+          "name": "Blusa",
+          "unit": "un",
+          "brand": null,
+          "barcode": null
+        },
+        {
+          "index": 5,
+          "origem": "lote",
+          "criterio": "codigo_de_barras",
+          "duplicata_de": 0,
+          "name": "Cinto Couro",
+          "unit": "un",
+          "brand": null,
+          "barcode": "7891234567890"
+        },
+        {
+          "index": 6,
+          "origem": "banco",
+          "criterio": "nome_unidade_marca",
+          "produto_id": "p-antigo",
+          "name": "Caneca",
+          "unit": "un",
+          "brand": null,
+          "barcode": null
+        }
+      ],
+      "unidades_desconhecidas": {
+        "total": 0,
+        "valores": []
+      }
+    }
+  },
+  "escritas_da_previa": [],
+  "gravacao": {
+    "status": 201,
+    "body": {
+      "saved": 6,
+      "duplicates_skipped": 3,
+      "error_count": 1,
+      "batch_id": "lote-0001",
+      "errors": [
+        {
+          "index": 7,
+          "error": "Preço de venda inválido ou ausente",
+          "row": {
+            "nome do produto": "Sem Preco",
+            "preco de venda (r$)": "",
+            "preco de custo (r$)": "",
+            "estoque atual": "1",
+            "estoque minimo": "",
+            "codigo de barras (ean)": "",
+            "sku / codigo interno": "SP-1",
+            "categoria": "",
+            "cor": "",
+            "tamanho": "",
+            "unidade": "un",
+            "preco no cartao": ""
+          }
+        }
+      ],
+      "categorias": {
+        "vinculados": 0,
+        "pendentes": [
+          "Vestuário",
+          "Vestido",
+          "Blusa",
+          "Bolsa",
+          "Saia"
+        ],
+        "ambiguos": []
+      },
+      "duplicatas": [
+        {
+          "index": 4,
+          "origem": "lote",
+          "criterio": "nome_unidade_marca",
+          "duplicata_de": 2,
+          "name": "Blusa",
+          "unit": "un",
+          "brand": null,
+          "barcode": null
+        },
+        {
+          "index": 5,
+          "origem": "lote",
+          "criterio": "codigo_de_barras",
+          "duplicata_de": 0,
+          "name": "Cinto Couro",
+          "unit": "un",
+          "brand": null,
+          "barcode": "7891234567890"
+        },
+        {
+          "index": 6,
+          "origem": "banco",
+          "criterio": "nome_unidade_marca",
+          "produto_id": "p-antigo",
+          "name": "Caneca",
+          "unit": "un",
+          "brand": null,
+          "barcode": null
+        }
+      ],
+      "unidades_desconhecidas": {
+        "total": 0,
+        "valores": []
+      }
+    }
+  },
+  "escritas": [
+    {
+      "sql": "INSERT INTO products (company_id, name, price, cost_price, stock_qty, stock_min, barcode, sku, category, color, size, unit, description, ncm, brand, card_price, import_batch_id) VALUES ($1,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$2),($1,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$2),($1,$33,$34,$35,$36,$37,$38,$39,$40,$41,$42,$43,$44,$45,$46,$47,$2),($1,$48,$49,$50,$51,$52,$53,$54,$55,$56,$57,$58,$59,$60,$61,$62,$2),($1,$63,$64,$65,$66,$67,$68,$69,$70,$71,$72,$73,$74,$75,$76,$77,$2),($1,$78,$79,$80,$81,$82,$83,$84,$85,$86,$87,$88,$89,$90,$91,$92,$2) ON CONFLICT DO NOTHING RETURNING id, category",
+      "params": [
+        "00000000-0000-0000-0000-000000000001",
+        "lote-0001",
+        "Camiseta Azul M",
+        79.9,
+        35,
+        50,
+        10,
+        "7891234567890",
+        "CAM-AZM",
+        "Vestuário",
+        "#0000FF",
+        "M",
+        "un",
+        null,
+        null,
+        null,
+        null,
+        "Vestido Temis",
+        185,
+        null,
+        4,
+        null,
+        "3125580047102",
+        "18345775",
+        "Vestido",
+        "#000000",
+        "U",
+        "un",
+        null,
+        null,
+        null,
+        199.9,
+        "Blusa",
+        59.9,
+        20,
+        3,
+        null,
+        null,
+        "B8449",
+        "Blusa",
+        null,
+        null,
+        "un",
+        null,
+        null,
+        null,
+        null,
+        "Blusa",
+        64.9,
+        22,
+        2,
+        null,
+        null,
+        "B8450",
+        "Blusa",
+        null,
+        null,
+        "un",
+        null,
+        null,
+        null,
+        null,
+        "Bolsa Tiracolo",
+        149.9,
+        60,
+        1,
+        2,
+        null,
+        null,
+        "Bolsa",
+        null,
+        null,
+        "un",
+        null,
+        null,
+        null,
+        null,
+        "Saia Midi",
+        119.9,
+        45,
+        2,
+        null,
+        null,
+        "SAI-9",
+        "Saia",
+        "#EF4444",
+        null,
+        "un",
+        null,
+        null,
+        null,
+        null
+      ]
+    },
+    {
+      "sql": "INSERT INTO import_logs (company_id, module, format, total_rows, imported_rows, error_rows, batch_id, created_by, meta) VALUES ($1,'products','csv',$2,$3,$4,$5,$6,$7)",
+      "params": [
+        "00000000-0000-0000-0000-000000000001",
+        10,
+        6,
+        1,
+        "lote-0001",
+        "u1",
+        "{\"duplicates_skipped\":3,\"column_map\":{\"nome do produto\":\"name\",\"preco de venda (r$)\":\"price\",\"preco de custo (r$)\":\"cost_price\",\"estoque atual\":\"stock_qty\",\"estoque minimo\":\"stock_min\",\"codigo de barras (ean)\":\"barcode\",\"sku / codigo interno\":\"sku\",\"categoria\":\"category\",\"cor\":\"color\",\"tamanho\":\"size\",\"unidade\":\"unit\",\"preco no cartao\":\"card_price\"}}"
+      ]
+    }
+  ]
+}

@@ -126,6 +126,7 @@ const { applySegment, isValidSegment, normalizeCnae, ALLOWED_EXTRAS } = require(
 const signupOrigem = require('../services/signupOrigem');
 const { lookupCNPJ } = require('../services/cnpj');
 const regimeLog = require('../services/regimeLog');
+const regimeDoCadastroSvc = require('../services/regimeDoCadastro');
 const documentoEmpresa = require('../services/documentoEmpresa');
 const whatsappCadastro = require('../services/whatsappCadastro');
 const signupHandshake = require('../services/signupHandshake');
@@ -359,12 +360,15 @@ router.post('/register', async (req, res) => {
   // 12/10/2026: o regime que o cadastro detectou pela Receita vem no corpo e
   // é gravado na empresa nova. Antes ninguém gravava e TODO cadastro ficava
   // com o default da coluna (simples_nacional) — 148 de 149 empresas.
-  const REGIMES = ['mei', 'simples_nacional', 'lucro_presumido', 'lucro_real'];
+  const REGIMES = regimeDoCadastroSvc.REGIMES;
   // 20/10/2026: conta com CPF nao tem regime (nao ha Receita para consultar).
   // Nada de inventar: o tax_regime do corpo e ignorado e a coluna (NOT NULL)
   // fica no default; o app trata o regime como "a confirmar" enquanto nao
   // houver CNPJ (GET /companies/:id/profile -> regime_a_confirmar).
-  const regimeDoCadastro = (!cleanCpf && REGIMES.includes(tax_regime)) ? tax_regime : null;
+  // 17/11/2026 (b-tq-regime-cadastro): o regime final e decidido logo antes
+  // do INSERT da empresa (services/regimeDoCadastro), com a Receita.
+  let regimeDoCadastro = (!cleanCpf && REGIMES.includes(tax_regime)) ? tax_regime : null;
+  let decisaoDoRegime = null;
   const isComecarCode = typeof access_code === 'string' && access_code.toUpperCase().trim() === 'COMECAR';
 
   if (!name || !email || !password) return res.status(400).json({ error: 'Campos obrigatorios: name, email, password' });
@@ -431,6 +435,15 @@ router.post('/register', async (req, res) => {
       code: 'FEDERATION_REQUIRED',
     });
   }
+
+  // 17/11/2026 (b-tq-regime-cadastro): a consulta a Receita comeca aqui, em
+  // paralelo com o resto, e so e esperada antes do INSERT da empresa nova
+  // (com prazo; nunca lanca). Conta com CPF ou sem CNPJ de 14 digitos nao
+  // consulta. A mesma resposta serve a cidade em segundo plano.
+  const cnpjDaReceita = (!cleanCpf && company_name) ? regimeDoCadastroSvc.cnpjConsultavel(cnpj) : null;
+  const consultaReceita = cnpjDaReceita
+    ? regimeDoCadastroSvc.consultarReceita(regimeLog.lookupComLog(lookupCNPJ, 'register'), cnpjDaReceita, redis)
+    : null;
 
   const client = await db.connect();
   try {
@@ -596,6 +609,15 @@ router.post('/register', async (req, res) => {
       // INSERT não gravava e 2 de 3 cadastros desde 28/09 ficavam sem e-mail
       // (o relatório semanal legado e o painel da gestão leem a coluna).
       // Vale para o cadastro com CNPJ, com CPF e o de dojô: todos passam aqui.
+      //
+      // 17/11/2026 (b-tq-regime-cadastro): o regime ($10) vem da Receita quando
+      // ela e confiavel (MEI -> mei); senao, o de antes (corpo ou default).
+      decisaoDoRegime = regimeDoCadastroSvc.decidirRegime({
+        temCpf: !!cleanCpf,
+        regimeDoCorpo: tax_regime,
+        receita: consultaReceita ? await consultaReceita.resultado : null,
+      });
+      regimeDoCadastro = decisaoDoRegime.regime;
       const { rows: [newCompany] } = await client.query(
         `INSERT INTO companies (owner_id, legal_name, trade_name, plan, onboarding_step, trial_ends_at, access_code_used, cnpj, phone, vertical, vertical_active, federation_id, tax_regime, is_primary, email)
          VALUES ($1, $2, $2, $3, 'cnpj', $4, $5, $6, $7, $8, $8, $9, COALESCE($10::tax_regime, 'simples_nacional'::tax_regime), true, $11)
@@ -699,14 +721,20 @@ router.post('/register', async (req, res) => {
       companyId: company ? company.id : null,
       selfServe: isSelfServe,
       temCodigo: !!access_code,
+      decisao: decisaoDoRegime,
     });
 
     // 15/10/2026 (t2-09): cidade do CNPJ na empresa nova (best-effort, em
     // segundo plano; o cadastro do site ja aqueceu o cache do lookup).
     // 28/10/2026: a mesma consulta (sem chamada nova) loga o regime que a
     // Receita devolve para o CNPJ, ao lado do [REGIME] do cadastro acima.
+    // 17/11/2026: quando o register ja consultou a Receita (acima), a cidade
+    // reaproveita aquela resposta: o cnpj.ws aceita 3 consultas por minuto.
     if (isNewCompany && !isDojoSignup && cnpj) {
-      signupOrigem.completarCidadePeloCnpj({ db, companyId: company.id, cnpj: String(cnpj), lookup: regimeLog.lookupComLog(lookupCNPJ, 'register'), redis })
+      const lookupDaCidade = consultaReceita
+        ? () => consultaReceita.bruta
+        : regimeLog.lookupComLog(lookupCNPJ, 'register');
+      signupOrigem.completarCidadePeloCnpj({ db, companyId: company.id, cnpj: String(cnpj), lookup: lookupDaCidade, redis })
         .catch(() => {});
     }
 

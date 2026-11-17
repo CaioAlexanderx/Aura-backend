@@ -13,6 +13,10 @@
 // ambíguo → consulta pela chave e NUNCA renumera; rejeição 539 pega número
 // novo; homologação com o xNome padrão; salvar no cadastro (com e sem a
 // migration 450). Dados fictícios.
+//
+// 17/11/2026 (Trocar por NF-e): GET /venda/:saleId/trocar-nfce e o caminho
+// inteiro: cancela a NFC-e pela rota de sempre (POST /nfce/:id/cancel,
+// evento 110111 falso) e a NF-e fica livre; SEFAZ recusa e a trava continua.
 // ============================================================
 'use strict';
 
@@ -183,6 +187,17 @@ async function fakeQuery(sql, params = []) {
     const e = emById(params[0]);
     return { rows: e ? [{ ...e }] : [] };
   }
+  // ── cancelamento da NFC-e (POST /nfce/:id/cancel, 17/11) ──
+  if (/SELECT \* FROM nfce_emissions WHERE id=\$1 AND company_id=\$2 AND xml_signed IS NOT NULL/.test(s)) {
+    const e = emById(params[0]);
+    return { rows: e && e.company_id === params[1] && e.xml_signed ? [{ ...e }] : [] };
+  }
+  if (/UPDATE nfce_emissions SET status='cancelada', cancel_reason=\$1, cancelled_at=NOW\(\) WHERE id=\$2 RETURNING \*/.test(s)) {
+    const e = emById(params[1]);
+    Object.assign(e, { status: 'cancelada', cancel_reason: params[0], cancelled_at: new Date().toISOString() });
+    return { rows: [{ ...e }] };
+  }
+  if (/SELECT \* FROM nfce_config WHERE company_id=\$1/.test(s)) return { rows: state.config ? [{ ...state.config }] : [] };
   // ── numeração ──
   if (/UPDATE nfce_config\s+SET next_number_nfe55 = next_number_nfe55 \+ 1/.test(s)) {
     state.reservas++;
@@ -271,7 +286,7 @@ const timeout = () => { const S = jest.requireActual('../src/services/sefazSp/so
 const chaveDoXml = (xml) => (xml.match(/Id="NFe(\d{44})"/) || [])[1];
 const nfeRows = () => state.emissions.filter((e) => e.tipo === 'nfe');
 
-const ENV_KEYS = ['NFE55_VENDA_UFS', 'AURA_RESP_TEC_CNPJ', 'NUVEM_FISCAL_CLIENT_ID', 'NUVEM_FISCAL_CLIENT_SECRET'];
+const ENV_KEYS = ['NFE55_VENDA_UFS', 'AURA_RESP_TEC_CNPJ', 'NUVEM_FISCAL_CLIENT_ID', 'NUVEM_FISCAL_CLIENT_SECRET', 'NFCE_CANCEL_DEADLINE_MIN'];
 const envOriginal = {};
 beforeAll(() => { for (const k of ENV_KEYS) envOriginal[k] = process.env[k]; });
 beforeEach(() => {
@@ -631,5 +646,141 @@ describe('salvar_no_cadastro', () => {
     expect(r.status).toBe(201);
     expect(r.body.cadastro).toEqual({ salvo: true, ignored_fields: ['ie', 'ind_ie_dest', 'codigo_municipio_ibge'] });
     expect(state.customerUpdates[0].sql).not.toMatch(/\bie = /);
+  });
+});
+
+// ── Trocar por NF-e (17/11/2026) ──────────────────────────────
+describe('Trocar por NF-e: GET /venda/:saleId/trocar-nfce e o caminho inteiro', () => {
+  const MIN = 60e3;
+  const situacao = (saleId) => supertest(ctx.app).get(`/c/${CID}/nfe55/venda/${saleId}/trocar-nfce`).set(auth);
+  const cancelarNfce = (nfceId, reason = 'Cliente pediu NF-e no lugar da NFC-e') =>
+    supertest(ctx.app).post(`/c/${CID}/nfce/${nfceId}/cancel`).set(auth).send({ reason });
+  const nfceDaVenda = () => state.emissions.find((e) => e.id === 'em-nfce-1');
+  // NFC-e da emissão própria (xml assinado), autorizada há `minutos`.
+  const nfcePropria = (minutos) => Object.assign(nfceDaVenda(), {
+    xml_signed: '<NFe>assinada</NFe>', protocolo: '135260000000900',
+    authorized_at: new Date(Date.now() - minutos * MIN).toISOString(),
+  });
+  let cancelNfce;
+  beforeEach(() => {
+    cancelNfce = jest.spyOn(require('../src/services/sefazSp'), 'cancelNfce');
+  });
+
+  it('venda sem NFC-e: sem_nfce (a tela de hoje)', async () => {
+    const r = await situacao(V_OK);
+    expect(r.status).toBe(200);
+    expect(r.body).toMatchObject({ situacao: 'sem_nfce', nfce: null, bloqueio: null });
+  });
+
+  it('dentro do prazo: pode_trocar com o prazo da NFC-e; nunca devolve o XML', async () => {
+    const nota = nfcePropria(5);
+    const r = await situacao(V_COM_NFCE);
+    expect(r.status).toBe(200);
+    expect(r.body.situacao).toBe('pode_trocar');
+    expect(r.body.nfce).toEqual({
+      id: 'em-nfce-1', numero: 900, serie: 2, authorized_at: nota.authorized_at,
+      cancelavel_ate: new Date(new Date(nota.authorized_at).getTime() + 30 * MIN).toISOString(),
+      // UF pela chave (a fictícia começa com 33 = RJ): o mesmo prazo da rota de cancelamento.
+      prazo_minutos: 30, uf: 'RJ',
+    });
+    expect(JSON.stringify(r.body)).not.toMatch(/assinada/);
+    // Só lê: nada cancelado, nada emitido, nenhum número reservado.
+    expect(nfceDaVenda().status).toBe('autorizada');
+    expect(cancelNfce).not.toHaveBeenCalled();
+    expect(state.reservas).toBe(0);
+  });
+
+  it('cancela a NFC-e pela rota de sempre (evento 110111) e a NF-e da mesma venda fica livre', async () => {
+    nfcePropria(5);
+    cancelNfce.mockResolvedValue({ sucesso: true, cStat: '135', xMotivo: 'Evento registrado', protocoloEvento: '135260000000901' });
+    // Antes: a trava vale enquanto a NFC-e está autorizada.
+    expect((await emitir(V_COM_NFCE)).status).toBe(409);
+
+    const c = await cancelarNfce('em-nfce-1');
+    expect(c.status).toBe(200);
+    expect(cancelNfce).toHaveBeenCalledWith(expect.objectContaining({
+      companyId: CID, chave: '3'.repeat(44), protocolo: '135260000000900', justificativa: 'Cliente pediu NF-e no lugar da NFC-e',
+    }));
+    expect(nfceDaVenda().status).toBe('cancelada');
+
+    const p = await previa(V_COM_NFCE);
+    expect(p.body).toMatchObject({ pode_emitir: true, nota_existente: null });
+    ctx.soap.autorizar.mockImplementation(async ({ signedNfeXml }) => AUTORIZADO(signedNfeXml));
+    const e = await emitir(V_COM_NFCE);
+    expect(e.status).toBe(201);
+    expect((await situacao(V_COM_NFCE)).body.situacao).toBe('sem_nfce');
+  });
+
+  it('SEFAZ recusa o cancelamento: 422 com o motivo, a NFC-e continua e a trava também', async () => {
+    nfcePropria(5);
+    cancelNfce.mockResolvedValue({ sucesso: false, cStat: '501', xMotivo: 'Rejeicao: Prazo de cancelamento superior ao previsto na Legislacao' });
+    const c = await cancelarNfce('em-nfce-1');
+    expect(c.status).toBe(422);
+    expect(c.body.error).toMatch(/recusou o cancelamento: \[501\]/);
+    expect(nfceDaVenda().status).toBe('autorizada');
+    expect((await emitir(V_COM_NFCE)).status).toBe(409);
+    expect((await situacao(V_COM_NFCE)).body.situacao).toBe('pode_trocar');
+  });
+
+  it('fora do prazo: fora_do_prazo, e a rota de cancelamento recusa sem ir à SEFAZ', async () => {
+    nfcePropria(40);
+    const r = await situacao(V_COM_NFCE);
+    expect(r.body.situacao).toBe('fora_do_prazo');
+    expect(r.body.nfce).toMatchObject({ cancelavel_ate: expect.any(String), prazo_minutos: 30, uf: 'RJ' });
+    const c = await cancelarNfce('em-nfce-1');
+    expect(c.status).toBe(400);
+    expect(c.body.code).toBe('NFCE_PRAZO_CANCELAMENTO_VENCIDO');
+    expect(cancelNfce).not.toHaveBeenCalled();
+    expect(nfceDaVenda().status).toBe('autorizada');
+  });
+
+  it('o prazo é o da rota de cancelamento (nfcePrazoCancelamento; NFCE_CANCEL_DEADLINE_MIN segue como alavanca)', async () => {
+    process.env.NFCE_CANCEL_DEADLINE_MIN = '60';
+    nfcePropria(40);
+    expect((await situacao(V_COM_NFCE)).body.situacao).toBe('pode_trocar');
+  });
+
+  it('sem data de autorização: oferece a troca e a SEFAZ decide', async () => {
+    nfcePropria(5);
+    nfceDaVenda().authorized_at = null;
+    const r = await situacao(V_COM_NFCE);
+    expect(r.body.situacao).toBe('pode_trocar');
+    expect(r.body.nfce.cancelavel_ate).toBeNull();
+  });
+
+  it('NFC-e do gateway (sem XML assinado pela Aura): fora_da_aura', async () => {
+    Object.assign(nfceDaVenda(), { authorized_at: new Date(Date.now() - 5 * MIN).toISOString() });
+    expect((await situacao(V_COM_NFCE)).body.situacao).toBe('fora_da_aura');
+  });
+
+  it('loja que não emitiria a NF-e: nfe_indisponivel com o motivo (nunca cancelar a NFC-e à toa)', async () => {
+    nfcePropria(5);
+    state.certNotAfter = new Date(Date.now() - 864e5).toISOString();
+    const r = await situacao(V_COM_NFCE);
+    expect(r.body.situacao).toBe('nfe_indisponivel');
+    expect(r.body.bloqueio).toMatchObject({ code: 'NFE_CERTIFICADO' });
+
+    state.certNotAfter = new Date(Date.now() + 864e5).toISOString();
+    state.company.address_state = 'MG';
+    state.config.uf = 'MG';
+    const uf = await situacao(V_COM_NFCE);
+    expect(uf.body).toMatchObject({ situacao: 'nfe_indisponivel', bloqueio: { code: 'NFE55_UF_NAO_HABILITADA' } });
+  });
+
+  it('NFC-e em processamento: nfce_pendente; NFC-e já cancelada não trava', async () => {
+    Object.assign(nfceDaVenda(), { status: 'processando' });
+    expect((await situacao(V_COM_NFCE)).body.situacao).toBe('nfce_pendente');
+    Object.assign(nfceDaVenda(), { status: 'cancelada' });
+    expect((await situacao(V_COM_NFCE)).body.situacao).toBe('sem_nfce');
+    expect((await previa(V_COM_NFCE)).body.pode_emitir).toBe(true);
+  });
+
+  it('multi-CNPJ: a NFC-e de outra loja não aparece pela loja errada', async () => {
+    state.emissions.push({
+      id: 'em-outra', company_id: OUTRA_LOJA, sale_id: V_OUTRA_LOJA, tipo: 'nfce', status: 'autorizada', numero: 7, serie: 1,
+      chave_acesso: '3'.repeat(44), xml_signed: '<x/>', authorized_at: new Date().toISOString(), seq: 0,
+    });
+    const r = await situacao(V_OUTRA_LOJA);
+    expect(r.body).toMatchObject({ situacao: 'sem_nfce', nfce: null });
   });
 });
