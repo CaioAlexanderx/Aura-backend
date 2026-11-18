@@ -216,19 +216,30 @@ describe('o caminho do relato', () => {
     expect(f.body.saldo_a_favor).toBe(0);
   });
 
-  test('antes da correção: o único jeito era o crediário, que ignora o saldo (A Receber de 200 com a ficha em 150)', async () => {
+  // Antes do J (17/11) esta venda passava e abria A Receber de 200 com a ficha
+  // em 150 (o crediario ignorava o saldo; numeros no Aura-backend#1080).
+  test('crediário com crédito de troca sobrando: 422 com o saldo, nada gravado', async () => {
     await abrirCaixa();
     await trocaComCredito();
-    const antes = await numeros();
+    const vendas = async () => (await q(`SELECT COUNT(*)::int AS n FROM sales WHERE company_id = $1`, [ID.loja])).rows[0].n;
+    const antes = await vendas();
     const r = await vender({ items: VESTIDO, payment_method: 'crediario', customer_id: ID.cliente });
-    expect(r.status).toBe(201);
-    const depois = await numeros();
-    const { rows: [ar] } = await q(
-      `SELECT amount::numeric AS amount FROM transactions WHERE idempotency_key = $1`, [`pdv-credit-receivable-${r.body.sale.id}`]);
-    // A ficha abate (−50 + 200 = 150), mas o Financeiro cobra os 200 cheios.
-    expect(depois.ficha).toBe(150);
-    expect(r2(ar.amount)).toBe(200);
-    expect(delta(depois, antes)).toMatchObject({ faturamento: 200, receita_painel: 0, a_receber_painel: 200 });
+    expect(r.status).toBe(422);
+    expect(r.body).toEqual({
+      error: 'A cliente tem R$ 50,00 de crédito nesta loja. Use o crédito na venda antes de lançar no crediário.',
+      code: 'CREDITO_ANTES_DO_CREDIARIO', saldo_a_favor: 50,
+    });
+    expect(await vendas()).toBe(antes);
+    expect(await ficha()).toBe(-50);
+    // Usando parte do crédito e o resto no crediário: tambem recusa (sobram 30).
+    const p = await vender({ items: VESTIDO, payment_method: 'crediario', customer_id: ID.cliente,
+      payments: [{ method: 'credito_cliente', value: 20 }, { method: 'crediario', value: 180 }] });
+    expect(p.status).toBe(422);
+    expect(p.body.saldo_a_favor).toBe(30);
+    // Saldo negativo que nao e credito (pagamento acima da divida) nao trava o crediario.
+    await q(`INSERT INTO customer_credit_transactions (company_id, customer_id, type, amount, payment_method) VALUES ($1, $2, 'payment', 80, 'pix')`, [ID.loja, ID.outra]);
+    const o = await vender({ items: VESTIDO, payment_method: 'crediario', customer_id: ID.outra });
+    expect(o.status).toBe(201);
   });
 
   test('venda de 200 com 50 de crédito de troca e 150 no Pix: Faturamento 200, Receita 200, ficha −50 -> 0, caixa Pix 150', async () => {
