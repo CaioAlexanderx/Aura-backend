@@ -87,6 +87,15 @@ beforeAll(async () => {
   // Mesmo ajuste do pedidoBalcao.banco (CI: a 070 nao tem updated_at).
   await q(`ALTER TABLE digital_order_sequences ADD COLUMN IF NOT EXISTS updated_at timestamptz NOT NULL DEFAULT now()`);
   hoje = require('../src/services/pedidoBalcao').hojeSP();
+  // Colunas de transactions de producao (legado) que nenhuma migration do
+  // repo cria e que o PATCH e o DELETE do Financeiro leem (mesmo ajuste de
+  // financeiro.categorias.banco). Idempotente.
+  await q(`ALTER TABLE transactions ADD COLUMN IF NOT EXISTS recurrence_type TEXT,
+                                   ADD COLUMN IF NOT EXISTS recurrence_group_id UUID,
+                                   ADD COLUMN IF NOT EXISTS recurrence_index INTEGER,
+                                   ADD COLUMN IF NOT EXISTS payment_method VARCHAR,
+                                   ADD COLUMN IF NOT EXISTS employee_id UUID,
+                                   ADD COLUMN IF NOT EXISTS employee_name TEXT`);
 
   await limpar();
   await q(`INSERT INTO users (id, email, password_hash, full_name) VALUES ($1, $2, 'x', 'Fixture Sinal')`,
