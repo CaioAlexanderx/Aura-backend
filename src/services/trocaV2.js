@@ -117,6 +117,8 @@ const nuvemfiscal = require('./nuvemfiscal');
 const trocaDevolucao55 = require('./trocaDevolucao55');
 const { resolveManualDiscount } = require('./descontoManual');
 const { productVisibilityWhere } = require('../utils/companyGroup');
+// INC-2026-11-18-02: servico (unit 'srv') nunca e barrado nem baixado por saldo.
+const { ehUnidadeServico } = require('./notaDoItem');
 // p-92 (08/11/2026, migration 428): item novo da troca guarda se saiu na promocao.
 const vendaNaPromocao = require('./vendaNaPromocao');
 const { estrategiaDaTroca, prazoDeCancelamento } = require('./nfcePrazoCancelamento');
@@ -750,7 +752,7 @@ async function adjustStock(client, returnedItems, newItems, currentCompanyId, tr
       // 02/11/2026: mesma regra de visibilidade do Estoque (bidirecional no
       // grupo). Antes a variante nao checava empresa nenhuma.
       const { rows: vr } = await client.query(
-        `SELECT p.company_id AS stock_company_id, pv.sku_suffix
+        `SELECT p.company_id AS stock_company_id, pv.sku_suffix, p.unit
            FROM product_variants pv JOIN products p ON p.id = pv.product_id
           WHERE pv.id=$1 AND pv.product_id=$2 AND ${productVisibilityWhere('$3', 'p.')}`,
         [item.variant_id, item.product_id, currentCompanyId]
@@ -758,6 +760,8 @@ async function adjustStock(client, returnedItems, newItems, currentCompanyId, tr
       if (vr.length) {
         stockLabel += vr[0].sku_suffix ? ` (${vr[0].sku_suffix})` : ' (variante)';
         stockCompanyId = vr[0].stock_company_id || currentCompanyId;
+        // INC-2026-11-18-02: servico nao tem saldo: nao baixa nem movimenta.
+        if (ehUnidadeServico(vr[0].unit)) continue;
       }
       // Lock atomico. Produto fora do grupo nao baixa (cai no
       // INSUFFICIENT_STOCK, como o produto sem variante).
@@ -777,12 +781,14 @@ async function adjustStock(client, returnedItems, newItems, currentCompanyId, tr
     } else {
       // Busca stock_company_id
       const { rows: pr } = await client.query(
-        `SELECT p.company_id AS stock_company_id
+        `SELECT p.company_id AS stock_company_id, p.unit
            FROM products p
           WHERE p.id = $1 AND ${productVisibilityWhere('$2', 'p.')}`,
         [item.product_id, currentCompanyId]
       );
       if (pr.length) stockCompanyId = pr[0].stock_company_id || currentCompanyId;
+      // INC-2026-11-18-02: servico nao tem saldo: nao baixa nem movimenta.
+      if (pr.length && ehUnidadeServico(pr[0].unit)) continue;
       // Lock atomico
       const { rows: stkRows } = await client.query(
         `UPDATE products SET stock_qty = stock_qty - $1, updated_at = NOW()

@@ -232,7 +232,9 @@ describe('gravarItens', () => {
 
     await vendaRapida.gravarItens(client, { saleId: 's', companyId: EMPRESA, itens, marcacoes: null });
     expect(client.query.mock.calls[0][0]).not.toMatch(/UPDATE employees|UPDATE coupons|preco_lista/);
-    expect(client.query.mock.calls[0][1]).toHaveLength(10);
+    // 11: o ultimo e "baixa" (INC-2026-11-18-02: servico nao baixa nem movimenta).
+    expect(client.query.mock.calls[0][1]).toHaveLength(11);
+    expect(client.query.mock.calls[0][1][10]).toEqual([true]);
 
     await vendaRapida.gravarItens(client, {
       saleId: 's', companyId: EMPRESA, itens, marcacoes: [{ preco_lista: 12, em_promocao: true }],
@@ -242,7 +244,22 @@ describe('gravarItens', () => {
     expect(sql).toMatch(/UPDATE employees SET total_sales = COALESCE\(total_sales,0\) \+ 1/);
     expect(sql).toMatch(/UPDATE coupons SET current_uses = current_uses \+ 1/);
     expect(sql).toMatch(/preco_lista, em_promocao/);
-    expect(params.slice(10)).toEqual([[12], [true], 10, P2, EMPRESA, V1]);
+    expect(params.slice(10)).toEqual([[true], [12], [true], 10, P2, EMPRESA, V1]);
+  });
+
+  test('INC-2026-11-18-02: servico (sem_baixa_de_estoque) fica fora da baixa e do stock_movements', async () => {
+    const client = { query: jest.fn().mockResolvedValue({ rows: [{ id: 'i-1' }, { id: 'i-2' }] }) };
+    const itens = [
+      { product_id: P1, quantity: 1, unit_price: 80, cost_price: 0, item_discount: 0, line_total: 80, product_name_snapshot: 'Instalacao', stock_company_id: EMPRESA, sem_baixa_de_estoque: true },
+      { product_id: P2, quantity: 2, unit_price: 10, cost_price: 4, item_discount: 0, line_total: 20, product_name_snapshot: 'Caneca', stock_company_id: EMPRESA, sem_baixa_de_estoque: false },
+    ];
+    await vendaRapida.gravarItens(client, { saleId: 's', companyId: EMPRESA, itens, marcacoes: null });
+    const [sql, params] = client.query.mock.calls[0];
+    expect(params[10]).toEqual([false, true]);
+    expect(sql).toMatch(/\$11::boolean\[\]/);
+    expect(sql).toMatch(/variant_id IS NOT NULL AND baixa/);
+    expect(sql).toMatch(/variant_id IS NULL AND baixa/);
+    expect(sql).toMatch(/src\.product_id IS NOT NULL AND src\.baixa/);
   });
 });
 

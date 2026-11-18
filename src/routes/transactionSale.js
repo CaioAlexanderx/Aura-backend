@@ -67,6 +67,8 @@ async function lerPromocaoDoItem(productId, variantId) {
 const { resolveSaleLink, extractSaleId } = require('../utils/saleLink');
 // 06/10/2026: chave "vender sem estoque" — ver cabecalho do util.
 const { vendaSemEstoqueLiberada } = require('../utils/vendaSemEstoque');
+// INC-2026-11-18-02: servico (unit 'srv') nunca e barrado nem baixado por saldo.
+const { ehUnidadeServico } = require('../services/notaDoItem');
 
 // Quanto ja foi devolvido/trocado por item da venda (troca_returned_items).
 // Best-effort: em deploy parcial a tabela pode nao existir (42P01) -> tudo 0.
@@ -295,11 +297,12 @@ router.post('/transactions/:tx_id/sale-items', asyncHandler(async (req, res) => 
 
     // 3. Carrega produto + valida pertence a empresa
     const prodRes = await client.query(
-      'SELECT id, name, price, stock_qty FROM products WHERE id = $1 AND company_id = $2 FOR UPDATE',
+      'SELECT id, name, price, stock_qty, unit FROM products WHERE id = $1 AND company_id = $2 FOR UPDATE',
       [product_id, companyId]
     );
     if (!prodRes.rows.length) throw new AppError('Produto nao encontrado', 404);
     const product = prodRes.rows[0];
+    const servico = ehUnidadeServico(product.unit);
 
     // 4. Se variant_id, valida pertence ao produto + tem estoque
     let variant = null;
@@ -325,7 +328,7 @@ router.post('/transactions/:tx_id/sale-items', asyncHandler(async (req, res) => 
       variant = varRes.rows[0];
       const varStock = parseFloat(variant.stock_qty || 0);
       // 06/10/2026: a chave so e consultada quando o saldo falta.
-      if (varStock < qty && !(await vendaSemEstoqueLiberada(client, companyId))) {
+      if (!servico && varStock < qty && !(await vendaSemEstoqueLiberada(client, companyId))) {
         throw new AppError('Estoque insuficiente. Disponivel: ' + varStock + ' un', 400);
       }
       // Sobrescreve preco se cliente nao mandou: preco proprio da variante,
@@ -336,7 +339,7 @@ router.post('/transactions/:tx_id/sale-items', asyncHandler(async (req, res) => 
     } else {
       // Validacao de estoque do produto (so se nao for variante, ja que produto pai pode ser ignorado)
       const prodStock = parseFloat(product.stock_qty || 0);
-      if (prodStock < qty && !(await vendaSemEstoqueLiberada(client, companyId))) {
+      if (!servico && prodStock < qty && !(await vendaSemEstoqueLiberada(client, companyId))) {
         throw new AppError('Estoque insuficiente. Disponivel: ' + prodStock + ' un', 400);
       }
     }
@@ -351,7 +354,9 @@ router.post('/transactions/:tx_id/sale-items', asyncHandler(async (req, res) => 
     // 06/10/2026: GREATEST(0, ...) como no Caixa (pdv.js). Com a trava de
     // saldo valendo o piso nunca e atingido; com "vender sem estoque" ligado
     // ele impede o saldo negativo.
-    if (variant) {
+    if (servico) {
+      // INC-2026-11-18-02: servico nao tem saldo: sem baixa.
+    } else if (variant) {
       await client.query(
         `UPDATE product_variants SET stock_qty = GREATEST(0, COALESCE(stock_qty, 0) - $1), updated_at = NOW()
          WHERE id = $2`,

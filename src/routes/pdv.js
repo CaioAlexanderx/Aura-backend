@@ -83,6 +83,8 @@ const comandaSaleHooks = require('../services/comandaSaleHooks');
 // 06/10/2026: chave "vender sem estoque" — ver cabecalho do util.
 const { vendaSemEstoqueLiberada, lerVendaSemEstoque } = require('../utils/vendaSemEstoque');
 const { productVisibilityWhere } = require('../utils/companyGroup');
+// INC-2026-11-18-02: servico (unit 'srv') nunca e barrado nem baixado por saldo.
+const { ehUnidadeServico } = require('../services/notaDoItem');
 const { iniciarTrialPelaPrimeiraVenda } = require('../services/trialRegra');
 const { avancarSemEsperar } = require('../services/onboardingProgress');
 // 17/10/2026 (migration 390): Idempotency-Key — ver cabecalho do servico.
@@ -471,6 +473,10 @@ async function handleSale(req, res, opts = {}) {
       let productName = item.product_name_snapshot || '';
       let costPrice = 0;
       let stockCompanyId = req.params.id;
+      // INC-2026-11-18-02: servico (unit 'srv') nao tem saldo. Nunca e barrado
+      // por estoque nem gera baixa/stock_movements. So o TIPO decide: item que
+      // sai em NFS-e com unit de mercadoria segue controlando estoque.
+      let semBaixaDeEstoque = false;
       if (item.product_id) {
         // 02/11/2026: mesma regra de visibilidade do Estoque (bidirecional no
         // grupo, utils/companyGroup.js). Antes só matriz → filial: a matriz
@@ -479,7 +485,7 @@ async function handleSale(req, res, opts = {}) {
         // Produto compartilhado é UMA linha para o grupo: a baixa vai na
         // linha da dona (stock_company_id), nos dois sentidos.
         const { rows: p } = lido ? { rows: lido.p } : await client.query(
-          `SELECT p.name, p.cost_price, p.stock_qty, p.company_id AS stock_company_id
+          `SELECT p.name, p.cost_price, p.stock_qty, p.company_id AS stock_company_id, p.unit
            FROM products p JOIN companies c ON c.id=$2
            WHERE p.id=$1 AND ${productVisibilityWhere('$2', 'p.')}`,
           [item.product_id, req.params.id]
@@ -489,6 +495,7 @@ async function handleSale(req, res, opts = {}) {
           productName = productName || p[0].name;
           costPrice = parseFloat(p[0].cost_price || 0);
           stockCompanyId = p[0].stock_company_id;
+          semBaixaDeEstoque = ehUnidadeServico(p[0].unit);
           let stockAvailable = parseFloat(p[0].stock_qty);
           let stockLabel = p[0].name;
           if (item.variant_id) {
@@ -501,7 +508,7 @@ async function handleSale(req, res, opts = {}) {
               stockLabel = p[0].name + (v[0].sku_suffix ? ` (${v[0].sku_suffix})` : ' (variante)');
             }
           }
-          if (!sale_date && stockAvailable < qty) {
+          if (!sale_date && !semBaixaDeEstoque && stockAvailable < qty) {
             if (semEstoqueLiberado === undefined) {
               // p-143: com o pdv_settings ja lido na abertura, nao rele.
               semEstoqueLiberado = contexto
@@ -520,7 +527,7 @@ async function handleSale(req, res, opts = {}) {
         }
       }
       productNames.push(productName);
-      enrichedItems.push({ ...item, product_name_snapshot: productName, cost_price: costPrice, item_discount: itemDiscount, line_total: lineTotal, stock_company_id: stockCompanyId });
+      enrichedItems.push({ ...item, product_name_snapshot: productName, cost_price: costPrice, item_discount: itemDiscount, line_total: lineTotal, stock_company_id: stockCompanyId, sem_baixa_de_estoque: semBaixaDeEstoque });
     }
     timing.etapa('itens_validacao');
     // Cupom e desconto manual SOMAM. O PDV mostra `subtotal - manual - cupom`
@@ -725,7 +732,7 @@ async function handleSale(req, res, opts = {}) {
          item.item_discount||0, item.line_total, item.product_name_snapshot,
          ...(marca ? [marca.preco_lista, marca.em_promocao] : [])]
       );
-      if (item.product_id) {
+      if (item.product_id && !item.sem_baixa_de_estoque) {
         if (item.variant_id) {
           // A variante só baixa se o produto dela é o validado acima, na
           // empresa dona (mesma trava do produto sem variante): variante de

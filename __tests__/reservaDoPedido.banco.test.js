@@ -41,7 +41,7 @@ jest.setTimeout(60000);
 const ID = {
   dono: uuid(), outroDono: uuid(),
   matriz: uuid(), filial: uuid(), deFora: uuid(),
-  camiseta: uuid(), bone: uuid(), caneca: uuid(), liso: uuid(),
+  camiseta: uuid(), bone: uuid(), caneca: uuid(), liso: uuid(), servico: uuid(),
   varP: uuid(), varM: uuid(),
 };
 const EMPRESAS = [ID.matriz, ID.filial, ID.deFora];
@@ -114,6 +114,9 @@ beforeAll(async () => {
   await produto(ID.bone, ID.matriz, 'Bone compartilhado', 3);
   await produto(ID.caneca, ID.matriz, 'Caneca sob encomenda', 0);
   await produto(ID.liso, ID.matriz, 'Produto liso', 2);
+  // INC-2026-11-18-02: servico (unit 'srv') nasce e fica com saldo 0.
+  await produto(ID.servico, ID.matriz, 'Instalacao', 0);
+  await q(`UPDATE products SET unit = 'srv' WHERE id = $1`, [ID.servico]);
   await q(`UPDATE products SET is_group_shared = true WHERE id = $1`, [ID.bone]);
   await q(`UPDATE products SET barcode = '7890000000099' WHERE id = $1`, [ID.liso]);
   await q(`UPDATE products SET is_personalizable = true, customization_config = '{"fields":[]}'::jsonb WHERE id = $1`, [ID.caneca]);
@@ -225,6 +228,16 @@ describe('aviso ao guardar', () => {
     const r = await guardar(ID.matriz, [{ p: ID.camiseta, v: ID.varM, qtd: 3 }, { p: ID.caneca, qtd: 10 }]);
     expect(r.status).toBe(201);
     expect(r.body.avisos).toEqual([]);
+  });
+
+  test('INC-2026-11-18-02: servico com saldo zero e a chave desligada: 201 sem aviso, nunca e conferido', async () => {
+    const r = await guardar(ID.matriz, [{ p: ID.servico, qtd: 2 }]);
+    expect(r.status).toBe(201);
+    expect(r.body.avisos).toEqual([]);
+    // Produto comum sem saldo no mesmo pedido continua barrando.
+    const comProduto = await guardar(ID.matriz, [{ p: ID.servico, qtd: 1 }, { p: ID.camiseta, v: ID.varP, qtd: 1 }]);
+    expect(comProduto.status).toBe(409);
+    expect(comProduto.body.faltas.map((f) => f.product_id)).toEqual([ID.camiseta]);
   });
 
   test('com "vender sem estoque" ligado: o pedido entra com o aviso', async () => {

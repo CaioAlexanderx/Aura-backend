@@ -65,13 +65,13 @@ const app = buildApp();
 
 const LIGADA = { allow_sale_without_stock: true };
 
-function mockClient({ pdvSettings = {}, stock = '0', variantStock = '0' } = {}) {
+function mockClient({ pdvSettings = {}, stock = '0', variantStock = '0', unit = 'un', nome = 'Cimento' } = {}) {
   const query = jest.fn().mockImplementation((sql) => {
     const s = String(sql || '');
     if (/SELECT pdv_settings FROM companies/i.test(s)) return Promise.resolve({ rows: [{ pdv_settings: pdvSettings }] });
     if (/FROM caixa_sessoes/i.test(s)) return Promise.resolve({ rows: [] });
     if (/FROM products p JOIN companies c/i.test(s)) {
-      return Promise.resolve({ rows: [{ name: 'Cimento', cost_price: '30.00', stock_qty: stock, stock_company_id: cid }] });
+      return Promise.resolve({ rows: [{ name: nome, cost_price: '30.00', stock_qty: stock, stock_company_id: cid, unit }] });
     }
     if (/SELECT stock_qty, sku_suffix FROM product_variants/i.test(s)) {
       return Promise.resolve({ rows: [{ stock_qty: variantStock, sku_suffix: 'CP2' }] });
@@ -187,6 +187,75 @@ describe('Caixa (POST /pdv/sale) -- chave ligada', () => {
   });
 });
 
+// INC-2026-11-18-02: servico (products.unit = 'srv') nasce com saldo 0 e nunca
+// tem estoque. A loja sem "vender sem estoque" ligado recebia 409 ao vender
+// servico. Regra: servico nunca e barrado por saldo e nao gera baixa nem
+// stock_movements. So o TIPO conta: item que sai em NFS-e com unit de
+// mercadoria segue controlando estoque.
+describe('Caixa (POST /pdv/sale) -- servico nao tem saldo', () => {
+  test('servico com saldo zero e a chave desligada => 201, sem baixa nem movimento', async () => {
+    const client = usar(mockClient({ pdvSettings: {}, stock: '0', unit: 'srv', nome: 'Instalacao' }));
+
+    const res = await sell([{ product_id: prod, quantity: 1, unit_price: 80 }]);
+
+    expect(res.status).toBe(201);
+    expect(callsMatching(client, /INSERT INTO sales/i)).toHaveLength(1);
+    expect(callsMatching(client, /INSERT INTO sale_items/i)).toHaveLength(1);
+    expect(callsMatching(client, /UPDATE products SET stock_qty/i)).toHaveLength(0);
+    expect(callsMatching(client, /UPDATE product_variants SET stock_qty/i)).toHaveLength(0);
+    expect(callsMatching(client, /INSERT INTO stock_movements/i)).toHaveLength(0);
+    // Nem consulta a chave: o servico nao falta (mesmas leituras da venda com saldo).
+    const comSaldo = usar(mockClient({ pdvSettings: {}, stock: '50' }));
+    await sell(umItem);
+    expect(settingsReads(client)).toBe(settingsReads(comSaldo));
+  });
+
+  test('"SRV" com espaco e caixa alta tambem e servico', async () => {
+    usar(mockClient({ pdvSettings: {}, stock: '0', unit: ' SRV ' }));
+    expect((await sell(umItem)).status).toBe(201);
+  });
+
+  test('produto comum com saldo zero segue 409 (unit "un" ou sem unit)', async () => {
+    for (const unit of ['un', null, 'kg']) {
+      const client = usar(mockClient({ pdvSettings: {}, stock: '0', unit }));
+      const res = await sell(umItem);
+      expect(res.status).toBe(409);
+      expect(callsMatching(client, /INSERT INTO sales/i)).toHaveLength(0);
+    }
+  });
+
+  test('servico junto com produto: o produto baixa, o servico nao', async () => {
+    const outro = 'eeeeeeee-ffff-0000-1111-222222222222';
+    const query = jest.fn().mockImplementation((sql, params) => {
+      const s = String(sql || '');
+      if (/SELECT pdv_settings FROM companies/i.test(s)) return Promise.resolve({ rows: [{ pdv_settings: {} }] });
+      if (/FROM products p JOIN companies c/i.test(s)) {
+        const servico = params && params[0] === outro;
+        return Promise.resolve({ rows: [{ name: servico ? 'Instalacao' : 'Cimento', cost_price: '0', stock_qty: servico ? '0' : '10', stock_company_id: cid, unit: servico ? 'srv' : 'un' }] });
+      }
+      if (/INSERT INTO sales/i.test(s)) return Promise.resolve({ rows: [{ id: 'sale-1', total_amount: '117.00' }] });
+      return Promise.resolve({ rows: [] });
+    });
+    const client = usar({ query, release: jest.fn() });
+
+    const res = await sell([{ product_id: prod, quantity: 2, unit_price: 18.5 }, { product_id: outro, quantity: 1, unit_price: 80 }]);
+
+    expect(res.status).toBe(201);
+    const baixa = callsMatching(client, /UPDATE products SET stock_qty/i);
+    expect(baixa).toHaveLength(1);
+    expect(baixa[0][1]).toEqual([2, prod, cid]);
+    const mov = callsMatching(client, /INSERT INTO stock_movements/i);
+    expect(mov).toHaveLength(1);
+    expect(mov[0][1][0]).toBe(prod);
+  });
+
+  test('o corpo da venda nao liga a excecao sozinho', async () => {
+    usar(mockClient({ pdvSettings: {}, stock: '0', unit: 'un' }));
+    const res = await sell([{ product_id: prod, quantity: 1, unit_price: 10, sem_baixa_de_estoque: true }]);
+    expect(res.status).toBe(409);
+  });
+});
+
 describe('Caixa -- venda com estoque nao paga consulta a mais', () => {
   test('mesmo numero de leituras de pdv_settings com a chave ligada ou nao', async () => {
     const desligada = usar(mockClient({ pdvSettings: {}, stock: '50' }));
@@ -243,7 +312,7 @@ describe('/pdv-settings -- allow_sale_without_stock', () => {
 describe('Financeiro (POST /transactions/:tx/sale-items)', () => {
   const url = `/api/v1/companies/${cid}/transactions/${txId}/sale-items`;
 
-  function mockFinanceiro({ pdvSettings = {}, stock = '0' } = {}) {
+  function mockFinanceiro({ pdvSettings = {}, stock = '0', unit = 'un' } = {}) {
     const query = jest.fn().mockImplementation((sql) => {
       const s = String(sql || '');
       if (/SELECT pdv_settings FROM companies/i.test(s)) return Promise.resolve({ rows: [{ pdv_settings: pdvSettings }] });
@@ -251,7 +320,7 @@ describe('Financeiro (POST /transactions/:tx/sale-items)', () => {
         return Promise.resolve({ rows: [{ id: txId, amount: '100.00', idempotency_key: 'pdv-sale-' + saleId, description: 'Venda', type: 'income', status: 'confirmed' }] });
       }
       if (/FROM sales/i.test(s)) return Promise.resolve({ rows: [{ id: saleId, total_amount: '100.00', status: 'completed' }] });
-      if (/FROM products WHERE id/i.test(s)) return Promise.resolve({ rows: [{ id: prod, name: 'Cimento', price: '37.00', stock_qty: stock }] });
+      if (/FROM products WHERE id/i.test(s)) return Promise.resolve({ rows: [{ id: prod, name: 'Cimento', price: '37.00', stock_qty: stock, unit }] });
       if (/INSERT INTO sale_items/i.test(s)) {
         return Promise.resolve({ rows: [{ id: 'item-1', product_id: prod, variant_id: null, quantity: '1', unit_price: '37.00', discount: '0', total_price: '37.00', product_name_snapshot: 'Cimento' }] });
       }
@@ -277,6 +346,15 @@ describe('Financeiro (POST /transactions/:tx/sale-items)', () => {
     const baixa = callsMatching(client, /UPDATE products SET stock_qty/i);
     expect(baixa).toHaveLength(1);
     expect(baixa[0][0]).toMatch(/GREATEST\(0, COALESCE\(stock_qty, 0\) - \$1\)/);
+  });
+
+  test('INC-2026-11-18-02: servico com saldo zero e a chave desligada => 201, sem baixa', async () => {
+    const client = usar(mockFinanceiro({ pdvSettings: {}, stock: '0', unit: 'srv' }));
+    const res = await add();
+    expect(res.status).toBe(201);
+    expect(callsMatching(client, /INSERT INTO sale_items/i)).toHaveLength(1);
+    expect(callsMatching(client, /UPDATE products SET stock_qty/i)).toHaveLength(0);
+    expect(settingsReads(client)).toBe(0);
   });
 
   test('com estoque a chave nem e consultada', async () => {
