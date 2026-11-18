@@ -165,6 +165,16 @@ describe('resultadoDoPeriodo (consultas)', () => {
     expect(R.CAT_FORNECEDORES).toEqual(['fornecedores']);
     expect(R.CAT_TROCA_DEVOLUCAO).toEqual(expect.arrayContaining(['troca - devolucao', 'troca - devolução', 'devolucao', 'devolução']));
   });
+
+  test('B6: "Devolução de sinal" sai de Despesas e NAO abate o Faturamento', () => {
+    const sql = R._sql.SQL_LANCAMENTOS;
+    expect(sql).toMatch(/NOT \(cat = ANY\(\$7::text\[\]\)\)/);
+    expect(R.CAT_DEVOLUCAO_SINAL).toEqual(['devolução de sinal', 'devolucao de sinal']);
+    // Nao entra na troca-devolucao (que abate o Faturamento).
+    for (const c of R.CAT_DEVOLUCAO_SINAL) expect(R.CAT_TROCA_DEVOLUCAO).not.toContain(c);
+    // $7 so aparece no filtro de despesas.
+    expect(sql.match(/\$7/g)).toHaveLength(1);
+  });
 });
 
 describe('rotas', () => {

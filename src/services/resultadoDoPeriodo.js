@@ -24,7 +24,8 @@
 //   Despesas     lançamentos expense confirmados, menos 'Fornecedores'
 //                (compra de mercadoria vira estoque, não gasto do mês) e menos
 //                'Troca - Devolucao' e 'devolucao' (venda desfeita, já sai do
-//                faturamento).
+//                faturamento) e menos 'Devolução de sinal' (17/11/2026, B6:
+//                sinal devolvido de pedido cancelado; veja abaixo).
 //                'Taxas de cartão' e todo o resto entram.
 //   Compras      expense confirmado em 'Fornecedores': só informativo.
 //
@@ -45,6 +46,12 @@ const CAT_TROCA_VENDA = ['troca - venda'];
 // 08/11/2026: 'devolucao' (devolução manual, sem troca) conta como a
 // 'Troca - Devolucao': abate o faturamento e sai de Despesas.
 const CAT_TROCA_DEVOLUCAO = ['troca - devolucao', 'troca - devolução', 'devolucao', 'devolução'];
+// 17/11/2026 (B6, pedido separado de venda; revisão da Célia): o sinal
+// devolvido no cancelamento do pedido NÃO é despesa e NÃO abate o
+// Faturamento (o pedido nunca virou venda, então não há faturamento a
+// abater). Sai só de Despesas. O sinal ("Sinal de pedido") também não é
+// Faturamento: só a venda da conclusão é.
+const CAT_DEVOLUCAO_SINAL = ['devolução de sinal', 'devolucao de sinal'];
 
 // Abaixo disso a loja aparece como "falta custo na maior parte" no consolidado.
 const COBERTURA_BAIXA_PCT = 50;
@@ -152,7 +159,8 @@ const SQL_LANCAMENTOS = `
          COUNT(*) FILTER (WHERE type = 'expense' AND cat = ANY($6::text[]))::int            AS n_compras,
          COALESCE(SUM(amount) FILTER (WHERE type = 'expense'
                                         AND NOT (cat = ANY($5::text[]))
-                                        AND NOT (cat = ANY($6::text[]))), 0)                AS despesas
+                                        AND NOT (cat = ANY($6::text[]))
+                                        AND NOT (cat = ANY($7::text[]))), 0)                AS despesas
     FROM (
       SELECT company_id, type, amount::numeric AS amount, lower(btrim(COALESCE(category, ''))) AS cat
         FROM transactions
@@ -290,7 +298,7 @@ async function resultadoDoPeriodo({ empresas, de, ate, comProdutos = true, clien
   const base = [ids, de, ate];
   const [vendas, lancamentos, produtos] = await Promise.all([
     client.query(SQL_VENDAS, base),
-    client.query(SQL_LANCAMENTOS, base.concat([CAT_TROCA_VENDA, CAT_TROCA_DEVOLUCAO, CAT_FORNECEDORES])),
+    client.query(SQL_LANCAMENTOS, base.concat([CAT_TROCA_VENDA, CAT_TROCA_DEVOLUCAO, CAT_FORNECEDORES, CAT_DEVOLUCAO_SINAL])),
     comProdutos ? client.query(SQL_PRODUTOS_SEM_CUSTO, base.concat([LIMITE_PRODUTOS_SEM_CUSTO])) : Promise.resolve({ rows: [] }),
   ]);
   return montarResultado({
@@ -334,5 +342,6 @@ module.exports = {
   CAT_FORNECEDORES,
   CAT_TROCA_VENDA,
   CAT_TROCA_DEVOLUCAO,
+  CAT_DEVOLUCAO_SINAL,
   _sql: { SQL_VENDAS, SQL_LANCAMENTOS, SQL_PRODUTOS_SEM_CUSTO },
 };
