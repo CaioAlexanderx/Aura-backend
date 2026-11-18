@@ -39,6 +39,15 @@ function eCrediario(tx) {
   return /^credi.rio/i.test(cat) || /^(pdv-credit-|credit-payment)/i.test(key);
 }
 
+// Pedido separado de venda (B4a, 17/11/2026): a conta "Pedido a receber", o
+// "Sinal de pedido" e a "Devolucao de sinal" mudam so pelo pedido (sinal,
+// conclusao no Caixa, cancelamento). Dar baixa a mao na conta a receber
+// contaria o saldo duas vezes: uma aqui e outra na venda da conclusao.
+function eDoPedido(tx) {
+  if (!tx) return false;
+  return /^pedido-(areceber|sinal|devolucao)-/i.test(String(tx.idempotency_key || ''));
+}
+
 // Cartao que o lojista pode arrastar: lancado a mao ou importado de planilha.
 // O resto (troca, pedido da vitrine, anuidade...) nasce e muda pelo fluxo de
 // origem — aparece travado.
@@ -213,6 +222,7 @@ function sqlDaBaixaEmLote() {
 module.exports = {
   LIMITE_POR_COLUNA,
   eCrediario,
+  eDoPedido,
   podeMover,
   hojeSP,
   intervaloDoMes,

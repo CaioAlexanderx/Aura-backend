@@ -6,8 +6,10 @@
 //   - pedido nao e venda: nao baixa estoque nem mexe no caixa ate concluir,
 //     so reserva (a reserva e CALCULADA dos pedidos abertos, card B2);
 //   - a venda so nasce na conclusao (POST /pdv/sale com order_id, card B5a);
-//   - a conta a receber e o sinal sao dos cards B4a em diante. Este card nao
-//     lanca nada no Financeiro.
+//   - B4a (p-62a): guardar lanca a conta a receber pelo valor cheio
+//     ("Pedido a receber", pendente, nunca faturamento), e o sinal pode vir
+//     no mesmo POST (`sinal: {amount, method}`), na mesma transacao. As
+//     regras do dinheiro moram em services/sinalDoPedido.js.
 //
 // Onde mora: digital_orders com origem = 'balcao' (coluna da 313), mais
 // promised_date / created_by (459). Nasce 'confirmed' por INSERT direto,
@@ -57,6 +59,7 @@ const { normalizarTelefone } = require('../utils/telefone');
 const { mesmosItens, INDICE } = require('./pedidoOnlineIdempotente');
 const { lerReservas, reservadoDaVariante } = require('./reservaDoPedido');
 const { vendaSemEstoqueLiberada } = require('../utils/vendaSemEstoque');
+const sinalDoPedido = require('./sinalDoPedido');
 
 const ORIGEM_BALCAO = 'balcao';
 const MAX_ITENS = 100;
@@ -382,6 +385,16 @@ async function guardarPedido({ companyId, userId, body, chave, hoje }) {
   const lido = lerCorpo(body, { hoje });
   if (lido.erro) throw erro(lido.erro.status, lido.erro.message, lido.erro.code);
   const dados = lido.dados;
+  // B4a: o sinal no mesmo POST. Conferido antes de abrir a transacao: sinal
+  // maior que o total e 422 e nada e gravado.
+  const sinal = sinalDoPedido.lerSinal(body && body.sinal, dados.total);
+  if (sinal.erro) throw erro(sinal.erro.status, sinal.erro.message, sinal.erro.code);
+  // 18/11/2026 (revisao do Fable): com sinal, a Idempotency-Key e obrigatoria.
+  // Sem ela, o toque duplo grava dois pedidos com dois sinais (receita em
+  // dobro). Sem sinal segue opcional, como no B1.
+  if (sinal.dados && !chave) {
+    throw erro(422, 'Faltou a chave da tentativa (Idempotency-Key). Atualize o app e toque de novo em Guardar pedido.', 'PEDIDO_SINAL_SEM_CHAVE');
+  }
 
   // Repeticao que chega depois da primeira ter terminado: responde logo.
   if (chave) {
@@ -419,7 +432,7 @@ async function guardarPedido({ companyId, userId, body, chave, hoje }) {
                $2, $3, $4,
                $5, $6, 0, $7,
                $8::date, $9, $10, NOW(), $11)
-       RETURNING id`,
+       RETURNING id, order_number, total, promised_date::text AS promised_date`,
       [
         companyId, cliente.id, cliente.nome, cliente.telefone,
         dados.subtotal, dados.desconto, dados.total,
@@ -435,6 +448,14 @@ async function guardarPedido({ companyId, userId, body, chave, hoje }) {
         [orderId, it.product_id, it.variant_id, it.variant_label, it.nome, it.unit_price, it.quantity, it.subtotal]
       );
     }
+    // B4a: a conta a receber pelo valor cheio e, se veio, o sinal.
+    await sinalDoPedido.criarContaAReceber(client, { companyId, pedido: o, itens: dados.itens, userId });
+    if (sinal.dados) {
+      await sinalDoPedido.registrarSinal(client, {
+        companyId, pedido: o, itens: dados.itens,
+        valor: sinal.dados.valor, forma: sinal.dados.forma, chave: null, userId,
+      });
+    }
     await client.query('COMMIT');
   } catch (e) {
     await client.query('ROLLBACK').catch(() => {});
@@ -449,7 +470,7 @@ async function guardarPedido({ companyId, userId, body, chave, hoje }) {
     if (!repetidoDe) throw erro(409, 'Este pedido mudou enquanto era guardado. Tente de novo.', 'PEDIDO_CONFLITO');
   }
   if (repetidoDe) return responderRepeticao(companyId, repetidoDe, dados.itens);
-  const pedido = await lerPedidoCompleto(db, companyId, orderId);
+  const pedido = await sinalDoPedido.comSinal(db, await lerPedidoCompleto(db, companyId, orderId));
   return { status: 201, pedido, repetido: false, avisos };
 }
 
@@ -469,7 +490,7 @@ async function responderRepeticao(companyId, ja, itensDoCorpo) {
       'IDEMPOTENCY_KEY_REUSED',
       { order_id: ja.id });
   }
-  return { status: 200, pedido, repetido: true };
+  return { status: 200, pedido: await sinalDoPedido.comSinal(db, pedido), repetido: true };
 }
 
 module.exports = {
