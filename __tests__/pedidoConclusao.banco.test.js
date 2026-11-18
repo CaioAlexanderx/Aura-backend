@@ -280,7 +280,10 @@ describe('cenario da Celia: R$ 389,70, sinal de R$ 100 no Pix, saldo em dinheiro
     expect(estoque).toEqual([9, 8]); // Blusa 10 - 1, Vestido 10 - 2
 
     // DRE sem soma em dobro: o sinal (receita bruta) + a venda = 389,70.
-    const dre = await request(app).get(`/companies/${ID.loja}/dre`).query({ from: hoje.slice(0, 8) + '01', to: hoje });
+    // dre.js filtra paid_at::date em UTC: depois das 21h de Sao Paulo o
+    // lancamento de hoje ja e "amanha". O periodo vai um dia alem.
+    const amanha = new Date(Date.parse(hoje + 'T12:00:00Z') + 86400000).toISOString().slice(0, 10);
+    const dre = await request(app).get(`/companies/${ID.loja}/dre`).query({ from: hoje.slice(0, 8) + '01', to: amanha });
     const total = dre.body.detail.reduce((s, d) => s + (d.group === 'Receita Bruta' || d.line === 'outros' ? d.total : 0), 0);
     expect(r2(total)).toBe(389.7);
 
