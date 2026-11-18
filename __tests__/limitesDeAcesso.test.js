@@ -218,6 +218,47 @@ describe('webhook fora do limitador', () => {
   }, 60000);
 });
 
+describe('IP real na Railway (X-Real-IP), medido em producao em 17/11', () => {
+  // Em producao o X-Forwarded-For chega com o proxy interno da Railway no fim
+  // (46.151.194.129 e .130, alternando), entao o req.ip do `trust proxy 1`
+  // era o proxy, e todas as lojas dividiam 2 baldes. O IP do cliente vem em
+  // X-Real-IP, posto pela borda da Railway.
+  const PROXY = (i) => '46.151.194.' + (129 + (i % 2));
+
+  test('11 senhas erradas do mesmo cliente, chegando por proxies alternados, levam 429 na 11a', async () => {
+    const status = await repetir(11, (i) => post('/api/v1/auth/login', PROXY(i), { 'X-Real-IP': '203.0.113.70' })
+      .send({ email: 'proxy@loja.com.br', password: 'x' + i }));
+    expect(status.slice(0, 10)).toEqual(Array(10).fill(401));
+    expect(status[10]).toBe(429);
+  });
+
+  test('clientes diferentes atras do mesmo proxy da Railway nao dividem o balde', async () => {
+    await repetir(21, (i) => post('/api/v1/auth/login', PROXY(0), { 'X-Real-IP': '203.0.113.71' })
+      .send({ email: 'p' + i + '@exemplo.com.br', password: 'x' }));
+    const vizinho = await post('/api/v1/auth/login', PROXY(0), { 'X-Real-IP': '198.51.100.71' })
+      .send({ email: 'p-fim@exemplo.com.br', password: 'x' });
+    expect(vizinho.status).toBe(401);
+  });
+
+  test('atras do Cloudflare, o X-Real-IP e a borda do Cloudflare e vale o CF-Connecting-IP', () => {
+    const { ipDoCliente } = require('../src/middleware/limitesDeAcesso');
+    expect(ipDoCliente({ ip: PROXY(0), headers: { 'x-real-ip': '173.245.48.9', 'cf-connecting-ip': '203.0.113.72' } })).toBe('203.0.113.72');
+    expect(ipDoCliente({ ip: PROXY(0), headers: { 'x-real-ip': '203.0.113.73', 'cf-connecting-ip': '10.0.0.1' } })).toBe('203.0.113.73');
+  });
+
+  test('sem X-Real-IP (ou invalido), segue o req.ip de antes', () => {
+    const { ipDoCliente } = require('../src/middleware/limitesDeAcesso');
+    expect(ipDoCliente({ ip: '203.0.113.74', headers: {} })).toBe('203.0.113.74');
+    expect(ipDoCliente({ ip: '203.0.113.75', headers: { 'x-real-ip': 'lixo' } })).toBe('203.0.113.75');
+  });
+
+  test('o audit_log grava o IP do cliente, nao o do proxy', () => {
+    const { contextoDaRequisicao } = require('../src/middleware/auditLog');
+    expect(contextoDaRequisicao({ ip: PROXY(1), headers: { 'x-real-ip': '203.0.113.76', 'user-agent': 'ua' } }).ip).toBe('203.0.113.76');
+    expect(contextoDaRequisicao({ headers: {} }).ip).toBe(null);
+  });
+});
+
 describe('ipDoCliente e chaveDoCliente (unidade)', () => {
   const { ipDoCliente, chaveDoCliente, _internos } = require('../src/middleware/limitesDeAcesso');
   const req = (ip, cf) => ({ ip, headers: cf ? { 'cf-connecting-ip': cf } : {} });
