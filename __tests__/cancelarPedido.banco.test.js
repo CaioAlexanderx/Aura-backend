@@ -491,3 +491,45 @@ describe('regras do cancelamento', () => {
     expect((await cancelar(oid, {})).status).toBe(404);
   });
 });
+
+describe('revisao do Fable (18/11)', () => {
+  beforeEach(async () => {
+    usuario = { id: ID.dono, role: 'client', is_staff: true };
+    await zerar();
+  });
+
+  test.each(['dinheiro', 'pix'])('estorno de sinal pago em %s: 422 e nada muda', async (forma) => {
+    const oid = await pedido({ sinal: { amount: 50, method: forma } });
+    const r = await cancelar(oid, { refund_kind: 'devolucao', refund_method: 'estorno' });
+    expect(r.status).toBe(422);
+    expect(r.body.code).toBe('PEDIDO_ESTORNO_SEM_CARTAO');
+    const l = await lancamentosDoPedido(oid);
+    expect(l['pedido-devolucao']).toBeUndefined();
+    expect(l['pedido-areceber'].status).toBe('pending');
+    const { rows: [o] } = await q(`SELECT status::text AS status FROM digital_orders WHERE id = $1`, [oid]);
+    expect(o.status).toBe('confirmed');
+  });
+
+  test('marco pago sem forma (fora do registrarSinal) nao conta como sinal: so o sinal de verdade e devolvido', async () => {
+    const oid = await pedido({ sinal: { amount: 40, method: 'pix' } });
+    // O que um marco do Studio gravaria (sem forma, sem dinheiro no Financeiro).
+    await q(`INSERT INTO studio_payments (company_id, order_id, kind, amount, status, method, paid_at)
+             VALUES ($1, $2, 'deposit', 500, 'paid', 'pix', NOW())`, [ID.loja, oid]);
+    const r = await cancelar(oid, { refund_kind: 'devolucao', refund_method: 'pix' });
+    expect(r.status).toBe(200);
+    expect(r.body.cancelamento.valor).toBe(40);
+    expect((await lancamentosDoPedido(oid))['pedido-devolucao'].amount).toBe(40);
+  });
+
+  test('pedido so com marco sem forma: cancela como pedido sem sinal, sem devolucao nem credito', async () => {
+    const oid = await pedido({ cliente: true });
+    await q(`INSERT INTO studio_payments (company_id, order_id, kind, amount, status, method, paid_at)
+             VALUES ($1, $2, 'deposit', 80, 'paid', 'cash', NOW())`, [ID.loja, oid]);
+    const r = await cancelar(oid, {});
+    expect(r.status).toBe(200);
+    expect(r.body.cancelamento).toMatchObject({ refund_kind: null, valor: 0 });
+    expect((await lancamentosDoPedido(oid))['pedido-devolucao']).toBeUndefined();
+    const { rows } = await q(`SELECT COUNT(*)::int AS n FROM customer_credit_transactions WHERE company_id = $1`, [ID.loja]);
+    expect(rows[0].n).toBe(0);
+  });
+});

@@ -22,6 +22,13 @@
 //  4. Idempotencia curta: um envio nos ultimos 60s e reaproveitado
 //     (StrictMode/duplo-mount da tela de espera e o envio disparado
 //     pelo proprio /register nao geram e-mails duplicados).
+//
+// 18/11/2026 (e-mail que volta, services/emailDevolvido.js):
+//  - endereco com devolucao PERMANENTE nao recebe o e-mail de confirmacao:
+//    o envio volta {sent:false, reason:'email_devolvido', email_devolvido}
+//    e a tela mostra o aviso com "Corrigir meu e-mail" e o WhatsApp;
+//  - a linha da email_log passa a levar user_id e company_id (a empresa de
+//    que a pessoa e dona). Nada retroativo.
 // ============================================================
 const router = require('express').Router();
 const crypto = require('crypto');
@@ -34,6 +41,7 @@ const limpezaPendentes = require('../services/limpezaPendentes');
 const { contextoDaRequisicao } = require('../middleware/auditLog');
 const { porUsuario: limitePorUsuario } = require('../middleware/limiteCorrigirEmail');
 const equipeAura = require('../utils/equipeAura');
+const emailDevolvido = require('../services/emailDevolvido');
 
 const env = validateRuntimeEnv();
 const API_URL = env.API_URL;
@@ -111,7 +119,15 @@ async function issueVerification(userId, email, fullName) {
 
     const confirmUrl = `${API_URL}/auth/confirm-email/${token}`;
     try {
-      await withTimeout(sendVerificationLinkEmail(email, confirmUrl, fullName, otpInEmail), 8000);
+      const companyId = await empresaDoDono(userId);
+      const r = await withTimeout(sendVerificationLinkEmail(email, confirmUrl, fullName, otpInEmail, { userId, companyId }), 8000);
+      if (r && r.suprimido) {
+        // Devolucao permanente: nada saiu. Apaga os registros como na falha.
+        console.log(`[verify] Email suprimido (devolucao permanente) for user ${userId}`);
+        await db.query('DELETE FROM verification_codes WHERE id = ANY($1::uuid[])', [insertedIds])
+          .catch((delErr) => console.warn('[verify] cleanup failed:', delErr.message));
+        return { sent: false, reason: 'email_devolvido' };
+      }
       console.log(`[verify] Email sent to ${email}`);
       return { sent: true };
     } catch (err) {
@@ -130,6 +146,25 @@ async function issueVerification(userId, email, fullName) {
     console.error('[issueVerification] error:', err.message);
     return { sent: false, reason: 'internal' };
   }
+}
+
+// Empresa de que a pessoa e dona (a mais antiga), so para a email_log.
+// Nunca lanca: sem empresa (membro, consulta falhou) fica null.
+async function empresaDoDono(userId) {
+  try {
+    const r = await db.query(
+      'SELECT id FROM companies WHERE owner_id = $1 ORDER BY created_at ASC LIMIT 1', [userId]
+    );
+    return (r && r.rows && r.rows[0] && r.rows[0].id) || null;
+  } catch (_) {
+    return null;
+  }
+}
+
+// Sinal da devolucao para a tela de confirmacao (null sem devolucao).
+async function sinalDaDevolucao(reason, email) {
+  if (reason !== 'email_devolvido') return null;
+  return (await emailDevolvido.devolucaoDaVerificacao(db, email)) || { tipo: 'permanente', em: null };
 }
 
 // tq-80 (24/10/2026): boas-vindas (4.1) só quando o e-mail acabou de ser
@@ -193,7 +228,11 @@ router.post('/send-verification', requireAuth, async (req, res) => {
 
     if (!result.sent) {
       // Verdade de estado: o frontend mostra o erro e oferece "tentar de novo".
-      return res.json({ sent: false, reason: result.reason || 'send_failed', destination });
+      const devolvido = await sinalDaDevolucao(result.reason, user.email);
+      return res.json({
+        sent: false, reason: result.reason || 'send_failed', destination,
+        ...(devolvido ? { email_devolvido: devolvido } : {}),
+      });
     }
 
     res.json({
@@ -426,6 +465,7 @@ router.post('/corrigir-email', requireAuth, limitePorUsuario, async (req, res) =
 
   console.log(`[corrigir-email] user ${userId}: e-mail trocado antes da confirmacao`);
   const envio = await issueVerification(userId, novo, usuario.full_name);
+  const devolvido = envio.sent ? null : await sinalDaDevolucao(envio.reason, novo);
   res.json({
     ok: true,
     user: {
@@ -441,6 +481,7 @@ router.post('/corrigir-email', requireAuth, limitePorUsuario, async (req, res) =
     expires_in: envio.sent ? VERIFY_TTL_MIN * 60 : undefined,
     retry_after: DEDUPE_SECONDS,
     otp_available: otpSupported,
+    ...(devolvido ? { email_devolvido: devolvido } : {}),
   });
 });
 

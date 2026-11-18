@@ -13,7 +13,10 @@ const db = require('../config/database');
  * o INSERT inteiro e a linha de auditoria se perderia.
  */
 function contextoDaRequisicao(req) {
-  let ip = req && req.ip ? String(req.ip).trim() : '';
+  // 17/11/2026: o mesmo IP real dos limites de acesso (X-Real-IP da borda da
+  // Railway e CF-Connecting-IP atras do Cloudflare); o req.ip era o proxy
+  // interno da Railway em todas as linhas.
+  let ip = req ? String(require('./limitesDeAcesso').ipDoCliente(req) || '').trim() : '';
   if (ip.startsWith('::ffff:') && net.isIPv4(ip.slice(7))) ip = ip.slice(7);
   const ua = req && req.headers && req.headers['user-agent'];
   return {

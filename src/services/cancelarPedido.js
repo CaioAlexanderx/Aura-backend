@@ -30,6 +30,7 @@
 //                 CAIXA_REQUIRED, igual a venda) e grava a saida
 //                 'devolucao_sinal' na sessao (migration 461). O fechamento
 //                 passa a le-la no card B4b. Pix e estorno so registram.
+//                 Estorno so para sinal pago no cartao (422 sem cartao).
 //   - sem e-mail e sem sino (o pedido do balcao nao avisa a cliente pelo
 //     Canal).
 //
@@ -135,16 +136,24 @@ async function cancelarPedido(db, { companyId, orderId, body, userId }) {
         { status_atual: pedido.status });
     }
 
+    // 18/11/2026 (revisao do Fable): so o sinal que o pedido gravou
+    // (registrarSinal, sempre com forma). Um marco sem forma nao tem dinheiro
+    // no Financeiro e nao se devolve nem vira credito.
     const { rows: [s] } = await client.query(
       `SELECT COALESCE(SUM(amount), 0) AS v,
-              BOOL_OR(COALESCE(forma IN ('cartao', 'debito'), method = 'card')) AS no_cartao
+              BOOL_OR(forma IN ('cartao', 'debito')) AS no_cartao
          FROM studio_payments
-        WHERE order_id = $1 AND kind = 'deposit' AND status = 'paid'`, [orderId]);
+        WHERE order_id = $1 AND kind = 'deposit' AND status = 'paid' AND forma IS NOT NULL`, [orderId]);
     const sinal = round2(Number(s && s.v) || 0);
     const sinalNoCartao = !!(s && s.no_cartao);
     const lido = lerDestino(body, sinal > 0);
     if (lido.erro) throw erro(lido.erro.status, lido.erro.message, lido.erro.code);
     const { kind, method } = lido.dados;
+    // 18/11/2026 (revisao do Fable): estorno so existe para sinal no cartao.
+    // Sinal em dinheiro ou Pix "estornado" sairia sem baixa da gaveta.
+    if (kind === 'devolucao' && method === 'estorno' && !sinalNoCartao) {
+      throw erro(422, 'Estorno só vale para sinal pago no cartão. Devolva em dinheiro ou Pix.', 'PEDIDO_ESTORNO_SEM_CARTAO');
+    }
 
     const cancelamento = { refund_kind: null, refund_method: null, valor: sinal, credito_id: null, movimento_caixa: false, taxa_estornada: 0 };
 
@@ -193,7 +202,7 @@ async function cancelarPedido(db, { companyId, orderId, body, userId }) {
         cancelamento.movimento_caixa = true;
       }
       // Estorno de sinal pago no cartao: a taxa da maquininha sai junto.
-      if (method === 'estorno' && sinalNoCartao) {
+      if (method === 'estorno') {
         const { rows: taxa } = await client.query(
           `DELETE FROM transactions WHERE idempotency_key = $1 AND company_id = $2 RETURNING amount`,
           [sinalDoPedido.CHAVE_TAXA_SINAL(orderId), companyId]

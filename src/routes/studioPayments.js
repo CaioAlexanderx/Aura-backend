@@ -10,6 +10,19 @@ const router  = express.Router({ mergeParams: true }); // company_id = req.param
 const db      = require('../config/database');
 const lojaEvents = require('../services/lojaEvents');
 
+// 18/11/2026 (B4a, revisao do Fable): o pedido guardado no Caixa (origem
+// 'balcao') tem o sinal pela rota propria (POST /pedidos/:oid/sinal), que
+// lanca o dinheiro, baixa a conta a receber e grava a forma. Um marco criado
+// ou marcado como pago por aqui seria um "sinal" sem dinheiro no Financeiro.
+const PEDIDO_DO_BALCAO = {
+  error: 'Este pedido foi guardado no Caixa. O sinal dele se registra pelo pedido, no Caixa.',
+  code: 'PEDIDO_DO_BALCAO',
+};
+async function eDoBalcao(orderId) {
+  const { rows } = await db.query(`SELECT origem FROM digital_orders WHERE id = $1`, [orderId]);
+  return !!(rows[0] && rows[0].origem === 'balcao');
+}
+
 // ── GET /studio/orders/:oid/payments ─────────────────────────────────────────
 router.get('/orders/:oid/payments', async (req, res) => {
   const { id: company_id, oid } = req.params;
@@ -42,6 +55,7 @@ router.post('/orders/:oid/payments', async (req, res) => {
   }
 
   try {
+    if (await eDoBalcao(oid)) return res.status(409).json(PEDIDO_DO_BALCAO);
     const { rows } = await db.query(
       `INSERT INTO studio_payments
          (company_id, order_id, kind, amount, status, method, due_at, created_at, updated_at)
@@ -71,6 +85,7 @@ router.post('/payments/:pid/mark-paid', async (req, res) => {
       return res.status(404).json({ error: 'Pagamento não encontrado' });
     }
     const payment = found[0];
+    if (await eDoBalcao(payment.order_id)) return res.status(409).json(PEDIDO_DO_BALCAO);
 
     // Atualiza o pagamento para paid
     const { rows: updated } = await db.query(
