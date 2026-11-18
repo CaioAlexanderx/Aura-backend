@@ -375,7 +375,7 @@ async function avisosDeCancelamento({ db, asaas, enviar, env = process.env, now 
         (!l.assinatura_atual && l.encerramento_pedido_por === 'cliente_no_app');
       if (!atual) { await decidir(db, sub, 'nao_era_a_atual'); conta('nao_era_a_atual'); continue; }
 
-      const destino = await destinatarioDaEmpresa(db, l.company_id);
+      const destino = await destinatarioDaEmpresa(db, l.company_id, { tipo: 'cobranca_assinatura_cancelada' });
       if (!destino || !destino.email) { await decidir(db, sub, 'fora'); conta('fora'); continue; }
 
       const naAsaas = await situacaoNaAsaas(asaas, { subId: sub, customerId: l.asaas_customer_id });

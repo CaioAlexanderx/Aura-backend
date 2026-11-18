@@ -8,7 +8,7 @@
 
 const norm = (s) => String(s).replace(/\s+/g, ' ').trim();
 
-function criarBanco({ empresas = [], usuarios = [], cobrancas = [], lembretesAntigos = [] } = {}) {
+function criarBanco({ empresas = [], usuarios = [], cobrancas = [], lembretesAntigos = [], notificationPrefs = [] } = {}) {
   const b = {
     empresas: empresas.map((e) => ({ is_active: true, is_sandbox: false, vertical: null, vertical_active: null, billing_status: 'active', ...e })),
     usuarios: usuarios.map((u) => ({ is_staff: false, ...u })),
@@ -16,6 +16,8 @@ function criarBanco({ empresas = [], usuarios = [], cobrancas = [], lembretesAnt
     emailLog: [],
     auditoria: [],
     lembretesAntigos,
+    // company_notification_prefs: { company_id, event_type, enabled }
+    notificationPrefs,
     consultas: [],
   };
 
@@ -139,6 +141,11 @@ function criarBanco({ empresas = [], usuarios = [], cobrancas = [], lembretesAnt
           return t <= agora - 24 * 3600000 && t >= agora - 72 * 3600000;
         })
         .map(comIso) };
+    }
+    // ── exceção do Karatê (company_notification_prefs) ──
+    if (s.startsWith('SELECT 1 FROM company_notification_prefs')) {
+      const ok = b.notificationPrefs.some((x) => x.company_id === p[0] && x.event_type === p[1] && x.enabled === true);
+      return { rows: ok ? [{ '?column?': 1 }] : [] };
     }
     if (s.startsWith('SELECT 1 FROM invoice_reminders')) {
       return { rows: b.lembretesAntigos.includes(p[0]) ? [{ '?column?': 1 }] : [] };

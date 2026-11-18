@@ -189,3 +189,38 @@ test('descadastro no banco: desliga weekly_report_enabled e grava audit_log', as
   expect(a).toHaveLength(1);
   expect(a[0].metadata).toMatchObject({ tipo: 'relatorio', origem: 'one_click' });
 });
+
+test('exceção do Karatê no banco: só com a linha cobranca_karate ligada, e só os três tipos', async () => {
+  const d = conn();
+  const fed = uuid();
+  const donoFed = uuid();
+  await client.query(
+    `INSERT INTO users (id, email, password_hash, full_name, email_verified) VALUES ($1, $2, 'x', 'Ana Fixture', true)`,
+    [donoFed, `ana-${donoFed}@example.test`]
+  );
+  await client.query(
+    `INSERT INTO companies (id, owner_id, legal_name, vertical) VALUES ($1, $2, 'Federação Fixture', 'karate_federation')`,
+    [fed, donoFed]
+  );
+  expect(await C.destinatarioDaEmpresa(d, fed, { tipo: 'cobranca_vence_hoje' })).toBeNull();
+
+  // O SQL que a equipe roda para ligar a exceção (descrito no PR).
+  await client.query(
+    `INSERT INTO company_notification_prefs (company_id, event_type, enabled, updated_at)
+     VALUES ($1, 'cobranca_karate', true, NOW())
+     ON CONFLICT (company_id, event_type) DO UPDATE SET enabled = true, updated_at = NOW()`,
+    [fed]
+  );
+  for (const tipo of C.TIPOS_DO_KARATE) {
+    expect(await C.destinatarioDaEmpresa(d, fed, { tipo })).toMatchObject({ companyId: fed, email: `ana-${donoFed}@example.test` });
+  }
+  for (const tipo of ['cobranca_atraso_1', 'cobranca_atraso_7', 'cobranca_caixa_pausado', 'cobranca_estorno', 'cobranca_cartao_recusado']) {
+    expect(await C.destinatarioDaEmpresa(d, fed, { tipo })).toBeNull();
+  }
+
+  await client.query(
+    `UPDATE company_notification_prefs SET enabled = false WHERE company_id = $1 AND event_type = 'cobranca_karate'`,
+    [fed]
+  );
+  expect(await C.destinatarioDaEmpresa(d, fed, { tipo: 'cobranca_pagamento_confirmado' })).toBeNull();
+});

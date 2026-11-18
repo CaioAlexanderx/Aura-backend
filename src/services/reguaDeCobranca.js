@@ -27,7 +27,8 @@
 //     ar = não envia nesta volta;
 //   - atraso só para empresa ainda 'overdue' e só pela cobrança vencida mais
 //     antiga (é dela que contam as pausas, a mesma data do /auth/me);
-//   - fora: conta interna, sandbox, inativa, Karatê/dojô (destinatarioDaEmpresa);
+//   - fora: conta interna, sandbox, inativa, Karatê/dojô (destinatarioDaEmpresa;
+//     o Karatê com a exceção ligada recebe só os dois lembretes daqui);
 //   - multi-CNPJ: a cobrança é da empresa que a tem na Asaas (matriz); as
 //     filiais herdam o status e não recebem cópia.
 //
@@ -183,7 +184,7 @@ async function processarLembretes({ db, asaas, enviar, hoje, summary }) {
       const etapa = etapaDoLembrete(C.diasEntre(linha.due_iso, hoje));
       if (!etapa) continue;
       if (await temLembreteAntigoComEmail(db, linha.asaas_payment_id)) { summary.ignorados++; continue; }
-      const destino = await C.destinatarioDaEmpresa(db, linha.company_id);
+      const destino = await C.destinatarioDaEmpresa(db, linha.company_id, { tipo: etapa.tipo });
       if (!destino || !destino.email) { summary.ignorados++; continue; }
       const chave = `${etapa.chave}:${linha.asaas_payment_id}`;
       const p = await lerOuAdiar({ db, asaas, linha, chave, tipo: etapa.tipo, destino, summary });
@@ -247,7 +248,7 @@ async function processarAtrasos({ db, asaas, enviar, notifications, alertaCompan
       const dias = C.diasEntre(hoje, linha.due_iso);
       const etapa = etapaDoAtraso(dias);
       if (!etapa) continue;
-      const destino = await C.destinatarioDaEmpresa(db, linha.company_id);
+      const destino = await C.destinatarioDaEmpresa(db, linha.company_id, { tipo: etapa.tipo });
       if (!destino) { summary.ignorados++; continue; }
       const chave = `${etapa.chave}:${linha.asaas_payment_id}`;
       const p = await lerOuAdiar({ db, asaas, linha, chave, tipo: etapa.tipo, destino, summary });
@@ -341,7 +342,7 @@ async function processarRetentativas({ db, asaas, enviar, hoje, now, summary }) 
       if (aprovada) { await marcar('aprovada'); continue; }
       await marcar('recusada');
 
-      const destino = await C.destinatarioDaEmpresa(db, linha.company_id);
+      const destino = await C.destinatarioDaEmpresa(db, linha.company_id, { tipo: 'cobranca_cartao_recusado_2' });
       if (!destino || !destino.email) continue;
       const venc = String(p.dueDate || linha.due_iso).slice(0, 10);
       const pix = await C.pixDaCobranca(asaas, linha.asaas_payment_id);
