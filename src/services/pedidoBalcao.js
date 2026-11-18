@@ -389,6 +389,12 @@ async function guardarPedido({ companyId, userId, body, chave, hoje }) {
   // maior que o total e 422 e nada e gravado.
   const sinal = sinalDoPedido.lerSinal(body && body.sinal, dados.total);
   if (sinal.erro) throw erro(sinal.erro.status, sinal.erro.message, sinal.erro.code);
+  // 18/11/2026 (revisao do Fable): com sinal, a Idempotency-Key e obrigatoria.
+  // Sem ela, o toque duplo grava dois pedidos com dois sinais (receita em
+  // dobro). Sem sinal segue opcional, como no B1.
+  if (sinal.dados && !chave) {
+    throw erro(422, 'Faltou a chave da tentativa (Idempotency-Key). Atualize o app e toque de novo em Guardar pedido.', 'PEDIDO_SINAL_SEM_CHAVE');
+  }
 
   // Repeticao que chega depois da primeira ter terminado: responde logo.
   if (chave) {

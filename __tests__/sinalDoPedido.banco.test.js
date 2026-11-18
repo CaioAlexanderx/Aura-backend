@@ -108,6 +108,7 @@ beforeAll(async () => {
   app.use('/companies/:id/transactions', require('../src/routes/transactions'));
   app.use('/companies/:id/dre', require('../src/routes/dre'));
   app.use('/companies/:id/dashboard', require('../src/routes/dashboard'));
+  app.use('/companies/:id/studio', require('../src/routes/studioPayments'));
 });
 
 beforeEach(() => {
@@ -499,5 +500,86 @@ describe('Financeiro: a conta do pedido nao se baixa a mao', () => {
     expect((await patch(conta.id, { description: 'Pedido da vitrine', amount: 289.7 })).status).toBe(200);
     expect((await lancamentosDoPedido(r.body.order.id))['pedido-areceber']).toMatchObject({ status: 'pending', amount: 289.7 });
     expect(l['pedido-areceber'].status).toBe('pending');
+  });
+});
+
+describe('revisao do Fable (18/11)', () => {
+  beforeAll(async () => { await zerarFinanceiro(); });
+  const patch = (id, body) => request(app).patch(`/companies/${ID.loja}/transactions/${id}`).send(body);
+  const apagar = (id) => request(app).delete(`/companies/${ID.loja}/transactions/${id}`);
+  async function idDe(chaveTx) {
+    const { rows: [t] } = await q(`SELECT id FROM transactions WHERE idempotency_key = $1`, [chaveTx]);
+    return t.id;
+  }
+
+  test('DELETE do "Sinal de pedido" e do "Pedido a receber": 409, nada apagado; lancamento comum apaga', async () => {
+    const r = await guardar({ items: ITENS_CELIA, sinal: { amount: 100, method: 'pix' } });
+    const oid = r.body.order.id;
+    for (const k of [`pedido-sinal-${oid}`, `pedido-areceber-${oid}`]) {
+      const x = await apagar(await idDe(k));
+      expect(x.status).toBe(409);
+      expect(x.body.code).toBe('PEDIDO_LANCAMENTO_DERIVADO');
+    }
+    expect(Object.keys(await lancamentosDoPedido(oid))).toEqual(['pedido-areceber', 'pedido-sinal']);
+    const { rows: [comum] } = await q(
+      `INSERT INTO transactions (company_id, type, status, amount, description, category, due_date)
+       VALUES ($1, 'expense', 'pending', 10, 'Comum', 'Outros', $2::date) RETURNING id`, [ID.loja, hoje]);
+    expect((await apagar(comum.id)).status).toBe(200);
+  });
+
+  test('PATCH de data da baixa, tipo ou categoria no lancamento do pedido: 409; o mesmo valor passa', async () => {
+    const r = await guardar({ items: ITENS_CELIA, sinal: { amount: 100, method: 'pix' } });
+    const oid = r.body.order.id;
+    const sinalId = await idDe(`pedido-sinal-${oid}`);
+    const contaId = await idDe(`pedido-areceber-${oid}`);
+    for (const [id, body] of [
+      [sinalId, { paid_at: '2026-01-05' }],
+      [sinalId, { type: 'expense' }],
+      [sinalId, { category: 'Outros' }],
+      [contaId, { category: 'Vendas' }],
+      [contaId, { type: 'expense' }],
+    ]) {
+      const x = await patch(id, body);
+      expect(x.status).toBe(409);
+      expect(x.body.code).toBe('PEDIDO_LANCAMENTO_DERIVADO');
+    }
+    // O modal manda tudo em todo Salvar: igual ao atual passa e so a descricao muda.
+    const ok = await patch(sinalId, { type: 'income', category: 'Sinal de pedido', amount: 100, description: 'Sinal da Maria' });
+    expect(ok.status).toBe(200);
+    expect((await lancamentosDoPedido(oid))['pedido-sinal']).toMatchObject({ category: 'Sinal de pedido', amount: 100, status: 'confirmed' });
+  });
+
+  test('POST /pedidos com sinal e sem Idempotency-Key: 422 e nada gravado; sem sinal, a chave segue opcional', async () => {
+    const antes = (await q(`SELECT COUNT(*)::int AS n FROM digital_orders WHERE company_id = $1`, [ID.loja])).rows[0].n;
+    const semChave = await request(app).post(`/companies/${ID.loja}/pedidos`).send({ items: ITENS_CELIA, sinal: { amount: 100, method: 'pix' } });
+    expect(semChave.status).toBe(422);
+    expect(semChave.body.code).toBe('PEDIDO_SINAL_SEM_CHAVE');
+    expect((await q(`SELECT COUNT(*)::int AS n FROM digital_orders WHERE company_id = $1`, [ID.loja])).rows[0].n).toBe(antes);
+    const semSinal = await request(app).post(`/companies/${ID.loja}/pedidos`).send({ items: ITENS_CELIA });
+    expect(semSinal.status).toBe(201);
+  });
+
+  test('Studio: criar ou marcar como pago um marco de pedido do balcao da 409; pedido do Studio segue', async () => {
+    const r = await guardar({ items: ITENS_CELIA });
+    const oid = r.body.order.id;
+    const criar = await request(app).post(`/companies/${ID.loja}/studio/orders/${oid}/payments`).send({ kind: 'deposit', amount: 50 });
+    expect(criar.status).toBe(409);
+    expect(criar.body.code).toBe('PEDIDO_DO_BALCAO');
+    const { rows: [marco] } = await q(
+      `INSERT INTO studio_payments (company_id, order_id, kind, amount, status) VALUES ($1, $2, 'deposit', 50, 'pending') RETURNING id`, [ID.loja, oid]);
+    const pagar = await request(app).post(`/companies/${ID.loja}/studio/payments/${marco.id}/mark-paid`).send({ method: 'pix' });
+    expect(pagar.status).toBe(409);
+    const { rows: [m] } = await q(`SELECT status FROM studio_payments WHERE id = $1`, [marco.id]);
+    expect(m.status).toBe('pending');
+    const { rows: [o] } = await q(`SELECT deposit_paid FROM digital_orders WHERE id = $1`, [oid]);
+    expect(o.deposit_paid).toBe(false);
+
+    const studio = uuid();
+    await q(`INSERT INTO digital_orders (id, company_id, order_number, customer_name, customer_phone, subtotal, total, status, vertical)
+             VALUES ($1, $2, 'ST-9001', 'Cliente Studio', '', 100, 100, 'confirmed', 'studio')`, [studio, ID.loja]);
+    const c2 = await request(app).post(`/companies/${ID.loja}/studio/orders/${studio}/payments`).send({ kind: 'deposit', amount: 50 });
+    expect(c2.status).toBe(201);
+    const p2 = await request(app).post(`/companies/${ID.loja}/studio/payments/${c2.body.id}/mark-paid`).send({ method: 'pix' });
+    expect(p2.status).toBe(200);
   });
 });
