@@ -1122,8 +1122,20 @@ router.post('/me', requireAuth, async (req, res) => {
       whatsappHandshake = handshakeP ? await handshakeP : null;
     }
 
+    // 18/11/2026 (e-mail que volta): so para quem ainda nao confirmou, por
+    // ultimo (nao muda a ordem das consultas acima). O ultimo e-mail de
+    // confirmacao voltou? user.email_devolvido = { tipo: 'permanente'|
+    // 'temporaria', em }; sem devolucao, o campo nao vem.
+    // Nunca derruba o /me (services/emailDevolvido).
+    const emailDevolvido = u.email_verified === true
+      ? null
+      : await require('../services/emailDevolvido').devolucaoDaVerificacao(db, u.email);
+
     res.json({
-      user: { id: u.id, name: u.name, email: u.email, role: u.role, is_staff: u.is_staff || false, totp_enabled: u.totp_enabled || false, email_verified: u.email_verified || false },
+      user: {
+        id: u.id, name: u.name, email: u.email, role: u.role, is_staff: u.is_staff || false, totp_enabled: u.totp_enabled || false, email_verified: u.email_verified || false,
+        ...(emailDevolvido ? { email_devolvido: emailDevolvido } : {}),
+      },
       company: companyOut,
       consolidated_view: jwtConsolidated,
       company_count: companyCount,

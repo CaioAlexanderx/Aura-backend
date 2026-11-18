@@ -402,7 +402,13 @@ router.patch('/:txId', async function(req, res) {
     paidAmount = Math.round(paidAmount * 100) / 100;
     delete req.body.amount;
   }
-  if (req.body.amount !== undefined || req.body.status !== undefined || paidAmount !== null) {
+  // 18/11/2026 (B4a, revisao do Fable): o lancamento do pedido tambem nao muda
+  // de data da baixa, de tipo nem de categoria. Estes campos entram na leitura
+  // do lancamento atual (uma consulta a mais so quando vem um deles sozinho;
+  // o SELECT e o mesmo de antes).
+  var mexeNoPedido = req.body.paid_at !== undefined || req.body.type !== undefined ||
+    req.body.category !== undefined || req.body.category_id !== undefined;
+  if (req.body.amount !== undefined || req.body.status !== undefined || paidAmount !== null || mexeNoPedido) {
     try {
       var curRes = await db.query('SELECT amount, idempotency_key, category, status FROM transactions WHERE id = $1 AND company_id = $2', [txId, cid]);
       var cur = curRes.rows[0];
@@ -419,12 +425,20 @@ router.patch('/:txId', async function(req, res) {
         });
       }
       // 17/11/2026 (B4a): o lancamento do pedido separado de venda so muda
-      // pelo pedido. Valor igual ao atual passa (o modal manda amount em todo
-      // Salvar); baixa, desfazer e valor diferente sao recusados.
+      // pelo pedido. O que vier igual ao atual passa (o modal manda amount,
+      // tipo e categoria em todo Salvar); baixa, desfazer, valor, data da
+      // baixa, tipo ou categoria diferentes sao recusados. Descricao, notas e
+      // vencimento seguem editaveis.
       if (cur && quadro.eDoPedido(cur)) {
         var mudaStatus = req.body.status !== undefined && req.body.status !== cur.status;
         var mudaValor = req.body.amount !== undefined && Math.abs(parseFloat(req.body.amount) - parseFloat(cur.amount)) > 0.005;
-        if (mudaStatus || mudaValor || paidAmount !== null) {
+        // O tipo sai da chave: devolucao e taxa sao despesa; o resto, receita.
+        var tipoDoPedido = /^pedido-(devolucao|sinal-taxa)-/i.test(String(cur.idempotency_key)) ? 'expense' : 'income';
+        var mudaTipo = req.body.type !== undefined && String(req.body.type) !== tipoDoPedido;
+        var mudaCategoria = (req.body.category !== undefined && String(req.body.category || '').trim() !== String(cur.category || '').trim()) ||
+          (req.body.category_id !== undefined && req.body.category_id !== null && req.body.category_id !== '');
+        var mudaBaixa = req.body.paid_at !== undefined && req.body.paid_at !== null;
+        if (mudaStatus || mudaValor || paidAmount !== null || mudaTipo || mudaCategoria || mudaBaixa) {
           return res.status(409).json({
             error: 'Este lançamento é de um pedido guardado no Caixa e muda pelo próprio pedido: o sinal, a conclusão no Caixa ou o cancelamento.',
             code: 'PEDIDO_LANCAMENTO_DERIVADO',
@@ -567,6 +581,16 @@ router.patch('/:txId', async function(req, res) {
 router.delete('/:txId', async function(req, res) {
   var cid = req.params.id; var txId = req.params.txId;
   try {
+    // 18/11/2026 (B4a, revisao do Fable): o lancamento do pedido separado de
+    // venda nao se apaga a mao. Apagar a conta a receber ou o sinal faria o
+    // Painel e a conclusao no Caixa contarem errado.
+    var alvo = await db.query('SELECT idempotency_key FROM transactions WHERE id = $1 AND company_id = $2', [txId, cid]);
+    if (alvo.rows && alvo.rows[0] && quadro.eDoPedido(alvo.rows[0])) {
+      return res.status(409).json({
+        error: 'Este lançamento é de um pedido guardado no Caixa e muda pelo próprio pedido: o sinal, a conclusão no Caixa ou o cancelamento.',
+        code: 'PEDIDO_LANCAMENTO_DERIVADO',
+      });
+    }
     await db.query('UPDATE bank_statement_entries SET matched_transaction_id = NULL WHERE matched_transaction_id = $1', [txId]).catch(function() {});
     await db.query('UPDATE nfce_emissions SET transaction_id = NULL WHERE transaction_id = $1', [txId]).catch(function() {});
     var result = await db.query('DELETE FROM transactions WHERE id = $1 AND company_id = $2 RETURNING id, recurrence_group_id', [txId, cid]);

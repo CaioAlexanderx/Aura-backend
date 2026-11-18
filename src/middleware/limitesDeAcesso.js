@@ -69,7 +69,15 @@ function ehCloudflare(ip) {
 
 /** O IP de quem esta do outro lado (ver cabecalho do arquivo). */
 function ipDoCliente(req) {
-  const ip = normalizarIp(req.ip);
+  // 17/11/2026: medido em producao, o req.ip do `trust proxy 1` e o proxy
+  // interno da Railway (46.151.194.129 e .130, alternando), nao o cliente:
+  // todas as lojas caiam nos mesmos 2 baldes. A borda da Railway poe o IP de
+  // quem conectou nela em X-Real-IP (docs.railway.com, networking > specs and
+  // limits). Com ele valido, ele e a base; sem ele (teste, rede interna), o
+  // req.ip de antes. Atras do Cloudflare o X-Real-IP e a borda do Cloudflare,
+  // e a regra do CF-Connecting-IP abaixo segue valendo.
+  const daRailway = normalizarIp(req.headers && req.headers['x-real-ip']);
+  const ip = daRailway || normalizarIp(req.ip);
   if (ip && ehCloudflare(ip)) {
     const doCloudflare = normalizarIp(req.headers && req.headers['cf-connecting-ip']);
     if (doCloudflare) return doCloudflare;
