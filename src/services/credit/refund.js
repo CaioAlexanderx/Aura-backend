@@ -192,6 +192,7 @@ async function refundCreditSale(client, { companyId, saleId, items, reason = nul
       product_name_snapshot: orig.product_name_snapshot,
     });
   }
+  let pagoForaDoCrediario = 0;
   // 4.1. Teto (17/11/2026, aprovado pelo Caio): a devolucao nunca credita
   //      mais que o debito da venda na ficha, descontado o que outras
   //      devolucoes da mesma venda ja creditaram. O debito do credito da
@@ -204,8 +205,18 @@ async function refundCreditSale(client, { companyId, saleId, items, reason = nul
         WHERE sale_id = $1 AND company_id = $2`,
       [saleId, saleCompanyId]
     );
-    const teto = round2(Math.max(0, (parseFloat(lim?.debito) || 0) - (parseFloat(lim?.devolvido) || 0)));
-    if (refundValue > teto + 0.005) refundValue = teto;
+    const debito = parseFloat(lim?.debito) || 0;
+    const teto = round2(Math.max(0, debito - (parseFloat(lim?.devolvido) || 0)));
+    if (refundValue > teto + 0.005) {
+      // 18/11 (conferencia da Celia): o que fica de fora do teto e o que foi
+      // pago fora do crediario (dinheiro, Pix, cartao na venda). A devolucao
+      // nao devolve esse valor nem vira credito: so avisa, na resposta, para
+      // a lojista devolver pela Troca. Teto por outra devolucao anterior nao
+      // conta (so a parte da venda que nao foi para o crediario).
+      const foraDoCrediario = round2(Math.max(0, totalDaVenda - debito));
+      pagoForaDoCrediario = round2(Math.min(refundValue - teto, foraDoCrediario));
+      refundValue = teto;
+    }
   }
   if (refundValue <= 0) throw err(400, { error: 'Valor de devolucao resultou em zero' });
 
@@ -408,6 +419,8 @@ async function refundCreditSale(client, { companyId, saleId, items, reason = nul
     credit_generated: creditGenerated,
     new_balance: newBalance,
     stock_restored: stockRestored,
+    // So aparece quando parte da venda foi paga fora do crediario.
+    ...(pagoForaDoCrediario > 0.005 ? { pago_fora_do_crediario: pagoForaDoCrediario } : {}),
   };
 }
 

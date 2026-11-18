@@ -189,7 +189,54 @@ describe('devolução do crediário com desconto da venda', () => {
     expect(r.body.refund_value).toBe(60);
     // Antes: 100 na ficha e a cliente com 40 de "credito" que saiu do dinheiro.
     expect(await ficha()).toBe(0);
+    // Os 40 do dinheiro nao voltam sozinhos: a resposta avisa para a tela.
+    expect(r.body.pago_fora_do_crediario).toBe(40);
+    const { rows: tx } = await q(`SELECT type, category, amount::text FROM transactions WHERE company_id = $1 AND category NOT LIKE 'Crediario%' ORDER BY type`, [ID.loja]);
+    expect(tx).toEqual([{ type: 'income', category: 'Vendas', amount: '40.00' }]);
     NUMEROS.push({ caso: 'blusa 100 = 40 no dinheiro + 60 no crediário', venda: 100, devolvido: r.body.refund_value, ficha: await ficha() });
+  });
+});
+
+describe('conferência da Célia (18/11)', () => {
+  test('cliente só com sobra de pagamento acima da dívida vende no crediário normalmente (sem o 422)', async () => {
+    // Sobra de pagamento: um pagamento sem divida (saldo −80). O Caixa nao
+    // oferece esse saldo (#1080), entao ele tambem nao trava o crediario.
+    await q(`INSERT INTO customer_credit_transactions (company_id, customer_id, type, amount, payment_method) VALUES ($1, $2, 'payment', 80, 'pix')`,
+      [ID.loja, ID.cliente]);
+    expect(await ficha()).toBe(-80);
+    const r = await request(app).post(`/companies/${ID.loja}/pdv/sale`).send({
+      customer_id: ID.cliente, items: [{ product_id: ID.blusa, quantity: 1, unit_price: 100 }], payment_method: 'crediario', installments: 2,
+    });
+    expect(r.status).toBe(201);
+    expect(r.body.code).toBeUndefined();
+    expect(await ficha()).toBe(20);
+  });
+
+  test('nada retroativo: a devolução inflada já gravada (o desenho da f1048a5a) fica como está', async () => {
+    // O que a producao tem hoje: venda de 139,95 (279,90 com 50%) no crediario
+    // e a devolucao antiga de 279,90 (credito de 139,95 a mais).
+    const v = await vender({
+      items: [{ product_id: ID.conjunto, quantity: 1, unit_price: 279.9 }],
+      payment_method: 'crediario', discount_type: 'percent', discount_value: 50,
+    });
+    await q(`INSERT INTO customer_credit_transactions (company_id, customer_id, sale_id, type, amount, payment_method, notes, source)
+             VALUES ($1, $2, $3, 'refund', 279.9, 'crediario_credito', 'Devolucao de venda (dev antiga)', 'refund')`, [ID.loja, ID.cliente, v.id]);
+    const retrato = async () => (await q(
+      `SELECT to_jsonb(t) AS r FROM customer_credit_transactions t WHERE company_id = $1 ORDER BY created_at, id`, [ID.loja])).rows.map((x) => x.r);
+    const parcelas = async () => (await q(`SELECT to_jsonb(c) AS r FROM credit_installments c WHERE company_id = $1 ORDER BY id`, [ID.loja])).rows.map((x) => x.r);
+    const antes = { razao: await retrato(), parcelas: await parcelas() };
+    expect(await ficha()).toBe(-139.95);
+
+    // O codigo novo passando por perto: devolver de novo a venda inflada
+    // (o teto recusa, nada gravado) e uma venda nova com outra devolucao.
+    const de_novo = await devolver(v.id, [{ sale_item_id: itemDe(v, ID.conjunto), quantity: 1 }]);
+    expect(de_novo.status).toBe(400);
+    const w = await vender({ items: [{ product_id: ID.blusa, quantity: 1, unit_price: 100 }], payment_method: 'dinheiro' });
+    expect(w.id).toBeTruthy();
+
+    // As linhas antigas, byte a byte (o credito a mais continua na ficha).
+    expect({ razao: await retrato(), parcelas: await parcelas() }).toEqual(antes);
+    expect(await ficha()).toBe(-139.95);
   });
 });
 
