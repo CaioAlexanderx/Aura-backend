@@ -75,7 +75,7 @@ const carneAuto = require('../services/credit/carneAuto');
 const { checkCouponOwner } = require('../services/couponPolicy');
 const { hasSaleNumberColumn, saleNumberSelect } = require('../utils/saleNumber');
 // 16/09/2026: cliente de outra loja do mesmo dono vale (utils/customerScope.js).
-const { findOwnerScopedCustomer } = require('../utils/customerScope');
+const { findOwnerScopedCustomer, CUSTOMER_NOT_FOUND_BODY } = require('../utils/customerScope');
 // 23/09/2026 (Matcon M1): ganchos da venda — ver cabecalho do servico.
 const matconSaleHooks = require('../services/matconSaleHooks');
 // 09/10/2026 (migration 368): venda com `comanda_id` fecha a comanda do Caixa.
@@ -108,6 +108,8 @@ const vendaTiming = require('../services/vendaTiming');
 // 17/11/2026 (p-141 a p-144): a venda com menos idas ao banco. O caminho de
 // sempre continua aqui, em cada `else` (PDV_VENDA_CAMINHO=fila volta a ele).
 const vendaRapida = require('../services/vendaRapida');
+// 17/11/2026 (INC-2026-11-17-03): credito da cliente usado na venda.
+const creditoDaCliente = require('../services/creditoDaCliente');
 
 const fmt = (v) => parseFloat(v || 0).toFixed(2);
 const SP_DATE_NOW = "(NOW() AT TIME ZONE 'America/Sao_Paulo')::date";
@@ -593,7 +595,32 @@ async function handleSale(req, res, opts = {}) {
       const rawCreditAmount = calcCreditAmount({ payment_method, payments, totalAmount });
       creditAmount = (rawCreditAmount > 0 && customerId) ? rawCreditAmount : 0;
     }
-    const cashAmount = parseFloat((totalAmount - creditAmount).toFixed(2));
+    // INC-2026-11-17-03: o credito a favor da cliente (troca, devolucao, sobra
+    // de pagamento) abate a venda como forma de pagamento 'credito_cliente'.
+    // A venda continua pelo valor cheio; o que entra hoje (sale_payments e a
+    // receita pdv-sale) e so o resto. Sem a forma no corpo, creditoUsado e 0
+    // e nada aqui consulta o banco: a venda e a de sempre.
+    const creditoPedido = creditoDaCliente.valorPedido({ payment_method, payments, totalAmount });
+    let creditoUsado = 0;
+    let creditoSaldoAntes = 0;
+    let creditoConferido = null;
+    if (creditoPedido > 0) {
+      creditoConferido = await creditoDaCliente.conferir(client, {
+        companyId: req.params.id, customerId, amount: creditoPedido, totalAmount,
+        crediarioAmount: creditAmount, payments, signalSale: !!opts.signalSale,
+      });
+      creditoUsado = creditoConferido.amount;
+      creditoSaldoAntes = creditoConferido.saldoAntes;
+    }
+    const cashAmount = parseFloat((totalAmount - creditAmount - creditoUsado).toFixed(2));
+    // Revisao da Celia (17/11): o credito de TROCA ja saiu como despesa
+    // ("Troca - Devolucao") quando nasceu, entao a parte da venda paga com ele
+    // entra na receita pdv-sale. O de devolucao do crediario nao saiu (so
+    // abateu divida): fica fora, como o sinal. sale_payments e o caixa seguem
+    // so com o dinheiro de hoje (cashAmount). Sem credito: receitaAmount = cashAmount.
+    const receitaAmount = creditoConferido
+      ? parseFloat((cashAmount + creditoConferido.naReceita).toFixed(2))
+      : cashAmount;
     timing.etapa('cupom_vendedora');
     // tq-15: com chave, ela entra no MESMO INSERT (o indice unico parcial da
     // 390 e a garantia final). Sem chave, o SQL e o de sempre.
@@ -789,6 +816,15 @@ async function handleSale(req, res, opts = {}) {
         createdBy:    req.user?.id || null,
       });
     }
+    // INC-2026-11-17-03: baixa do credito da cliente, presa a venda (o
+    // cancelamento da venda apaga o debito e o credito volta para a ficha).
+    if (creditoUsado > 0) {
+      await creditoDaCliente.baixar(client, {
+        companyId: req.params.id, customerId, saleId: sale.id, saleNumber: sale.sale_number,
+        deTroca: creditoConferido.deTroca, deDevolucao: creditoConferido.deDevolucao,
+        createdBy: req.user?.id || null,
+      });
+    }
     timing.etapa('crediario');
 
     let activeSessaoId = null;
@@ -816,7 +852,7 @@ async function handleSale(req, res, opts = {}) {
       if (Array.isArray(payments) && payments.length > 0) {
         for (const p of payments) {
           const m = (p.method || '').toLowerCase();
-          if (m === 'crediario') continue;
+          if (m === 'crediario' || m === creditoDaCliente.METODO) continue;
           const amt = parseFloat(p.value ?? p.amount ?? 0);
           if (amt <= 0) continue;
           pagamentos.push({ method: p.method, amount: amt });
@@ -832,15 +868,15 @@ async function handleSale(req, res, opts = {}) {
         }
       }
       let receita = null;
-      if (cashAmount > 0) {
+      if (receitaAmount > 0) {
         const itemsSummary = productNames.slice(0, 3).join(', ');
         let payLabel = payment_method || 'dinheiro';
         if (Array.isArray(payments) && payments.length > 0) {
-          const nonCredit = payments.find(p => (p.method || '').toLowerCase() !== 'crediario');
+          const nonCredit = payments.find(p => !['crediario', creditoDaCliente.METODO].includes((p.method || '').toLowerCase()));
           if (nonCredit) payLabel = nonCredit.method;
         }
         receita = {
-          amount: cashAmount,
+          amount: receitaAmount,
           description: sale_date
             ? `Venda (retroativa) - ${itemsSummary} (${payLabel})`
             : `Venda PDV - ${itemsSummary} (${payLabel})`,
@@ -857,7 +893,7 @@ async function handleSale(req, res, opts = {}) {
     if (Array.isArray(payments) && payments.length > 0) {
       for (const p of payments) {
         const m = (p.method || '').toLowerCase();
-        if (m === 'crediario') continue;
+        if (m === 'crediario' || m === creditoDaCliente.METODO) continue;
         const amt = parseFloat(p.value ?? p.amount ?? 0);
         if (amt <= 0) continue;
         await client.query(
@@ -880,18 +916,18 @@ async function handleSale(req, res, opts = {}) {
         }
       }
     }
-    if (cashAmount > 0) {
+    if (receitaAmount > 0) {
       const itemsSummary = productNames.slice(0, 3).join(', ');
       let payLabel = payment_method || 'dinheiro';
       if (Array.isArray(payments) && payments.length > 0) {
-        const nonCredit = payments.find(p => (p.method || '').toLowerCase() !== 'crediario');
+        const nonCredit = payments.find(p => !['crediario', creditoDaCliente.METODO].includes((p.method || '').toLowerCase()));
         if (nonCredit) payLabel = nonCredit.method;
       }
       const txDesc = sale_date
         ? `Venda (retroativa) - ${itemsSummary} (${payLabel})`
         : `Venda PDV - ${itemsSummary} (${payLabel})`;
       const dueDateExpr = sale_date ? `$6::date` : SP_DATE_NOW;
-      const txParams = [req.params.id, cashAmount, txDesc, req.user?.id||null, 'pdv-sale-'+sale.id];
+      const txParams = [req.params.id, receitaAmount, txDesc, req.user?.id||null, 'pdv-sale-'+sale.id];
       if (sale_date) txParams.push(sale_date);
       await client.query(
         `INSERT INTO transactions
@@ -1034,6 +1070,14 @@ async function handleSale(req, res, opts = {}) {
         : null,
       // Matcon M1: so aparece quando a venda veio de um orcamento.
       ...(matconResult ? { matcon: matconResult } : {}),
+      // INC-2026-11-17-03: so aparece quando a venda usou credito da cliente.
+      ...(creditoUsado > 0 ? {
+        credito_cliente: {
+          usado: creditoUsado,
+          saldo_antes: creditoSaldoAntes,
+          saldo_depois: parseFloat((creditoSaldoAntes - creditoUsado).toFixed(2)),
+        },
+      } : {}),
     };
     // tq-15: a repeticao da mesma chave devolve este mesmo corpo.
     if (idemKey) vendaIdempotente.guardarResposta({ companyId: req.params.id, saleId: sale.id, corpo });
@@ -1064,7 +1108,7 @@ async function handleSale(req, res, opts = {}) {
     // F2: resolveInlineCustomer sinaliza 404 CUSTOMER_NOT_FOUND /
     // 422 SINAL_REQUIRES_CUSTOMER do mesmo jeito -- propaga em vez de virar 500.
     if (e && e.statusCode && e.code) {
-      return res.status(e.statusCode).json({ error: e.message, code: e.code });
+      return res.status(e.statusCode).json({ error: e.message, code: e.code, ...(e.extra || {}) });
     }
     console.error('[PDV] Erro ao registrar venda:', e.message);
     res.status(500).json({ error: 'Erro ao registrar venda' });
@@ -1140,6 +1184,29 @@ router.post('/sale-com-sinal', async (req, res) => {
 });
 
 // ===== GET /sale/:saleId =====
+// ===== GET /clientes/:cid/credito =====
+// INC-2026-11-17-03: saldo a favor da cliente NESTA loja, para o Caixa
+// mostrar e abater na venda. Mora no /pdv (e nao no /credit, que exige o
+// plano Negocio): o credito de troca existe em qualquer plano e com o
+// crediario desligado. Cliente de outro dono: 404, como na venda.
+router.get('/clientes/:cid/credito', async (req, res) => {
+  try {
+    const uuidOk = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(String(req.params.cid || ''));
+    const found = uuidOk ? await findOwnerScopedCustomer(db, req.params.id, req.params.cid) : null;
+    if (!found) return res.status(404).json({ ...CUSTOMER_NOT_FOUND_BODY });
+    let saldo = 0;
+    try {
+      saldo = await creditoDaCliente.saldoAFavor(db, { companyId: req.params.id, customerId: req.params.cid });
+    } catch (e) {
+      if (e.code !== '42P01' && e.code !== '42703') throw e;
+    }
+    res.json({ customer_id: req.params.cid, saldo_a_favor: saldo });
+  } catch (e) {
+    console.error('[PDV] credito da cliente:', e.message);
+    res.status(500).json({ error: 'Erro ao buscar o credito da cliente' });
+  }
+});
+
 router.get('/sale/:saleId', async (req, res) => {
   try {
     // Matcon M1: has_pending_delivery vem no MESMO SELECT (sondagem da

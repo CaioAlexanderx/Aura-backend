@@ -111,7 +111,7 @@ async function limpar() {
   await pool.query(`DELETE FROM users WHERE id = $1`, [ID.dono]).catch(() => {});
 }
 
-async function semear({ settings = {}, caixaAberto = false } = {}) {
+async function semear({ settings = {}, caixaAberto = false, creditoDaCliente = 0 } = {}) {
   await limpar();
   const q = (sql, params) => pool.query(sql, params);
   await q(`INSERT INTO users (id, email, password_hash, full_name) VALUES ($1, $2, 'x', 'Fixture Venda Rapida')`,
@@ -165,6 +165,13 @@ async function semear({ settings = {}, caixaAberto = false } = {}) {
     [ID.comanda, ID.matriz, ID.simples]);
   await q(`INSERT INTO matcon_quotes (id, company_id, valid_until, customer_name, status) VALUES ($1, $2, CURRENT_DATE + 7, 'Cliente do Orcamento', 'open')`,
     [ID.orcamento, ID.matriz]);
+  // INC-2026-11-17-03: credito a favor da cliente (o que a troca grava com
+  // "Credito para"). So nos cenarios que pedem: os de antes semeiam o mesmo.
+  if (creditoDaCliente > 0) {
+    await q(`INSERT INTO customer_credit_transactions (company_id, customer_id, type, amount, payment_method, notes)
+             VALUES ($1, $2, 'payment', $3, 'crediario_credito', 'Credito de troca (fixture)')`,
+      [ID.matriz, ID.cliente, creditoDaCliente]);
+  }
   if (caixaAberto) {
     await q(`INSERT INTO caixa_sessoes (id, company_id, opened_by, troco_inicial, status) VALUES ($1, $2, $3, 50, 'aberta')`,
       [ID.sessao, ID.matriz, ID.dono]);
@@ -400,7 +407,29 @@ const CENARIOS = [
   { nome: 'venda de valor zero (desconto de 100%)', status: 201,
     body: { items: [item(ID.simples, 1, 10)], payment_method: 'pix', discount_type: 'percent', discount_value: 100 } },
 
+  // INC-2026-11-17-03: credito da cliente abatido na venda.
+  { nome: 'credito da cliente + PIX, com caixa aberto e taxa da maquininha', status: 201,
+    settings: { caixa_enabled: true, ...TAXA }, caixaAberto: true, creditoDaCliente: 50,
+    body: {
+      items: [item(ID.simples, 3, 10), item(ID.grade, 1, 25, { variant_id: ID.varP })], customer_id: ID.cliente,
+      payment_method: 'pix', payments: [{ method: 'credito_cliente', value: 20 }, { method: 'pix', value: 35 }],
+    } },
+  { nome: 'venda inteira no credito da cliente', status: 201, creditoDaCliente: 50,
+    body: { items: [item(ID.simples, 4, 10)], customer_id: ID.cliente, payment_method: 'credito_cliente' } },
+  { nome: 'credito da cliente + crediario parcelado', status: 201, creditoDaCliente: 50,
+    body: {
+      items: [item(ID.simples, 3, 10), item(ID.ultimo, 1, 30)], customer_id: ID.cliente, installments: 2,
+      payment_method: 'crediario', payments: [{ method: 'credito_cliente', value: 15 }, { method: 'crediario', value: 45 }],
+    } },
+
   // ── Recusas: mesma mensagem, mesmo codigo, nada gravado ──
+  { nome: 'recusa: credito da cliente maior que o saldo', status: 422, creditoDaCliente: 50,
+    body: { items: [item(ID.simples, 6, 10)], customer_id: ID.cliente, payment_method: 'credito_cliente' } },
+  { nome: 'recusa: credito da cliente com pagamentos que nao fecham', status: 422, creditoDaCliente: 50,
+    body: {
+      items: [item(ID.simples, 3, 10)], customer_id: ID.cliente,
+      payment_method: 'pix', payments: [{ method: 'credito_cliente', value: 10 }, { method: 'pix', value: 30 }],
+    } },
   { nome: 'recusa: crediario de cliente com credito bloqueado (422, nada gravado)', status: 422,
     body: { items: [item(ID.simples, 1, 10)], payment_method: 'crediario', customer_id: ID.clienteBloqueada } },
   { nome: 'recusa: comanda que nao existe (a venda inteira volta)', statusDeCada: null, status: 404,

@@ -92,11 +92,14 @@ async function refundCreditSale(client, { companyId, saleId, items, reason = nul
   const customerId = sale.customer_id;
 
   // 2. A venda e do crediario? (precisa do debit no ledger) + resolve account_id
+  //    INC-2026-11-17-03: o debito do credito da cliente usado na venda
+  //    ('credito_cliente') nao faz da venda uma venda no crediario.
   let accountId = null;
   try {
     const { rows: debitRows } = await client.query(
       `SELECT account_id FROM customer_credit_transactions
-        WHERE sale_id = $1 AND company_id = $2 AND type = 'debit' LIMIT 1`,
+        WHERE sale_id = $1 AND company_id = $2 AND type = 'debit'
+          AND payment_method IS DISTINCT FROM 'credito_cliente' LIMIT 1`,
       [saleId, saleCompanyId]
     );
     if (!debitRows.length) throw err(422, { error: 'Venda nao e do crediario (sem lancamento de credito)', code: 'NOT_A_CREDIT_SALE' });
@@ -106,7 +109,8 @@ async function refundCreditSale(client, { companyId, saleId, items, reason = nul
     if (e.code === '42703') {
       const { rows: debitRows } = await client.query(
         `SELECT id FROM customer_credit_transactions
-          WHERE sale_id = $1 AND company_id = $2 AND type = 'debit' LIMIT 1`,
+          WHERE sale_id = $1 AND company_id = $2 AND type = 'debit'
+          AND payment_method IS DISTINCT FROM 'credito_cliente' LIMIT 1`,
         [saleId, saleCompanyId]
       );
       if (!debitRows.length) throw err(422, { error: 'Venda nao e do crediario (sem lancamento de credito)', code: 'NOT_A_CREDIT_SALE' });
