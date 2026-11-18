@@ -73,11 +73,26 @@ const formatarAlerta = (a) => ({
   detalhe: a.detalhe || null,
   verbo: a.verbo || null,
   bloco: a.bloco || null,
+  // 18/11/2026: WhatsApp da loja (verificacao_devolvida). Só vem no alerta
+  // calculado agora; o gravado não tem a coluna.
+  ...(a.link ? { link: a.link } : {}),
 });
 
 // Contato sem resposta depende do relógio (passou de 2h? é horário
 // comercial?): o gravado às 06h nunca valeria, então vale o de agora. Falha
 // aqui não derruba o painel.
+// E-mail de confirmação que voltou: some assim que a pessoa confirma ou
+// corrige, e o link do WhatsApp não fica gravado. Vale o de agora, como o
+// contato. Falha aqui não derruba o painel.
+async function alertasDeVerificacaoAgora(hoje) {
+  try {
+    return await require('../services/emailDevolvido').alertasDeVerificacaoDevolvida({ db: pool, hoje });
+  } catch (err) {
+    console.error('[painel] alerta do e-mail devolvido falhou:', err.message);
+    return [];
+  }
+}
+
 async function alertasDeContatosAgora() {
   try {
     return await alertasDeContatos({ db: pool });
@@ -149,7 +164,8 @@ router.get('/hoje', ...adminOnly, asyncHandler(async (req, res) => {
         (id) => porBloco.get(id) && porBloco.get(id).dados
       ),
       alertas: alertas
-        .filter((a) => a.tipo !== 'contato_sem_resposta')
+        .filter((a) => a.tipo !== 'contato_sem_resposta' && a.tipo !== 'verificacao_devolvida')
+        .concat(await alertasDeVerificacaoAgora(hoje))
         .concat(await alertasDeContatosAgora())
         .map(formatarAlerta),
     });
