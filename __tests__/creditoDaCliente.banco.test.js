@@ -395,6 +395,30 @@ describe('recusas: nada gravado', () => {
     expect(await ficha()).toBe(-50);
   });
 
+  test('saldo negativo que não veio de crédito (renegociação, pagamento acima da dívida) não aparece no Caixa', async () => {
+    await q(`INSERT INTO customer_credit_transactions (company_id, customer_id, type, amount, payment_method, notes) VALUES
+               ($1, $2, 'refund', 120, 'crediario_ajuste', 'Renegociacao - desconto no saldo'),
+               ($1, $3, 'payment', 80, 'pix', NULL)`, [ID.loja, ID.cliente, ID.outra]);
+    expect(await ficha()).toBe(-120);
+    expect(await ficha(ID.outra)).toBe(-80);
+    for (const cid of [ID.cliente, ID.outra]) {
+      const r = await request(app).get(`/companies/${ID.loja}/pdv/clientes/${cid}/credito`);
+      expect(r.body.saldo_a_favor).toBe(0);
+    }
+    await abrirCaixa();
+    await semVenda({ items: [{ product_id: ID.casaco, quantity: 1, unit_price: 50 }], payment_method: 'credito_cliente', customer_id: ID.outra }, 'CREDITO_INSUFICIENTE');
+  });
+
+  test('crédito de troca com dívida noutra compra: usa só o que sobra na ficha', async () => {
+    await abrirCaixa();
+    await trocaComCredito();
+    await q(`INSERT INTO customer_credit_transactions (company_id, customer_id, type, amount, notes) VALUES ($1, $2, 'debit', 20, 'Debito manual')`,
+      [ID.loja, ID.cliente]);
+    expect(await ficha()).toBe(-30);
+    const r = await request(app).get(`/companies/${ID.loja}/pdv/clientes/${ID.cliente}/credito`);
+    expect(r.body.saldo_a_favor).toBe(30);
+  });
+
   test('duas vendas ao mesmo tempo com o mesmo crédito: uma entra, a outra recebe 422', async () => {
     for (let rodada = 0; rodada < 3; rodada++) {
       await apagarTudo();

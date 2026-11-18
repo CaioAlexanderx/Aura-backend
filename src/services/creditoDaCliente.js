@@ -60,9 +60,20 @@ function somaDoPagamentoDeHoje(payments) {
 }
 
 /**
- * Saldo a favor da cliente na loja. Positivo = crédito disponível; zero quando
- * ela deve ou está quitada. `travar` segura o saldo até o fim da transação
- * (duas vendas ao mesmo tempo não gastam o mesmo crédito).
+ * Crédito que a cliente pode usar na loja. Positivo = disponível; zero quando
+ * ela deve, está quitada ou o saldo negativo não veio de crédito.
+ *
+ * Só conta o crédito de ORIGEM conhecida (17/11/2026, medido em produção):
+ * a troca com "Crédito para" (payment crediario_credito) e a devolução do
+ * crediário (refund crediario_credito), menos o que já foi usado em venda.
+ * O saldo negativo que vem de desconto de renegociação (crediario_ajuste) ou
+ * de pagamento acima da dívida NÃO aparece no Caixa: lá a ficha pode estar
+ * errada e o Caixa estaria oferecendo dinheiro que a cliente nunca deixou.
+ * O teto continua sendo o saldo da ficha (quem deve noutra compra usa o
+ * crédito só no que sobra).
+ *
+ * `travar` segura o saldo até o fim da transação (duas vendas ao mesmo tempo
+ * não gastam o mesmo crédito).
  */
 async function saldoAFavor(client, { companyId, customerId, travar = false }) {
   if (!companyId || !customerId) return 0;
@@ -72,12 +83,19 @@ async function saldoAFavor(client, { companyId, customerId, travar = false }) {
       [companyId, customerId]
     );
   }
+  // Mesma conta da view customer_credit_balances (debit soma, o resto abate).
   const { rows } = await client.query(
-    `SELECT balance FROM customer_credit_balances WHERE company_id = $1 AND customer_id = $2`,
-    [companyId, customerId]
+    `SELECT COALESCE(SUM(CASE type WHEN 'debit' THEN amount ELSE -amount END), 0) AS balance,
+            COALESCE(SUM(amount) FILTER (WHERE type IN ('payment', 'refund') AND payment_method = 'crediario_credito'), 0) AS origem,
+            COALESCE(SUM(amount) FILTER (WHERE type = 'debit' AND payment_method = $3), 0) AS usado
+       FROM customer_credit_transactions
+      WHERE company_id = $1 AND customer_id = $2`,
+    [companyId, customerId, METODO]
   );
-  const balance = parseFloat(rows[0]?.balance || 0) || 0;
-  return balance < 0 ? round2(-balance) : 0;
+  const r = rows[0] || {};
+  const aFavor = Math.max(0, -(parseFloat(r.balance) || 0));
+  const deCredito = Math.max(0, (parseFloat(r.origem) || 0) - (parseFloat(r.usado) || 0));
+  return round2(Math.min(aFavor, deCredito));
 }
 
 function erro(statusCode, code, message, extra) {
