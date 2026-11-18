@@ -1319,13 +1319,18 @@ router.delete('/sale/:saleId', async (req, res) => {
   try {
     await client.query('BEGIN');
     const { rows } = await client.query(
-      `SELECT id, customer_id, employee_id, total_amount, coupon_id, status
+      `SELECT id, customer_id, employee_id, total_amount, coupon_id, status,
+              to_jsonb(sales)->>'order_id' AS order_id
        FROM sales WHERE id=$1 AND company_id=$2`,
       [req.params.saleId, req.params.id]
     );
     if (!rows.length) { await client.query('ROLLBACK'); return res.status(404).json({ error: 'Venda nao encontrada' }); }
     const sale = rows[0];
     if (sale.status === 'cancelled') { await client.query('ROLLBACK'); return res.status(409).json({ error: 'Esta venda ja foi cancelada' }); }
+    // B5a (revisao da Celia): a venda que concluiu um pedido nao se cancela
+    // por aqui (o pedido ficaria entregue e o sinal sem destino). B5b reabre.
+    const recusaDoPedido = pedidoSaleHooks.recusaDoCancelamento(sale.order_id);
+    if (recusaDoPedido) { await client.query('ROLLBACK'); return res.status(409).json(recusaDoPedido); }
     const { rows: items } = await client.query(
       `SELECT si.product_id, si.variant_id, si.quantity, si.product_name_snapshot,
               COALESCE(p.company_id,$2) AS stock_company_id

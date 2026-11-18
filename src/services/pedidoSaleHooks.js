@@ -46,6 +46,15 @@
 //       (somaria com a pdv-sale e com o sinal). Sinal igual ao total ja a
 //       tinha quitado no B4a: aqui nada muda nela.
 //
+//   CANCELAR / DESFAZER A VENDA DO PEDIDO (revisao da Celia, 17/11): recusado
+//     com 409 ORDER_SALE em todo caminho que cancela a venda ou tira item dela
+//     (DELETE /pdv/sale/:id, POST /sales/:id/cancel, DELETE
+//     /transactions/:tx/sale-items/:item). Cancelar devolveria o estoque e a
+//     pdv-sale, mas o pedido ficaria 'delivered' e o sinal sem destino. O
+//     B5b tira esta trava quando o cancelamento reabrir o pedido. Venda sem
+//     order_id: os caminhos sao os de hoje (a coluna so e lida junto).
+//     Editar venda tem a trava propria (editarVenda.js, ORDER_SALE).
+//
 // Fica para o B5b: sobra do sinal (credito na ficha ou devolucao) e a linha
 // "Sinal ja recebido" no cupom e no detalhe da venda. Condicao da Celia para
 // o B5b: quando a cliente gastar o credito do sinal numa venda, essa parte
@@ -65,6 +74,15 @@ const ABERTOS = ['confirmed', 'preparing', 'ready'];
 
 const round2 = (n) => Math.round((Number(n) + Number.EPSILON) * 100) / 100;
 const brl = (n) => `R$ ${round2(n).toFixed(2).replace('.', ',')}`;
+
+// Texto novo (lista para o Caio aprovar).
+const TEXTO_CANCELAR_VENDA_DO_PEDIDO = 'Esta venda concluiu um pedido. Cancele pelo pedido.';
+
+/** Corpo do 409 de quem tenta cancelar a venda de um pedido; null = venda comum. */
+function recusaDoCancelamento(orderId) {
+  if (!orderId) return null;
+  return { error: TEXTO_CANCELAR_VENDA_DO_PEDIDO, code: 'ORDER_SALE' };
+}
 
 function erro(statusCode, code, message, extra) {
   return Object.assign(new Error(message), { statusCode, code, ...(extra || {}) });
@@ -228,6 +246,8 @@ async function afterSaleInsert(client, { companyId, sale, pedido, valores }) {
 }
 
 module.exports = {
+  TEXTO_CANCELAR_VENDA_DO_PEDIDO,
+  recusaDoCancelamento,
   pedidoDoCorpo,
   travarPedido,
   valoresDaConclusao,

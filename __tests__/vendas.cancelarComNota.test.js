@@ -38,7 +38,7 @@ function instalar() {
     query: jest.fn(async (sql, params) => {
       const s = norm(sql);
       sqlsTx.push(s);
-      if (/^SELECT id, total_amount, status, COALESCE\(type,'sale'\) AS type FROM sales/.test(s)) {
+      if (/^SELECT id, total_amount, status, COALESCE\(type,'sale'\) AS type[, ].*FROM sales/.test(s)) {
         return { rows: [{ id: SALE, total_amount: '100.00', status: 'completed', type: 'sale' }] };
       }
       if (/FROM nfce_emissions ne LEFT JOIN nfce_config nc ON nc\.company_id = ne\.company_id WHERE ne\.sale_id = \$1 AND ne\.tipo IN/.test(s)) {

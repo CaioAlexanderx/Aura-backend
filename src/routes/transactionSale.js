@@ -67,6 +67,8 @@ async function lerPromocaoDoItem(productId, variantId) {
 const { resolveSaleLink, extractSaleId } = require('../utils/saleLink');
 // 06/10/2026: chave "vender sem estoque" — ver cabecalho do util.
 const { vendaSemEstoqueLiberada } = require('../utils/vendaSemEstoque');
+// 17/11/2026 (B5a): a venda que concluiu um pedido do balcao nao se cancela.
+const { recusaDoCancelamento } = require('../services/pedidoSaleHooks');
 
 // Quanto ja foi devolvido/trocado por item da venda (troca_returned_items).
 // Best-effort: em deploy parcial a tabela pode nao existir (42P01) -> tudo 0.
@@ -458,7 +460,7 @@ router.delete('/transactions/:tx_id/sale-items/:item_id', asyncHandler(async (re
     const itemRes = await client.query(
       `SELECT si.id, si.sale_id, si.product_id, si.variant_id,
               si.quantity, si.total_price, si.product_name_snapshot,
-              p.name AS product_name
+              p.name AS product_name, to_jsonb(s)->>'order_id' AS order_id
        FROM sale_items si
        LEFT JOIN products p ON p.id = si.product_id
        JOIN sales s ON s.id = si.sale_id
@@ -467,6 +469,13 @@ router.delete('/transactions/:tx_id/sale-items/:item_id', asyncHandler(async (re
     );
     if (!itemRes.rows.length) throw new AppError('Item nao encontrado nessa venda', 404);
     const item = itemRes.rows[0];
+    // B5a (revisao da Celia): tirar item da venda que concluiu um pedido (e o
+    // ultimo item cancela a venda) e recusado, como o cancelamento.
+    const recusaDoPedido = recusaDoCancelamento(item.order_id);
+    if (recusaDoPedido) {
+      await client.query('ROLLBACK');
+      return res.status(409).json(recusaDoPedido);
+    }
     const itemTotal = parseFloat(item.total_price);
     const itemQty = parseFloat(item.quantity);
     const itemName = item.product_name || item.product_name_snapshot || 'Item';

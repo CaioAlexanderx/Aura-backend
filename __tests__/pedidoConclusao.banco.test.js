@@ -125,6 +125,8 @@ beforeAll(async () => {
   app.use('/companies/:id/caixa', require('../src/routes/caixa'));
   app.use('/companies/:id/dashboard', require('../src/routes/dashboard'));
   app.use('/companies/:id/dre', require('../src/routes/dre'));
+  app.use('/companies/:id/sales', require('../src/routes/sales'));
+  app.use('/companies/:id', require('../src/routes/transactionSale'));
   app.use((err, _req, res, _next) => res.status(err.statusCode || err.status || 500).json({ error: err.message }));
 });
 
@@ -387,5 +389,61 @@ describe('dia a dia: o sinal ontem, a conclusao hoje', () => {
           AND COALESCE(due_date, (created_at AT TIME ZONE 'America/Sao_Paulo')::date) = $2::date`, [ID.loja, dia])).rows[0].v);
     expect({ ontem: await fat(ontem), hoje: await fat(hoje) }).toEqual({ ontem: 0, hoje: 389.7 });
     expect({ ontem: await receita(ontem), hoje: await receita(hoje) }).toEqual({ ontem: 100, hoje: 289.7 });
+  });
+});
+
+describe('cancelar a venda do pedido: recusado em todo caminho, nada muda (revisao da Celia)', () => {
+  async function retrato(oid, vendaId) {
+    const um = async (sql, params) => (await q(sql, params)).rows;
+    return {
+      venda: await um(`SELECT status, total_amount::text AS total, notes FROM sales WHERE id = $1`, [vendaId]),
+      itens: await um(`SELECT id, quantity::text AS q FROM sale_items WHERE sale_id = $1 ORDER BY id`, [vendaId]),
+      pagamentos: await um(`SELECT method, amount::text AS v, sessao_id FROM sale_payments WHERE sale_id = $1 ORDER BY method`, [vendaId]),
+      lancamentos: await um(`SELECT idempotency_key, status, amount::text AS v, notes FROM transactions WHERE company_id = $1 ORDER BY idempotency_key`, [ID.loja]),
+      pedido: await um(`SELECT status::text AS status, sale_id, stock_deducted FROM digital_orders WHERE id = $1`, [oid]),
+      estoque: await um(`SELECT id, stock_qty::text AS q FROM products WHERE company_id = $1 ORDER BY id`, [ID.loja]),
+      movimentos: await um(`SELECT tipo, valor::text AS v FROM caixa_movimentos WHERE company_id = $1 ORDER BY tipo`, [ID.loja]),
+    };
+  }
+
+  test('DELETE /pdv/sale, POST /sales/:id/cancel e tirar item: 409 ORDER_SALE; receita, formas, conta e pedido iguais', async () => {
+    await abrirCaixa(50);
+    const oid = await guardarPedido();
+    await pagarSinal(oid, 'pix');
+    const v = await concluir(oid, { payments: [{ method: 'dinheiro', value: 200 }, { method: 'pix', value: 89.7 }] });
+    expect(v.status).toBe(201);
+    const vendaId = v.body.sale.id;
+    const antes = await retrato(oid, vendaId);
+    const caixaAntes = (await caixaAoVivo()).totais_ao_vivo;
+    const recusa = { error: 'Esta venda concluiu um pedido. Cancele pelo pedido.', code: 'ORDER_SALE' };
+
+    const a = await request(app).delete(`/companies/${ID.loja}/pdv/sale/${vendaId}`);
+    expect([a.status, a.body]).toEqual([409, recusa]);
+
+    const b = await request(app).post(`/companies/${ID.loja}/sales/${vendaId}/cancel`).send({ reason: 'teste' });
+    expect([b.status, b.body]).toEqual([409, recusa]);
+
+    const { rows: [tx] } = await q(`SELECT id FROM transactions WHERE idempotency_key = $1`, [`pdv-sale-${vendaId}`]);
+    for (const it of antes.itens) {
+      const c = await request(app).delete(`/companies/${ID.loja}/transactions/${tx.id}/sale-items/${it.id}`);
+      expect([c.status, c.body]).toEqual([409, recusa]);
+    }
+
+    expect(await retrato(oid, vendaId)).toEqual(antes);
+    expect((await caixaAoVivo()).totais_ao_vivo).toEqual(caixaAntes);
+    expect(antes.venda[0].status).toBe('completed');
+    expect(antes.pedido[0].status).toBe('delivered');
+  });
+
+  test('venda comum (sem order_id) continua cancelando como hoje', async () => {
+    await abrirCaixa(50);
+    const comum = await request(app).post(`/companies/${ID.loja}/pdv/sale`).set('Idempotency-Key', chave('comum'))
+      .send({ items: [{ product_id: ID.vestido, quantity: 1, unit_price: 129.9 }], payment_method: 'pix' });
+    expect(comum.status).toBe(201);
+    const r = await request(app).post(`/companies/${ID.loja}/sales/${comum.body.sale.id}/cancel`).send({});
+    expect(r.status).toBe(200);
+    const { rows: [s] } = await q(`SELECT status FROM sales WHERE id = $1`, [comum.body.sale.id]);
+    expect(s.status).toBe('cancelled');
+    expect((await q(`SELECT COUNT(*)::int AS n FROM transactions WHERE idempotency_key = $1`, [`pdv-sale-${comum.body.sale.id}`])).rows[0].n).toBe(0);
   });
 });
