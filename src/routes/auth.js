@@ -1031,6 +1031,7 @@ router.post('/me', requireAuth, async (req, res) => {
                 c.federation_id, c.segment,
                 c.is_sandbox,
                 (COALESCE(c.studio_settings->>'casa_negocio', '') = 'true') AS casa_negocio,
+                (COALESCE(c.studio_settings->>'personalizados_teste', '') = 'true') AS personalizados_teste,
                 CASE
                   WHEN c.owner_id = $1 THEN 'owner'
                   ELSE COALESCE(cm.role_label, 'member')
@@ -1107,6 +1108,12 @@ router.post('/me', requireAuth, async (req, res) => {
         // aparece quando ligada: para todas as outras empresas o /me e o de
         // sempre. O app so le com a trava PERSONALIZADOS_LIBERADO.
         ...(company.casa_negocio === true ? { casa_negocio: true } : {}),
+        // 18/11/2026 (p-188): trava da frente Personalizados ligada so para a
+        // conta de teste (studio_settings.personalizados_teste, gravada pela
+        // equipe por SQL com audit_log; o lojista nao grava nem apaga: fica
+        // fora de ALLOWED_STUDIO_SETTINGS). Mesma regra da casa: so aparece
+        // quando true, e o /me das outras empresas nao muda.
+        ...(company.personalizados_teste === true ? { personalizados_teste: true } : {}),
         extra_seats_granted: extraMap.get(company.id) || 0,
         // { mode, ends_at, started_by_sale_at, dias_restantes, teto_em, ... }
         trial: trialRegra.montarTrial({ ...company, ...trialCols }),
