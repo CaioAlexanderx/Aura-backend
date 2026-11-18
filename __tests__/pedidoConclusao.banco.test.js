@@ -447,3 +447,19 @@ describe('cancelar a venda do pedido: recusado em todo caminho, nada muda (revis
     expect((await q(`SELECT COUNT(*)::int AS n FROM transactions WHERE idempotency_key = $1`, [`pdv-sale-${comum.body.sale.id}`])).rows[0].n).toBe(0);
   });
 });
+
+describe('so o sinal registrado pelo Caixa e descontado (revisao do Fable)', () => {
+  test('deposito marcado pago sem forma (rota do Studio) nao abate a venda: ela cobra o valor cheio hoje', async () => {
+    await abrirCaixa(50);
+    const oid = await guardarPedido();
+    // O que o mark-paid do Studio grava: deposito pago, sem forma e sem a
+    // entrada "Sinal de pedido".
+    await q(`INSERT INTO studio_payments (company_id, order_id, kind, amount, status, method, paid_at)
+             VALUES ($1, $2, 'deposit', 100, 'paid', 'pix', NOW())`, [ID.loja, oid]);
+    const parcial = await concluir(oid, { payment_method: 'pix' });
+    expect(parcial.status).toBe(201);
+    expect(parcial.body.pedido).toMatchObject({ sinal_pago: 0, recebido_hoje: 389.7 });
+    const { rows: [t] } = await q(`SELECT amount::numeric AS v FROM transactions WHERE idempotency_key = $1`, [`pdv-sale-${parcial.body.sale.id}`]);
+    expect(Number(t.v)).toBe(389.7);
+  });
+});

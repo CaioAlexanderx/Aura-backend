@@ -131,9 +131,15 @@ async function travarPedido(client, { companyId, orderId }) {
   if (!ABERTOS.includes(p.status)) {
     throw erro(409, 'PEDIDO_FECHADO', `O pedido ${p.order_number} não está aberto.`);
   }
+  // So o sinal que o Caixa registrou (registrarSinal grava a forma e a
+  // entrada "Sinal de pedido"). Um deposito marcado pago por outra rota (Studio:
+  // POST /studio/orders/:oid/payments, mark-paid) nao tem forma nem dinheiro
+  // lancado: descontar esse valor da venda seria cobrar menos sem o dinheiro
+  // ter entrado (revisao do Fable, 18/11).
   const { rows: [s] } = await client.query(
     `SELECT COALESCE(SUM(amount), 0) AS v FROM studio_payments
-      WHERE order_id = $1 AND company_id = $2 AND kind = 'deposit' AND status = 'paid'`,
+      WHERE order_id = $1 AND company_id = $2 AND kind = 'deposit' AND status = 'paid'
+        AND forma IS NOT NULL`,
     [orderId, companyId]
   );
   return {
