@@ -21,6 +21,11 @@
 //   pix_auto_cancelado       autorização do Pix Automático cancelada sem ser
 //                            pela Aura nos últimos 7 dias: sinal de saída
 //                            (tq-105). Chave: id da autorização
+//   verificacao_devolvida    cadastro dos últimos 7 dias cujo último e-mail
+//                            de confirmação voltou (bounce do Resend) e que
+//                            não confirmou (18/11/2026). Leva ao WhatsApp da
+//                            loja (`link`). Chave: id da loja. Regra em
+//                            services/emailDevolvido.js
 //
 // `chave` identifica o alerta dentro do (dia, tipo): o id da loja, no
 // pagamento sem loja o id do registro do webhook e, no contato, o id da
@@ -34,6 +39,7 @@ const plantao = require('./plantao');
 const cw = require('./contatosWhatsapp');
 const canaryStatus = require('./canaryStatus');
 const pixCancelamentos = require('./pixAutomaticoCancelamentos');
+const emailDevolvido = require('./emailDevolvido');
 
 const DIAS_SEM_VENDA = 14;
 // Pagamento sem loja segue avisando por este tempo; depois vira histórico.
@@ -203,6 +209,14 @@ async function calcularAlertas({ hoje, db = b.pool, empresas, agora = new Date()
     }
   } catch (err) {
     console.error('[painel] alerta do Pix Automático falhou:', err.message);
+  }
+
+  // 5c. E-mail de confirmação que voltou (cadastro de 7 dias sem confirmar).
+  //     Uma fonte a mais: se falhar, os outros alertas saem.
+  try {
+    alertas.push(...await emailDevolvido.alertasDeVerificacaoDevolvida({ db, hoje }));
+  } catch (err) {
+    console.error('[painel] alerta do e-mail devolvido falhou:', err.message);
   }
 
   // 6. Plataforma caída: o bipe sintético falhou duas vezes seguidas. Dormente

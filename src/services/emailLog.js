@@ -74,6 +74,19 @@ async function marcarEnviado(db, id, resendId) {
   );
 }
 
+/**
+ * Envio que não saiu porque o endereço tem devolução permanente
+ * (services/emailDevolvido.js). Fica 'failed' com as tentativas esgotadas:
+ * o job não tenta de novo pela mesma chave.
+ */
+async function marcarSuprimido(db, id) {
+  const { ERRO_SUPRIMIDO } = require('./emailDevolvido');
+  await db.query(
+    `UPDATE email_log SET status = 'failed', erro = $2, tentativas = GREATEST(tentativas, $3), updated_at = NOW() WHERE id = $1`,
+    [id, ERRO_SUPRIMIDO, MAX_TENTATIVAS]
+  );
+}
+
 async function marcarFalha(db, id, erro) {
   await db.query(
     `UPDATE email_log SET status = 'failed', erro = $2, updated_at = NOW() WHERE id = $1`,
@@ -84,7 +97,10 @@ async function marcarFalha(db, id, erro) {
 /**
  * Envia um e-mail com idempotência.
  *
- * @returns {Promise<{status:'sent'|'duplicate'|'failed'|'sem_registro', id?, resendId?, error?}>}
+ * @returns {Promise<{status:'sent'|'duplicate'|'failed'|'sem_registro'|'suprimido', id?, resendId?, error?}>}
+ *
+ * 'suprimido' (18/11/2026): o endereço tem devolução permanente e o tipo
+ * respeita a devolução (services/emailDevolvido.js); nada saiu.
  */
 async function enviarEmailRegistrado({
   db = dbPadrao(), enviar, chave, tipo, companyId = null, userId = null, metadata = null,
@@ -103,7 +119,11 @@ async function enviarEmailRegistrado({
   if (!id) return { status: 'duplicate' };
 
   try {
-    const r = await sendMail({ to, subject, html, text, from, replyTo, headers, _registrado: true });
+    const r = await sendMail({ to, subject, html, text, from, replyTo, headers, tipo, _registrado: true });
+    if (r && r.suprimido) {
+      await marcarSuprimido(db, id).catch((e) => console.error(`[emailLog] marcar suprimido falhou: ${e.message}`));
+      return { status: 'suprimido', id };
+    }
     const resendId = (r && r.id) || null;
     await marcarEnviado(db, id, resendId).catch((e) => console.error(`[emailLog] marcar enviado falhou: ${e.message}`));
     return { status: 'sent', id, resendId };
@@ -132,11 +152,20 @@ async function registrarEnvio({ db = null, tipo = 'outro', companyId = null, use
   }
 }
 
-/** Liga o registro de todo sendMail (chamado uma vez no boot). */
+/**
+ * Liga o registro de todo sendMail (chamado uma vez no boot). 18/11/2026:
+ * liga também o filtro da devolução permanente (services/emailDevolvido.js).
+ */
 function ligarRegistroNoMailer() {
   const mailer = require('./mailer');
   if (typeof mailer.definirRegistroDeEnvio === 'function') {
     mailer.definirRegistroDeEnvio((info) => registrarEnvio(info));
+  }
+  if (typeof mailer.definirFiltroDeDevolucao === 'function') {
+    const dev = require('./emailDevolvido');
+    mailer.definirFiltroDeDevolucao((to, tipo) => (
+      dev.respeitaDevolucao(tipo) ? dev.filtrarDestinatarios(dbPadrao(), to) : null
+    ));
   }
 }
 
@@ -145,6 +174,7 @@ module.exports = {
   reservarEnvio,
   marcarEnviado,
   marcarFalha,
+  marcarSuprimido,
   enviarEmailRegistrado,
   registrarEnvio,
   ligarRegistroNoMailer,
