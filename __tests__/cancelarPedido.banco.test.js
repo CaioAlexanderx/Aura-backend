@@ -66,6 +66,7 @@ async function limpar() {
     [`DELETE FROM caixa_sessoes WHERE company_id = ANY($1)`, [EMPRESAS]],
     [`DELETE FROM customer_credit_transactions WHERE company_id = ANY($1)`, [EMPRESAS]],
     [`DELETE FROM transactions WHERE company_id = ANY($1)`, [EMPRESAS]],
+    [`DELETE FROM finance_categories WHERE company_id = ANY($1)`, [EMPRESAS]],
     [`DELETE FROM studio_payments WHERE company_id = ANY($1)`, [EMPRESAS]],
     [`DELETE FROM digital_order_items WHERE order_id IN (SELECT id FROM digital_orders WHERE company_id = ANY($1))`, [EMPRESAS]],
     [`DELETE FROM digital_orders WHERE company_id = ANY($1)`, [EMPRESAS]],
@@ -241,6 +242,34 @@ describe('cenario da Celia: cancelamento com devolucao em dinheiro', () => {
     const { lerReservas } = require('../src/services/reservaDoPedido');
     const reservas = await lerReservas(pool, ID.loja, [ID.vestido, ID.blusa]);
     expect(reservas.size).toBe(0);
+  });
+
+  test('depois da migracao de categorias: "Devolução de sinal" sem categoria viva, e o DRE e o Resultado seguem iguais', async () => {
+    const cat = require('../src/services/financeCategories');
+    await cat.aplicarMigracao(ID.loja);
+    const { rows } = await q(
+      `SELECT t.category, f.name AS categoria FROM transactions t
+         LEFT JOIN finance_categories f ON f.id = t.category_id
+        WHERE t.idempotency_key IN ($1, $2) ORDER BY t.category`,
+      [`pedido-devolucao-${oid}`, `pedido-sinal-${oid}`]);
+    expect(rows).toEqual([
+      { category: 'Devolução de sinal', categoria: null },
+      { category: 'Sinal de pedido', categoria: 'Vendas' },
+    ]);
+
+    // dre.js: a devolucao na linha do sinal com valor negativo; liquido 0.
+    const amanha = new Date(Date.parse(hoje + 'T12:00:00Z') + 86400000).toISOString().slice(0, 10);
+    const r = await request(app).get(`/companies/${ID.loja}/dre`).query({ from: hoje.slice(0, 8) + '01', to: amanha });
+    expect(r.status).toBe(200);
+    expect(r.body.detail).toEqual([{ group: 'Receita Bruta', line: 'receita_bruta', total: 0 }]);
+    expect(r.body.summary).toMatchObject({ receita_bruta: 0, outros: 0, lucro_liquido: 0 });
+    // Linha a linha: +100 do sinal, -100 da devolucao.
+    const { DEFAULT_LINE_MAP } = require('../src/routes/dre');
+    expect(DEFAULT_LINE_MAP['devolução de sinal'].line).toBe(DEFAULT_LINE_MAP['sinal de pedido'].line);
+
+    // Resultado do periodo: Faturamento 0 e Despesas 0.
+    const res = await R.resultadoDoPeriodo({ empresas: [ID.loja], de: hoje, ate: hoje, comProdutos: false, client: pool });
+    expect(res).toMatchObject({ faturamento: 0, despesas: 0, trocas: { entrou: 0, devolvido: 0 } });
   });
 
   test('cancelar de novo: 200 ja_estava, nada lancado de novo', async () => {
