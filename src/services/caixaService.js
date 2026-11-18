@@ -389,9 +389,9 @@ async function calcularTotais(companyId, sessaoId, openedAt, closedAt) {
   const sinais = await calcularSinaisDoPedido(companyId, sessaoId, openedAt, until);
   if (sinais) {
     totais.dinheiro       += sinais.dinheiro - sinais.devolvido_dinheiro;
-    totais.pix            += sinais.pix;
-    totais.cartao_credito += sinais.cartao_credito;
-    totais.cartao_debito  += sinais.cartao_debito;
+    totais.pix            += sinais.pix - sinais.devolvido_pix;
+    totais.cartao_credito += sinais.cartao_credito - sinais.devolvido_cartao_credito;
+    totais.cartao_debito  += sinais.cartao_debito - sinais.devolvido_cartao_debito;
   }
 
   totais.geral = Object.values(totais).reduce((acc, v) => acc + v, 0);
@@ -411,6 +411,14 @@ async function calcularTotais(companyId, sessaoId, openedAt, closedAt) {
  * devolução de sinal em dinheiro. Devolve null quando não houve nenhum.
  *   dinheiro            movimentos 'sinal_pedido' da sessão
  *   devolvido_dinheiro  movimentos 'devolucao_sinal' da sessão (B6)
+ *   devolvido_pix / devolvido_cartao_*  (decisão da Célia, 18/11) a devolução
+ *                       do sinal em Pix ou por estorno no cartão abate a forma
+ *                       usada nela, na sessão em que ela acontece: a saída
+ *                       "Devolução de sinal" (pedido-devolucao-<pedido>) com
+ *                       paid_at na janela, a forma em digital_orders.refund_kind
+ *                       (o estorno vai ao cartão do sinal: débito ou crédito).
+ *                       Pode deixar a forma negativa numa sessão posterior; a
+ *                       sessão do sinal não muda. Dinheiro: pelo movimento.
  *   pix / cartao_*      entradas "Sinal de pedido" (pedido-sinal-<pedido>)
  *                       com paid_at na janela, forma de studio_payments.
  *                       O dinheiro fica de fora daqui: entra pelo movimento,
@@ -419,7 +427,10 @@ async function calcularTotais(companyId, sessaoId, openedAt, closedAt) {
  * Defensivo a deploy parcial (42P01/42703): sem as tabelas, null.
  */
 async function calcularSinaisDoPedido(companyId, sessaoId, openedAt, until) {
-  const s = { dinheiro: 0, pix: 0, cartao_credito: 0, cartao_debito: 0, total: 0, devolvido_dinheiro: 0 };
+  const s = {
+    dinheiro: 0, pix: 0, cartao_credito: 0, cartao_debito: 0, total: 0,
+    devolvido_dinheiro: 0, devolvido_pix: 0, devolvido_cartao_credito: 0, devolvido_cartao_debito: 0,
+  };
   let houve = false;
   try {
     if (movimentosDisponiveis !== false) {
@@ -465,6 +476,39 @@ async function calcularSinaisDoPedido(companyId, sessaoId, openedAt, until) {
       else if (row.forma === 'cartao') { s.cartao_credito = r2(s.cartao_credito + v); houve = true; }
       else if (row.forma === 'debito') { s.cartao_debito = r2(s.cartao_debito + v); houve = true; }
       // dinheiro: pelo movimento da sessão (acima).
+    }
+  } catch (err) {
+    if (err.code !== '42P01' && err.code !== '42703') throw err;
+  }
+  try {
+    const { rows } = await pool.query(
+      `SELECT o.refund_kind,
+              (SELECT COALESCE(sp.forma, CASE sp.method WHEN 'card' THEN 'cartao' END)
+                 FROM studio_payments sp
+                WHERE sp.order_id = o.id AND sp.kind = 'deposit' AND sp.status = 'paid'
+                ORDER BY sp.paid_at NULLS LAST LIMIT 1) AS forma_sinal,
+              COALESCE(SUM(t.amount), 0)::numeric(12,2) AS total
+         FROM transactions t
+         JOIN digital_orders o
+           ON t.idempotency_key = 'pedido-devolucao-' || o.id::text
+          AND o.company_id = t.company_id
+        WHERE t.company_id = $1
+          AND t.type = 'expense'
+          AND t.status = 'confirmed'
+          AND t.idempotency_key LIKE 'pedido-devolucao-%'
+          AND to_jsonb(o)->>'refund_kind' IN ('pix', 'estorno')
+          AND t.paid_at >= $2
+          AND t.paid_at < $3
+        GROUP BY 1, 2`,
+      [companyId, openedAt, until]
+    );
+    for (const row of rows) {
+      const v = r2(row.total);
+      if (!(v > 0)) continue;
+      houve = true;
+      if (row.refund_kind === 'pix') s.devolvido_pix = r2(s.devolvido_pix + v);
+      else if (row.forma_sinal === 'debito') s.devolvido_cartao_debito = r2(s.devolvido_cartao_debito + v);
+      else s.devolvido_cartao_credito = r2(s.devolvido_cartao_credito + v);
     }
   } catch (err) {
     if (err.code !== '42P01' && err.code !== '42703') throw err;
@@ -1144,4 +1188,6 @@ module.exports = {
   abrir, getStatus, fechar, getHistorico, getSessao,
   registrarMovimento, listarMovimentos, removerMovimento,
   _resetCache,
+  // Só para testes: os totais de uma sessão sem a trava da chave do caixa.
+  _calcularTotais: calcularTotais,
 };

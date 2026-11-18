@@ -103,6 +103,8 @@ beforeAll(async () => {
   app.use((req, _res, next) => { req.user = usuario; next(); });
   app.use('/companies/:id/pedidos', require('../src/routes/pedidosDoBalcao'));
   app.use('/companies/:id/caixa', require('../src/routes/caixa'));
+  app.use('/companies/:id/dashboard', require('../src/routes/dashboard'));
+  app.use('/companies/:id/dre', require('../src/routes/dre'));
   app.use((err, _req, res, _next) => res.status(err.statusCode || err.status || 500).json({ error: err.message }));
 });
 
@@ -217,6 +219,40 @@ describe('sinal em dinheiro com o caixa ligado e fechado', () => {
   });
 });
 
+describe('chave do caixa desligada com sessao aberta: a regra da venda (revisao do Fable)', () => {
+  test('o sinal em dinheiro entra na sessao aberta; a devolucao em dinheiro sai dela', async () => {
+    await abrirCaixa(); // liga, abre a sessao...
+    await q(`UPDATE companies SET pdv_settings = '{"caixa_enabled": false}'::jsonb WHERE id = $1`, [ID.loja]); // ...e desliga
+    const r = await guardar({ items: ITENS_CELIA, customer_id: ID.cliente, sinal: { amount: 100, method: 'dinheiro' } });
+    expect(r.status).toBe(201);
+    const oid = r.body.order.id;
+    expect(await movimentos()).toEqual([expect.objectContaining({ tipo: 'sinal_pedido', valor: 100, sessao_id: ID.sessao })]);
+
+    // A venda faz o mesmo: grava a forma na sessao aberta com a chave desligada.
+    const caixaService = require('../src/services/caixaService');
+    await respirar();
+    const totais = await (async () => {
+      const { rows: [s] } = await q(`SELECT opened_at FROM caixa_sessoes WHERE id = $1`, [ID.sessao]);
+      return caixaService._calcularTotais(ID.loja, ID.sessao, s.opened_at, null);
+    })();
+    expect(totais).toMatchObject({ dinheiro: 100, outros: 0 });
+
+    const c = await request(app).post(`/companies/${ID.loja}/pedidos/${oid}/cancelar`)
+      .send({ refund_kind: 'devolucao', refund_method: 'dinheiro' });
+    expect(c.status).toBe(200);
+    expect(c.body.cancelamento.movimento_caixa).toBe(true);
+    expect((await movimentos()).map((m) => [m.tipo, m.valor, m.sessao_id]).sort())
+      .toEqual([['devolucao_sinal', 100, ID.sessao], ['sinal_pedido', 100, ID.sessao]]);
+  });
+
+  test('chave desligada e sem sessao: o sinal em dinheiro so e registrado (sem 409, sem movimento)', async () => {
+    await q(`UPDATE companies SET pdv_settings = '{"caixa_enabled": false}'::jsonb WHERE id = $1`, [ID.loja]);
+    const oid = await pedidoSemSinal();
+    expect((await sinal(oid, { amount: 100, method: 'dinheiro' })).status).toBe(201);
+    expect(await movimentos()).toEqual([]);
+  });
+});
+
 describe('cenario da Celia com sinal em dinheiro: caixa aberto, fechamento', () => {
   test('o sinal entra na gaveta, sai de "outras entradas" e o fechamento bate', async () => {
     await abrirCaixa(); // troco 50
@@ -232,7 +268,7 @@ describe('cenario da Celia com sinal em dinheiro: caixa aberto, fechamento', () 
     const s = await status();
     expect(s.totais_ao_vivo).toMatchObject({ dinheiro: 100, pix: 0, outros: 0, geral: 100 });
     expect(s.totais_ao_vivo.sinais_pedido).toEqual({
-      dinheiro: 100, pix: 0, cartao_credito: 0, cartao_debito: 0, total: 100, devolvido_dinheiro: 0,
+      dinheiro: 100, pix: 0, cartao_credito: 0, cartao_debito: 0, total: 100, devolvido_dinheiro: 0, devolvido_pix: 0, devolvido_cartao_credito: 0, devolvido_cartao_debito: 0,
     });
     expect(s.dinheiro_em_caixa).toBe(150);
     expect(s.suprimentos).toBe(0);
@@ -279,7 +315,7 @@ describe('Pix, credito e debito: na forma deles', () => {
     const s = await status();
     expect(s.totais_ao_vivo).toMatchObject({ pix: 100, cartao_credito: 60, cartao_debito: 40, dinheiro: 0, outros: 25, geral: 225 });
     expect(s.totais_ao_vivo.sinais_pedido).toEqual({
-      dinheiro: 0, pix: 100, cartao_credito: 60, cartao_debito: 40, total: 200, devolvido_dinheiro: 0,
+      dinheiro: 0, pix: 100, cartao_credito: 60, cartao_debito: 40, total: 200, devolvido_dinheiro: 0, devolvido_pix: 0, devolvido_cartao_credito: 0, devolvido_cartao_debito: 0,
     });
     expect(s.dinheiro_em_caixa).toBe(50);
 
@@ -355,5 +391,85 @@ describe('loja sem pedido: o caixa responde como sempre', () => {
     expect(Number(f.total_geral)).toBe(37);
     const det = await request(app).get(`/companies/${ID.semPedido}/caixa/sessao/${ID.sessaoSemPedido}`);
     expect(det.body.sessao).not.toHaveProperty('sinais_pedido');
+  });
+});
+
+describe('devolucao do sinal em Pix ou estorno: abate a forma na sessao em que acontece (decisao da Celia, 18/11)', () => {
+  const R = require('../src/services/resultadoDoPeriodo');
+  const hoje = () => require('../src/services/pedidoBalcao').hojeSP();
+  const cancelarDevolvendo = (oid, refund_method) => request(app)
+    .post(`/companies/${ID.loja}/pedidos/${oid}/cancelar`).send({ refund_kind: 'devolucao', refund_method });
+  async function financeiro() {
+    const d = hoje();
+    const res = await R.resultadoDoPeriodo({ empresas: [ID.loja], de: d, ate: d, comProdutos: false, client: pool });
+    const painel = await request(app).get(`/companies/${ID.loja}/dashboard`);
+    const amanha = new Date(Date.parse(d + 'T12:00:00Z') + 86400000).toISOString().slice(0, 10);
+    const dre = await request(app).get(`/companies/${ID.loja}/dre`).query({ from: d.slice(0, 8) + '01', to: amanha });
+    const receitaBruta = (dre.body.detail.find((x) => x.line === 'receita_bruta') || { total: 0 }).total;
+    return {
+      faturamento: r2(res.faturamento), despesas: r2(res.despesas),
+      painel_receita: r2(painel.body.revenue), painel_despesas: r2(painel.body.expenses),
+      dre_receita_bruta: r2(receitaBruta),
+    };
+  }
+
+  test('sinal Pix 100 e devolucao Pix 100 na mesma sessao: Pix 0; Faturamento, Despesas e DRE zerados', async () => {
+    await abrirCaixa();
+    const oid = await pedidoSemSinal();
+    expect((await sinal(oid, { amount: 100, method: 'pix' })).status).toBe(201);
+    expect((await status()).totais_ao_vivo.pix).toBe(100);
+    expect((await cancelarDevolvendo(oid, 'pix')).status).toBe(200);
+
+    const s = await status();
+    expect(s.totais_ao_vivo).toMatchObject({ pix: 0, outros: 0, geral: 0 });
+    expect(s.totais_ao_vivo.sinais_pedido).toMatchObject({ pix: 100, devolvido_pix: 100, total: 100 });
+    expect(s.dinheiro_em_caixa).toBe(50);
+    const f = await financeiro();
+    // Resultado (p-81/p-82) e DRE: o sinal e a devolucao se anulam. O Painel
+    // de hoje soma receita e despesa sem compensar (100 e 100), regra do B6.
+    expect(f).toMatchObject({ faturamento: 0, despesas: 0, dre_receita_bruta: 0 });
+    process.stdout.write(`
+[devolucao Pix mesma sessao] ${JSON.stringify(f)}
+`);
+    const fe = await fechar(ID.loja, 50);
+    expect(Number(fe.total_pix)).toBe(0);
+    expect(Number(fe.diferenca)).toBe(0);
+  });
+
+  test('em duas sessoes: +100 no Pix da primeira e -100 no Pix da segunda; a primeira nao muda', async () => {
+    await abrirCaixa();
+    const oid = await pedidoSemSinal();
+    expect((await sinal(oid, { amount: 100, method: 'pix' })).status).toBe(201);
+    const f1 = await fechar(ID.loja, 50);
+    expect(Number(f1.total_pix)).toBe(100);
+
+    const sessao2 = uuid();
+    await q(`INSERT INTO caixa_sessoes (id, company_id, opened_by, troco_inicial, status, opened_at)
+             VALUES ($1, $2, $3, 50, 'aberta', NOW())`, [sessao2, ID.loja, ID.dono]);
+    await respirar();
+    expect((await cancelarDevolvendo(oid, 'pix')).status).toBe(200);
+    const s2 = await status();
+    expect(s2.totais_ao_vivo).toMatchObject({ pix: -100, geral: -100 });
+    expect(s2.totais_ao_vivo.sinais_pedido).toMatchObject({ pix: 0, devolvido_pix: 100, total: 0 });
+    const f2 = await fechar(ID.loja, 50);
+    expect(Number(f2.total_pix)).toBe(-100);
+    expect(Number(f2.dinheiro_esperado)).toBe(50);
+
+    const d1 = await request(app).get(`/companies/${ID.loja}/caixa/sessao/${ID.sessao}`);
+    expect(Number(d1.body.sessao.total_pix)).toBe(100);
+    expect(d1.body.sessao.sinais_pedido).toMatchObject({ pix: 100, devolvido_pix: 0 });
+  });
+
+  test('estorno no cartao: abate o cartao do sinal (debito no debito, credito no credito)', async () => {
+    await abrirCaixa();
+    const deb = await pedidoSemSinal();
+    const cre = await pedidoSemSinal();
+    expect((await sinal(deb, { amount: 60, method: 'debito' })).status).toBe(201);
+    expect((await sinal(cre, { amount: 40, method: 'cartao' })).status).toBe(201);
+    expect((await cancelarDevolvendo(deb, 'estorno')).status).toBe(200);
+    expect((await cancelarDevolvendo(cre, 'estorno')).status).toBe(200);
+    const s = await status();
+    expect(s.totais_ao_vivo).toMatchObject({ cartao_debito: 0, cartao_credito: 0, geral: 0 });
+    expect(s.totais_ao_vivo.sinais_pedido).toMatchObject({ devolvido_cartao_debito: 60, devolvido_cartao_credito: 40 });
   });
 });

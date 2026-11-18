@@ -102,13 +102,11 @@ function lerDestino(body, temSinal) {
   };
 }
 
+// B4b (revisao do Fable): a mesma leitura do sinal (sinalDoPedido.sessaoDoCaixa)
+// e da venda: com sessao aberta, a devolucao em dinheiro sai dela mesmo com a
+// chave caixa_enabled desligada.
 async function caixaDaLoja(client, companyId) {
-  const { rows } = await client.query(`SELECT pdv_settings FROM companies WHERE id = $1`, [companyId]);
-  const ligado = !!(rows[0] && rows[0].pdv_settings && rows[0].pdv_settings.caixa_enabled);
-  if (!ligado) return { ligado: false, sessaoId: null };
-  const { rows: s } = await client.query(
-    `SELECT id FROM caixa_sessoes WHERE company_id = $1 AND status = 'aberta' LIMIT 1`, [companyId]);
-  return { ligado: true, sessaoId: s[0] ? s[0].id : null };
+  return sinalDoPedido.sessaoDoCaixa(client, companyId);
 }
 
 /**
