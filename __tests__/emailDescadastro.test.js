@@ -143,8 +143,9 @@ describe('descadastro', () => {
     const adulterado = t.slice(0, -2) + (t.endsWith('A') ? 'BB' : 'AA');
     const outroTipo = links.tokenDescadastro(EMP, 'marketing');
     const cobranca = links.tokenDescadastro(EMP, 'cobranca');
+    const excecaoKarate = links.tokenDescadastro(EMP, 'cobranca_karate');
     const qr = links.linkQrDoPix('PIX').split('/').pop().replace('.png', '');
-    for (const tk of [adulterado, outroTipo, cobranca, qr, 'lixo']) {
+    for (const tk of [adulterado, outroTipo, cobranca, excecaoKarate, qr, 'lixo']) {
       expect((await request(app()).post('/emails/descadastro/' + tk).type('form').send('List-Unsubscribe=One-Click')).status).toBe(404);
       expect((await request(app()).get('/emails/descadastro/' + tk)).status).toBe(404);
     }

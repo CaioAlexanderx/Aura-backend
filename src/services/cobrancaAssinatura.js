@@ -236,14 +236,66 @@ async function registrarCobranca(db, { companyId, payment, estado, origem = 'web
 // ── Destinatário ────────────────────────────────────────────────
 const VERTICAIS_FORA = ['karate_dojo', 'karate_federation'];
 
+// Exceção do Karatê (18/11/2026, decisão do Caio): a empresa do Karatê que
+// paga a assinatura pode receber SÓ estes três e-mails, e só com a exceção
+// ligada pela equipe. Atraso (1, 3, 7), pausa do Caixa, estorno,
+// contestação, cartão recusado, nova data, assinatura cancelada e o resto
+// continuam fora para o Karatê inteiro.
+const TIPOS_DO_KARATE = Object.freeze([
+  'cobranca_pagamento_confirmado',
+  'cobranca_lembrete_2_dias',
+  'cobranca_vence_hoje',
+]);
+
+// A exceção é um DADO por empresa, gravado pela equipe (nunca um id no
+// código): uma linha em company_notification_prefs com este event_type e
+// enabled = true. Por que esta tabela e não company_email_prefs: o CHECK de
+// company_email_prefs.tipo (migrations 409/426) recusa tipo novo sem
+// migration. Aqui não há CHECK, e o lojista não grava este tipo: o PUT de
+// /notifications/preferences só aceita a taxonomia de lojaEvents
+// (isPrefKey), e o GET só devolve as chaves da taxonomia.
+const EXCECAO_KARATE = 'cobranca_karate';
+
+function ehDoKarate(c) {
+  return VERTICAIS_FORA.includes(c.vertical) || VERTICAIS_FORA.includes(c.vertical_active);
+}
+
+/**
+ * A empresa do Karatê tem a exceção ligada? Lida na hora, sem cache. Sem a
+ * tabela ou com falha na leitura: false (na dúvida, nada sai, como antes).
+ */
+async function karateComExcecao(db, companyId) {
+  try {
+    const r = await db.query(
+      `SELECT 1 FROM company_notification_prefs
+        WHERE company_id = $1 AND event_type = $2 AND enabled = true
+        LIMIT 1`,
+      [companyId, EXCECAO_KARATE]
+    );
+    return !!(r && r.rows && r.rows.length);
+  } catch (err) {
+    if (!err || err.code !== '42P01') {
+      console.error('[cobrancaAssinatura] exceção do Karatê não pôde ser lida: ' + (err && err.message));
+    }
+    return false;
+  }
+}
+
 /**
  * Quem recebe o e-mail de cobrança da empresa (o dono), ou null quando a
- * empresa fica fora: inativa, sandbox, Karatê/dojô, conta da equipe
- * (users.is_staff; o domínio do e-mail não conta) e conta pendente (tq-113: dono nunca confirmou o
- * e-mail, utils/contaPendente). Sem e-mail no cadastro: o objeto vem com
- * email null.
+ * empresa fica fora: inativa, sandbox, conta da equipe (users.is_staff; o
+ * domínio do e-mail não conta), conta pendente (tq-113: dono nunca confirmou
+ * o e-mail, utils/contaPendente) e Karatê/dojô. Sem e-mail no cadastro: o
+ * objeto vem com email null.
+ *
+ * Karatê: fora, salvo `tipo` em TIPOS_DO_KARATE E a exceção ligada na
+ * empresa (karateComExcecao). Só a empresa do Karatê com um desses três
+ * tipos faz a consulta a mais; as outras não.
+ *
+ * @param {object} [opts]
+ * @param {string} [opts.tipo] tipo do e-mail (email_log.tipo) que vai sair
  */
-async function destinatarioDaEmpresa(db, companyId) {
+async function destinatarioDaEmpresa(db, companyId, { tipo = null } = {}) {
   const r = await db.query(
     `SELECT c.id, COALESCE(c.trade_name, c.legal_name) AS loja, c.email AS company_email,
             c.is_active, c.is_sandbox, c.vertical, c.vertical_active,
@@ -256,7 +308,8 @@ async function destinatarioDaEmpresa(db, companyId) {
   const c = r && r.rows && r.rows[0];
   if (!c) return null;
   if (c.is_active === false || c.is_sandbox === true) return null;
-  if (VERTICAIS_FORA.includes(c.vertical) || VERTICAIS_FORA.includes(c.vertical_active)) return null;
+  const karate = ehDoKarate(c);
+  if (karate && !TIPOS_DO_KARATE.includes(tipo)) return null;
   if (c.is_staff === true) return null;
   // tq-113: conta pendente não recebe e-mail de cobrança. Só decide quando a
   // linha trouxe o dono (user_id) e o campo email_verified.
@@ -264,6 +317,8 @@ async function destinatarioDaEmpresa(db, companyId) {
     email_verified: c.email_verified, is_staff: c.is_staff, is_sandbox: c.is_sandbox,
     owner_email: c.user_email, company_email: c.company_email,
   })) return null;
+  // Por último: a consulta a mais só para quem passou pelos outros filtros.
+  if (karate && !(await karateComExcecao(db, c.id))) return null;
   const email = String(c.user_email || c.company_email || '').trim();
   return {
     companyId: c.id,
@@ -409,7 +464,7 @@ async function aoEventoDaAssinatura({ db, asaas, enviar, event, payment, fromAsa
     }
     if (!tipo) return resultado;
 
-    const destino = await destinatarioDaEmpresa(db, company.id);
+    const destino = await destinatarioDaEmpresa(db, company.id, { tipo });
     if (!destino || !destino.email) {
       resultado.email = 'fora';
       return resultado;
@@ -459,7 +514,7 @@ async function enviarNovaDataCombinada({ db, asaas, enviar, companyId, paymentId
   const v = conteudos.valorParaEmail(payment, { situacao: 'aberta', hoje });
   if (!v || v.comJuros) return { status: 'nao_enviado', motivo: v ? 'com_multa_ou_juros' : 'valor_indisponivel' };
 
-  const destino = await destinatarioDaEmpresa(db, companyId);
+  const destino = await destinatarioDaEmpresa(db, companyId, { tipo: 'cobranca_nova_data' });
   if (!destino || !destino.email) return { status: 'fora' };
   const pix = await pixDaCobranca(asaas, paymentId);
   const conteudo = conteudos.novaDataCombinada({
@@ -491,6 +546,9 @@ module.exports = {
   dataDoPagamento,
   registrarCobranca,
   destinatarioDaEmpresa,
+  karateComExcecao,
+  TIPOS_DO_KARATE,
+  EXCECAO_KARATE,
   pixDaCobranca,
   linkDaFatura,
   enviarCobranca,

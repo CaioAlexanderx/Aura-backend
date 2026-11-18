@@ -232,6 +232,26 @@ describe('preferencias', () => {
     expect(db.query.mock.calls.some((c) => /INSERT INTO company_notification_prefs/.test(c[0]))).toBe(false);
   });
 
+  // Exceção do Karatê nos e-mails de cobrança (cobrancaAssinatura): linha
+  // 'cobranca_karate' gravada só pela equipe. O lojista não liga nem vê.
+  test('PUT recusa cobranca_karate (exceção da equipe) e nao grava nada', async () => {
+    mockFeed();
+    const res = await request(app)
+      .put(`/api/v1/companies/${CID}/notifications/preferences`).set(auth)
+      .send({ preferences: { cobranca_karate: true } });
+    expect(res.status).toBe(400);
+    expect(res.body.valid_types).not.toContain('cobranca_karate');
+    expect(db.query.mock.calls.some((c) => /INSERT INTO company_notification_prefs/.test(c[0]))).toBe(false);
+  });
+
+  test('GET nao devolve a linha cobranca_karate', async () => {
+    mockFeed({ prefs: [{ event_type: 'cobranca_karate', enabled: true }] });
+    const res = await request(app).get(`/api/v1/companies/${CID}/notifications/preferences`).set(auth);
+    expect(res.status).toBe(200);
+    expect(res.body.preferences).not.toHaveProperty('cobranca_karate');
+    expect(res.body.catalog.some((p) => p.type === 'cobranca_karate')).toBe(false);
+  });
+
   test('PUT recusa valor que nao e booleano', async () => {
     mockFeed();
     const res = await request(app)
