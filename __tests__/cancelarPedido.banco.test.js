@@ -211,7 +211,9 @@ describe('cenario da Celia: cancelamento com devolucao em dinheiro', () => {
   });
 
   test('DRE: a linha de receita bruta fecha em 0, sem despesa', async () => {
-    const r = await request(app).get(`/companies/${ID.loja}/dre`).query({ from: hoje.slice(0, 8) + '01', to: hoje });
+    // dre.js filtra por paid_at::date em UTC: o fim vai um dia alem de hoje.
+    const amanha = new Date(Date.parse(hoje + 'T12:00:00Z') + 86400000).toISOString().slice(0, 10);
+    const r = await request(app).get(`/companies/${ID.loja}/dre`).query({ from: hoje.slice(0, 8) + '01', to: amanha });
     expect(r.status).toBe(200);
     expect(r.body.summary).toMatchObject({ receita_bruta: 0, outros: 0, lucro_liquido: 0 });
     expect(Math.abs(r.body.summary.despesa_variavel)).toBe(0);
