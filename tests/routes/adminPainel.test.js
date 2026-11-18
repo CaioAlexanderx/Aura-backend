@@ -110,9 +110,12 @@ describe('GET /admin/painel/hoje', () => {
     // só leitura: 2 consultas do painel + a leitura do hub para o alerta de
     // contato (que depende do relógio e por isso não vem gravado) + a leitura
     // ao vivo dos erros por minuto (últimos 60 min, também não vem gravada)
+    // + a leitura ao vivo do e-mail de confirmação que voltou (18/11/2026)
     const sqls = db.query.mock.calls.map((c) => c[0]);
-    const doPainel = sqls.filter((q) => !q.includes('-- contatos:') && !q.includes('FROM erros_por_minuto'));
+    const doPainel = sqls.filter((q) => !q.includes('-- contatos:') && !q.includes('FROM erros_por_minuto')
+      && !q.includes('-- painel:verificacao_devolvida'));
     expect(doPainel).toHaveLength(2);
+    expect(sqls.filter((q) => q.includes('-- painel:verificacao_devolvida'))).toHaveLength(1);
     expect(sqls.filter((q) => q.includes('-- contatos:')).length).toBeGreaterThan(0);
     expect(sqls.filter((q) => q.includes('FROM erros_por_minuto'))).toHaveLength(1);
     expect(escritas).toHaveLength(0);
@@ -173,6 +176,30 @@ describe('GET /admin/painel/hoje', () => {
       // 05:30 → 09:00 BRT: 3h30 sem resposta humana (a Aurinha já respondeu)
       { tipo: 'contato_sem_resposta', company_id: null, titulo: '+55 12 98888-0077 sem resposta há 3 h 30 min', detalhe: 'WhatsApp +55 12 98888-0077 · https://wa.me/5512988880077 · Aurinha já respondeu', verbo: 'Responder', bloco: 'contatos' },
     ]);
+  });
+
+  test('e-mail de confirmação que voltou: vale o de agora, com o link do WhatsApp da loja (18/11/2026)', async () => {
+    const dados = fake.dadosPadrao();
+    dados.gravados = doDia.gravados;
+    // O job gravou um alerta que já não vale (a pessoa confirmou depois).
+    dados.alertasGravados = doDia.alertas.concat([{
+      tipo: 'verificacao_devolvida', chave: fake.id(9), company_id: fake.id(9),
+      titulo: 'Loja Antiga: e-mail de confirmação voltou', detalhe: 'x', verbo: 'Falar', bloco: 'cadastros',
+    }]);
+    dados.verificacaoDevolvida = [{
+      company_id: fake.id(3), nome: 'Loja Nova', telefone: '(12) 98888-0001', created_at: '2026-10-12T15:00:00.000Z',
+    }];
+    fake.ligar(db.query, dados);
+    const { body } = await api('get', '/hoje');
+    const deles = body.alertas.filter((a) => a.tipo === 'verificacao_devolvida');
+    expect(deles).toEqual([{
+      tipo: 'verificacao_devolvida', company_id: fake.id(3),
+      titulo: 'Loja Nova: e-mail de confirmação voltou',
+      detalhe: 'Cadastro de 12/10 · não confirmou · falar no WhatsApp',
+      verbo: 'Falar', bloco: 'cadastros', link: 'https://wa.me/5512988880001',
+    }]);
+    // os outros alertas não ganham `link`
+    expect(body.alertas.filter((a) => a.tipo !== 'verificacao_devolvida').some((a) => 'link' in a)).toBe(false);
   });
 
   test('alerta de contato vale o de agora, não o gravado às 06h', async () => {

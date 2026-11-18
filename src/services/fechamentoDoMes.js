@@ -26,7 +26,7 @@
 const db = require('../config/database');
 const P = require('./emailPreferencias');
 const { semPendente } = require('../utils/contaPendente');
-const { reservarEnvio, marcarEnviado, marcarFalha } = require('./emailLog');
+const { reservarEnvio, marcarEnviado, marcarFalha, marcarSuprimido } = require('./emailLog');
 const { vendasPorNumeracao, resolverPeriodo, hojeSP, SEM_NUMERACAO } = require('./vendasPorNumeracao');
 const { montarXlsx } = require('./planilhaXlsx');
 
@@ -215,6 +215,13 @@ async function enviarGrupo(g, { periodo, env = process.env, enviar, gerar = vend
         contentType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
       }],
     });
+    // 18/11/2026: todos os destinatários com devolução permanente.
+    if (envio && envio.suprimido) {
+      await marcarSuprimido(db, logId).catch(() => {});
+      jaResolvido.add(chave);
+      console.log(`[fechamentoDoMes] skipped (devolucao permanente) company=${g.primaria.id}`);
+      return 'skipped';
+    }
     await marcarEnviado(db, logId, (envio && envio.id) || null).catch(() => {});
     jaResolvido.add(chave);
     console.log(`[fechamentoDoMes] sent company=${g.primaria.id} id=${(envio && envio.id) || '-'}`);
