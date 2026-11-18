@@ -59,6 +59,8 @@ const { normalizarTelefone } = require('../utils/telefone');
 const { mesmosItens, INDICE } = require('./pedidoOnlineIdempotente');
 const { lerReservas, reservadoDaVariante } = require('./reservaDoPedido');
 const { vendaSemEstoqueLiberada } = require('../utils/vendaSemEstoque');
+// INC-2026-11-18-02: servico (unit 'srv') nunca e barrado por saldo.
+const { ehUnidadeServico } = require('./notaDoItem');
 const sinalDoPedido = require('./sinalDoPedido');
 
 const ORIGEM_BALCAO = 'balcao';
@@ -224,7 +226,7 @@ async function conferirProdutos(client, companyId, itens) {
   const ids = [...new Set(itens.filter((i) => i.product_id).map((i) => i.product_id))];
   if (!ids.length) return;
   const { rows } = await client.query(
-    `SELECT p.id, p.name, p.stock_qty,
+    `SELECT p.id, p.name, p.stock_qty, p.unit,
             (p.is_personalizable IS TRUE AND p.customization_config IS NOT NULL) AS sob_encomenda
        FROM products p
       WHERE p.id = ANY($1::uuid[])
@@ -250,6 +252,7 @@ async function conferirProdutos(client, companyId, itens) {
     // Nome gravado: o do cadastro (o do corpo so vale para item sem cadastro).
     it.nome = p.name || it.nome;
     it.sobEncomenda = p.sob_encomenda === true;
+    it.servico = ehUnidadeServico(p.unit);
     it.estoque = Number(p.stock_qty) || 0;
     if (it.variant_id) {
       const v = variantes.get(it.variant_id);
@@ -272,7 +275,7 @@ async function conferirProdutos(client, companyId, itens) {
 async function conferirSaldo(client, companyId, itens) {
   const linhas = new Map();
   for (const it of itens) {
-    if (!it.product_id || it.sobEncomenda) continue;
+    if (!it.product_id || it.sobEncomenda || it.servico) continue;
     const k = `${it.product_id}|${it.variant_id || ''}`;
     const l = linhas.get(k) || { it, quantidade: 0 };
     l.quantidade += it.quantity;

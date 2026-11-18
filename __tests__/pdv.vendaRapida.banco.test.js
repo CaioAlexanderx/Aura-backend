@@ -48,7 +48,7 @@ const ID = {
   dono: uuid(),
   matriz: uuid(), filial: uuid(), fora: uuid(),
   simples: uuid(), grade: uuid(), daFilial: uuid(), ultimo: uuid(), deFora: uuid(),
-  promo: uuid(), perso: uuid(), inexistente: uuid(),
+  promo: uuid(), perso: uuid(), inexistente: uuid(), servico: uuid(),
   varP: uuid(), varM: uuid(), varUltima: uuid(),
   vendedora: uuid(), vendedoraDeFora: uuid(),
   cliente: uuid(), clienteDeFora: uuid(),
@@ -132,6 +132,9 @@ async function semear({ settings = {}, caixaAberto = false, creditoDaCliente = 0
   await produto(ID.deFora, ID.fora, 'Produto de outra empresa', 9, 2, 9);
   await produto(ID.promo, ID.matriz, 'Vestido em promocao', 100, 40, 6);
   await produto(ID.perso, ID.matriz, 'Caneca personalizada', 35, 9, 4);
+  // INC-2026-11-18-02: servico (unit 'srv') nasce e fica com saldo 0.
+  await produto(ID.servico, ID.matriz, 'Instalacao', 80, 0, 0);
+  await q(`UPDATE products SET unit = 'srv' WHERE id = $1`, [ID.servico]);
   await q(`UPDATE products SET is_group_shared = true WHERE id = $1`, [ID.daFilial]);
   await q(`UPDATE products SET promo_price = 79.9, promo_starts_at = NOW() - INTERVAL '1 day',
              promo_ends_at = NOW() + INTERVAL '1 day' WHERE id = $1`, [ID.promo]);
@@ -313,6 +316,10 @@ const CENARIOS = [
       items: [item(ID.ultimo, 3, 30), item(ID.grade, 2, 25, { variant_id: ID.varM })],
       payment_method: 'dinheiro',
     } },
+
+  // INC-2026-11-18-02: servico com saldo 0 e "vender sem estoque" desligado.
+  { nome: 'servico com saldo zero, sem a chave: entra, sem baixa nem movimento do servico', status: 201,
+    body: { items: [item(ID.servico, 1, 80), item(ID.simples, 1, 10)], payment_method: 'pix' } },
 
   { nome: 'venda retroativa (sale_date): nao confere o estoque', status: 201,
     body: { items: [item(ID.ultimo, 5, 30), item(ID.simples, 1, 10)], payment_method: 'cartao', sale_date: '2026-10-05' } },
@@ -562,6 +569,28 @@ const contar = async (tabela, onde = 'company_id = ANY($1)') =>
   (await pool.query(`SELECT COUNT(*)::int AS n FROM ${tabela} WHERE ${onde}`, [EMPRESAS])).rows[0].n;
 const saldo = async (tabela, id) =>
   Number((await pool.query(`SELECT stock_qty FROM ${tabela} WHERE id = $1`, [id])).rows[0].stock_qty);
+
+// INC-2026-11-18-02: servico (unit 'srv') nunca e barrado nem baixado por saldo.
+describe('servico nao tem saldo (os dois caminhos)', () => {
+  test.each(['fila', 'rapido'])('%s: entra com saldo zero, sem baixa nem stock_movements do servico', async (caminho) => {
+    const c = CENARIOS.find((x) => x.nome.startsWith('servico com saldo zero'));
+    const r = await rodar(c, caminho);
+    expect(r.respostas[0].status).toBe(201);
+    expect(await saldo('products', ID.servico)).toBe(0);
+    expect(await saldo('products', ID.simples)).toBe(19);
+    expect(await contar('stock_movements', `company_id = ANY($1) AND product_id = '${ID.servico}'`)).toBe(0);
+    expect(await contar('stock_movements', `company_id = ANY($1) AND product_id = '${ID.simples}'`)).toBe(1);
+    expect(await contar('sale_items', `${FILHAS[0][1]} AND product_id = '${ID.servico}'`)).toBe(1);
+  });
+
+  test('produto comum com saldo zero, sem a chave, segue 409 (os dois caminhos)', async () => {
+    for (const caminho of ['fila', 'rapido']) {
+      const r = await rodar({ body: { items: [item(ID.servico, 1, 80), item(ID.grade, 1, 25, { variant_id: ID.varM })], payment_method: 'pix' } }, caminho);
+      expect(r.respostas[0].status).toBe(409);
+      expect(await contar('sales')).toBe(0);
+    }
+  });
+});
 
 describe('concorrencia: vendas simultaneas do ultimo item (caminho novo)', () => {
   beforeEach(() => usarCaminho('rapido'));

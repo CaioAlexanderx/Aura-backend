@@ -187,7 +187,7 @@ async function lerProdutos(client, { companyId, items, employeeId, comPromocao, 
          FROM unnest($1::uuid[], $3::uuid[]) WITH ORDINALITY AS i(product_id, variant_id, ord)
      ),
      prod AS (
-       SELECT p.id, p.name, p.cost_price, p.stock_qty, p.company_id
+       SELECT p.id, p.name, p.cost_price, p.stock_qty, p.company_id, p.unit
               ${comPromocao ? ', p.price, p.promo_price, p.promo_starts_at, p.promo_ends_at' : ''}
          FROM products p JOIN companies c ON c.id = $2
         WHERE p.id IN (SELECT product_id FROM itens) AND ${productVisibilityWhere('$2', 'p.')}
@@ -214,7 +214,7 @@ async function lerProdutos(client, { companyId, items, employeeId, comPromocao, 
      )
      SELECT i.ord, prod.name, prod.cost_price,
             COALESCE(tp.stock_qty, prod.stock_qty) AS stock_qty,
-            prod.company_id AS stock_company_id,
+            prod.company_id AS stock_company_id, prod.unit,
             tv.id AS variante_id, tv.stock_qty AS variante_stock_qty, tv.sku_suffix AS variante_sku_suffix
             ${comPromocao ? `, prod.price, prod.promo_price, prod.promo_starts_at, prod.promo_ends_at,
             tv.price_override AS variante_price_override, tv.promo_price AS variante_promo_price,
@@ -233,7 +233,7 @@ async function lerProdutos(client, { companyId, items, employeeId, comPromocao, 
     const idx = indices[Number(r.ord) - 1];
     const item = items[idx];
     const alvo = porItem[idx];
-    alvo.p = [{ name: r.name, cost_price: r.cost_price, stock_qty: r.stock_qty, stock_company_id: r.stock_company_id }];
+    alvo.p = [{ name: r.name, cost_price: r.cost_price, stock_qty: r.stock_qty, stock_company_id: r.stock_company_id, unit: r.unit }];
     if (item.variant_id && r.variante_id) {
       alvo.v = [{ stock_qty: r.variante_stock_qty, sku_suffix: r.variante_sku_suffix }];
     }
@@ -323,6 +323,8 @@ async function gravarItens(client, {
     col((i) => i.line_total),
     col((i) => i.product_name_snapshot),
     col((i) => (i.product_id ? i.stock_company_id : null)),
+    // INC-2026-11-18-02: servico (unit 'srv') nao baixa nem gera movimento.
+    col((i) => !i.sem_baixa_de_estoque),
   ];
   let marcaCols = '';
   let marcaSrc = '';
@@ -357,11 +359,11 @@ async function gravarItens(client, {
   const { rows } = await client.query(
     `WITH src AS (
        SELECT t.ord, uuid_generate_v4() AS id, t.product_id, t.variant_id, t.quantity, t.unit_price,
-              t.unit_cost, t.discount, t.total_price, t.nome, t.stock_company_id${marcaAlias ? ', t.preco_lista, t.em_promocao' : ''}
+              t.unit_cost, t.discount, t.total_price, t.nome, t.stock_company_id, t.baixa${marcaAlias ? ', t.preco_lista, t.em_promocao' : ''}
          FROM unnest($2::uuid[], $3::uuid[], $4::numeric[], $5::numeric[], $6::numeric[], $7::numeric[],
-                     $8::numeric[], $9::text[], $10::uuid[]${marcaUnnest})
+                     $8::numeric[], $9::text[], $10::uuid[], $11::boolean[]${marcaUnnest})
               WITH ORDINALITY AS t(product_id, variant_id, quantity, unit_price, unit_cost, discount,
-                                   total_price, nome, stock_company_id${marcaAlias}, ord)
+                                   total_price, nome, stock_company_id, baixa${marcaAlias}, ord)
      ),
      itens_gravados AS (
        INSERT INTO sale_items (id, sale_id, product_id, variant_id, quantity, unit_price, unit_cost,
@@ -375,7 +377,7 @@ async function gravarItens(client, {
        UPDATE product_variants v
           SET stock_qty = GREATEST(0, v.stock_qty - q.quantidade), updated_at = NOW()
          FROM (SELECT variant_id, product_id, stock_company_id, SUM(quantity) AS quantidade
-                 FROM src WHERE product_id IS NOT NULL AND variant_id IS NOT NULL
+                 FROM src WHERE product_id IS NOT NULL AND variant_id IS NOT NULL AND baixa
                 GROUP BY variant_id, product_id, stock_company_id) q
         WHERE v.id = q.variant_id AND v.product_id = q.product_id
           AND v.product_id IN (SELECT p.id FROM products p WHERE p.id = q.product_id AND p.company_id = q.stock_company_id)
@@ -384,14 +386,14 @@ async function gravarItens(client, {
        UPDATE products p
           SET stock_qty = GREATEST(0, p.stock_qty - q.quantidade), updated_at = NOW()
          FROM (SELECT product_id, stock_company_id, SUM(quantity) AS quantidade
-                 FROM src WHERE product_id IS NOT NULL AND variant_id IS NULL
+                 FROM src WHERE product_id IS NOT NULL AND variant_id IS NULL AND baixa
                 GROUP BY product_id, stock_company_id) q
         WHERE p.id = q.product_id AND p.company_id = q.stock_company_id
      ),
      movimentos AS (
        INSERT INTO stock_movements (product_id, company_id, type, quantity, reference_id, reference_type, notes)
        SELECT src.product_id, src.stock_company_id, 'out', src.quantity, $1::uuid, 'sale', 'Venda PDV'
-         FROM src WHERE src.product_id IS NOT NULL ORDER BY src.ord
+         FROM src WHERE src.product_id IS NOT NULL AND src.baixa ORDER BY src.ord
        ON CONFLICT DO NOTHING
      )${vendedoraCte}${cupomCte}
      SELECT g.*, p.name AS product_name
