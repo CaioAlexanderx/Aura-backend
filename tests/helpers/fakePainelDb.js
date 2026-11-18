@@ -334,6 +334,9 @@ function responder(dados, escritas, sql, params = []) {
   // ── origem do site nos cadastros (migration 387); sem dados = ninguém tem origem ──
   if (s.includes('-- cadastros:origem')) return dados.cadastrosOrigem || [];
 
+  // ── e-mail de confirmação que voltou (18/11/2026); sem dados = nenhum ──
+  if (s.includes('-- painel:verificacao_devolvida')) return dados.verificacaoDevolvida || [];
+
   // ── check-in do prospect ──
   if (s.includes('-- checkin:cadastros')) return dados.checkinCadastros;
   if (s.includes('-- checkin:json')) return dados.checkinJson.filter((r) => [].concat(params[0] || []).includes(r.company_id));

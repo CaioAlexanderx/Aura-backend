@@ -193,6 +193,15 @@ function registrar(opts, status, resultado, erro) {
   } catch (_) { /* registro nunca derruba o envio */ }
 }
 
+// Devolução permanente (18/11/2026, services/emailDevolvido.js): ligado no
+// boot junto com o registro (emailLog.ligarRegistroNoMailer). Recebe
+// (to, tipo) e devolve { to, suprimidos, vazio } ou null (tipo que não
+// respeita a devolução). Sem ele (testes, scripts), nada é filtrado.
+let _filtroDeDevolucao = null;
+function definirFiltroDeDevolucao(fn) {
+  _filtroDeDevolucao = typeof fn === 'function' ? fn : null;
+}
+
 async function enviarPeloCanal(opts) {
   if (process.env.RESEND_API_KEY) return sendViaResend(opts);
   const smtp = getSmtpTransporter();
@@ -216,7 +225,25 @@ async function enviarPeloCanal(opts) {
 // Devolve o resultado do provedor com `id` sempre preenchido quando o
 // provedor deu um (Resend: id; SMTP: messageId; dev: dev-<timestamp>), para
 // quem chama gravar (report_deliveries.resend_id, notification_emails...).
+//
+// 18/11/2026: endereço com devolução PERMANENTE sai do `to` nos tipos que
+// respeitam a devolução (verificação, relatório, fechamento do mês, ajuda,
+// acompanhamento, novidades). Sem ninguém sobrando, nada é enviado e a
+// resposta é { id: null, suprimido: true } (sem lançar: quem chama decide).
 async function sendMail(opts) {
+  if (_filtroDeDevolucao && opts && opts.tipo) {
+    let f = null;
+    try { f = await _filtroDeDevolucao(opts.to, opts.tipo); } catch (_) { f = null; }
+    if (f && f.suprimidos && f.suprimidos.length) {
+      if (f.vazio) {
+        const { ERRO_SUPRIMIDO } = require('./emailDevolvido');
+        registrar(opts, 'failed', null, new Error(ERRO_SUPRIMIDO));
+        console.log(`[mailer] suprimido (${opts.tipo}): destinatário com devolução permanente`);
+        return { id: null, suprimido: true };
+      }
+      opts = { ...opts, to: f.to };
+    }
+  }
   try {
     const r = await enviarPeloCanal(opts);
     registrar(opts, 'sent', r, null);
@@ -246,7 +273,8 @@ function botaoSimples(rotulo, url) {
 // -- Template: verificacao de email via LINK (+ codigo OTP opcional) --
 // Task Sign Up 03/08: quando otpCode vem preenchido, o e-mail traz tambem
 // o codigo de 6 digitos digitavel no app — caminho paralelo ao link.
-async function sendVerificationLinkEmail(to, confirmUrl, userName, otpCode) {
+// 18/11/2026: `quem` ({ userId, companyId }) só vai à linha da email_log.
+async function sendVerificationLinkEmail(to, confirmUrl, userName, otpCode, quem = {}) {
   const firstName = L.primeiroNome(userName);
   const codigo = otpCode ? L.caixa(
     `<p class="a-ink2" style="margin:0 0 6px;color:${L.COR.tinta2};font-size:12.5px;text-align:center;">ou digite este código na tela de confirmação:</p>` +
@@ -274,6 +302,8 @@ async function sendVerificationLinkEmail(to, confirmUrl, userName, otpCode) {
     text: `Ola${firstName ? ' ' + firstName : ''}! Confirme seu e-mail: ${confirmUrl}${otpCode ? ` — ou use o codigo ${otpCode} na tela de confirmacao` : ''} (validos por 1 hora).`,
     html,
     tipo: 'verificacao_email',
+    userId: (quem && quem.userId) || null,
+    companyId: (quem && quem.companyId) || null,
   });
 }
 
@@ -712,6 +742,7 @@ async function sendDiscountEndingEmail(to, opts) {
 module.exports = {
   sendMail,
   definirRegistroDeEnvio,
+  definirFiltroDeDevolucao,
   emailLayout,
   escapeHtml,
   sendDiscountEndingEmail,
