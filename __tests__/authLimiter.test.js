@@ -55,7 +55,9 @@ async function tentarLogin(ip, n) {
   const status = [];
   for (let i = 0; i < n; i++) {
     const r = await deIp(request(app).post('/api/v1/auth/login'), ip)
-      .send({ email: 'ninguem@exemplo.com.br', password: 'errada' + i });
+      // um e-mail por tentativa: aqui se mede o teto por IP; o teto por
+      // IP + e-mail (10) fica em __tests__/limitesDeAcesso.test.js
+      .send({ email: 'ninguem' + i + '@exemplo.com.br', password: 'errada' + i });
     status.push(r.status);
   }
   return status;
@@ -124,8 +126,9 @@ describe('POST /auth/register e /auth/forgot-password', () => {
   test('forgot-password: a tentativa 21 do mesmo IP leva 429', async () => {
     const status = [];
     for (let i = 0; i <= LIMITE; i++) {
+      // e-mail diferente a cada pedido: o teto por IP + e-mail (5/h) e outro teste
       const r = await deIp(request(app).post('/api/v1/auth/forgot-password'), '203.0.113.30')
-        .send({ email: 'ninguem@exemplo.com.br' });
+        .send({ email: 'ninguem' + i + '@exemplo.com.br' });
       status.push(r.status);
     }
     expect(status.slice(0, LIMITE)).toEqual(Array(LIMITE).fill(200));

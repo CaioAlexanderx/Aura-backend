@@ -95,6 +95,14 @@
 //   webhook da Asaas libera no pagamento confirmado (services/acessosPendentes).
 //   Assinatura ativa e em dia, mesmo plano e ciclo, acessos diferentes: 409
 //   ASSINATURA_ATIVA (nao e' troca de plano). Valor combinado ignora o campo.
+//
+// 17/11/2026 — PERSONALIZADOS SEM ESSENCIAL TAMBEM FORA DA VERTICAL (p-195):
+//   A trava de 13/07 valia so para vertical_active='studio'. Com a casa no
+//   Negocio (p-189) a empresa sai da vertical e mantem
+//   pdv_settings.studio_enabled = true; agora o Essencial e' recusado nos
+//   dois casos, com a mesma mensagem e o mesmo stage 'plan_vertical', e o
+//   GET /status devolve allowed_plans sem o Essencial tambem para ela.
+//   Regra unica em services/planoMinimoDaFrente.js. Loja comum: nada muda.
 // ============================================================
 
 const express = require('express');
@@ -126,6 +134,7 @@ const subscriptionDiscount = require('../services/subscriptionDiscount');
 const acessosPendentes = require('../services/acessosPendentes');
 const { SEATS_PER_PLAN } = require('../services/memberSeats');
 const { marcarEncerramentoPedido } = require('../services/assinaturasAsaas');
+const { planosExigidos, planoPermitido } = require('../services/planoMinimoDaFrente');
 // 21/09/2026: o Asaas nao cobra cliente sem CPF/CNPJ e a maioria das empresas
 // nao tem CNPJ cadastrado. O documento agora vem do checkout (cpf_cnpj).
 const {
@@ -162,17 +171,9 @@ function couponDiscountAmount(coupon, plan, cycle, billingType, baseValue = null
   }) || 0;
 }
 
-// Verticais que exigem plano minimo. Espelha o gate do app (Negocio+).
-// Studio: nao existe Aura Studio no Essencial — a tela nem carrega.
-const VERTICAL_MIN_PLANS = {
-  studio: ['negocio', 'expansao'],
-};
-
-function planAllowedForVertical(vertical, plan) {
-  const allowed = VERTICAL_MIN_PLANS[String(vertical || '').toLowerCase()];
-  if (!allowed) return true; // vertical sem restricao (ou sem vertical)
-  return allowed.includes(String(plan || '').toLowerCase());
-}
+// Plano minimo de quem tem a frente Personalizados: vertical Studio OU
+// pdv_settings.studio_enabled (p-195). Regra unica em
+// services/planoMinimoDaFrente.js; loja comum sem restricao.
 
 // ── F3c: flag do gate do plano Aura Dojô (default OFF). Com OFF, o gate
 // NUNCA exige pagamento (required:false), mas ainda devolve os valores pra
@@ -368,9 +369,8 @@ router.get('/status', requireAuth, async (req, res) => {
       needs_cpf_cnpj: !companyHasTaxId(c),
       // 13/07: a tela precisa saber que Essencial nao e opcao pra esta empresa.
       vertical_active: c.vertical_active || null,
-      allowed_plans: c.vertical_active && VERTICAL_MIN_PLANS[c.vertical_active]
-        ? VERTICAL_MIN_PLANS[c.vertical_active]
-        : Object.keys(PLANS),
+      // 17/11 (p-195): tambem para quem tem studio_enabled fora da vertical.
+      allowed_plans: planosExigidos(c) || Object.keys(PLANS),
     });
   } catch (err) {
     console.error('[BILLING] Status error:', err.message);
@@ -765,8 +765,10 @@ router.post('/subscribe', requireAuth, requireRole('client', 'admin'), async (re
     // A vertical exige Negocio+. Sem esta trava, o cliente Studio podia assinar
     // Essencial (R$89) e cair num app que nao carrega o Studio: pagou e nao
     // recebeu. Regra no backend, nao so na tela.
-    if (!planAllowedForVertical(company.vertical_active, plan)) {
-      const allowed = VERTICAL_MIN_PLANS[String(company.vertical_active).toLowerCase()];
+    // 17/11 (p-195): vale tambem para quem tem pdv_settings.studio_enabled
+    // fora da vertical (casa no Negocio): mesma mensagem, mesmo stage.
+    if (!planoPermitido(company, plan)) {
+      const allowed = planosExigidos(company);
       return res.status(400).json({
         error: 'O Aura Studio exige o plano Negocio ou superior.',
         stage: 'plan_vertical',

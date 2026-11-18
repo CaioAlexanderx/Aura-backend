@@ -235,7 +235,16 @@ async function buildNotice(client, { companyId, installmentId, template = 'atras
   // INSERT dava 23502 a cada aviso: o historico nunca era gravado e, como
   // o 23502 sobe, a rota devolvia 500 e a lojista ficava sem o texto.
   // Os ids vem da propria parcela; nenhum campo NOT NULL vai nulo.
+  //
+  // Registro nunca derruba o aviso (17/11/2026): o texto ja esta montado e
+  // e o que a lojista precisa. O historico roda dentro de um SAVEPOINT
+  // porque o caller esta numa transacao e um INSERT que falha a abortaria
+  // (o COMMIT viraria ROLLBACK e o aviso voltaria 500). Qualquer erro
+  // aqui so e logado; 42P01/42703 (CI sem a tabela) seguem em silencio.
+  let savepoint = false;
   try {
+    await client.query('SAVEPOINT cred_notice_evento');
+    savepoint = true;
     await client.query(
       `-- cred:notice-evento
        INSERT INTO credit_collection_events
@@ -255,7 +264,16 @@ async function buildNotice(client, { companyId, installmentId, template = 'atras
       `UPDATE credit_installments SET collection_stage = collection_stage + 1, updated_at = NOW() WHERE id = $1`,
       [inst.id]
     );
-  } catch (e) { if (e.code !== '42P01' && e.code !== '42703') throw e; }
+    await client.query('RELEASE SAVEPOINT cred_notice_evento');
+  } catch (e) {
+    if (savepoint) {
+      try { await client.query('ROLLBACK TO SAVEPOINT cred_notice_evento'); } catch (_) { /* transacao ja perdida */ }
+    }
+    if (e.code !== '42P01' && e.code !== '42703') {
+      console.error('[creditCollectionNotice] evento nao gravado (aviso segue)',
+        { installmentId: inst.id, companyId: inst.company_id || companyId, code: e.code, message: e.message });
+    }
+  }
 
   return {
     installment_id: inst.id,

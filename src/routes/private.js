@@ -164,6 +164,10 @@ router.use('/products', require('./productCategories').productLinksRouter);
 // 03/11/2026 (migration 424): fornecedores do produto (cada um com o seu
 // custo) e entrada de mercadoria. Caminhos /:pid/suppliers e
 // /:pid/stock-entries; antes de ./products por causa do /:pid curinga.
+// 17/11/2026 (migration 457, B2a/B3): entrada de vários itens numa ida só
+// ("Chegou mercadoria") e "nota já lançada?". Caminho estático
+// /stock-receipts: antes de ./productSuppliers e ./products (/:pid curinga).
+router.use('/products', require('./stockReceipts'));
 router.use('/products', require('./productSuppliers'));
 router.use('/products', require('./products'));
 router.use('/products', require('./productsRanking'));
