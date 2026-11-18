@@ -125,6 +125,9 @@ function paymentCode(method) {
     cartao_credito: '03', cartao_debito: '04',
     crediario: '05', // Credito Loja (tPag 05, a prazo -- indPag=1)
     credito_troca: '05', // Credito Loja da devolucao (tPag 05, a vista -- indPag=0)
+    // INC-2026-11-17-03: credito da cliente usado no Caixa -- Credito Loja,
+    // a vista (indPag 0, o default abaixo para tudo que nao e crediario).
+    credito_cliente: '05',
     outros: '99',
   };
   return map[method] || '01';

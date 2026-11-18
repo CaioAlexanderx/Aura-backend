@@ -166,6 +166,18 @@ async function lerPagamentosDaVenda(db, saleId) {
       `SELECT method, amount FROM sale_payments WHERE sale_id = $1 ORDER BY created_at, id`,
       [saleId]
     );
+    // INC-2026-11-17-03: o credito da cliente usado na venda nao entra em
+    // sale_payments (nao e dinheiro de hoje), mas e forma de pagamento da
+    // nota: Credito Loja (05). So consulta quando a venda tem formas no caixa
+    // (a venda inteira no credito cai no payment_method, mais abaixo).
+    if (rows.length) {
+      const { rows: cred } = await db.query(
+        `SELECT 'credito_cliente' AS method, amount FROM customer_credit_transactions
+          WHERE sale_id = $1 AND type = 'debit' AND payment_method = 'credito_cliente'`,
+        [saleId]
+      );
+      if (cred && cred.length) return [...rows, ...cred];
+    }
     return rows;
   } catch (e) {
     if (e.code === '42P01' || e.code === '42703') return [];
@@ -467,7 +479,7 @@ function validNcm(n) {
 
 const TPAG = {
   dinheiro: '01', cheque: '02', credito: '03', cartao: '03', cartao_credito: '03',
-  debito: '04', cartao_debito: '04', crediario: '05', fiado: '05', credito_troca: '05',
+  debito: '04', cartao_debito: '04', crediario: '05', fiado: '05', credito_troca: '05', credito_cliente: '05',
   boleto: '15', pix: '17', outros: '99',
 };
 const A_PRAZO = new Set(['crediario', 'fiado']);

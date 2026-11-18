@@ -8,12 +8,17 @@
 //   refund                         -> refund
 //   payment + crediario_credito    -> exchange_credit (crédito vindo de troca)
 //   payment (demais)               -> payment
+//   debit   + credito_cliente      -> credit_use (credito usado numa venda
+//                                     do Caixa, INC-2026-11-17-03)
 // Valor com sinal: débito positivo, pagamento/crédito/estorno negativo.
 // ============================================================
 'use strict';
 
 function creditHistoryEventType(row) {
-  if (row.type === 'debit') return row.sale_id ? 'purchase' : 'manual_debit';
+  if (row.type === 'debit') {
+    if (row.payment_method === 'credito_cliente') return 'credit_use';
+    return row.sale_id ? 'purchase' : 'manual_debit';
+  }
   if (row.type === 'refund') return 'refund';
   return row.payment_method === 'crediario_credito' ? 'exchange_credit' : 'payment';
 }
