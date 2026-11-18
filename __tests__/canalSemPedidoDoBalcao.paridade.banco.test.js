@@ -237,7 +237,12 @@ describe('acoes do Canal no pedido do balcao', () => {
     expect(s.body.code).toBe('PEDIDO_DO_BALCAO');
     const { rows: [o] } = await q(
       `SELECT status, payment_status, stock_deducted, transaction_id, delivered_at, cancelled_at FROM digital_orders WHERE id = $1`, [id]);
-    expect(o).toEqual({ status: 'ready', payment_status: 'pending', stock_deducted: false, transaction_id: null, delivered_at: null, cancelled_at: null });
+    expect(o).toMatchObject({ status: 'ready', payment_status: 'pending', stock_deducted: false, delivered_at: null, cancelled_at: null });
+    // B4a: o pedido do balcao tem a conta "Pedido a receber" desde que foi
+    // guardado. O Canal nao a quita (quitarNaEntrega) nem a estorna.
+    expect(o.transaction_id).not.toBeNull();
+    const { rows: [conta] } = await q(`SELECT status::text AS status FROM transactions WHERE id = $1`, [o.transaction_id]);
+    expect(conta.status).toBe('pending');
     expect(notify.notifyStatusChange).not.toHaveBeenCalled();
     expect(lojaEvents.emit).not.toHaveBeenCalled();
   });

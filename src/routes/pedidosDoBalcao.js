@@ -12,6 +12,25 @@
 // POST /pedidos           → 201 {order, avisos} (B1 / p-61a; avisos do B2)
 //                           200 {order, idempotent_replay} na mesma chave
 //                           409 PEDIDO_SEM_SALDO {faltas} sem saldo livre (B2)
+//        B4a: lanca a conta "Pedido a receber" pelo valor cheio; o sinal pode
+//        vir junto, em `sinal: {amount, method}` (422 PEDIDO_SINAL_MAIOR se
+//        passar do total, e nada e gravado).
+// POST /pedidos/:oid/sinal {amount, method} + Idempotency-Key (B4a / p-62a)
+//                         → 201 {order, sinal, taxa}
+//                           200 {order, sinal, idempotent_replay} na mesma chave
+//                           409 PEDIDO_SINAL_JA_PAGO (um sinal por pedido)
+//                           409 PEDIDO_FECHADO (concluido ou cancelado)
+//                           422 PEDIDO_SINAL_MAIOR / _VALOR / _FORMA
+//                           409 CAIXA_REQUIRED (B4b): sinal em dinheiro com o
+//                               caixa ligado e fechado (tambem no POST /pedidos)
+//        method: dinheiro | pix | cartao (credito) | debito. Regras do
+//        dinheiro em services/sinalDoPedido.js.
+// POST /pedidos/:oid/cancelar (B6 / p-62e)
+//        {refund_kind: 'credito'|'devolucao', refund_method: 'dinheiro'|'pix'|'estorno', reason?}
+//                         → 200 {order, cancelamento, ja_estava}
+//                           409 PEDIDO_JA_CONCLUIDO / CAIXA_REQUIRED (dinheiro com caixa fechado)
+//                           422 PEDIDO_DESTINO_DO_SINAL / PEDIDO_DEVOLUCAO_FORMA / CREDITO_EXIGE_CLIENTE
+//        Sem sinal, refund_kind nao e pedido. Regras em services/cancelarPedido.js.
 // GET  /pedidos           → {orders, situacao, kpis, counts, pagination} (B3)
 //        ?situacao=abertos|aguardando|separando|prontos|concluidos|cancelados|todos
 //        &atrasados=1 &q= &page= &limit=   (regras em services/listaDePedidos.js)
@@ -33,6 +52,8 @@ const router = require('express').Router({ mergeParams: true });
 const db = require('../config/database');
 const pedidoBalcao = require('../services/pedidoBalcao');
 const listaDePedidos = require('../services/listaDePedidos');
+const sinalDoPedido = require('../services/sinalDoPedido');
+const cancelarPedido = require('../services/cancelarPedido');
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const NAO_ENCONTRADO = { error: 'Pedido não encontrado.', code: 'PEDIDO_NAO_ENCONTRADO' };
@@ -104,26 +125,60 @@ router.get('/', async (req, res) => {
   }
 });
 
-/** Sinal pago do pedido (studio_payments de sinal pagos; B4a grava ali). */
-async function sinalPago(orderId) {
-  const { rows } = await db.query(
-    `SELECT COALESCE(SUM(amount), 0) AS v FROM studio_payments
-      WHERE order_id = $1 AND kind = 'deposit' AND status = 'paid'`, [orderId]);
-  return Number(rows[0] && rows[0].v) || 0;
-}
-
 router.get('/:oid', async (req, res) => {
   const { id: cid, oid } = req.params;
   if (!UUID_RE.test(String(oid))) return res.status(404).json(NAO_ENCONTRADO);
   try {
     const pedido = await pedidoBalcao.lerPedidoCompleto(db, cid, oid);
     if (!pedido || pedido.origem !== pedidoBalcao.ORIGEM_BALCAO) return res.status(404).json(NAO_ENCONTRADO);
-    const sinal = await sinalPago(oid);
-    pedido.sinal_pago = sinal;
-    pedido.falta = Math.round(Math.max(pedido.total - sinal, 0) * 100) / 100;
+    // sinal_pago, falta e o sinal (forma e data), lidos de studio_payments.
+    await sinalDoPedido.comSinal(db, pedido);
     return res.json({ order: pedido });
   } catch (err) {
     return falhar(res, err, 'detalhe', 'Não conseguimos abrir o pedido agora. Tente de novo em instantes.');
+  }
+});
+
+// B4a (p-62a): o sinal do pedido guardado. Baixa parcial da conta a receber,
+// entrada "Sinal de pedido" sem venda, marco em studio_payments.
+router.post('/:oid/sinal', async (req, res) => {
+  const { id: cid, oid } = req.params;
+  if (!UUID_RE.test(String(oid))) return res.status(404).json(NAO_ENCONTRADO);
+  try {
+    const r = await sinalDoPedido.receberSinal(db, {
+      companyId: cid,
+      orderId: oid,
+      body: req.body,
+      chave: pedidoBalcao.lerChave(req),
+      userId: req.user && req.user.id,
+    });
+    const order = await sinalDoPedido.comSinal(db, await pedidoBalcao.lerPedidoCompleto(db, cid, oid));
+    if (r.repetido) {
+      res.set('Idempotent-Replayed', 'true');
+      return res.status(200).json({ order, sinal: r.sinal, idempotent_replay: true });
+    }
+    return res.status(201).json({ order, sinal: r.sinal, taxa: r.taxa });
+  } catch (err) {
+    return falhar(res, err, 'sinal', 'Não deu para registrar o sinal agora. Nada foi lançado. Tente de novo em instantes.');
+  }
+});
+
+// B6 (p-62e): cancelar. O sinal vira credito na ficha ou e devolvido; a
+// conta a receber vai a 'cancelled'. Sem e-mail e sem sino.
+router.post('/:oid/cancelar', async (req, res) => {
+  const { id: cid, oid } = req.params;
+  if (!UUID_RE.test(String(oid))) return res.status(404).json(NAO_ENCONTRADO);
+  try {
+    const r = await cancelarPedido.cancelarPedido(db, {
+      companyId: cid,
+      orderId: oid,
+      body: req.body,
+      userId: req.user && req.user.id,
+    });
+    const order = await sinalDoPedido.comSinal(db, await pedidoBalcao.lerPedidoCompleto(db, cid, oid));
+    return res.json({ order, cancelamento: r.cancelamento, ja_estava: r.ja_estava });
+  } catch (err) {
+    return falhar(res, err, 'cancelar', 'Não deu para cancelar o pedido agora. Nada foi alterado. Tente de novo em instantes.');
   }
 });
 

@@ -90,6 +90,8 @@ const editarVenda = require('../services/editarVenda');
 const { prazoDeCancelamento } = require('../services/nfcePrazoCancelamento');
 const nfceCancelamento = require('../services/nfceCancelamento');
 const { TEXTOS_PRAZO_NFCE } = require('../services/textosPrazoNfce');
+// 17/11/2026 (B5a): a venda que concluiu um pedido do balcao nao se cancela.
+const { recusaDoCancelamento } = require('../services/pedidoSaleHooks');
 
 // Prazo de cancelamento de uma nota autorizada da venda (null nos outros casos).
 function cancelamentoDaNota(r, now) {
@@ -753,12 +755,22 @@ router.post('/:sale_id/cancel', asyncHandler(async (req, res) => {
     await client.query('BEGIN');
 
     const saleRes = await client.query(
-      "SELECT id, total_amount, status, COALESCE(type,'sale') AS type FROM sales WHERE id = $1 AND company_id = $2 FOR UPDATE",
+      "SELECT id, total_amount, status, COALESCE(type,'sale') AS type, to_jsonb(sales)->>'order_id' AS order_id FROM sales WHERE id = $1 AND company_id = $2 FOR UPDATE",
       [saleId, companyId]
     );
     if (!saleRes.rows.length) throw new AppError('Venda nao encontrada', 404);
     if (saleRes.rows[0].status === 'cancelled') {
       throw new AppError('Venda ja esta cancelada', 400);
+    }
+    // B5a (revisao da Celia): a venda que concluiu um pedido nao se cancela
+    // por aqui (o pedido ficaria entregue e o sinal sem destino). B5b reabre.
+    const recusaDoPedido = recusaDoCancelamento(saleRes.rows[0].order_id);
+    if (recusaDoPedido) {
+      const e = new Error(recusaDoPedido.error);
+      e.isRefundError = true;
+      e.status = 409;
+      e.body = recusaDoPedido;
+      throw e;
     }
     const isTroca = saleRes.rows[0].type === 'troca';
     const isDevolucao = saleRes.rows[0].type === 'devolucao';

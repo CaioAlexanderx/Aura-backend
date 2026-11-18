@@ -36,7 +36,12 @@ const CARD_FEE_KEY = (saleId) => 'pdv-card-fee-' + saleId;
 // pdv_settings da empresa na abertura da transacao e o entrega aqui; quem nao
 // passa (o Editar venda) continua lendo, como sempre. `null` = empresa sem
 // configuracao (sem taxa).
-async function insertCardFeeExpense(client, { companyId, saleId, cardBase, createdBy, saleDate, itemsSummary, pdvSettings }) {
+//
+// 17/11/2026 (B4a, sinal do pedido do balcao): `chave` e opcional. O sinal
+// paga a taxa com a MESMA regra da venda (D-S1, conferido pela Celia), mas
+// nao tem venda: a despesa leva a chave do sinal (pedido-sinal-taxa-<id>).
+// Sem `chave`, a de sempre (pdv-card-fee-<saleId>).
+async function insertCardFeeExpense(client, { companyId, saleId, cardBase, createdBy, saleDate, itemsSummary, pdvSettings, chave }) {
   const credBase = parseFloat((cardBase?.cartao || 0).toFixed(2));
   const debBase  = parseFloat((cardBase?.debito || 0).toFixed(2));
   const pixBase  = parseFloat((cardBase?.pix || 0).toFixed(2));
@@ -76,7 +81,7 @@ async function insertCardFeeExpense(client, { companyId, saleId, cardBase, creat
   const params = [
     companyId, fee,
     `Taxa da maquininha - ${itemsSummary || 'Venda'} (${parts.join(' + ')})`,
-    createdBy || null, CARD_FEE_KEY(saleId),
+    createdBy || null, chave || CARD_FEE_KEY(saleId),
   ];
   if (saleDate) params.push(saleDate);
 
