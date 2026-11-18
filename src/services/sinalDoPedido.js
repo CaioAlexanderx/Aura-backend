@@ -36,7 +36,8 @@
 // movimento 'sinal_pedido' da sessao (migration 461), que o fechamento soma
 // no dinheiro da gaveta (services/caixaService.js). Pix e cartao nao exigem
 // caixa: o fechamento os le pela chave pedido-sinal-<pedido> na janela da
-// sessao. Sem o caixa ligado, nada muda. Nada chama esta rota antes do app de
+// sessao. Com a chave desligada vale a regra da venda: havendo sessao aberta,
+// o dinheiro entra nela; sem sessao, so e registrado. Nada chama esta rota antes do app de
 // 02/12 (trava PEDIDO_LIBERADO).
 //
 // Multi-CNPJ: tudo na company_id da loja do pedido (a do :id, conferida pelo
@@ -177,20 +178,25 @@ function apresentarSinal(sp) {
 }
 
 /**
- * B4b: a sessao de caixa que recebe o sinal em dinheiro. Caixa desligado na
- * loja: { ligado: false, sessaoId: null } (nada muda). Ligado e sem sessao
- * aberta: { ligado: true, sessaoId: null } (quem chama responde 409). Mesma
- * leitura de routes/pdv.js (assertCaixaOpenOrAllowed), sem o "fail-open":
- * aqui um erro de banco derruba o sinal (nada e gravado) em vez de deixar o
- * dinheiro fora da gaveta.
+ * B4b: a sessao de caixa que recebe o sinal em dinheiro. A MESMA regra da
+ * venda (routes/pdv.js): a sessao aberta da loja recebe o dinheiro mesmo com
+ * a chave caixa_enabled desligada (a venda grava sale_payments.sessao_id
+ * assim); a chave so decide se a falta de sessao e 409.
+ *   { ligado, sessaoId }: ligado = caixa_enabled; sessaoId = a aberta ou null.
+ *   Ligado e sem sessao: quem chama responde 409. Desligado e sem sessao: o
+ *   sinal so e registrado (nao ha gaveta).
+ * Sem o "fail-open" da venda: um erro de banco derruba o sinal (nada e
+ * gravado) em vez de deixar o dinheiro fora da gaveta.
  */
 async function sessaoDoCaixa(client, companyId) {
-  const { rows } = await client.query(`SELECT pdv_settings FROM companies WHERE id = $1`, [companyId]);
-  const ligado = !!(rows[0] && rows[0].pdv_settings && rows[0].pdv_settings.caixa_enabled);
-  if (!ligado) return { ligado: false, sessaoId: null };
-  const { rows: s } = await client.query(
-    `SELECT id FROM caixa_sessoes WHERE company_id = $1 AND status = 'aberta' LIMIT 1`, [companyId]);
-  return { ligado: true, sessaoId: s[0] ? s[0].id : null };
+  const { rows } = await client.query(
+    `SELECT c.pdv_settings,
+            (SELECT s.id FROM caixa_sessoes s WHERE s.company_id = c.id AND s.status = 'aberta' LIMIT 1) AS sessao_id
+       FROM companies c WHERE c.id = $1`,
+    [companyId]
+  );
+  const r = rows[0] || {};
+  return { ligado: !!(r.pdv_settings && r.pdv_settings.caixa_enabled), sessaoId: r.sessao_id || null };
 }
 
 /**
