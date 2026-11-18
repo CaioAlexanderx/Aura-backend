@@ -69,7 +69,7 @@ async function refundCreditSale(client, { companyId, saleId, items, reason = nul
 
   // 1. Venda (group-aware: mesma empresa ou mesmo billing owner)
   const { rows: saleRows } = await client.query(
-    `SELECT s.id, s.company_id, s.customer_id, s.status
+    `SELECT s.id, s.company_id, s.customer_id, s.status, s.total_amount
        FROM sales s
        JOIN companies c ON c.id = $2
       WHERE s.id = $1
@@ -148,6 +148,18 @@ async function refundCreditSale(client, { companyId, saleId, items, reason = nul
   }
 
   // 4. Valida itens + calcula valor efetivo
+  //
+  // 17/11/2026 (INC-2026-11-17-03, aprovado pelo Caio): o desconto da VENDA
+  // (cupom, desconto manual no total) entra na devolucao, proporcional ao
+  // item. Antes o valor saia do total_price do item (liquido so do desconto
+  // do item) e a venda f1048a5a de R$ 139,95 (R$ 279,90 com 50% no total)
+  // foi devolvida por R$ 279,90. fator = total da venda / soma das linhas.
+  // Venda sem desconto no total: fator 1 e a conta e exatamente a de antes.
+  const somaDasLinhas = round2(saleItems.reduce((s, i) => s + (parseFloat(i.total_price) || 0), 0));
+  const totalDaVenda = round2(parseFloat(sale.total_amount) || 0);
+  const fator = (somaDasLinhas > 0 && totalDaVenda >= 0 && totalDaVenda < somaDasLinhas - 0.005)
+    ? totalDaVenda / somaDasLinhas
+    : 1;
   let refundValue = 0;
   const normalized = [];
   for (const it of items) {
@@ -166,8 +178,9 @@ async function refundCreditSale(client, { companyId, saleId, items, reason = nul
       });
     }
     // Preco efetivo unitario = total_price / quantity (ja liquido de item_discount).
-    const effectiveUnit = origQty > 0 ? round2(parseFloat(orig.total_price) / origQty) : parseFloat(orig.unit_price) || 0;
-    const lineValue = round2(effectiveUnit * qty);
+    const unitDaLinha = origQty > 0 ? round2(parseFloat(orig.total_price) / origQty) : parseFloat(orig.unit_price) || 0;
+    const effectiveUnit = fator === 1 ? unitDaLinha : round2(unitDaLinha * fator);
+    const lineValue = fator === 1 ? round2(effectiveUnit * qty) : round2(unitDaLinha * qty * fator);
     refundValue = round2(refundValue + lineValue);
     normalized.push({
       sale_item_id: it.sale_item_id,
@@ -178,6 +191,21 @@ async function refundCreditSale(client, { companyId, saleId, items, reason = nul
       line_value: lineValue,
       product_name_snapshot: orig.product_name_snapshot,
     });
+  }
+  // 4.1. Teto (17/11/2026, aprovado pelo Caio): a devolucao nunca credita
+  //      mais que o debito da venda na ficha, descontado o que outras
+  //      devolucoes da mesma venda ja creditaram. O debito do credito da
+  //      cliente usado na venda ('credito_cliente') nao entra: nao e fiado.
+  {
+    const { rows: [lim] } = await client.query(
+      `SELECT COALESCE(SUM(amount) FILTER (WHERE type = 'debit' AND payment_method IS DISTINCT FROM 'credito_cliente'), 0) AS debito,
+              COALESCE(SUM(amount) FILTER (WHERE type = 'refund'), 0) AS devolvido
+         FROM customer_credit_transactions
+        WHERE sale_id = $1 AND company_id = $2`,
+      [saleId, saleCompanyId]
+    );
+    const teto = round2(Math.max(0, (parseFloat(lim?.debito) || 0) - (parseFloat(lim?.devolvido) || 0)));
+    if (refundValue > teto + 0.005) refundValue = teto;
   }
   if (refundValue <= 0) throw err(400, { error: 'Valor de devolucao resultou em zero' });
 

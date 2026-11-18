@@ -177,6 +177,34 @@ async function conferir(client, { companyId, customerId, amount, totalAmount, cr
   return { amount: round2(amount), saldoAntes, deTroca, deDevolucao, naReceita: deTroca };
 }
 
+/**
+ * 17/11/2026 (J, aprovado pelo Caio): a venda no crediário de uma cliente que
+ * tem crédito de origem conhecida (troca, devolução) e não usou todo ele é
+ * recusada, com o saldo, para o Caixa usar o crédito primeiro. Sem isso o
+ * createCreditSale abria o "A Receber" e as parcelas pelo valor cheio,
+ * ignorando o crédito (a ficha abatia, o Financeiro cobrava a mais).
+ *
+ * Escolhido no lugar de abater dentro do createCreditSale: nada muda no
+ * razão, nas parcelas nem no "A Receber" de ninguém; só a venda dessa
+ * cliente pede um passo a mais, e o crédito sai pela forma credito_cliente,
+ * com a receita certa por origem.
+ *
+ * `restante`: o que sobra de crédito depois do usado nesta venda (quando a
+ * venda já usou crédito, o `conferir` já leu e travou o saldo). Sem ele, lê.
+ * Venda com sinal fica fora (o sinal não usa crédito; ver `conferir`).
+ */
+async function exigirCreditoAntesDoCrediario(client, { companyId, customerId, crediarioAmount, restante }) {
+  if (!(crediarioAmount > 0.005) || !customerId) return;
+  const sobra = restante !== undefined
+    ? round2(restante)
+    : await saldoAFavor(client, { companyId, customerId });
+  if (sobra > 0.005) {
+    throw erro(422, 'CREDITO_ANTES_DO_CREDIARIO',
+      `A cliente tem R$ ${sobra.toFixed(2).replace('.', ',')} de crédito nesta loja. Use o crédito na venda antes de lançar no crediário.`,
+      { saldo_a_favor: sobra });
+  }
+}
+
 /** Baixa do crédito no razão, presa à venda: um débito por origem usada. */
 async function baixar(client, { companyId, customerId, saleId, saleNumber, deTroca, deDevolucao, createdBy }) {
   const nota = saleNumber != null ? `Crédito usado na venda #${saleNumber}` : 'Crédito usado na venda';
@@ -223,6 +251,7 @@ module.exports = {
   ORIGEM_DEVOLUCAO,
   saldoPorOrigem,
   repartir,
+  exigirCreditoAntesDoCrediario,
   valorPedido,
   somaDoPagamentoDeHoje,
   saldoAFavor,

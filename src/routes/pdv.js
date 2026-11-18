@@ -612,6 +612,15 @@ async function handleSale(req, res, opts = {}) {
       creditoUsado = creditoConferido.amount;
       creditoSaldoAntes = creditoConferido.saldoAntes;
     }
+    // J (17/11, aprovado pelo Caio): crediario de quem tem credito de troca ou
+    // devolucao sobrando e recusado ate o credito ser usado. So consulta quando
+    // a venda vai no crediario (e nao e venda com sinal).
+    if (creditAmount > 0 && !opts.signalSale) {
+      await creditoDaCliente.exigirCreditoAntesDoCrediario(client, {
+        companyId: req.params.id, customerId, crediarioAmount: creditAmount,
+        restante: creditoConferido ? parseFloat((creditoConferido.saldoAntes - creditoUsado).toFixed(2)) : undefined,
+      });
+    }
     const cashAmount = parseFloat((totalAmount - creditAmount - creditoUsado).toFixed(2));
     // Revisao da Celia (17/11): o credito de TROCA ja saiu como despesa
     // ("Troca - Devolucao") quando nasceu, entao a parte da venda paga com ele

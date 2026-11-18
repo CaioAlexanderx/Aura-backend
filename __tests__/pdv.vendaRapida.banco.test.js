@@ -419,12 +419,15 @@ const CENARIOS = [
   { nome: 'credito da cliente + crediario parcelado', status: 201, creditoDaCliente: 50,
     body: {
       items: [item(ID.simples, 3, 10), item(ID.ultimo, 1, 30)], customer_id: ID.cliente, installments: 2,
-      payment_method: 'crediario', payments: [{ method: 'credito_cliente', value: 15 }, { method: 'crediario', value: 45 }],
+      payment_method: 'crediario', payments: [{ method: 'credito_cliente', value: 50 }, { method: 'crediario', value: 10 }],
     } },
 
   // ── Recusas: mesma mensagem, mesmo codigo, nada gravado ──
   { nome: 'recusa: credito da cliente maior que o saldo', status: 422, creditoDaCliente: 50,
     body: { items: [item(ID.simples, 6, 10)], customer_id: ID.cliente, payment_method: 'credito_cliente' } },
+  // J (17/11): crediario com credito de troca sobrando e recusado ate usar o credito.
+  { nome: 'recusa: crediario com credito da cliente sobrando', status: 422, creditoDaCliente: 50,
+    body: { items: [item(ID.simples, 3, 10)], customer_id: ID.cliente, payment_method: 'crediario' } },
   { nome: 'recusa: credito da cliente com pagamentos que nao fecham', status: 422, creditoDaCliente: 50,
     body: {
       items: [item(ID.simples, 3, 10)], customer_id: ID.cliente,
@@ -690,7 +693,8 @@ describe('caminho novo: abertura da transacao em um envio', () => {
     ['3 itens, vendedora e cliente', 7],
     ['o mesmo produto e a mesma variante em duas linhas', 6],
     ['caixa aberto, 3 formas de pagamento', 8],
-    ['crediario em 3 parcelas', 21],
+    // J (17/11): +1 ida so na venda no crediario (o credito da cliente que sobra).
+    ['crediario em 3 parcelas', 22],
   ])('%s: no maximo %i idas', async (nome, teto) => {
     const r = await rodar(cenario(nome), 'rapido');
     expect(r.respostas[0].status).toBe(201);
