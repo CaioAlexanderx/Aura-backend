@@ -136,7 +136,9 @@ afterAll(async () => {
 async function fotoDaLoja(empresa) {
   const res = await R.resultadoDoPeriodo({ empresas: [empresa], de: hoje, ate: hoje, comProdutos: false, client: pool });
   const fin = await request(app).get(`/companies/${empresa}/transactions`).query({ start: hoje, end: hoje });
-  const dre = await request(app).get(`/companies/${empresa}/dre`).query({ from: hoje.slice(0, 8) + '01', to: hoje });
+  // dre.js filtra por paid_at::date em UTC: o fim vai um dia alem de hoje.
+  const amanha = new Date(Date.parse(hoje + 'T12:00:00Z') + 86400000).toISOString().slice(0, 10);
+  const dre = await request(app).get(`/companies/${empresa}/dre`).query({ from: hoje.slice(0, 8) + '01', to: amanha });
   const painel = await request(app).get(`/companies/${empresa}/dashboard`);
   expect([fin.status, dre.status, painel.status]).toEqual([200, 200, 200]);
   return {
@@ -162,6 +164,7 @@ test('2. Financeiro, DRE e Painel da loja sem pedido: iguais antes e depois do p
   const antes = await fotoDaLoja(ID.semPedido);
   expect(antes.painel).toMatchObject({ revenue: 700, expenses: 595 });
   expect(antes.financeiro).toMatchObject({ income: 700, expenses: 595 });
+  expect(antes.dre.detail.length).toBeGreaterThan(0);
 
   // A outra loja do mesmo dono passa por tudo o que o pedido grava.
   const um = await request(app).post(`/companies/${ID.comPedido}/pedidos`).set('Idempotency-Key', `paridade-1-${uuid()}`)
