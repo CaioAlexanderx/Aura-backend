@@ -283,6 +283,8 @@ async function calcularTotais(companyId, sessaoId, openedAt, closedAt) {
         WHERE cct.company_id = $1
           AND cct.type = 'debit'
           AND cct.sale_id IS NOT NULL
+          -- INC-2026-11-17-03: credito da cliente usado na venda nao e fiado.
+          AND cct.payment_method IS DISTINCT FROM 'credito_cliente'
           AND cct.created_at >= $2
           AND cct.created_at < $3
           AND COALESCE(s.status, 'active') <> 'cancelled'`,

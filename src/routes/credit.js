@@ -1059,11 +1059,13 @@ router.get('/customers/search', async (req, res) => {
 //   42703 account_id (migration 163) / source (migration 144) /
 //   product_name_snapshot em sale_items; 42P01 sale_items ausente -> sem itens.
 // ============================================================
-const HISTORY_EVENT_TYPES = ['purchase', 'manual_debit', 'payment', 'exchange_credit', 'refund'];
+const HISTORY_EVENT_TYPES = ['purchase', 'manual_debit', 'payment', 'exchange_credit', 'refund', 'credit_use'];
 
 const HISTORY_TYPE_SQL = {
-  purchase:        `(t.type = 'debit' AND t.sale_id IS NOT NULL)`,
-  manual_debit:    `(t.type = 'debit' AND t.sale_id IS NULL)`,
+  purchase:        `(t.type = 'debit' AND t.sale_id IS NOT NULL AND t.payment_method IS DISTINCT FROM 'credito_cliente')`,
+  manual_debit:    `(t.type = 'debit' AND t.sale_id IS NULL AND t.payment_method IS DISTINCT FROM 'credito_cliente')`,
+  // INC-2026-11-17-03: credito da cliente usado numa venda do Caixa.
+  credit_use:      `(t.type = 'debit' AND t.payment_method = 'credito_cliente')`,
   exchange_credit: `(t.type = 'payment' AND t.payment_method = 'crediario_credito')`,
   payment:         `(t.type = 'payment' AND t.payment_method IS DISTINCT FROM 'crediario_credito')`,
   refund:          `(t.type = 'refund')`,

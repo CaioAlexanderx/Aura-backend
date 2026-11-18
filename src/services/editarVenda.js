@@ -227,7 +227,12 @@ SELECT s.id, s.company_id, s.sale_number, s.customer_id, s.seller_id, s.employee
                                                    'terms', ca.terms_snapshot)), '[]'::json)
           FROM customer_credit_transactions d
           LEFT JOIN credit_accounts ca ON ca.id = d.account_id
-         WHERE d.sale_id = s.id AND d.company_id = s.company_id AND d.type = 'debit') AS debitos,
+         WHERE d.sale_id = s.id AND d.company_id = s.company_id AND d.type = 'debit'
+           AND d.payment_method IS DISTINCT FROM 'credito_cliente') AS debitos,
+       -- INC-2026-11-17-03: credito da cliente usado na venda (nao e crediario).
+       (SELECT COALESCE(SUM(d.amount), 0) FROM customer_credit_transactions d
+         WHERE d.sale_id = s.id AND d.company_id = s.company_id AND d.type = 'debit'
+           AND d.payment_method = 'credito_cliente') AS credito_cliente,
        (SELECT COALESCE(json_agg(json_build_object('id', t.id, 'amount', t.amount, 'status', t.status,
                                                    'key', t.idempotency_key)), '[]'::json)
           FROM transactions t
@@ -248,7 +253,8 @@ SELECT s.id, s.company_id, s.sale_number, s.customer_id, s.seller_id, s.employee
          WHERE ci.sale_id = s.id AND ci.company_id = s.company_id AND ci.status = 'cancelled'
            AND ci.account_id IS NOT DISTINCT FROM (
              SELECT d.account_id FROM customer_credit_transactions d
-              WHERE d.sale_id = s.id AND d.company_id = s.company_id AND d.type = 'debit' LIMIT 1)) AS parcelas_canceladas,
+              WHERE d.sale_id = s.id AND d.company_id = s.company_id AND d.type = 'debit'
+                AND d.payment_method IS DISTINCT FROM 'credito_cliente' LIMIT 1)) AS parcelas_canceladas,
        (SELECT COUNT(*)::int FROM credit_installments ci
          WHERE ci.company_id = s.company_id AND ci.sale_id IS NULL
            AND ci.account_id IN (
@@ -310,7 +316,10 @@ function obj(v) {
  * parcela (applyPayment) — por isso a entrada é lida em ordem até fechar
  * total - principal.
  */
-function derivarPagamentos({ total, pagamentos, debitos, recebiveis, parcelas }) {
+// INC-2026-11-17-03: `creditoCliente` = credito da cliente usado na venda
+// (debito 'credito_cliente' no razao). Entra na lista como uma forma a mais;
+// nao e crediario. Ausente ou 0: a lista e a de sempre.
+function derivarPagamentos({ total, pagamentos, debitos, recebiveis, parcelas, creditoCliente }) {
   total = num(total);
   const pg = arr(pagamentos).filter((p) => num(p.amount) > 0);
   const deb = arr(debitos);
@@ -358,6 +367,8 @@ function derivarPagamentos({ total, pagamentos, debitos, recebiveis, parcelas })
   } : null;
   const lista = entrada.slice();
   if (credito && credito.amount > 0) lista.push({ method: 'crediario', amount: credito.amount, installments: credito.installments });
+  const usado = num(creditoCliente);
+  if (usado > 0) lista.push({ method: 'credito_cliente', amount: usado });
   return { entrada, entrada_ids: entradaRows.map((p) => p.id).filter(Boolean), credito, lista, sessao_id: (pg.find((p) => p.sessao_id) || {}).sessao_id || null, primeiro_em: pg.length ? pg[0].created_at : null };
 }
 
@@ -377,6 +388,7 @@ async function carregarContexto(q, { companyId, saleId, lock = false }) {
   const total = num(r.total_amount);
   const pag = derivarPagamentos({
     total, pagamentos: r.pagamentos, debitos: r.debitos, recebiveis: r.recebiveis, parcelas: r.parcelas,
+    creditoCliente: r.credito_cliente,
   });
   return {
     sale: {
@@ -396,6 +408,7 @@ async function carregarContexto(q, { companyId, saleId, lock = false }) {
     devolucoes: arr(r.devolucoes),
     nfce: obj(r.nfce),
     produtos: arr(r.produtos).filter(Boolean),
+    credito_cliente: num(r.credito_cliente),
     renegociada: arr(r.debitos).length > 0 && ((parseInt(r.parcelas_canceladas, 10) || 0) > 0 || (parseInt(r.parcelas_sem_venda, 10) || 0) > 0),
     credit_plan_snapshot: obj(r.credit_plan_snapshot),
     caixa: obj(r.caixa),
@@ -442,6 +455,15 @@ function travaDoDinheiro(ctx, perms) {
       code: 'CREDIT_HAS_PAYMENT', status: 409,
       message: `Já entrou pagamento neste crediário${quanto}. Para não bagunçar o que já foi pago, a forma e o cliente ficam como estão. Se o produto vai voltar, use “Devolver”.`,
       paid_amount: c.paid_amount,
+    };
+  }
+  // INC-2026-11-17-03: a venda usou credito da cliente. Mudar a forma
+  // recalcularia a receita como total - crediario e contaria o credito como
+  // dinheiro de novo; mudar o cliente deixaria a baixa na ficha de outra.
+  if ((ctx.credito_cliente || 0) > 0) {
+    return {
+      code: 'CUSTOMER_CREDIT_SALE', status: 409,
+      message: `Esta venda usou ${brl(ctx.credito_cliente)} de crédito da cliente, então a forma e o cliente ficam como estão. Para corrigir, cancele a venda (o crédito volta para a cliente) e faça de novo.`,
     };
   }
   if (String(ctx.sale.payment_method || '').toLowerCase() === 'sinal') {

@@ -28,6 +28,7 @@
 //   Endereco: o retrato da venda (sales.delivery_address, migration 435) e,
 //   na venda sem retrato, o cadastro atual do cliente.
 // ============================================================
+const creditoDaCliente = require('../services/creditoDaCliente');
 const express = require('express');
 const router  = express.Router({ mergeParams: true });
 const db      = require('../config/database');
@@ -260,7 +261,9 @@ function _payLabel(method) {
   const m = {
     pix: 'Pix', dinheiro: 'Dinheiro', cartao: 'Cartao',
     debito: 'Cartao Debito', credito: 'Cartao Credito',
-    fiado: 'Fiado', crediario: 'Crediario', outro: 'Outro'
+    fiado: 'Fiado', crediario: 'Crediario', outro: 'Outro',
+    // INC-2026-11-17-03: credito da cliente usado na venda.
+    credito_cliente: 'Credito da cliente'
   };
   return m[method] || method;
 }
@@ -326,7 +329,19 @@ async function _loadSaleData(saleId, companyId) {
     const rotulo = rotuloDaVariante({ color_name: variant_color_name, sku_suffix: i.variant_label, attributes: variant_attrs });
     return rotulo ? { ...resto, variant_label: rotulo } : resto;
   });
-  const payments = paymentsRes.rows;
+  let payments = paymentsRes.rows;
+  // INC-2026-11-17-03: a venda que usou credito da cliente tem sale_payments
+  // menor que o total (o credito nao entra no caixa). So nesse caso le o
+  // credito no razao e o poe na lista de formas do cupom; venda comum nao
+  // ganha consulta nem muda o HTML.
+  const somaDasFormas = payments.reduce((s, p) => s + (parseFloat(p.amount) || 0), 0);
+  const metodoDaVenda = String(saleRows[0].payment_method || '').toLowerCase();
+  const podeTerCredito = saleRows[0].customer_id
+    && (metodoDaVenda === 'credito_cliente' || (payments.length > 0 && somaDasFormas + 0.005 < (parseFloat(saleRows[0].total_amount) || 0)));
+  if (podeTerCredito) {
+    const usado = await creditoDaCliente.usadoNaVenda(db, { companyId, saleId });
+    if (usado > 0) payments = [...payments, { method: 'credito_cliente', amount: usado }];
+  }
   let installments = [];
   const isCrediario = String(saleRows[0].payment_method || '').toLowerCase() === 'crediario'
     || payments.some(p => String(p.method || '').toLowerCase() === 'crediario');
