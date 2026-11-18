@@ -55,6 +55,9 @@ const ID = {
   cupomDez: uuid(), cupomCinco: uuid(), cupomEsgotado: uuid(),
   sessao: uuid(), insumo: uuid(), composicao: uuid(),
   clienteBloqueada: uuid(), comanda: uuid(), orcamento: uuid(),
+  // B5a: pedidos do balcao (digital_orders origem 'balcao').
+  pedidoComSinal: uuid(), pedidoSemSinal: uuid(), pedidoQuitado: uuid(),
+  pedidoCancelado: uuid(), pedidoDaFilial: uuid(),
 };
 const NOME_DO_ID = new Map(Object.entries(ID).map(([nome, id]) => [id, `<${nome}>`]));
 const EMPRESAS = [ID.matriz, ID.filial, ID.fora];
@@ -90,6 +93,7 @@ async function tabelasComLinha() {
 
 const FILHAS = [
   ['sale_items', `sale_id IN (SELECT id FROM sales WHERE company_id = ANY($1))`],
+  ['digital_order_items', `order_id IN (SELECT id FROM digital_orders WHERE company_id = ANY($1))`],
   ['product_variants', `product_id IN (SELECT id FROM products WHERE company_id = ANY($1))`],
   ['studio_composition_items', `composition_id IN (SELECT id FROM studio_compositions WHERE company_id = ANY($1))`],
 ];
@@ -111,7 +115,7 @@ async function limpar() {
   await pool.query(`DELETE FROM users WHERE id = $1`, [ID.dono]).catch(() => {});
 }
 
-async function semear({ settings = {}, caixaAberto = false } = {}) {
+async function semear({ settings = {}, caixaAberto = false, liberado = false, comPedidos = false } = {}) {
   await limpar();
   const q = (sql, params) => pool.query(sql, params);
   await q(`INSERT INTO users (id, email, password_hash, full_name) VALUES ($1, $2, 'x', 'Fixture Venda Rapida')`,
@@ -169,6 +173,44 @@ async function semear({ settings = {}, caixaAberto = false } = {}) {
     await q(`INSERT INTO caixa_sessoes (id, company_id, opened_by, troco_inicial, status) VALUES ($1, $2, $3, 50, 'aberta')`,
       [ID.sessao, ID.matriz, ID.dono]);
   }
+  // B5a: os pedidos do balcao so nos cenarios de pedido (os de antes semeiam
+  // exatamente o que semeavam).
+  if (liberado || comPedidos) await semearPedidos(q);
+}
+
+// B5a: os pedidos do balcao como o B1 e o B4a os gravam (pedido 'confirmed'
+// ou 'ready', conta "Pedido a receber" pendente e, com sinal, o marco em
+// studio_payments e a entrada "Sinal de pedido").
+async function semearPedidos(q) {
+  const pedido = async (id, empresa, numero, status, total, { sinal = 0, cliente = null, data = null } = {}) => {
+    await q(`INSERT INTO digital_orders
+               (id, company_id, order_number, origem, status, payment_status, payment_method, delivery_type,
+                customer_id, customer_name, customer_phone, subtotal, discount_amount, delivery_fee, total,
+                promised_date, confirmed_at, deposit_paid)
+             VALUES ($1, $2, $3, 'balcao', $4, 'pending', 'balcao', 'pickup', $5, 'Cliente do Pedido', '',
+                     $6, 0, 0, $6, $7::date, NOW(), $8)`,
+      [id, empresa, numero, status, cliente, total, data, sinal > 0]);
+    await q(`INSERT INTO digital_order_items (order_id, product_id, product_name, unit_price, quantity, subtotal)
+             VALUES ($1, $2, 'Caneca lisa', 10, $3, $4)`, [id, empresa === ID.matriz ? ID.simples : null, total / 10, total]);
+    const saldo = Math.round((total - sinal) * 100) / 100;
+    await q(`INSERT INTO transactions (company_id, type, status, amount, original_amount, description, category, due_date, idempotency_key, notes)
+             VALUES ($1, 'income', $2, $3, $4, 'Pedido a receber', 'Pedido a receber', CURRENT_DATE, $5, $6)`,
+      [empresa, saldo > 0 ? 'pending' : 'cancelled', saldo > 0 ? saldo : total, sinal > 0 ? total : null,
+        `pedido-areceber-${id}`, saldo > 0 ? null : 'Quitada pelo sinal do pedido']);
+    if (sinal > 0) {
+      await q(`INSERT INTO studio_payments (company_id, order_id, kind, amount, status, method, forma, paid_at)
+               VALUES ($1, $2, 'deposit', $3, 'paid', 'pix', 'pix', NOW())`, [empresa, id, sinal]);
+      await q(`INSERT INTO transactions (company_id, type, status, amount, description, category, due_date, paid_at, idempotency_key)
+               VALUES ($1, 'income', 'confirmed', $2, 'Sinal do pedido', 'Sinal de pedido', CURRENT_DATE, NOW(), $3)`,
+        [empresa, sinal, `pedido-sinal-${id}`]);
+    }
+  };
+  // 3 canecas = 30, sinal de 10 no Pix, saldo 20, data combinada.
+  await pedido(ID.pedidoComSinal, ID.matriz, 'P-0001', 'ready', 30, { sinal: 10, cliente: ID.cliente, data: '2027-01-20' });
+  await pedido(ID.pedidoSemSinal, ID.matriz, 'P-0002', 'confirmed', 20);
+  await pedido(ID.pedidoQuitado, ID.matriz, 'P-0003', 'preparing', 10, { sinal: 10, cliente: ID.cliente });
+  await pedido(ID.pedidoCancelado, ID.matriz, 'P-0004', 'cancelled', 20);
+  await pedido(ID.pedidoDaFilial, ID.filial, 'P-0005', 'confirmed', 20);
 }
 
 // ── Retrato do banco e da resposta, sem o que e gerado na hora ──
@@ -237,6 +279,9 @@ function postar({ rota = 'sale', body, chave, empresa = ID.matriz }) {
 async function rodar(cenario, caminho) {
   await semear(cenario);
   usarCaminho(caminho);
+  // B5a: a trava do pedido (PEDIDO_LIBERADO). Os cenarios de antes rodam sem.
+  if (cenario.liberado) process.env.PEDIDO_LIBERADO = 'true';
+  else delete process.env.PEDIDO_LIBERADO;
   logSpy.mockClear();
   const respostas = [];
   for (const pedido of (cenario.pedidos || [cenario])) {
@@ -433,6 +478,54 @@ const CENARIOS = [
     body: { items: [item(ID.ultimo, 2, 30), item('abc', 1, 10)], payment_method: 'pix' } },
   { nome: 'recusa: desconto manual invalido', status: 400,
     body: { items: [item(ID.simples, 1, 10)], payment_method: 'pix', discount_type: 'percent', discount_value: 150 } },
+
+  // ── B5a: concluir o pedido do balcao (order_id) ──
+  // O sinal (10 no Pix) vem do servidor; a venda nasce com o valor cheio (30)
+  // e os pagamentos e a pdv-sale levam so o de hoje (20).
+  { nome: 'pedido: conclusao com sinal, saldo em dinheiro + Pix, caixa aberto e taxa da maquininha', status: 201, liberado: true,
+    settings: { caixa_enabled: true, ...TAXA }, caixaAberto: true,
+    body: {
+      items: [item(ID.simples, 3, 10)], order_id: ID.pedidoComSinal, customer_id: ID.cliente,
+      payments: [{ method: 'dinheiro', value: 12 }, { method: 'pix', value: 8 }],
+    } },
+  { nome: 'pedido: saldo no crediario em 3 parcelas', status: 201, liberado: true,
+    body: { items: [item(ID.simples, 3, 10)], order_id: ID.pedidoComSinal, customer_id: ID.cliente, payment_method: 'crediario', installments: 3 } },
+  { nome: 'pedido: saldo em crediario parcial + Pix', status: 201, liberado: true,
+    body: {
+      items: [item(ID.simples, 3, 10)], order_id: ID.pedidoComSinal, customer_id: ID.cliente,
+      payments: [{ method: 'crediario', value: 15 }, { method: 'pix', value: 5 }],
+    } },
+  { nome: 'pedido: sem sinal, no Pix, sem cliente (a venda fica sem cliente, como o pedido)', status: 201, liberado: true,
+    body: { items: [item(ID.simples, 2, 10)], order_id: ID.pedidoSemSinal, payment_method: 'pix' } },
+  { nome: 'pedido: o sinal pagou tudo (nada entra hoje), e a cliente vem do pedido', status: 201, liberado: true,
+    body: { items: [item(ID.simples, 1, 10)], order_id: ID.pedidoQuitado, payment_method: 'pix' } },
+  { nome: 'pedido: concluir duas vezes (outra chave): a segunda e 409', liberado: true, status: 201,
+    pedidos: [
+      { body: { items: [item(ID.simples, 2, 10)], order_id: ID.pedidoSemSinal, payment_method: 'pix' }, chave: 'chave-pedido-0001' },
+      { body: { items: [item(ID.simples, 2, 10)], order_id: ID.pedidoSemSinal, payment_method: 'pix' }, chave: 'chave-pedido-0002' },
+    ],
+    statusDeCada: [201, 409] },
+  { nome: 'recusa: pedido com comanda junto (422)', status: 422, liberado: true,
+    body: { items: [item(ID.simples, 2, 10)], order_id: ID.pedidoSemSinal, comanda_id: ID.comanda, payment_method: 'pix' } },
+  { nome: 'recusa: pedido com orcamento junto (422)', status: 422, liberado: true,
+    body: { items: [item(ID.simples, 2, 10)], order_id: ID.pedidoSemSinal, quote_id: ID.orcamento, payment_method: 'pix' } },
+  { nome: 'recusa: pedido com a trava desligada (404, nada gravado)', status: 404, comPedidos: true,
+    body: { items: [item(ID.simples, 2, 10)], order_id: ID.pedidoSemSinal, payment_method: 'pix' } },
+  { nome: 'recusa: pedido cancelado (409)', status: 409, liberado: true,
+    body: { items: [item(ID.simples, 2, 10)], order_id: ID.pedidoCancelado, payment_method: 'pix' } },
+  { nome: 'recusa: pedido de outra loja do grupo (404)', status: 404, liberado: true,
+    body: { items: [item(ID.simples, 2, 10)], order_id: ID.pedidoDaFilial, payment_method: 'pix' } },
+  { nome: 'recusa: pagamentos cobram o sinal de novo (422)', status: 422, liberado: true,
+    body: { items: [item(ID.simples, 3, 10)], order_id: ID.pedidoComSinal, customer_id: ID.cliente, payments: [{ method: 'pix', value: 30 }] } },
+  { nome: 'recusa: sinal maior que a venda (422, a sobra e do B5b)', status: 422, liberado: true,
+    body: { items: [item(ID.simples, 1, 5)], order_id: ID.pedidoComSinal, customer_id: ID.cliente, payment_method: 'pix' } },
+  { nome: 'recusa: crediario maior que o saldo (422)', status: 422, liberado: true,
+    body: {
+      items: [item(ID.simples, 3, 10)], order_id: ID.pedidoComSinal, customer_id: ID.cliente,
+      payments: [{ method: 'crediario', value: 25 }],
+    } },
+  { nome: 'recusa: pedido com caixa obrigatorio e fechado (409 da venda)', status: 409, liberado: true, settings: { caixa_enabled: true },
+    body: { items: [item(ID.simples, 2, 10)], order_id: ID.pedidoSemSinal, payment_method: 'pix' } },
 ];
 
 const IDAS = [];
@@ -769,3 +862,61 @@ describe('caminho novo: abertura da transacao em um envio', () => {
   });
 });
 // <<< p-144
+
+// >>> B5a
+// ── Concluir o pedido do balcao: o que a venda grava (B5a / p-62c) ──
+describe('pedido do balcao: a venda da conclusao, nos dois caminhos', () => {
+  const cenario = (nome) => CENARIOS.find((c) => c.nome.startsWith(nome));
+  const num = (v) => (v == null ? v : Number(v));
+
+  test.each(['fila', 'rapido'])('%s: valor cheio na venda, so o de hoje no caixa e no Financeiro, pedido entregue', async (caminho) => {
+    const r = await rodar(cenario('pedido: conclusao com sinal'), caminho);
+    expect(r.respostas[0].status).toBe(201);
+    const { rows: [venda] } = await pool.query(
+      `SELECT id, total_amount, order_id, promised_date::text AS promised_date, customer_id FROM sales WHERE company_id = $1`, [ID.matriz]);
+    expect(num(venda.total_amount)).toBe(30);
+    expect(venda).toMatchObject({ order_id: ID.pedidoComSinal, promised_date: '2027-01-20', customer_id: ID.cliente });
+
+    const { rows: pagamentos } = await pool.query(
+      `SELECT method, amount::numeric AS amount, sessao_id FROM sale_payments WHERE sale_id = $1 ORDER BY method`, [venda.id]);
+    expect(pagamentos.map((p) => [p.method, num(p.amount), p.sessao_id])).toEqual([['dinheiro', 12, ID.sessao], ['pix', 8, ID.sessao]]);
+
+    const lanc = async (k) => (await pool.query(
+      `SELECT status, amount::numeric AS amount, notes FROM transactions WHERE idempotency_key = $1`, [k])).rows[0];
+    expect(num((await lanc(`pdv-sale-${venda.id}`)).amount)).toBe(20);
+    expect(await lanc(`pedido-areceber-${ID.pedidoComSinal}`)).toMatchObject({ status: 'cancelled', notes: expect.stringMatching(/^Quitada pela venda #/) });
+    expect(await lanc(`pedido-sinal-${ID.pedidoComSinal}`)).toMatchObject({ status: 'confirmed' });
+    // Taxa da maquininha so do Pix de hoje (8 x 1%).
+    expect(num((await lanc(`pdv-card-fee-${venda.id}`)).amount)).toBe(0.08);
+
+    const { rows: [o] } = await pool.query(
+      `SELECT status::text AS status, sale_id, delivered_at, stock_deducted FROM digital_orders WHERE id = $1`, [ID.pedidoComSinal]);
+    expect(o).toMatchObject({ status: 'delivered', sale_id: venda.id, stock_deducted: false });
+    expect(o.delivered_at).not.toBeNull();
+    // A venda baixou o estoque pelo caminho normal: 20 - 3.
+    expect(Number((await pool.query(`SELECT stock_qty FROM products WHERE id = $1`, [ID.simples])).rows[0].stock_qty)).toBe(17);
+
+    expect(r.respostas[0].body.pedido).toEqual({
+      id: '<pedidoComSinal>', order_number: 'P-0001', status: 'delivered',
+      total_pedido: 30, sinal_pago: 10, recebido_hoje: 20, no_crediario: 0,
+    });
+  });
+
+  test('sem order_id a resposta nao ganha a chave `pedido` e a venda nao ganha order_id', async () => {
+    const r = await rodar(cenario('1 item, PIX'), 'rapido');
+    expect(r.respostas[0].body).not.toHaveProperty('pedido');
+    const { rows } = await pool.query(`SELECT order_id FROM sales WHERE company_id = $1`, [ID.matriz]);
+    expect(rows).toEqual([{ order_id: null }]);
+  });
+
+  test('saldo no crediario 3x: a venda de 30, debito de 20 em 3 parcelas, nada entra hoje', async () => {
+    const r = await rodar(cenario('pedido: saldo no crediario'), 'rapido');
+    expect(r.respostas[0].status).toBe(201);
+    const id = (await pool.query(`SELECT id FROM sales WHERE company_id = $1`, [ID.matriz])).rows[0].id;
+    expect(r.respostas[0].body.credit).toMatchObject({ debited: 20 });
+    expect(r.respostas[0].body.credit.installments).toHaveLength(3);
+    expect((await pool.query(`SELECT COUNT(*)::int AS n FROM sale_payments WHERE sale_id = $1`, [id])).rows[0].n).toBe(0);
+    expect((await pool.query(`SELECT COUNT(*)::int AS n FROM transactions WHERE idempotency_key = $1`, [`pdv-sale-${id}`])).rows[0].n).toBe(0);
+  });
+});
+// <<< B5a

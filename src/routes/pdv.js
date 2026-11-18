@@ -80,6 +80,9 @@ const { findOwnerScopedCustomer } = require('../utils/customerScope');
 const matconSaleHooks = require('../services/matconSaleHooks');
 // 09/10/2026 (migration 368): venda com `comanda_id` fecha a comanda do Caixa.
 const comandaSaleHooks = require('../services/comandaSaleHooks');
+// 17/11/2026 (B5a / p-62c): venda com `order_id` conclui o pedido do balcao.
+// Sem order_id nada do gancho roda (venda de hoje, byte a byte).
+const pedidoSaleHooks = require('../services/pedidoSaleHooks');
 // 06/10/2026: chave "vender sem estoque" — ver cabecalho do util.
 const { vendaSemEstoqueLiberada, lerVendaSemEstoque } = require('../utils/vendaSemEstoque');
 const { productVisibilityWhere } = require('../utils/companyGroup');
@@ -335,6 +338,16 @@ async function handleSale(req, res, opts = {}) {
     console.warn('[pdv] nfse_tomador ignorado na venda:', nfseTomador.aviso, { companyId: req.params.id });
   }
 
+  // 17/11/2026 (B5a): order_id = a venda conclui um pedido do balcao. null =
+  // venda comum (o caminho de sempre, sem nenhuma consulta a mais). Com
+  // comanda, orcamento ou sinal junto: 422; trava desligada: 404.
+  let orderIdDaVenda = null;
+  try {
+    orderIdDaVenda = pedidoSaleHooks.pedidoDoCorpo(req, { signalSale: !!opts.signalSale });
+  } catch (e) {
+    return res.status(e.statusCode).json({ error: e.message, code: e.code });
+  }
+
   // 17/10/2026 (tq-15): null = venda sem chave, exatamente como antes.
   const idemKey = await vendaIdempotente.chaveDaVenda(req);
 
@@ -406,6 +419,19 @@ async function handleSale(req, res, opts = {}) {
       }
     }
     }
+    // B5a: trava o pedido (FOR UPDATE: mesma loja, aberto) e le o sinal pago,
+    // do servidor. Venda sem order_id nao passa aqui.
+    let pedidoDaVenda = null;
+    let clienteDoPedido = false;
+    if (orderIdDaVenda) {
+      pedidoDaVenda = await pedidoSaleHooks.travarPedido(client, { companyId: req.params.id, orderId: orderIdDaVenda });
+      // A venda e da cliente do pedido quando o Caixa nao mandou outra (a
+      // mesma conferencia de dono do customer_id do corpo).
+      if (!customerId && !req.body?.customer && !req.body?.customer_name && pedidoDaVenda.customer_id) {
+        const doPedido = await findOwnerScopedCustomer(client, req.params.id, pedidoDaVenda.customer_id);
+        if (doPedido) { customerId = doPedido.id; clienteDoPedido = true; }
+      }
+    }
     // F2: resolvido DENTRO da transacao -- se a venda falhar adiante, o
     // cadastro criado aqui volta atras junto. Antes do cupom, que precisa
     // do dono pra validar cupom nominal.
@@ -417,7 +443,7 @@ async function handleSale(req, res, opts = {}) {
     // 16/09/2026: o customer_id sozinho tambem passa aqui. Antes ele ia
     // direto pro INSERT sem conferencia nenhuma -- um id de cliente de outro
     // dono virava venda (e divida no crediario) desta loja.
-    if (opts.signalSale || customerId || req.body?.customer || req.body?.customer_name) {
+    if (!clienteDoPedido && (opts.signalSale || customerId || req.body?.customer || req.body?.customer_name)) {
       customerId = await resolveInlineCustomer(client, req.params.id, req.body, {
         required: !!opts.signalSale,
       });
@@ -578,7 +604,14 @@ async function handleSale(req, res, opts = {}) {
     // nunca de um valor mandado pelo cliente -- assim `sinal + saldo = total`
     // por construcao. Sem piso de sinal (decisao de produto): so 0 < sinal < total.
     let creditAmount;
-    if (opts.signalSale) {
+    // B5a: os valores da conclusao do pedido (o sinal vem do servidor).
+    let valoresDoPedido = null;
+    if (pedidoDaVenda) {
+      valoresDoPedido = pedidoSaleHooks.valoresDaConclusao({
+        pedido: pedidoDaVenda, totalAmount, payment_method, payments, customerId,
+      });
+      creditAmount = valoresDoPedido.creditAmount;
+    } else if (opts.signalSale) {
       if (!(signalAmount > 0) || signalAmount >= totalAmount) {
         await client.query('ROLLBACK');
         return res.status(422).json({
@@ -593,7 +626,11 @@ async function handleSale(req, res, opts = {}) {
       const rawCreditAmount = calcCreditAmount({ payment_method, payments, totalAmount });
       creditAmount = (rawCreditAmount > 0 && customerId) ? rawCreditAmount : 0;
     }
-    const cashAmount = parseFloat((totalAmount - creditAmount).toFixed(2));
+    // B5a: na conclusao do pedido, cashAmount = total - crediario - sinal (so o
+    // que entra hoje). Venda comum: a conta de sempre.
+    const cashAmount = valoresDoPedido
+      ? valoresDoPedido.cashAmount
+      : parseFloat((totalAmount - creditAmount).toFixed(2));
     timing.etapa('cupom_vendedora');
     // tq-15: com chave, ela entra no MESMO INSERT (o indice unico parcial da
     // 390 e a garantia final). Sem chave, o SQL e o de sempre.
@@ -943,6 +980,15 @@ async function handleSale(req, res, opts = {}) {
       // 392 (tc-04): cobranca parcial — a comanda continua aberta com o resto.
       if (comandaResult.comanda_open) sale.comanda_open = true;
     }
+
+    // B5a: o pedido vira 'delivered' com a venda, a venda leva o order_id e a
+    // conta a receber vai a 'cancelled' (quitada pela venda). Sem pedido,
+    // nada.
+    const pedidoResult = pedidoDaVenda
+      ? await pedidoSaleHooks.afterSaleInsert(client, {
+        companyId: req.params.id, sale, pedido: pedidoDaVenda, valores: valoresDoPedido,
+      })
+      : null;
     timing.etapa('ganchos');
 
     await client.query('COMMIT');
@@ -1034,6 +1080,8 @@ async function handleSale(req, res, opts = {}) {
         : null,
       // Matcon M1: so aparece quando a venda veio de um orcamento.
       ...(matconResult ? { matcon: matconResult } : {}),
+      // B5a: so aparece quando a venda concluiu um pedido do balcao.
+      ...(pedidoResult ? { pedido: pedidoResult } : {}),
     };
     // tq-15: a repeticao da mesma chave devolve este mesmo corpo.
     if (idemKey) vendaIdempotente.guardarResposta({ companyId: req.params.id, saleId: sale.id, corpo });

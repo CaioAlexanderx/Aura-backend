@@ -215,6 +215,7 @@ async function permissoesDeEdicao(q, { companyId, user, companyRole }) {
 const SQL_CONTEXTO = (comSnapshot) => `
 SELECT s.id, s.company_id, s.sale_number, s.customer_id, s.seller_id, s.employee_id, s.seller_name,
        s.total_amount, s.payment_method, s.status, COALESCE(s.type, 'sale') AS type, s.created_at,
+       to_jsonb(s)->>'order_id' AS order_id,
        to_char(s.created_at AT TIME ZONE '${SP_TZ}', 'YYYY-MM-DD') AS dia,
        c.name AS customer_name, e.name AS employee_name,
        ${comSnapshot ? 's.credit_plan_snapshot' : 'NULL::jsonb'} AS credit_plan_snapshot,
@@ -384,6 +385,7 @@ async function carregarContexto(q, { companyId, saleId, lock = false }) {
       customer_id: r.customer_id || null, seller_id: r.seller_id || null, employee_id: r.employee_id || null,
       seller_name: r.seller_name || null, total_amount: total, payment_method: r.payment_method || null,
       status: r.status || 'completed', type: r.type || 'sale', created_at: r.created_at, dia: r.dia,
+      order_id: r.order_id || null,
     },
     customer: r.customer_id ? { id: r.customer_id, name: r.customer_name || 'Cliente' } : null,
     seller: (r.employee_id || r.seller_name)
@@ -448,6 +450,15 @@ function travaDoDinheiro(ctx, perms) {
     return {
       code: 'SIGNAL_SALE', status: 409,
       message: 'Venda com sinal: a forma e o cliente ficam como estão. O saldo é baixado pelo pedido.',
+    };
+  }
+  // 17/11/2026 (B5a): a venda que concluiu um pedido do balcao leva so o que
+  // entrou na conclusao; o sinal entrou antes, fora dela. Recalcular a
+  // receita aqui (total - crediario) contaria o sinal de novo.
+  if (ctx.sale.order_id) {
+    return {
+      code: 'ORDER_SALE', status: 409,
+      message: 'Esta venda concluiu um pedido: a forma e o cliente ficam como estão. O sinal entrou antes, no pedido.',
     };
   }
   if (perms && !perms.dinheiro) {
