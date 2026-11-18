@@ -143,7 +143,7 @@ async function crediarioDaSemana(db, companyId, period, { plano = null, totalVen
       `SELECT
          COALESCE(SUM(amount) FILTER (WHERE type = 'payment' AND payment_method IS DISTINCT FROM 'crediario_credito'), 0) AS recebido,
          COUNT(*) FILTER (WHERE type = 'payment' AND payment_method IS DISTINCT FROM 'crediario_credito')::int          AS recebimentos,
-         COALESCE(SUM(amount) FILTER (WHERE type = 'debit'), 0)                                                         AS novo_fiado
+         COALESCE(SUM(amount) FILTER (WHERE type = 'debit' AND payment_method IS DISTINCT FROM 'credito_cliente'), 0)  AS novo_fiado
          FROM customer_credit_transactions
         WHERE company_id = $1 AND ${naSemana}`,
       [companyId, inicio, fimExclusivo]
@@ -200,6 +200,7 @@ async function crediarioDaSemana(db, companyId, period, { plano = null, totalVen
         WHERE t.company_id = $1
           AND t.type = 'debit'
           AND t.sale_id IS NOT NULL
+          AND t.payment_method IS DISTINCT FROM 'credito_cliente'
           AND (t.created_at ${SP}) >= $2::timestamp AND (t.created_at ${SP}) < $3::timestamp`,
       [companyId, inicio, fimExclusivo]
     );

@@ -487,7 +487,8 @@ router.get('/:sale_id', asyncHandler(async (req, res) => {
   const [formasRes, lastEdit] = await Promise.all([
     pool.query(
       "SELECT (SELECT COALESCE(json_agg(json_build_object('method', sp.method, 'amount', sp.amount, 'sessao_id', sp.sessao_id, 'created_at', sp.created_at) ORDER BY sp.created_at, sp.id), '[]'::json) FROM sale_payments sp WHERE sp.sale_id = $1) AS pagamentos, " +
-      "       (SELECT COALESCE(json_agg(json_build_object('id', d.id, 'account_id', d.account_id)), '[]'::json) FROM customer_credit_transactions d WHERE d.sale_id = $1 AND d.company_id = $2 AND d.type = 'debit') AS debitos, " +
+      "       (SELECT COALESCE(json_agg(json_build_object('id', d.id, 'account_id', d.account_id)), '[]'::json) FROM customer_credit_transactions d WHERE d.sale_id = $1 AND d.company_id = $2 AND d.type = 'debit' AND d.payment_method IS DISTINCT FROM 'credito_cliente') AS debitos, " +
+      "       (SELECT COALESCE(SUM(d.amount), 0) FROM customer_credit_transactions d WHERE d.sale_id = $1 AND d.company_id = $2 AND d.type = 'debit' AND d.payment_method = 'credito_cliente') AS credito_cliente, " +
       "       (SELECT COALESCE(json_agg(json_build_object('amount', t.amount, 'status', t.status, 'key', t.idempotency_key)), '[]'::json) FROM transactions t WHERE t.company_id = $2 AND t.idempotency_key >= 'pdv-credit-receivable-' || $1::text AND t.idempotency_key < 'pdv-credit-receivable-' || $1::text || 'z') AS recebiveis, " +
       "       (SELECT COALESCE(json_agg(json_build_object('total', ci.total_installments, 'due_date', to_char(ci.due_date, 'YYYY-MM-DD'), 'status', ci.status, 'covered', ci.covered_amount) ORDER BY ci.installment_number), '[]'::json) FROM credit_installments ci WHERE ci.sale_id = $1 AND ci.company_id = $2 AND ci.status <> 'cancelled') AS parcelas",
       [saleId, companyId]
@@ -499,6 +500,7 @@ router.get('/:sale_id', asyncHandler(async (req, res) => {
     const f = formasRes.rows[0];
     payments = editarVenda.derivarPagamentos({
       total: sale.total_amount, pagamentos: f.pagamentos, debitos: f.debitos, recebiveis: f.recebiveis, parcelas: f.parcelas,
+      creditoCliente: f.credito_cliente,
     }).lista;
   }
 
