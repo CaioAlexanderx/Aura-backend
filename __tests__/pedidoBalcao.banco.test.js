@@ -5,8 +5,10 @@
 //
 // Regras do Caio (17/11) provadas aqui, no banco de verdade:
 //   1. pedido nao e venda: guardar NAO baixa estoque (produto, variante,
-//      insumo do Studio), NAO lanca no Financeiro, NAO cria venda nem
-//      movimento de caixa. Nasce 'confirmed', stock_deducted FALSE;
+//      insumo do Studio), NAO cria venda nem movimento de caixa e, no
+//      Financeiro, so lanca a conta "Pedido a receber" PENDENTE (B4a; o
+//      sinal e o resto do dinheiro estao em sinalDoPedido.banco.test.js).
+//      Nasce 'confirmed', stock_deducted FALSE;
 //   2. preco congelado, desconto por item e do pedido, cliente opcional;
 //   3. Idempotency-Key: repetir nao duplica (nem em paralelo); a mesma chave
 //      com outros itens e 409;
@@ -63,6 +65,8 @@ const base = `/companies/${ID.loja}`;
 
 async function limpar() {
   const passos = [
+    [`DELETE FROM transactions WHERE company_id = ANY($1)`, [EMPRESAS]],
+    [`DELETE FROM studio_payments WHERE company_id = ANY($1)`, [EMPRESAS]],
     [`DELETE FROM digital_order_items WHERE order_id IN (SELECT id FROM digital_orders WHERE company_id = ANY($1))`, [EMPRESAS]],
     [`DELETE FROM digital_orders WHERE company_id = ANY($1)`, [EMPRESAS]],
     [`DELETE FROM studio_composition_items WHERE composition_id = $1`, [ID.composicao]],
@@ -156,7 +160,8 @@ async function estoque() {
 
 async function contarEfeitos() {
   const { rows } = await q(
-    `SELECT (SELECT COUNT(*) FROM transactions WHERE company_id = ANY($1))::int AS transacoes,
+    `SELECT (SELECT COUNT(*) FROM transactions WHERE company_id = ANY($1) AND status <> 'pending')::int AS transacoes,
+            (SELECT COUNT(*) FROM transactions WHERE company_id = ANY($1) AND status = 'pending')::int AS a_receber,
             (SELECT COUNT(*) FROM sales WHERE company_id = ANY($1))::int AS vendas,
             (SELECT COUNT(*) FROM stock_movements WHERE company_id = ANY($1))::int AS movimentos`,
     [EMPRESAS]);
@@ -164,7 +169,7 @@ async function contarEfeitos() {
 }
 
 describe('guardar o pedido', () => {
-  test('nasce confirmado, sem baixa, sem lancamento, com preco congelado', async () => {
+  test('nasce confirmado, sem baixa, so a conta a receber pendente, com preco congelado', async () => {
     const antes = await estoque();
     const efeitosAntes = await contarEfeitos();
     const r = await guardar({
@@ -194,12 +199,19 @@ describe('guardar o pedido', () => {
     const { rows: [linha] } = await q(
       `SELECT stock_deducted, transaction_id, sale_id, vertical, payment_method, delivery_type::text AS delivery_type, confirmed_at
          FROM digital_orders WHERE id = $1`, [o.id]);
-    expect(linha).toMatchObject({ stock_deducted: false, transaction_id: null, sale_id: null, vertical: null, payment_method: 'balcao', delivery_type: 'pickup' });
+    expect(linha).toMatchObject({ stock_deducted: false, sale_id: null, vertical: null, payment_method: 'balcao', delivery_type: 'pickup' });
     expect(linha.confirmed_at).not.toBeNull();
 
     // Nada baixou: produto, variante, nem o insumo da caneca (trigger 459).
     expect(await estoque()).toEqual(antes);
-    expect(await contarEfeitos()).toEqual(efeitosAntes);
+    // B4a: so a conta a receber, pendente, pelo valor cheio, ligada ao pedido.
+    expect(await contarEfeitos()).toEqual({ ...efeitosAntes, a_receber: efeitosAntes.a_receber + 1 });
+    const { rows: [conta] } = await q(
+      `SELECT id, type::text AS type, status::text AS status, amount::numeric AS amount, category, due_date::text AS due_date
+         FROM transactions WHERE idempotency_key = $1`, [`pedido-areceber-${o.id}`]);
+    expect(conta).toMatchObject({ type: 'income', status: 'pending', category: 'Pedido a receber', due_date: '2099-12-20' });
+    expect(Number(conta.amount)).toBe(150);
+    expect(linha.transaction_id).toBe(conta.id);
   });
 
   test('sem cliente: so o nome, ou "Cliente"', async () => {
