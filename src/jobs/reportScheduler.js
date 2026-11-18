@@ -39,7 +39,7 @@ const db = require('../config/database');
 const P = require('../services/emailPreferencias');
 // tq-113 (26/10/2026): conta pendente (dono nunca confirmou o e-mail) não recebe o relatório.
 const { semPendente } = require('../utils/contaPendente');
-const { reservarEnvio, marcarEnviado, marcarFalha } = require('../services/emailLog');
+const { reservarEnvio, marcarEnviado, marcarFalha, marcarSuprimido } = require('../services/emailLog');
 const { resolvePeriodForReport } = require('../services/reportDataQueries');
 
 const VERTICAIS_FORA = ['karate_dojo', 'karate_federation'];
@@ -233,6 +233,14 @@ async function enviarGrupo(g, { now = Date.now(), env = process.env, contadores 
     if (!(await updateDelivery(result.deliveryId, 'failed', { error: sendErr.message })) && contadores) contadores.deliveryErrors++;
     throw sendErr;
   }
+  // 18/11/2026: todos os destinatários com devolução permanente
+  // (services/emailDevolvido.js): nada saiu.
+  if (envio && envio.suprimido) {
+    await marcarSuprimido(db, logId).catch(() => {});
+    await updateDelivery(result.deliveryId, 'failed', { error: 'devolucao_permanente' });
+    console.log(`[reportScheduler] skipped (devolucao permanente): company=${g.primary.id}`);
+    return 'skipped';
+  }
   const envioId = (envio && envio.id) || null;
   await marcarEnviado(db, logId, envioId).catch((e) => console.error('[reportScheduler] marcar enviado falhou:', e.message));
   if (!(await updateDelivery(result.deliveryId, 'sent', { resendId: envioId })) && contadores) contadores.deliveryErrors++;
@@ -352,6 +360,10 @@ async function enviarRelatorioAgora({ companyId, userId, email, now = Date.now()
         relatorio: result.relatorio, versao: result.versao, periodo: periodoDoResultado(result),
       }
     );
+    if (envio && envio.suprimido) {
+      await marcarSuprimido(db, logId).catch(() => {});
+      return { ok: false, codigo: 'ENVIO_FALHOU' };
+    }
     await marcarEnviado(db, logId, (envio && envio.id) || null).catch(() => {});
     return { ok: true, para, restantes: MAX_AGORA_POR_DIA - usados };
   } catch (err) {

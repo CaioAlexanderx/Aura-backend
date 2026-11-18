@@ -86,6 +86,9 @@ router.use('/comandas', require('./comandas'));
 // venda como pedido (digital_orders, origem 'balcao'). Sem requirePlan no
 // prefixo (Caixa e de todo plano); trava PEDIDO_LIBERADO dentro do router.
 router.use('/pedidos', require('./pedidosDoBalcao'));
+// 17/11/2026 — "Nova data" do pedido (PATCH /:oid/data). Router proprio,
+// depois do de cima, com a mesma trava dentro.
+router.use('/pedidos', require('./pedidoNovaData'));
 // 23/09/2026 — Matcon M3: Profissionais Parceiros (migration 353). Mesmo
 // desenho da Otica: gate por pdv_settings.matcon_enabled dentro do router,
 // so na escrita, sem requirePlan no prefixo.
