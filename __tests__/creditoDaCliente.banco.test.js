@@ -115,6 +115,7 @@ beforeAll(async () => {
   app.use('/companies/:id/pdv', require('../src/routes/pdv'));
   app.use('/companies/:id/caixa', require('../src/routes/caixa'));
   app.use('/companies/:id/dashboard', require('../src/routes/dashboard'));
+  app.use('/companies/:id/dre', require('../src/routes/dre'));
   app.use('/companies/:id/sales', require('../src/routes/sales'));
   app.use('/companies/:id/credit', require('../src/routes/credit'));
   app.use('/companies/:id/print', require('../src/routes/print'));
@@ -161,9 +162,16 @@ async function numeros() {
   const painel = await request(app).get(`/companies/${ID.loja}/dashboard`);
   expect(painel.status).toBe(200);
   const cx = await caixa();
+  const dre = await request(app).get(`/companies/${ID.loja}/dre`).query({ from: hoje, to: hoje });
+  expect(dre.status).toBe(200);
   return {
     faturamento: r2(res.faturamento),
     receita_painel: r2(painel.body.revenue),
+    // Entradas menos saidas do Painel (a "Troca - Devolucao" e saida).
+    saldo_painel: r2(painel.body.net),
+    // DRE: Receita Bruta + a linha "outros" (onde caem "Vendas" e "Troca -
+    // Devolucao" sem mapa proprio), com sinal: entradas menos saidas.
+    dre_resultado: r2((dre.body.summary.receita_bruta || 0) + (dre.body.summary.outros || 0)),
     a_receber_painel: r2(painel.body.pendingIncome),
     ficha: await ficha(),
     caixa_pix: r2(cx.totais_ao_vivo.pix),
@@ -223,10 +231,21 @@ describe('o caminho do relato', () => {
     expect(delta(depois, antes)).toMatchObject({ faturamento: 200, receita_painel: 0, a_receber_painel: 200 });
   });
 
-  test('venda de 200 com 50 de crédito e 150 no Pix: Faturamento 200, Receita 150, ficha −50 -> 0, caixa Pix 150', async () => {
+  test('venda de 200 com 50 de crédito de troca e 150 no Pix: Faturamento 200, Receita 200, ficha −50 -> 0, caixa Pix 150', async () => {
     await abrirCaixa();
-    await trocaComCredito();
+    // Antes da troca: so a venda do casaco (50 no Pix), dinheiro de verdade.
+    const venda = await vender({ items: [{ product_id: ID.casaco, quantity: 1, unit_price: 50 }], payment_method: 'pix', customer_id: ID.cliente });
+    const [item] = (await q(`SELECT id FROM sale_items WHERE sale_id = $1`, [venda.body.sale.id])).rows;
+    const inicio = await numeros();
+    const troca = await request(app).post(`/companies/${ID.loja}/pdv/troca`).send({
+      original_sale_ids: [venda.body.sale.id],
+      returned_items: [{ original_sale_id: venda.body.sale.id, original_sale_item_id: item.id, product_id: ID.casaco, quantity: 1, unit_price: 50 }],
+      new_items: [], refund_splits: [{ method: 'crediario_credito', amount: 50 }], customer_id: ID.cliente, nfce_strategy: 'none',
+    });
+    expect(troca.status).toBe(201);
     const antes = await numeros();
+    // A troca ja lancou a saida: "Troca - Devolucao" de 50 (Painel −50, DRE −50).
+    expect(delta(antes, inicio)).toMatchObject({ receita_painel: 0, saldo_painel: -50, dre_resultado: -50, ficha: -50, caixa_pix: 0 });
     const r = await vender({
       items: VESTIDO, payment_method: 'pix', customer_id: ID.cliente,
       payments: [{ method: 'credito_cliente', value: 50 }, { method: 'pix', value: 150 }],
@@ -236,21 +255,30 @@ describe('o caminho do relato', () => {
     expect(r.body.credit).toBeNull();
     const depois = await numeros();
     const d = delta(depois, antes);
-    TABELA.push({ momento: 'antes da venda', ...antes }, { momento: 'depois da venda', ...depois }, { momento: 'diferença', ...d });
-    expect(d).toEqual({ faturamento: 200, receita_painel: 150, a_receber_painel: 0, ficha: 50, caixa_pix: 150, caixa_fiado: 0 });
+    TABELA.push(
+      { momento: 'depois da venda do casaco', ...inicio },
+      { momento: 'depois da troca', ...antes },
+      { momento: 'depois da venda de 200', ...depois },
+      { momento: 'venda: diferença', ...d },
+      { momento: 'troca + venda', ...delta(depois, inicio) },
+    );
+    // A parte paga com credito de troca entra na receita (a saida ja foi na troca).
+    expect(d).toEqual({ faturamento: 200, receita_painel: 200, saldo_painel: 200, dre_resultado: 200, a_receber_painel: 0, ficha: 50, caixa_pix: 150, caixa_fiado: 0 });
+    // Troca + venda: o Painel e o DRE andam o dinheiro que entrou de fato (o Pix de 150).
+    expect(delta(depois, inicio)).toMatchObject({ saldo_painel: 150, dre_resultado: 150, caixa_pix: 150, ficha: 0 });
     expect(antes.ficha).toBe(-50);
     expect(depois.ficha).toBe(0);
 
     const saleId = r.body.sale.id;
-    const { rows: [venda] } = await q(`SELECT total_amount::text, payment_method FROM sales WHERE id = $1`, [saleId]);
-    expect(venda).toEqual({ total_amount: '200.00', payment_method: 'pix' });
+    const { rows: [gravada] } = await q(`SELECT total_amount::text, payment_method FROM sales WHERE id = $1`, [saleId]);
+    expect(gravada).toEqual({ total_amount: '200.00', payment_method: 'pix' });
     const { rows: formas } = await q(`SELECT method, amount::text FROM sale_payments WHERE sale_id = $1`, [saleId]);
     expect(formas).toEqual([{ method: 'pix', amount: '150.00' }]);
     const { rows: tx } = await q(`SELECT idempotency_key, amount::text, status FROM transactions WHERE idempotency_key LIKE $1`, [`%${saleId}%`]);
-    expect(tx).toEqual([{ idempotency_key: `pdv-sale-${saleId}`, amount: '150.00', status: 'confirmed' }]);
+    expect(tx).toEqual([{ idempotency_key: `pdv-sale-${saleId}`, amount: '200.00', status: 'confirmed' }]);
     const { rows: baixa } = await q(
-      `SELECT type, payment_method, amount::text, notes FROM customer_credit_transactions WHERE sale_id = $1`, [saleId]);
-    expect(baixa).toEqual([{ type: 'debit', payment_method: 'credito_cliente', amount: '50.00', notes: `Crédito usado na venda #${r.body.sale.sale_number}` }]);
+      `SELECT type, payment_method, source, amount::text, notes FROM customer_credit_transactions WHERE sale_id = $1`, [saleId]);
+    expect(baixa).toEqual([{ type: 'debit', payment_method: 'credito_cliente', source: 'credito_troca', amount: '50.00', notes: `Crédito usado na venda #${r.body.sale.sale_number}` }]);
     // Nada de parcela nem carne: nao e crediario.
     expect((await q(`SELECT COUNT(*)::int AS n FROM credit_installments WHERE sale_id = $1`, [saleId])).rows[0].n).toBe(0);
     expect((await q(`SELECT COUNT(*)::int AS n FROM credit_accounts WHERE company_id = $1`, [ID.loja])).rows[0].n).toBe(0);
@@ -286,14 +314,14 @@ describe('o caminho do relato', () => {
     expect(tipos.find(([t]) => t === 'purchase')).toBeUndefined();
   });
 
-  test('venda inteira no crédito: nenhuma forma no caixa, nenhuma receita, ficha zerada', async () => {
+  test('venda inteira no crédito de troca: nenhuma forma no caixa, receita de 50, ficha zerada', async () => {
     await abrirCaixa();
     await trocaComCredito();
     const antes = await numeros();
     const r = await vender({ items: [{ product_id: ID.casaco, quantity: 1, unit_price: 50 }], payment_method: 'credito_cliente', customer_id: ID.cliente });
     expect(r.status).toBe(201);
     const d = delta(await numeros(), antes);
-    expect(d).toEqual({ faturamento: 50, receita_painel: 0, a_receber_painel: 0, ficha: 50, caixa_pix: 0, caixa_fiado: 0 });
+    expect(d).toEqual({ faturamento: 50, receita_painel: 50, saldo_painel: 50, dre_resultado: 50, a_receber_painel: 0, ficha: 50, caixa_pix: 0, caixa_fiado: 0 });
     expect((await q(`SELECT COUNT(*)::int AS n FROM sale_payments WHERE sale_id = $1`, [r.body.sale.id])).rows[0].n).toBe(0);
     const cupom = await request(app).get(`/companies/${ID.loja}/print/receipt/${r.body.sale.id}`);
     expect(cupom.text).toContain('<td>Credito da cliente</td><td style="text-align:right">R$50.00</td>');
@@ -307,6 +335,8 @@ describe('o caminho do relato', () => {
       payments: [{ method: 'credito_cliente', value: 50 }, { method: 'pix', value: 150 }],
     });
     expect(await ficha()).toBe(0);
+    const { rows: [rec] } = await q(`SELECT amount::text FROM transactions WHERE idempotency_key = $1`, [`pdv-sale-${r.body.sale.id}`]);
+    expect(rec.amount).toBe('200.00');
     const del = await request(app).delete(`/companies/${ID.loja}/pdv/sale/${r.body.sale.id}`);
     expect(del.status).toBe(200);
     expect(await ficha()).toBe(-50);
@@ -328,9 +358,10 @@ describe('o caminho do relato', () => {
     expect(await ficha()).toBe(0);
   });
 
-  test('crediário junto: 50 de crédito + 150 no crediário (o A Receber é só dos 150)', async () => {
+  test('crediário junto: 50 de crédito + 150 no crediário (Receita 50, A Receber 150)', async () => {
     await abrirCaixa();
     await trocaComCredito();
+    const antes = await numeros();
     const r = await vender({
       items: VESTIDO, payment_method: 'crediario', customer_id: ID.cliente,
       payments: [{ method: 'credito_cliente', value: 50 }, { method: 'crediario', value: 150 }],
@@ -338,9 +369,46 @@ describe('o caminho do relato', () => {
     expect(r.status).toBe(201);
     const { rows: [ar] } = await q(`SELECT amount::numeric AS amount FROM transactions WHERE idempotency_key = $1`, [`pdv-credit-receivable-${r.body.sale.id}`]);
     expect(r2(ar.amount)).toBe(150);
+    const d = delta(await numeros(), antes);
+    expect(d).toEqual({ faturamento: 200, receita_painel: 50, saldo_painel: 50, dre_resultado: 50, a_receber_painel: 150, ficha: 200, caixa_pix: 0, caixa_fiado: 150 });
     expect(await ficha()).toBe(150);
-    const cx = await caixa();
-    expect(r2(cx.totais_ao_vivo.fiado)).toBe(150);
+  });
+
+  test('crédito de devolução do crediário (sem despesa): a parte paga com ele NÃO entra na receita', async () => {
+    await abrirCaixa();
+    // O que a devolucao do crediario grava (refund.js): so o refund na ficha, nenhuma despesa.
+    await q(`INSERT INTO customer_credit_transactions (company_id, customer_id, type, amount, payment_method, notes, source)
+             VALUES ($1, $2, 'refund', 50, 'crediario_credito', 'Devolucao de venda (fixture)', 'refund')`, [ID.loja, ID.cliente]);
+    const antes = await numeros();
+    const r = await vender({
+      items: VESTIDO, payment_method: 'pix', customer_id: ID.cliente,
+      payments: [{ method: 'credito_cliente', value: 50 }, { method: 'pix', value: 150 }],
+    });
+    expect(r.status).toBe(201);
+    const d = delta(await numeros(), antes);
+    expect(d).toEqual({ faturamento: 200, receita_painel: 150, saldo_painel: 150, dre_resultado: 150, a_receber_painel: 0, ficha: 50, caixa_pix: 150, caixa_fiado: 0 });
+    const { rows: baixa } = await q(`SELECT source, amount::text FROM customer_credit_transactions WHERE sale_id = $1`, [r.body.sale.id]);
+    expect(baixa).toEqual([{ source: 'credito_devolucao', amount: '50.00' }]);
+  });
+
+  test('crédito das duas origens: 30 de troca + 20 de devolução; a troca é gasta primeiro e só ela entra na receita', async () => {
+    await abrirCaixa();
+    await q(`INSERT INTO customer_credit_transactions (company_id, customer_id, type, amount, payment_method, notes) VALUES
+               ($1, $2, 'payment', 30, 'crediario_credito', 'Credito de troca (fixture)'),
+               ($1, $2, 'refund', 20, 'crediario_credito', 'Devolucao de venda (fixture)')`, [ID.loja, ID.cliente]);
+    const antes = await numeros();
+    const r = await vender({
+      items: VESTIDO, payment_method: 'pix', customer_id: ID.cliente,
+      payments: [{ method: 'credito_cliente', value: 40 }, { method: 'pix', value: 160 }],
+    });
+    expect(r.status).toBe(201);
+    const d = delta(await numeros(), antes);
+    expect(d).toMatchObject({ faturamento: 200, receita_painel: 190, caixa_pix: 160, ficha: 40 });
+    const { rows: baixa } = await q(`SELECT source, amount::text FROM customer_credit_transactions WHERE sale_id = $1 ORDER BY source`, [r.body.sale.id]);
+    expect(baixa).toEqual([{ source: 'credito_devolucao', amount: '10.00' }, { source: 'credito_troca', amount: '30.00' }]);
+    // Sobram 10 de devolucao.
+    const g = await request(app).get(`/companies/${ID.loja}/pdv/clientes/${ID.cliente}/credito`);
+    expect(g.body.saldo_a_favor).toBe(10);
   });
 });
 
@@ -435,7 +503,7 @@ describe('recusas: nada gravado', () => {
 
 afterAll(() => {
   if (!TABELA.length) return;
-  const cab = 'momento | Faturamento | Receita do Painel | A receber | ficha | caixa Pix | caixa fiado';
-  const linhas = TABELA.map((t) => [t.momento, t.faturamento, t.receita_painel, t.a_receber_painel, t.ficha, t.caixa_pix, t.caixa_fiado].join(' | '));
+  const cab = 'momento | Faturamento | Receita do Painel | Painel (entradas - saidas) | DRE resultado | A receber | ficha | caixa Pix | caixa fiado';
+  const linhas = TABELA.map((t) => [t.momento, t.faturamento, t.receita_painel, t.saldo_painel, t.dre_resultado, t.a_receber_painel, t.ficha, t.caixa_pix, t.caixa_fiado].join(' | '));
   process.stdout.write(`\n[INC-2026-11-17-03: venda de 200 = 50 de credito + 150 no Pix]\n${cab}\n${linhas.join('\n')}\n`);
 });

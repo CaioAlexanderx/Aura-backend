@@ -75,8 +75,25 @@ function somaDoPagamentoDeHoje(payments) {
  * `travar` segura o saldo até o fim da transação (duas vendas ao mesmo tempo
  * não gastam o mesmo crédito).
  */
-async function saldoAFavor(client, { companyId, customerId, travar = false }) {
-  if (!companyId || !customerId) return 0;
+// Origem do crédito usado, gravada em `source` no débito da baixa
+// (17/11/2026, revisão da Célia). Cada origem tem uma regra de receita:
+//   - TROCA: a troca já lançou "Troca - Devolucao" como despesa confirmada
+//     pelo valor devolvido (trocaV2.insertAggregateTransactions), inclusive
+//     quando o valor foi para a ficha. A saída já está no Financeiro; a parte
+//     da venda paga com esse crédito ENTRA na receita da venda.
+//   - DEVOLUÇÃO do crediário (refund.js): não grava despesa nenhuma, só abate
+//     a dívida e o "A Receber". O que a cliente pagou entrou como receita no
+//     recebimento; a parte paga com esse crédito NÃO entra (regra do sinal).
+const ORIGEM_TROCA = 'credito_troca';
+const ORIGEM_DEVOLUCAO = 'credito_devolucao';
+
+/**
+ * O crédito disponível, por origem. `troca` e `devolucao` são o que sobra de
+ * cada origem; `total` tem teto no saldo a favor da ficha. A troca é gasta
+ * primeiro (ver `repartir`).
+ */
+async function saldoPorOrigem(client, { companyId, customerId, travar = false }) {
+  if (!companyId || !customerId) return { total: 0, troca: 0, devolucao: 0 };
   if (travar) {
     await client.query(
       `SELECT pg_advisory_xact_lock(hashtextextended('credito_cliente:' || $1::text || ':' || $2::text, 0))`,
@@ -86,16 +103,30 @@ async function saldoAFavor(client, { companyId, customerId, travar = false }) {
   // Mesma conta da view customer_credit_balances (debit soma, o resto abate).
   const { rows } = await client.query(
     `SELECT COALESCE(SUM(CASE type WHEN 'debit' THEN amount ELSE -amount END), 0) AS balance,
-            COALESCE(SUM(amount) FILTER (WHERE type IN ('payment', 'refund') AND payment_method = 'crediario_credito'), 0) AS origem,
-            COALESCE(SUM(amount) FILTER (WHERE type = 'debit' AND payment_method = $3), 0) AS usado
+            COALESCE(SUM(amount) FILTER (WHERE type = 'payment' AND payment_method = 'crediario_credito'), 0) AS troca,
+            COALESCE(SUM(amount) FILTER (WHERE type = 'refund' AND payment_method = 'crediario_credito'), 0) AS devolucao,
+            COALESCE(SUM(amount) FILTER (WHERE type = 'debit' AND payment_method = $3 AND source = $4), 0) AS usado_devolucao,
+            COALESCE(SUM(amount) FILTER (WHERE type = 'debit' AND payment_method = $3 AND source IS DISTINCT FROM $4), 0) AS usado_troca
        FROM customer_credit_transactions
       WHERE company_id = $1 AND customer_id = $2`,
-    [companyId, customerId, METODO]
+    [companyId, customerId, METODO, ORIGEM_DEVOLUCAO]
   );
   const r = rows[0] || {};
   const aFavor = Math.max(0, -(parseFloat(r.balance) || 0));
-  const deCredito = Math.max(0, (parseFloat(r.origem) || 0) - (parseFloat(r.usado) || 0));
-  return round2(Math.min(aFavor, deCredito));
+  const troca = round2(Math.max(0, (parseFloat(r.troca) || 0) - (parseFloat(r.usado_troca) || 0)));
+  const devolucao = round2(Math.max(0, (parseFloat(r.devolucao) || 0) - (parseFloat(r.usado_devolucao) || 0)));
+  return { total: round2(Math.min(aFavor, troca + devolucao)), troca, devolucao };
+}
+
+/** O total disponível (o que o Caixa mostra). */
+async function saldoAFavor(client, opts) {
+  return (await saldoPorOrigem(client, opts)).total;
+}
+
+/** Reparte o valor usado pelas origens: a troca primeiro. */
+function repartir(amount, origens) {
+  const deTroca = round2(Math.min(amount, origens.troca));
+  return { deTroca, deDevolucao: round2(amount - deTroca) };
 }
 
 function erro(statusCode, code, message, extra) {
@@ -123,7 +154,8 @@ async function conferir(client, { companyId, customerId, amount, totalAmount, cr
       `O crédito usado passa do valor da venda (R$ ${restoDaVenda.toFixed(2).replace('.', ',')}).`,
       { total_amount: totalAmount });
   }
-  const saldoAntes = await saldoAFavor(client, { companyId, customerId, travar: true });
+  const origens = await saldoPorOrigem(client, { companyId, customerId, travar: true });
+  const saldoAntes = origens.total;
   if (amount > saldoAntes + 0.005) {
     throw erro(422, 'CREDITO_INSUFICIENTE',
       `A cliente tem R$ ${saldoAntes.toFixed(2).replace('.', ',')} de crédito nesta loja.`,
@@ -140,20 +172,27 @@ async function conferir(client, { companyId, customerId, amount, totalAmount, cr
         { falta_pagar: falta });
     }
   }
-  return { amount: round2(amount), saldoAntes };
+  const { deTroca, deDevolucao } = repartir(round2(amount), origens);
+  // Na receita da venda entra só a parte de crédito de troca (ver ORIGEM_TROCA).
+  return { amount: round2(amount), saldoAntes, deTroca, deDevolucao, naReceita: deTroca };
 }
 
-/** Baixa do crédito no razão, presa à venda. */
-async function baixar(client, { companyId, customerId, saleId, saleNumber, amount, createdBy }) {
+/** Baixa do crédito no razão, presa à venda: um débito por origem usada. */
+async function baixar(client, { companyId, customerId, saleId, saleNumber, deTroca, deDevolucao, createdBy }) {
   const nota = saleNumber != null ? `Crédito usado na venda #${saleNumber}` : 'Crédito usado na venda';
-  const { rows } = await client.query(
-    `INSERT INTO customer_credit_transactions
-       (company_id, customer_id, sale_id, type, amount, payment_method, notes, created_by)
-     VALUES ($1, $2, $3, 'debit', $4, $5, $6, $7)
-     RETURNING id`,
-    [companyId, customerId, saleId, amount, METODO, nota, createdBy || null]
-  );
-  return rows[0] || null;
+  const linhas = [];
+  for (const [valor, origem] of [[deTroca, ORIGEM_TROCA], [deDevolucao, ORIGEM_DEVOLUCAO]]) {
+    if (!(valor > 0.005)) continue;
+    const { rows } = await client.query(
+      `INSERT INTO customer_credit_transactions
+         (company_id, customer_id, sale_id, type, amount, payment_method, notes, created_by, source)
+       VALUES ($1, $2, $3, 'debit', $4, $5, $6, $7, $8)
+       RETURNING id`,
+      [companyId, customerId, saleId, round2(valor), METODO, nota, createdBy || null, origem]
+    );
+    linhas.push(rows[0] || null);
+  }
+  return linhas;
 }
 
 /** Crédito usado numa venda (0 quando não usou). */
@@ -180,6 +219,10 @@ function naoEhCreditoUsado(alias) {
 
 module.exports = {
   METODO,
+  ORIGEM_TROCA,
+  ORIGEM_DEVOLUCAO,
+  saldoPorOrigem,
+  repartir,
   valorPedido,
   somaDoPagamentoDeHoje,
   saldoAFavor,

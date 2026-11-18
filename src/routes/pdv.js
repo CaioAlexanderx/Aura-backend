@@ -603,15 +603,24 @@ async function handleSale(req, res, opts = {}) {
     const creditoPedido = creditoDaCliente.valorPedido({ payment_method, payments, totalAmount });
     let creditoUsado = 0;
     let creditoSaldoAntes = 0;
+    let creditoConferido = null;
     if (creditoPedido > 0) {
-      const conferido = await creditoDaCliente.conferir(client, {
+      creditoConferido = await creditoDaCliente.conferir(client, {
         companyId: req.params.id, customerId, amount: creditoPedido, totalAmount,
         crediarioAmount: creditAmount, payments, signalSale: !!opts.signalSale,
       });
-      creditoUsado = conferido.amount;
-      creditoSaldoAntes = conferido.saldoAntes;
+      creditoUsado = creditoConferido.amount;
+      creditoSaldoAntes = creditoConferido.saldoAntes;
     }
     const cashAmount = parseFloat((totalAmount - creditAmount - creditoUsado).toFixed(2));
+    // Revisao da Celia (17/11): o credito de TROCA ja saiu como despesa
+    // ("Troca - Devolucao") quando nasceu, entao a parte da venda paga com ele
+    // entra na receita pdv-sale. O de devolucao do crediario nao saiu (so
+    // abateu divida): fica fora, como o sinal. sale_payments e o caixa seguem
+    // so com o dinheiro de hoje (cashAmount). Sem credito: receitaAmount = cashAmount.
+    const receitaAmount = creditoConferido
+      ? parseFloat((cashAmount + creditoConferido.naReceita).toFixed(2))
+      : cashAmount;
     timing.etapa('cupom_vendedora');
     // tq-15: com chave, ela entra no MESMO INSERT (o indice unico parcial da
     // 390 e a garantia final). Sem chave, o SQL e o de sempre.
@@ -812,7 +821,8 @@ async function handleSale(req, res, opts = {}) {
     if (creditoUsado > 0) {
       await creditoDaCliente.baixar(client, {
         companyId: req.params.id, customerId, saleId: sale.id, saleNumber: sale.sale_number,
-        amount: creditoUsado, createdBy: req.user?.id || null,
+        deTroca: creditoConferido.deTroca, deDevolucao: creditoConferido.deDevolucao,
+        createdBy: req.user?.id || null,
       });
     }
     timing.etapa('crediario');
@@ -858,7 +868,7 @@ async function handleSale(req, res, opts = {}) {
         }
       }
       let receita = null;
-      if (cashAmount > 0) {
+      if (receitaAmount > 0) {
         const itemsSummary = productNames.slice(0, 3).join(', ');
         let payLabel = payment_method || 'dinheiro';
         if (Array.isArray(payments) && payments.length > 0) {
@@ -866,7 +876,7 @@ async function handleSale(req, res, opts = {}) {
           if (nonCredit) payLabel = nonCredit.method;
         }
         receita = {
-          amount: cashAmount,
+          amount: receitaAmount,
           description: sale_date
             ? `Venda (retroativa) - ${itemsSummary} (${payLabel})`
             : `Venda PDV - ${itemsSummary} (${payLabel})`,
@@ -906,7 +916,7 @@ async function handleSale(req, res, opts = {}) {
         }
       }
     }
-    if (cashAmount > 0) {
+    if (receitaAmount > 0) {
       const itemsSummary = productNames.slice(0, 3).join(', ');
       let payLabel = payment_method || 'dinheiro';
       if (Array.isArray(payments) && payments.length > 0) {
@@ -917,7 +927,7 @@ async function handleSale(req, res, opts = {}) {
         ? `Venda (retroativa) - ${itemsSummary} (${payLabel})`
         : `Venda PDV - ${itemsSummary} (${payLabel})`;
       const dueDateExpr = sale_date ? `$6::date` : SP_DATE_NOW;
-      const txParams = [req.params.id, cashAmount, txDesc, req.user?.id||null, 'pdv-sale-'+sale.id];
+      const txParams = [req.params.id, receitaAmount, txDesc, req.user?.id||null, 'pdv-sale-'+sale.id];
       if (sale_date) txParams.push(sale_date);
       await client.query(
         `INSERT INTO transactions
