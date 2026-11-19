@@ -100,6 +100,18 @@
 //   (zerava/quebrava). toFiniteNum() + backfill do preco original em
 //   validateReturnedItems + guarda nos INSERTs e em computeAndValidateTotals.
 //
+// 19/11/2026 (INC-2026-11-19-01 — credito da troca pelo preco de tabela):
+//   o item devolvido vale o que a cliente PAGOU por ele, calculado aqui a
+//   partir da linha original (services/valorPagoNaTroca.js): total da linha
+//   com o lapis, menos a parte do desconto da venda rateada como na NFC-e,
+//   por unidade. O unit_price do payload nao vale mais para dinheiro (o app
+//   mandava o preco de tabela: blusa de 79,90 com 25,00 de desconto na venda
+//   virava 79,90 de credito). Vale para troca_returned_items.unit_price,
+//   returnedValue (credito/estorno, financeiro "Troca - Devolucao", sale_payments
+//   negativa) e para a NF-e 55 de devolucao. Pedido online: o desconto do
+//   pedido (Pix) entra no rateio do mesmo jeito. A soma das devolucoes de uma
+//   linha nunca passa do que foi pago por ela.
+//
 // 17/11/2026 (b-troca-prazo-nfce): a troca usa o MESMO prazo do cancelamento
 //   da NFC-e, por UF (services/nfcePrazoCancelamento.js; 30 min em SP, AP, RJ
 //   e MG). Antes escolhia cancel_reissue com NFC-e de ate 24 h e o
@@ -123,6 +135,8 @@ const { ehUnidadeServico } = require('./notaDoItem');
 const vendaNaPromocao = require('./vendaNaPromocao');
 const { estrategiaDaTroca, prazoDeCancelamento } = require('./nfcePrazoCancelamento');
 const { findOwnerScopedCustomer, CUSTOMER_NOT_FOUND_BODY } = require('../utils/customerScope');
+// INC-2026-11-19-01: o item devolvido vale o que a cliente pagou (servidor).
+const { valorPagoDasLinhas, aplicarValorPago } = require('./valorPagoNaTroca');
 
 const SP_DATE_NOW = "(NOW() AT TIME ZONE 'America/Sao_Paulo')::date";
 
@@ -247,7 +261,8 @@ async function lookupOriginSales(client, currentCompanyId, originalSaleIds) {
   // Placeholders para a query principal (usa $1 = currentCompanyId)
   const placeholders = originalSaleIds.map((_, i) => `$${i + 2}`).join(',');
   const { rows: salesRows } = await client.query(
-    `SELECT s.id, s.status, s.company_id, s.seller_id, s.employee_id, s.created_at, s.total_amount, s.customer_id
+    `SELECT s.id, s.status, s.company_id, s.seller_id, s.employee_id, s.created_at, s.total_amount, s.customer_id,
+            s.discount_amount
        FROM sales s
        JOIN companies c ON c.id = $1
       WHERE s.id IN (${placeholders})
@@ -283,8 +298,10 @@ async function lookupOriginSales(client, currentCompanyId, originalSaleIds) {
   const idPlaceholders = originalSaleIds.map((_, i) => `$${i + 1}`).join(',');
 
   const itemsResp = await client.query(
-    `SELECT id, sale_id, product_id, variant_id, quantity, unit_price, product_name_snapshot
-       FROM sale_items WHERE sale_id IN (${idPlaceholders})`,
+    `SELECT id, sale_id, product_id, variant_id, quantity, unit_price, product_name_snapshot,
+            discount, total_price
+       FROM sale_items WHERE sale_id IN (${idPlaceholders})
+      ORDER BY sale_id, id`,
     originalSaleIds
   );
   const itemsBySale = new Map();
@@ -313,6 +330,19 @@ async function lookupOriginSales(client, currentCompanyId, originalSaleIds) {
   }));
 
   return enriched;
+}
+
+// INC-2026-11-19-01: pago por unidade de cada linha das vendas de origem
+// (total da linha com o lapis, menos o rateio do desconto da venda — a mesma
+// regra da NFC-e, services/valorPagoNaTroca.js). Chave = sale_items.id.
+function pagoDasVendas(originSales) {
+  const pagoPorChave = new Map();
+  for (const s of originSales || []) {
+    const itens = s.items || [];
+    const pagos = valorPagoDasLinhas(itens, s.discount_amount);
+    itens.forEach((it, i) => pagoPorChave.set(String(it.id), pagos[i]));
+  }
+  return pagoPorChave;
 }
 
 async function validateReturnedItems(client, originSales, returnedItems) {
@@ -351,7 +381,8 @@ async function validateReturnedItems(client, originSales, returnedItems) {
 
   const placeholders = itemIds.map((_, i) => `$${i + 1}`).join(',');
   const { rows: prev } = await client.query(
-    `SELECT tri.original_sale_item_id, SUM(tri.quantity) AS already_returned
+    `SELECT tri.original_sale_item_id, SUM(tri.quantity) AS already_returned,
+            SUM(tri.quantity * tri.unit_price) AS already_value
        FROM troca_returned_items tri
        JOIN sales ts ON ts.id = tri.troca_sale_id
       WHERE tri.original_sale_item_id IN (${placeholders})
@@ -360,6 +391,7 @@ async function validateReturnedItems(client, originSales, returnedItems) {
     itemIds
   );
   const alreadyByItem = new Map(prev.map((r) => [r.original_sale_item_id, parseFloat(r.already_returned) || 0]));
+  const alreadyValueCByItem = new Map(prev.map((r) => [String(r.original_sale_item_id), Math.round((parseFloat(r.already_value) || 0) * 100)]));
 
   for (const ret of returnedItems) {
     const qty = parseFloat(ret.quantity);
@@ -380,6 +412,16 @@ async function validateReturnedItems(client, originSales, returnedItems) {
       });
     }
   }
+
+  // INC-2026-11-19-01: o valor devolvido e o que a cliente pagou pela linha
+  // original, nunca o unit_price do payload (o app mandava o preco de tabela,
+  // sem o desconto do item nem o da venda). Teto: o que ainda nao voltou da
+  // linha em trocas anteriores.
+  aplicarValorPago(returnedItems, {
+    chave: (ret) => String(ret.original_sale_item_id),
+    pagoPorChave: pagoDasVendas(originSales),
+    jaDevolvidoCPorChave: alreadyValueCByItem,
+  });
 }
 
 // ── Pedido da loja online como origem (27/10/2026, migration 415) ──
@@ -397,7 +439,8 @@ async function lookupOriginDigitalOrders(client, currentCompanyId, orderIds) {
   const placeholders = orderIds.map((_, i) => `$${i + 2}`).join(',');
   const { rows: orders } = await client.query(
     `SELECT o.id, o.order_number, o.status, o.payment_status, o.stock_deducted,
-            o.company_id, o.customer_id, o.total, o.created_at, o.nfce_id
+            o.company_id, o.customer_id, o.total, o.created_at, o.nfce_id,
+            o.discount_amount
        FROM digital_orders o
        JOIN companies c ON c.id = $1
       WHERE o.id IN (${placeholders})
@@ -437,8 +480,10 @@ async function lookupOriginDigitalOrders(client, currentCompanyId, orderIds) {
 
   const idPlaceholders = orderIds.map((_, i) => `$${i + 1}`).join(',');
   const { rows: items } = await client.query(
-    `SELECT id, order_id, product_id, variant_id, quantity, unit_price, product_name, variant_label
-       FROM digital_order_items WHERE order_id IN (${idPlaceholders})`,
+    `SELECT id, order_id, product_id, variant_id, quantity, unit_price, product_name, variant_label,
+            subtotal
+       FROM digital_order_items WHERE order_id IN (${idPlaceholders})
+      ORDER BY order_id, id`,
     orderIds
   );
   const itemsByOrder = new Map();
@@ -495,7 +540,8 @@ async function validateDigitalReturnedItems(client, originDigitalOrders, returne
 
   const itemIds = Array.from(requestedByItem.keys());
   const { rows: prev } = await client.query(
-    `SELECT tri.original_digital_order_item_id AS item_id, SUM(tri.quantity) AS already_returned
+    `SELECT tri.original_digital_order_item_id AS item_id, SUM(tri.quantity) AS already_returned,
+            SUM(tri.quantity * tri.unit_price) AS already_value
        FROM troca_returned_items tri
        JOIN sales ts ON ts.id = tri.troca_sale_id
       WHERE tri.original_digital_order_item_id = ANY($1::text[])
@@ -504,6 +550,7 @@ async function validateDigitalReturnedItems(client, originDigitalOrders, returne
     [itemIds]
   );
   const alreadyByItem = new Map(prev.map((r) => [String(r.item_id), parseFloat(r.already_returned) || 0]));
+  const alreadyValueCByItem = new Map(prev.map((r) => [String(r.item_id), Math.round((parseFloat(r.already_value) || 0) * 100)]));
 
   for (const key of itemIds) {
     const origItem = origByItem.get(key);
@@ -522,6 +569,27 @@ async function validateDigitalReturnedItems(client, originDigitalOrders, returne
       });
     }
   }
+
+  // INC-2026-11-19-01: mesma regra da venda do Caixa. O pedido nao tem
+  // desconto por item; o desconto do pedido (digital_orders.discount_amount,
+  // hoje o do Pix) e rateado pelos itens (subtotal de cada um). Frete nao e
+  // item do pedido (delivery_fee), entao fica fora sozinho.
+  aplicarValorPago(returnedItems, {
+    chave: (ret) => String(ret.original_digital_order_item_id),
+    pagoPorChave: pagoDosPedidos(originDigitalOrders),
+    jaDevolvidoCPorChave: alreadyValueCByItem,
+  });
+}
+
+// Pago por unidade de cada item dos pedidos online. Chave = digital_order_items.id.
+function pagoDosPedidos(originDigitalOrders) {
+  const pagoPorChave = new Map();
+  for (const o of originDigitalOrders || []) {
+    const itens = (o.items || []).map((it) => ({ ...it, total_price: it.subtotal }));
+    const pagos = valorPagoDasLinhas(itens, o.discount_amount);
+    itens.forEach((it, i) => pagoPorChave.set(String(it.id), pagos[i]));
+  }
+  return pagoPorChave;
 }
 
 // Ajusta uma lista de splits para somar exatamente `target`, preservando ao
@@ -1444,5 +1512,5 @@ module.exports = {
   handle,
   reemitirEmissao,
   TrocaV2Error,
-  _internal: { resolverClienteDaTroca, temCreditoNaConta, CREDITO_EXIGE_CLIENTE_BODY, adjustStock, computeAndValidateTotals, newItemLine, balanceSplits, decideFiscalPerOrigin, normalizeMethodForSalePayments, bestEffort, toFiniteNum, lookupOriginDigitalOrders, validateDigitalReturnedItems, trocaSummary },
+  _internal: { resolverClienteDaTroca, temCreditoNaConta, CREDITO_EXIGE_CLIENTE_BODY, adjustStock, computeAndValidateTotals, newItemLine, balanceSplits, decideFiscalPerOrigin, normalizeMethodForSalePayments, bestEffort, toFiniteNum, lookupOriginDigitalOrders, validateDigitalReturnedItems, trocaSummary, validateReturnedItems, pagoDasVendas, pagoDosPedidos },
 };

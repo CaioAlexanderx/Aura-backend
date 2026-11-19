@@ -46,7 +46,7 @@ function clientDaTroca() {
       const s = norm(sql);
       chamadas.push([s, params]);
       if (/^SELECT s\.id, s\.status, s\.company_id/.test(s)) return { rows: [venda] };
-      if (/^SELECT id, sale_id, product_id, variant_id, quantity, unit_price, product_name_snapshot FROM sale_items/.test(s)) return { rows: venda.items };
+      if (/^SELECT id, sale_id, product_id, variant_id, quantity, unit_price, product_name_snapshot, discount, total_price FROM sale_items/.test(s)) return { rows: venda.items };
       if (/information_schema\.columns/.test(s)) return { rows: [{ n: '2' }] };
       if (/^INSERT INTO sales/.test(s)) return { rows: [{ id: 'troca-1', company_id: params[0], customer_id: params[1] }] };
       if (/^SELECT company_id FROM products WHERE id=\$1/.test(s)) return { rows: [{ company_id: EMPRESA }] };

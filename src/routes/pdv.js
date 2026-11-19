@@ -105,6 +105,8 @@ const nfseAutomaticaRepo = require('../services/nfseAutomaticaRepo');
 const { prazoDoValeEmDias } = require('../utils/valeTrocaPrazo');
 // 17/11/2026 (b-troca-prazo-nfce): previa do caminho fiscal da troca por venda.
 const { previaFiscalDaTroca, SQL_NFCE_DA_TROCA } = require('../services/nfcePrazoCancelamento');
+// 19/11/2026 (INC-2026-11-19-01): valor pago por item na busca da troca.
+const { comValorPago } = require('../services/valorPagoNaTroca');
 // 17/11/2026 (p-140): uma linha de log por venda com o tempo de cada etapa.
 const vendaTiming = require('../services/vendaTiming');
 // 17/11/2026 (p-141 a p-144): a venda com menos idas ao banco. O caminho de
@@ -1511,9 +1513,15 @@ router.post('/troca/:trocaSaleId/reemitir-fiscal', async (req, res) => {
 // (nfce_troca_estrategia 'cancel_reissue' | 'devolucao_55' | 'none',
 // nfce_cancelavel_ate, nfce_prazo_minutos, nfce_uf, nfce_authorized_at) com o
 // MESMO prazo por UF que o POST /troca usa. Campos novos; nada renomeado.
+// 19/11/2026 (INC-2026-11-19-01): cada item traz `valor_pago_unit` e
+// `valor_pago_total` -- o que a cliente pagou (total da linha com o lapis,
+// menos o rateio do desconto da venda, a mesma regra que o POST /troca grava,
+// services/valorPagoNaTroca.js). A venda traz `discount_amount`. Campos
+// novos; nada renomeado.
 function comPreviaFiscal(r) {
   Object.assign(r, previaFiscalDaTroca(r.has_nfce ? r.nfce_da_troca : null));
   delete r.nfce_da_troca;
+  comValorPago(r, r.discount_amount);
   return r;
 }
 
@@ -1552,7 +1560,7 @@ router.get('/sales-for-troca', async (req, res) => {
   }
   try {
     const { rows } = await db.query(
-      `SELECT s.id, s.total_amount, s.payment_method, s.status, s.created_at,
+      `SELECT s.id, s.total_amount, s.discount_amount, s.payment_method, s.status, s.created_at,
               s.company_id, COALESCE(comp.trade_name,comp.legal_name) AS company_name,
               s.customer_id, cust.name AS customer_name, cust.cpf_cnpj,
               s.seller_id, s.seller_name,
@@ -1569,7 +1577,7 @@ router.get('/sales-for-troca', async (req, res) => {
                 'quantity',si.quantity,'unit_price',si.unit_price,
                 'original_sale_item_id',si.id,
                 'total_price',si.total_price
-              )) FILTER (WHERE si.id IS NOT NULL),'[]'::json) AS items
+              ) ORDER BY si.id) FILTER (WHERE si.id IS NOT NULL),'[]'::json) AS items
          FROM sales s ${nfceJoin}
          LEFT JOIN companies comp ON comp.id=s.company_id
          LEFT JOIN customers cust ON cust.id=s.customer_id
@@ -1629,7 +1637,7 @@ router.get('/sales-by-product-barcode', async (req, res) => {
                AND COALESCE(NULLIF(c2.billing_owner_company_id,c2.id),c2.id)
                  =COALESCE(NULLIF((SELECT billing_owner_company_id FROM companies WHERE id=$1),$1),$1)))
        )
-       SELECT s.id, s.total_amount, s.payment_method, s.status, s.created_at,
+       SELECT s.id, s.total_amount, s.discount_amount, s.payment_method, s.status, s.created_at,
               s.company_id, COALESCE(comp.trade_name,comp.legal_name) AS company_name,
               s.customer_id, cust.name AS customer_name, cust.cpf_cnpj,
               s.seller_id, s.seller_name, (s.company_id!=$1) AS is_cross_filial,
@@ -1644,7 +1652,7 @@ router.get('/sales-by-product-barcode', async (req, res) => {
                 'quantity',si.quantity,'unit_price',si.unit_price,
                 'original_sale_item_id',si.id,
                 'total_price',si.total_price
-              )) FILTER (WHERE si.id IS NOT NULL),'[]'::json) AS items
+              ) ORDER BY si.id) FILTER (WHERE si.id IS NOT NULL),'[]'::json) AS items
          FROM sales s JOIN eligible_sales es ON es.id=s.id
          LEFT JOIN companies comp ON comp.id=s.company_id
          LEFT JOIN customers cust ON cust.id=s.customer_id

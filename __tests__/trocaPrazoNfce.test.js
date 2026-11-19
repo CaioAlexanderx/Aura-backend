@@ -142,7 +142,7 @@ function clientDaTroca(nfce) {
       if (/^SELECT s\.id, s\.status, s\.company_id/.test(s)) {
         return { rows: [{ id: VENDA, status: 'completed', company_id: EMPRESA, seller_id: 'u1', employee_id: null, created_at: nfce.authorized_at, total_amount: '100.00', customer_id: 'cli-1' }] };
       }
-      if (/^SELECT id, sale_id, product_id, variant_id, quantity, unit_price, product_name_snapshot FROM sale_items/.test(s)) {
+      if (/^SELECT id, sale_id, product_id, variant_id, quantity, unit_price, product_name_snapshot, discount, total_price FROM sale_items/.test(s)) {
         return { rows: [{ id: ITEM, sale_id: VENDA, product_id: 'prod-1', variant_id: null, quantity: '1', unit_price: '100.00', product_name_snapshot: 'Vestido' }] };
       }
       if (/^SELECT DISTINCT ON \(ne\.sale_id\)/.test(s)) return { rows: [{ sale_id: VENDA, ...nfce }] };
