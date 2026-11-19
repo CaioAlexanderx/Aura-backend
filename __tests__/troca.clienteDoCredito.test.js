@@ -35,7 +35,7 @@ function clientDaTroca({ pedido, itens, jaDevolvido = [], venda, clienteDoDono =
       if (/FROM digital_order_items WHERE order_id IN/.test(s)) return { rows: itens || [] };
       if (/original_digital_order_item_id AS item_id, SUM/.test(s)) return { rows: jaDevolvido };
       if (/^SELECT s\.id, s\.status, s\.company_id/.test(s)) return { rows: venda ? [venda] : [] };
-      if (/^SELECT id, sale_id, product_id, variant_id, quantity, unit_price, product_name_snapshot FROM sale_items/.test(s)) {
+      if (/^SELECT id, sale_id, product_id, variant_id, quantity, unit_price, product_name_snapshot, discount, total_price FROM sale_items/.test(s)) {
         return { rows: venda ? venda.items : [] };
       }
       if (/^SELECT id FROM customers WHERE id = \$1/.test(s)) return { rows: clienteDoDono ? [{ id: params[0] }] : [] };

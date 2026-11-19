@@ -31,6 +31,8 @@
 // ============================================================
 'use strict';
 
+const { comValorPago } = require('./valorPagoNaTroca');
+
 const GROUP_COND = `(o.company_id=$1 OR EXISTS (
        SELECT 1 FROM companies c2 WHERE c2.id=o.company_id
          AND COALESCE(NULLIF(c2.billing_owner_company_id,c2.id),c2.id)
@@ -40,7 +42,18 @@ function onlyDigits(v) {
   return String(v || '').replace(/\D/g, '');
 }
 
+// 19/11/2026 (INC-2026-11-19-01): cada item traz valor_pago_unit e
+// valor_pago_total -- o subtotal do item menos o rateio do desconto do pedido
+// (digital_orders.discount_amount, hoje o do Pix), a mesma regra que a troca
+// grava (services/valorPagoNaTroca.js). Campos novos; nada renomeado.
 function normalizeRow(r) {
+  return comValorPago({
+    ...normalizeRowSemValor(r),
+    discount_amount: parseFloat(r.discount_amount) || 0,
+  }, r.discount_amount);
+}
+
+function normalizeRowSemValor(r) {
   return {
     id: r.id,
     origin_kind: 'digital_order',
@@ -134,7 +147,7 @@ async function buscarPedidosParaTroca(db, companyId, f = {}) {
 
   const { rows } = await db.query(
     `SELECT o.id, o.order_number, o.status, o.payment_status, o.payment_method,
-            o.total, o.created_at, o.company_id,
+            o.total, o.discount_amount, o.created_at, o.company_id,
             COALESCE(comp.trade_name,comp.legal_name) AS company_name,
             o.customer_id, o.customer_name, o.customer_phone, o.customer_cpf_cnpj,
             (o.company_id!=$1) AS is_cross_filial,

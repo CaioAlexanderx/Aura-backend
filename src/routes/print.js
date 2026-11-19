@@ -90,7 +90,25 @@ function receiptLogoUrl(raw) {
   }
 }
 
-function receiptHTML({ company, sale, items, payments, installments = [], options = {} }) {
+// 19/11/2026 (INC-2026-11-19-01): troca com credito na ficha. A troca so de
+// credito (sem item novo) saia com TOTAL R$ 0,00 e nada do credito. Agora,
+// depois dos totais, as duas linhas aprovadas pelo Caio (texto exato):
+//   Crédito da troca: R$ 54,90   (o que esta troca lancou na ficha)
+//   Saldo para usar: R$ 54,90    (saldo a favor da cliente na loja, agora)
+// Sem credito (venda comum, troca com diferenca paga ou devolvida de outra
+// forma) o bloco e vazio e o HTML e o de sempre, byte a byte
+// (__tests__/trocaValorPago.cupom.test.js).
+function _reais(v) { return `R$ ${fmt(v).replace('.', ',')}`; }
+
+function trocaCreditoHTML(trocaCredito) {
+  if (!trocaCredito || !(parseFloat(trocaCredito.valor) > 0)) return '';
+  return `
+  <div class="divider"></div>
+  <div class="bold">Crédito da troca: ${_reais(trocaCredito.valor)}</div>
+  <div>Saldo para usar: ${_reais(trocaCredito.saldo)}</div>`;
+}
+
+function receiptHTML({ company, sale, items, payments, installments = [], trocaCredito = null, options = {} }) {
   const { autoprint = false, width80 = true } = options;
   const date = new Date(sale.created_at).toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo' });
 
@@ -245,7 +263,7 @@ function receiptHTML({ company, sale, items, payments, installments = [], option
     <tr class="total-row"><td>TOTAL</td><td style="text-align:right">R$${fmt(sale.total_amount)}</td></tr>
     ${paymentsHTML}
     ${change ? `<tr><td>Troco</td><td style="text-align:right">R$${change}</td></tr>` : ''}
-  </table>
+  </table>${trocaCreditoHTML(trocaCredito)}
   ${pixSection}
   ${installmentsHTML}
   <div class="divider"></div>
@@ -363,7 +381,39 @@ async function _loadSaleData(saleId, companyId) {
       if (e.code !== '42P01' && e.code !== '42703') throw e;
     }
   }
-  return { company: companyRows[0] || {}, sale: saleRows[0], items, payments, installments };
+  // 19/11/2026 (INC-2026-11-19-01): so a venda de troca consulta o credito
+  // que ela lancou na ficha. Venda comum: nenhuma ida a mais, HTML igual.
+  const trocaCredito = String(saleRows[0].type || '') === 'troca'
+    ? await _loadTrocaCredito(saleId)
+    : null;
+  const out = { company: companyRows[0] || {}, sale: saleRows[0], items, payments, installments };
+  if (trocaCredito) out.trocaCredito = trocaCredito;
+  return out;
+}
+
+// Credito lancado na ficha pela troca (trocaV2.insertTrocaPayouts: 'payment'
+// crediario_credito com sale_id = a venda de troca) e o saldo a favor da
+// cliente na loja onde o credito ficou (company_id do lancamento -- no
+// multi-CNPJ e a loja do Caixa que fez a troca, nao necessariamente a da
+// venda). Falha aqui nunca derruba o cupom: sai o de sempre.
+async function _loadTrocaCredito(saleId) {
+  try {
+    const { rows } = await db.query(
+      `SELECT company_id, customer_id, COALESCE(SUM(amount), 0) AS amount
+         FROM customer_credit_transactions
+        WHERE sale_id = $1 AND type = 'payment' AND payment_method = 'crediario_credito'
+        GROUP BY company_id, customer_id`,
+      [saleId]
+    );
+    const r = rows && rows[0];
+    const valor = r ? Math.round((parseFloat(r.amount) || 0) * 100) / 100 : 0;
+    if (!(valor > 0)) return null;
+    const saldo = await creditoDaCliente.saldoAFavor(db, { companyId: r.company_id, customerId: r.customer_id });
+    return { valor, saldo };
+  } catch (e) {
+    console.error('[print] credito da troca no cupom:', e.message);
+    return null;
+  }
 }
 
 // 09/11/2026: para onde vai a entrega. O retrato gravado na venda vale
