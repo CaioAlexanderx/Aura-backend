@@ -44,6 +44,12 @@
 
 const { randomUUID } = require('crypto');
 const { nomeDaCorDaVariante, nomeGravadoQueAparece } = require('./nomeDaCor');
+// 20/11/2026: a copia do cadastro (colunas, fotos, fornecedores, categorias,
+// variantes) e de services/copiaDeCadastro.js, usada tambem pelo cadastro do
+// mesmo produto em outras lojas (services/produtoNasLojas.js).
+const {
+  colunasCopiaveis, _limparCacheDeColunas, copiarProdutos, copiarVariantes,
+} = require('./copiaDeCadastro');
 
 const LIMITE_ITENS = 1000;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -166,53 +172,6 @@ async function conferirLojas(conn, { origemId, destinoId, userId, isStaff }) {
   return { grupo: String(origem.grupo), origemNome: origem.nome, destinoNome: destino.nome };
 }
 
-// ─── colunas copiaveis (cache do processo) ───────────────────
-// A copia leva TODAS as colunas do cadastro que existem na base (NCM, campos
-// fiscais da 437, nota_fiscal da 442, Matcon, marca, fotos...), sem lista
-// fixa que envelhece quando uma migration nova adiciona coluna.
-const FORA_DA_COPIA = {
-  products: new Set([
-    'id', 'company_id', 'stock_qty', 'stock_fraction', 'is_group_shared',
-    'created_at', 'updated_at', 'import_batch_id', 'barcode',
-    'promo_price', 'promo_starts_at', 'promo_ends_at',
-  ]),
-  product_variants: new Set([
-    'id', 'product_id', 'stock_qty', 'is_active', 'deactivated_reason',
-    'created_at', 'updated_at', 'promo_price', 'promo_starts_at', 'promo_ends_at',
-  ]),
-};
-let colunasCache = null;
-async function colunasCopiaveis(conn) {
-  if (colunasCache) return colunasCache;
-  const { rows } = await conn.query(
-    `SELECT table_name, column_name
-       FROM information_schema.columns
-      WHERE table_schema = 'public'
-        AND table_name IN ('products', 'product_variants')
-        AND is_generated = 'NEVER'
-        AND identity_generation IS NULL
-      ORDER BY table_name, ordinal_position`
-  );
-  const out = { products: [], product_variants: [] };
-  for (const r of rows) {
-    if (!out[r.table_name] || FORA_DA_COPIA[r.table_name].has(r.column_name)) continue;
-    if (!/^[a-z_][a-z0-9_]*$/.test(r.column_name)) continue;
-    out[r.table_name].push(r.column_name);
-  }
-  if (!out.products.includes('name')) {
-    // information_schema vazio (permissao/base estranha): o minimo do cadastro.
-    out.products = ['name', 'sku', 'category', 'description', 'price', 'cost_price', 'unit', 'ncm'];
-  }
-  if (!out.product_variants.includes('sku_suffix')) {
-    out.product_variants = ['sku_suffix', 'price_override', 'barcode', 'image_url'];
-  }
-  colunasCache = out;
-  return out;
-}
-function _limparCacheDeColunas() { colunasCache = null; }
-
-const q = (c) => `"${c}"`;
-
 // ─── rotulo da variante ──────────────────────────────────────
 // "Azul / M": nome da cor e depois os outros atributos; tamanho curto em
 // maiuscula. Sem nada legivel, o sku_suffix ("AZUL-M").
@@ -256,86 +215,6 @@ function agrupar(rows, chave) {
     m.get(k).push(r);
   }
   return m;
-}
-
-// SAVEPOINT para as tabelas penduradas no produto (fotos, fornecedores,
-// categorias): base sem a tabela/coluna segue sem elas. `toleraDuplicado`:
-// categoria que colide na unicidade do destino (ex.: mesmo caminho/slug com
-// outro nome) nao derruba a transferencia — o produto vai sem a categoria
-// (o texto products.category segue copiado).
-async function opcional(conn, nome, fn, { toleraDuplicado = false } = {}) {
-  await conn.query(`SAVEPOINT ${nome}`);
-  try {
-    const r = await fn();
-    await conn.query(`RELEASE SAVEPOINT ${nome}`);
-    return r;
-  } catch (e) {
-    if (e && (e.code === '42P01' || e.code === '42703' || (toleraDuplicado && e.code === '23505'))) {
-      await conn.query(`ROLLBACK TO SAVEPOINT ${nome}`);
-      return null;
-    }
-    throw e;
-  }
-}
-
-// ─── categorias no destino ───────────────────────────────────
-// Categoria e por empresa. Acha a equivalente no destino pelo nome (mesmo
-// pai, mesmo type — a unicidade de product_categories) ou cria, de cima
-// para baixo. Numero de queries = numero de categorias envolvidas.
-async function copiarCategorias(conn, destinoId, mapaProdutos) {
-  const origens = [...mapaProdutos.keys()];
-  if (!origens.length) return;
-  const { rows: links } = await conn.query(
-    `SELECT product_id, category_id, is_primary FROM product_category_links WHERE product_id = ANY($1::uuid[])`,
-    [origens]
-  );
-  if (!links.length) return;
-  const { rows: cats } = await conn.query(
-    `WITH RECURSIVE arvore AS (
-       SELECT id, parent_id, name, type, color, sort_order, depth
-         FROM product_categories WHERE id = ANY($1::uuid[])
-       UNION
-       SELECT c.id, c.parent_id, c.name, c.type, c.color, c.sort_order, c.depth
-         FROM product_categories c JOIN arvore a ON c.id = a.parent_id
-     )
-     SELECT DISTINCT id, parent_id, name, type, color, sort_order, depth FROM arvore ORDER BY depth ASC NULLS FIRST`,
-    [[...new Set(links.map((l) => l.category_id))]]
-  );
-  const mapaCat = new Map();
-  for (const c of cats) {
-    const tipo = c.type || 'product';
-    const pai = c.parent_id ? mapaCat.get(String(c.parent_id)) || null : null;
-    if (c.parent_id && !pai) continue; // pai nao copiado: nao inventa arvore
-    const { rows: achada } = await conn.query(
-      `SELECT id FROM product_categories
-        WHERE company_id = $1 AND COALESCE(type, 'product') = $2::text
-          AND parent_id IS NOT DISTINCT FROM $3::uuid
-          AND lower(btrim(name)) = lower(btrim($4::text))
-        LIMIT 1`,
-      [destinoId, tipo, pai, c.name]
-    );
-    if (achada[0]) { mapaCat.set(String(c.id), achada[0].id); continue; }
-    const { rows: nova } = await conn.query(
-      `INSERT INTO product_categories (company_id, type, parent_id, name, color, sort_order)
-       VALUES ($1, $2, $3, $4, $5, $6) RETURNING id`,
-      [destinoId, tipo, pai, c.name, c.color, c.sort_order || 0]
-    );
-    mapaCat.set(String(c.id), nova[0].id);
-  }
-  const prod = [], cat = [], prim = [];
-  for (const l of links) {
-    const novoProduto = mapaProdutos.get(String(l.product_id).toLowerCase());
-    const novaCat = mapaCat.get(String(l.category_id));
-    if (!novoProduto || !novaCat) continue;
-    prod.push(novoProduto); cat.push(novaCat); prim.push(!!l.is_primary);
-  }
-  if (!prod.length) return;
-  await conn.query(
-    `INSERT INTO product_category_links (product_id, category_id, is_primary)
-     SELECT * FROM unnest($1::uuid[], $2::uuid[], $3::boolean[])
-     ON CONFLICT DO NOTHING`,
-    [prod, cat, prim]
-  );
 }
 
 // ─── o nucleo ────────────────────────────────────────────────
@@ -537,7 +416,6 @@ async function transferir(conn, { origemId, destinoId, userId, isStaff = false, 
   // 6. copia dos que nao existem no destino
   const cols = await colunasCopiaveis(conn);
   const copiar = pendentes();
-  const mapaCopias = new Map();
   if (copiar.length) {
     const orig = [], novo = [], barcode = [];
     for (const p of copiar) {
@@ -546,33 +424,9 @@ async function transferir(conn, { origemId, destinoId, userId, isStaff = false, 
       orig.push(o); novo.push(id);
       barcode.push(txt(p.barcode) && !barcodeOcupado.has(txt(p.barcode)) ? p.barcode : null);
       mapaProd.set(o, { id, criado: true, via: 'copia' });
-      mapaCopias.set(o, id);
     }
-    const lista = cols.products.map(q).join(', ');
-    const sel = cols.products.map((c) => `p.${q(c)}`).join(', ');
-    await conn.query(
-      `INSERT INTO products (id, company_id, stock_qty, is_group_shared, barcode, ${lista})
-       SELECT m.novo, $1, 0, false, m.barcode, ${sel}
-         FROM unnest($2::uuid[], $3::uuid[], $4::text[]) AS m(orig, novo, barcode)
-         JOIN products p ON p.id = m.orig`,
-      [destinoId, orig, novo, barcode]
-    );
-    await opcional(conn, 'sp_fotos', () => conn.query(
-      `INSERT INTO product_images (company_id, product_id, color_hex, url, thumb_url, position)
-       SELECT $1, m.novo, i.color_hex, i.url, i.thumb_url, i.position
-         FROM unnest($2::uuid[], $3::uuid[]) AS m(orig, novo)
-         JOIN product_images i ON i.product_id = m.orig`,
-      [destinoId, orig, novo]
-    ));
-    await opcional(conn, 'sp_fornecedores', () => conn.query(
-      `INSERT INTO product_suppliers (company_id, product_id, supplier_id, cost, supplier_code, is_main, last_purchase_at)
-       SELECT $1, m.novo, s.supplier_id, s.cost, s.supplier_code, s.is_main, s.last_purchase_at
-         FROM unnest($2::uuid[], $3::uuid[]) AS m(orig, novo)
-         JOIN product_suppliers s ON s.product_id = m.orig
-       ON CONFLICT DO NOTHING`,
-      [destinoId, orig, novo]
-    ));
-    await opcional(conn, 'sp_categorias', () => copiarCategorias(conn, destinoId, mapaCopias), { toleraDuplicado: true });
+    // 20/11/2026: a copia mora em services/copiaDeCadastro.js (mesmo SQL).
+    await copiarProdutos(conn, { destinoId, orig, novo, barcode, cols });
   }
 
   // 7. variante no destino
@@ -628,23 +482,7 @@ async function transferir(conn, { origemId, destinoId, userId, isStaff = false, 
       varsDestino.set(destPid, lista);
     }
     if (criarOrig.length) {
-      const lista = cols.product_variants.map(q).join(', ');
-      const sel = cols.product_variants.map((c) => `v.${q(c)}`).join(', ');
-      await conn.query(
-        `INSERT INTO product_variants (id, product_id, stock_qty, is_active, ${lista})
-         SELECT m.novo, m.pid, 0, true, ${sel}
-           FROM unnest($1::uuid[], $2::uuid[], $3::uuid[]) AS m(orig, novo, pid)
-           JOIN product_variants v ON v.id = m.orig`,
-        [criarOrig, criarNovo, criarPid]
-      );
-      await conn.query(
-        `INSERT INTO product_variant_values (variant_id, attribute_name, value)
-         SELECT m.novo, vv.attribute_name, vv.value
-           FROM unnest($1::uuid[], $2::uuid[]) AS m(orig, novo)
-           JOIN product_variant_values vv ON vv.variant_id = m.orig
-         ON CONFLICT DO NOTHING`,
-        [criarOrig, criarNovo]
-      );
+      await copiarVariantes(conn, { cols, orig: criarOrig, novo: criarNovo, pid: criarPid });
     }
   }
 

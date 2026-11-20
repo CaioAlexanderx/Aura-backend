@@ -136,6 +136,9 @@ router.use('/', require('./catalogHealth'));
 router.use('/products', require('./productDescriptions'));
 router.use('/products', require('./productsDuplicates'));
 router.use('/products', require('./productsBatch'));
+// 20/11/2026 (B1, "Em qual loja o produto entra"): lojas para o cadastro e
+// o mesmo produto em outras lojas do grupo. Antes de ./products.
+router.use('/products', require('./productsNasLojas'));
 // p-74 (30/10/2026): POST /products/barcodes/generate -- gera EAN-13 da
 // serie interna 210, de um produto ou em lote, com previa (dry_run).
 // Caminho estatico, montado junto dos outros antes dos routers com /:pid.
