@@ -27,7 +27,7 @@
 //     com o produto que esta com o codigo;
 //   - D7: NCM, CEST e origem vao iguais. tax_profile e icms_st_paid so com o
 //     mesmo regime (companies.tax_regime); codigo municipal da NFS-e
-//     (nfse_ctribmun) so no mesmo municipio. Sem copiar, a loja fica com o
+//     (nfse_ctribmun) e aliquota do ISS (nfse_aliquota_iss) so no mesmo municipio. Sem copiar, a loja fica com o
 //     padrao dela e o resultado avisa 'fiscal_conferir'. Nada bloqueia;
 //   - estoque inicial com stock_movements de entrada ('in',
 //     reference_type 'cadastro_em_outra_loja', reference_id = produto de
@@ -522,7 +522,7 @@ async function levarLote(conn, { origemId, userId, isStaff = false, itens, opcoe
       const mesmoMunicipio = !!(txt(origem.municipio) && txt(destino.municipio) && txt(origem.municipio) === txt(destino.municipio));
       const limpar = [];
       if (!mesmoRegime) limpar.push('tax_profile', 'icms_st_paid');
-      if (!mesmoMunicipio) limpar.push('nfse_ctribmun');
+      if (!mesmoMunicipio) limpar.push('nfse_ctribmun', 'nfse_aliquota_iss');
       for (const c of limpar) {
         const alvo = orig.filter((pid) => {
           const p = prodPorId.get(pid);
