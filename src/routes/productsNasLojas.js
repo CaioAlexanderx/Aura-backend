@@ -20,8 +20,19 @@
 //       VARIANTE_INVALIDA (400); SEM_ACESSO (403); PRODUTO_NAO_ENCONTRADO
 //       (404); PRODUTO_COMPARTILHADO (409).
 //
+//   B3 (edicao, A4):
+//   GET  /companies/:id/products/:pid/lojas
+//     200 { em: [{ company_id, nome, product_id }], pode_levar_para: [{ company_id, nome }],
+//           compartilhado?: true }
+//     "Levar para outra loja" = o POST acima com stock_qty 0.
+//   POST /companies/:id/products/:pid/aplicar-nas-lojas
+//     { campos: ['price', 'name', ...], lojas: ['uuid'] }
+//     200 { resultados: [{ company_id, nome, status: 'aplicado'|'erro',
+//            product_id, campos, avisos, erro? }] }
+//     Os valores saem do produto JA GRAVADO na loja do caminho. Nunca estoque.
+//
 // O mount /products tem o estoqueSoConsulta: o perfil "estoque so consulta"
-// leva 403 nas duas (rota nova sob /products nasce fechada para ele).
+// leva 403 em todas (rota nova sob /products nasce fechada para ele).
 // ============================================================
 'use strict';
 
@@ -78,6 +89,64 @@ router.post('/:pid/lojas', async (req, res) => {
     }
     console.error('[productsNasLojas] POST lojas error:', err && err.message, err && err.code);
     res.status(500).json({ error: 'Erro ao cadastrar o produto nas outras lojas' });
+  } finally {
+    client.release();
+  }
+});
+
+// ─── B3: edicao ──────────────────────────────────────────────
+// Transacao so de leitura: a busca do vinculo de transferencia usa SAVEPOINT
+// (base sem a tabela segue so com o master_sku).
+router.get('/:pid/lojas', async (req, res) => {
+  const client = await db.connect();
+  try {
+    await client.query('BEGIN READ ONLY');
+    const out = await svc.lojasDoProduto(client, {
+      companyId: req.params.id,
+      productId: req.params.pid,
+      userId: req.user && req.user.id,
+      isStaff: ehStaff(req),
+    });
+    await client.query('COMMIT');
+    res.json(out);
+  } catch (err) {
+    await client.query('ROLLBACK').catch(() => {});
+    if (err instanceof svc.ErroDeLojas) return res.status(err.status).json(err.body);
+    console.error('[productsNasLojas] GET :pid/lojas error:', err && err.message);
+    res.status(500).json({ error: 'Erro ao listar as lojas do produto' });
+  } finally {
+    client.release();
+  }
+});
+
+router.post('/:pid/aplicar-nas-lojas', async (req, res) => {
+  let pedido;
+  try {
+    pedido = svc.lerPedidoDeAplicar(req.body);
+  } catch (e) {
+    if (e instanceof svc.ErroDeLojas) return res.status(e.status).json(e.body);
+    throw e;
+  }
+  const client = await db.connect();
+  try {
+    await client.query('BEGIN');
+    const out = await svc.aplicarNasLojas(client, {
+      companyId: req.params.id,
+      productId: req.params.pid,
+      userId: req.user && req.user.id,
+      isStaff: ehStaff(req),
+      ...pedido,
+    });
+    await client.query('COMMIT');
+    res.json(out);
+  } catch (err) {
+    await client.query('ROLLBACK').catch(() => {});
+    if (err instanceof svc.ErroDeLojas) return res.status(err.status).json(err.body);
+    if (falhaDeSchema(err)) {
+      return res.status(503).json({ error: 'Recurso ainda não disponível. Tente de novo em alguns minutos.', code: 'SCHEMA_PENDENTE' });
+    }
+    console.error('[productsNasLojas] POST aplicar-nas-lojas error:', err && err.message, err && err.code);
+    res.status(500).json({ error: 'Erro ao alterar o produto nas outras lojas' });
   } finally {
     client.release();
   }

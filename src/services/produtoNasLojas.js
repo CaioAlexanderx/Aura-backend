@@ -813,6 +813,213 @@ async function levarDepoisDoCadastro(db, {
   return porLoja;
 }
 
+// ─── B3: edicao (A4) ─────────────────────────────────────────
+// "Este produto esta em: Matriz · Filial" e "Aplicar tambem na Filial".
+// O par de cada loja e o mesmo do B1: o mesmo master_sku ou uma
+// transferencia entre as duas.
+
+// Campos de cadastro que podem ir para o par. Nunca estoque.
+const CAMPOS_EDITAVEIS = new Set([
+  'name', 'price', 'card_price', 'cost_price', 'description', 'category', 'brand', 'unit',
+  'ncm', 'cest', 'origem', 'barcode', 'sku', 'stock_min', 'stock_max',
+  'material', 'medidas', 'cuidados', 'image_url', 'gallery_urls', 'nota_fiscal', 'duration_minutes',
+  'size', 'color', 'purchase_unit', 'purchase_factor', 'weight_kg',
+  'nfse_ctribnac', 'nfse_cnbs', 'nfse_descricao', 'ibscbs_cst', 'ibscbs_cclasstrib', 'ibscbs_cindop',
+  // D7: so com o mesmo regime / o mesmo municipio
+  'tax_profile', 'icms_st_paid', 'nfse_ctribmun', 'nfse_aliquota_iss',
+]);
+const CAMPOS_DO_REGIME = new Set(['tax_profile', 'icms_st_paid']);
+const CAMPOS_DO_MUNICIPIO = new Set(['nfse_ctribmun', 'nfse_aliquota_iss']);
+const CAMPOS_DE_ESTOQUE = new Set(['stock_qty', 'stock_fraction', 'variants', 'variantes']);
+
+const temAcesso = (g) => g.is_owner === true || !!g.role_label;
+
+const VISIVEL = `(p.company_id = $2 OR (p.is_group_shared = true AND p.company_id IN (
+  SELECT id FROM companies WHERE COALESCE(NULLIF(billing_owner_company_id, id), id) = (
+    SELECT COALESCE(NULLIF(billing_owner_company_id, id), id) FROM companies WHERE id = $2))))`;
+
+// O produto (visivel na loja :id) e o par dele em cada loja do grupo.
+async function paresNoGrupo(conn, { companyId, productId, grupo }) {
+  const cid = low(companyId);
+  const pid = low(productId);
+  if (!UUID.test(pid)) throw new ErroDeLojas(404, 'PRODUTO_NAO_ENCONTRADO', 'Produto não encontrado.');
+  const { rows } = await conn.query(
+    `SELECT p.* FROM products p WHERE p.id = $1 AND p.is_active = true AND ${VISIVEL}`,
+    [pid, cid]
+  );
+  const p = rows[0];
+  if (!p) throw new ErroDeLojas(404, 'PRODUTO_NAO_ENCONTRADO', 'Produto não encontrado.');
+  const dono = low(p.company_id);
+  const par = new Map([[dono, pid]]); // loja -> product_id
+  if (p.is_group_shared === true) return { p, dono, par, compartilhado: true };
+
+  const ids = grupo.map((g) => g.id).filter((id) => id !== dono);
+  if (ids.length) {
+    const master = txt(p.master_sku);
+    const vinculos = await copia.opcional(conn, 'sp_vinculos_edicao', () => conn.query(
+      `SELECT * FROM (
+         SELECT t.destino_company_id AS loja, i.destino_product_id AS pid, t.criada_em
+           FROM stock_transfer_items i JOIN stock_transfers t ON t.id = i.transfer_id
+          WHERE t.origem_company_id = $1 AND i.product_id = $2 AND t.destino_company_id = ANY($3::uuid[])
+         UNION ALL
+         SELECT t.origem_company_id, i.product_id, t.criada_em
+           FROM stock_transfer_items i JOIN stock_transfers t ON t.id = i.transfer_id
+          WHERE t.destino_company_id = $1 AND i.destino_product_id = $2 AND t.origem_company_id = ANY($3::uuid[])
+       ) v WHERE v.pid IS NOT NULL ORDER BY v.criada_em DESC`,
+      [dono, pid, ids]
+    ));
+    const ligados = vinculos ? vinculos.rows : [];
+    const { rows: pares } = await conn.query(
+      `SELECT id, company_id, btrim(master_sku) AS master_sku FROM products
+        WHERE company_id = ANY($1::uuid[]) AND is_active = true
+          AND (($2::text <> '' AND btrim(master_sku) = $2) OR id = ANY($3::uuid[]))
+        ORDER BY created_at ASC`,
+      [ids, master, ligados.map((v) => v.pid)]
+    );
+    for (const r of pares) {
+      if (master && r.master_sku === master && !par.has(low(r.company_id))) par.set(low(r.company_id), low(r.id));
+    }
+    const ativos = new Map(pares.map((r) => [low(r.id), low(r.company_id)]));
+    for (const v of ligados) {
+      const loja = low(v.loja);
+      if (!par.has(loja) && ativos.get(low(v.pid)) === loja) par.set(loja, low(v.pid));
+    }
+  }
+  return { p, dono, par, compartilhado: false };
+}
+
+// GET /:pid/lojas
+async function lojasDoProduto(conn, { companyId, productId, userId, isStaff = false }) {
+  const cid = low(companyId);
+  const grupo = await lojasDoGrupo(conn, cid, userId);
+  const { dono, par, compartilhado } = await paresNoGrupo(conn, { companyId: cid, productId, grupo });
+  const em = grupo
+    .filter((g) => par.has(g.id) && (g.id === dono || g.id === cid || isStaff || temAcesso(g)))
+    .map((g) => ({ company_id: g.id, nome: g.nome, product_id: par.get(g.id) }));
+  // "Levar para outra loja" = POST :pid/lojas, que copia da loja do caminho:
+  // so quando o produto e desta loja e nao e compartilhado.
+  const podeLevar = !compartilhado && dono === cid;
+  const pode_levar_para = podeLevar
+    ? grupo.filter((g) => !par.has(g.id) && g.ativa && (isStaff || mexe(g))).map((g) => ({ company_id: g.id, nome: g.nome }))
+    : [];
+  return { em, pode_levar_para, ...(compartilhado ? { compartilhado: true } : {}) };
+}
+
+function lerPedidoDeAplicar(body) {
+  const b = body && typeof body === 'object' ? body : {};
+  if (!Array.isArray(b.campos) || b.campos.length === 0) {
+    throw new ErroDeLojas(400, 'CAMPOS_INVALIDOS', 'Escolha o que levar para as outras lojas.');
+  }
+  const campos = [];
+  for (const c of b.campos) {
+    const k = txt(c);
+    if (CAMPOS_DE_ESTOQUE.has(k)) {
+      throw new ErroDeLojas(400, 'CAMPOS_INVALIDOS', 'O estoque não vai por aqui. Para mandar peças, use "Transferir".', { campo: k });
+    }
+    if (!CAMPOS_EDITAVEIS.has(k)) throw new ErroDeLojas(400, 'CAMPOS_INVALIDOS', 'Um dos campos não pode ser levado para outra loja.', { campo: k });
+    if (!campos.includes(k)) campos.push(k);
+  }
+  if (!Array.isArray(b.lojas) || b.lojas.length === 0) throw new ErroDeLojas(400, 'LOJAS_INVALIDAS', 'Escolha pelo menos uma loja.');
+  if (b.lojas.length > LIMITE_LOJAS) throw new ErroDeLojas(400, 'LOJAS_INVALIDAS', `Escolha no máximo ${LIMITE_LOJAS} lojas.`, { limite: LIMITE_LOJAS });
+  const lojas = [];
+  for (const x of b.lojas) {
+    const id = txt(x && typeof x === 'object' ? x.company_id : x);
+    if (!UUID.test(id)) throw new ErroDeLojas(400, 'LOJAS_INVALIDAS', 'Escolha a loja.');
+    if (!lojas.includes(low(id))) lojas.push(low(id));
+  }
+  return { campos, lojas };
+}
+
+/**
+ * POST /:pid/aplicar-nas-lojas. Os valores saem do produto JA GRAVADO na
+ * loja do caminho (o app salva aqui e depois pede para levar), copiados em
+ * SQL (UPDATE ... FROM products s): jsonb e numeric vao como estao.
+ * Uma loja que falha nao desfaz as outras (SAVEPOINT). Nunca toca estoque.
+ */
+async function aplicarNasLojas(conn, { companyId, productId, userId, isStaff = false, campos, lojas }) {
+  const cid = low(companyId);
+  const grupo = await lojasDoGrupo(conn, cid, userId);
+  const origem = grupo.find((g) => g.id === cid);
+  if (!origem) throw new ErroDeLojas(404, 'PRODUTO_NAO_ENCONTRADO', 'Produto não encontrado.');
+  if (!isStaff && !mexe(origem)) throw new ErroDeLojas(403, 'SEM_ACESSO', 'Você não tem acesso ao estoque desta loja.');
+  const { p, dono, par, compartilhado } = await paresNoGrupo(conn, { companyId: cid, productId, grupo });
+  if (compartilhado) {
+    throw new ErroDeLojas(409, 'PRODUTO_COMPARTILHADO', 'Este produto já aparece em todas as lojas do grupo: a alteração já vale para todas.');
+  }
+  if (dono !== cid) throw new ErroDeLojas(404, 'PRODUTO_NAO_ENCONTRADO', 'Produto não encontrado.');
+  const pid = low(p.id);
+  const existentes = campos.filter((c) => tem(p, c)); // base sem a coluna: fica de fora
+  const porId = new Map(grupo.map((g) => [g.id, g]));
+
+  const resultados = [];
+  for (const lojaId of lojas) {
+    const destino = porId.get(lojaId);
+    const r = { company_id: lojaId, nome: destino ? destino.nome : null, status: 'erro', product_id: null, campos: [], avisos: [] };
+    resultados.push(r);
+    const falhar = (code, message, extra = {}) => { r.erro = { code, message, ...extra }; };
+    if (lojaId === cid) { falhar('MESMA_LOJA', 'O produto já é desta loja.'); continue; }
+    if (!destino || !destino.ativa || (!isStaff && !mexe(destino))) {
+      falhar('SEM_ACESSO', 'Esta loja não está no seu grupo ou você não tem acesso ao estoque dela.');
+      continue;
+    }
+    const alvo = par.get(lojaId);
+    if (!alvo) { falhar('SEM_PAR', 'O produto não está nesta loja. Use "Levar para outra loja".'); continue; }
+    r.product_id = alvo;
+
+    const mesmoRegime = !!(origem.regime && destino.regime && origem.regime === destino.regime);
+    const mesmoMunicipio = !!(txt(origem.municipio) && txt(destino.municipio) && txt(origem.municipio) === txt(destino.municipio));
+    const levar = existentes.filter((c) => {
+      if (CAMPOS_DO_REGIME.has(c) && !mesmoRegime) return false;
+      if (CAMPOS_DO_MUNICIPIO.has(c) && !mesmoMunicipio) return false;
+      return true;
+    });
+    if (levar.length < existentes.length) r.avisos.push('fiscal_conferir');
+
+    // D6: o codigo novo nao pode ser de outro produto da loja
+    if (levar.includes('barcode') && txt(p.barcode)) {
+      const donos = await donosDosCodigos(conn, { destinoId: lojaId, codigos: [txt(p.barcode)], excluir: [pid, alvo] });
+      const d = donos.get(txt(p.barcode));
+      if (d) { const { code, message, ...extra } = erroDeCodigo(d); falhar(code, message, extra); r.avisos = []; continue; }
+    }
+    if (levar.includes('sku') && txt(p.sku)) {
+      const donos = await donosDosSkus(conn, { destinoId: lojaId, skus: [txt(p.sku)], excluir: [pid, alvo] });
+      const d = donos.get(txt(p.sku));
+      if (d) { const { code, message, ...extra } = erroDeSku(txt(p.sku), d); falhar(code, message, extra); r.avisos = []; continue; }
+    }
+    if (!levar.length) { r.status = 'aplicado'; continue; }
+
+    await conn.query('SAVEPOINT sp_aplicar');
+    try {
+      await conn.query(
+        `UPDATE products t SET ${levar.map((c) => `"${c}" = s."${c}"`).join(', ')}, updated_at = NOW()
+           FROM products s
+          WHERE t.id = $1 AND t.company_id = $2 AND s.id = $3`,
+        [alvo, lojaId, pid]
+      );
+      if (levar.includes('category')) {
+        // a categoria da arvore vai pelo nome, como na copia
+        await copia.opcional(conn, 'sp_aplicar_cat', async () => {
+          await conn.query(`DELETE FROM product_category_links WHERE product_id = $1`, [alvo]);
+          await copia.copiarCategorias(conn, lojaId, new Map([[pid, alvo]]));
+        }, { toleraDuplicado: true });
+      }
+      await conn.query('RELEASE SAVEPOINT sp_aplicar');
+      r.status = 'aplicado';
+      r.campos = levar;
+    } catch (e) {
+      await conn.query('ROLLBACK TO SAVEPOINT sp_aplicar');
+      await conn.query('RELEASE SAVEPOINT sp_aplicar');
+      r.avisos = [];
+      if (ehBarcodeDuplicado(e)) falhar('BARCODE_EM_USO', `O código ${txt(p.barcode)} já está em outro produto desta loja.`);
+      else {
+        console.error('[produtoNasLojas] aplicar em', lojaId, 'falhou:', e && e.message, e && e.code);
+        falhar('ERRO_AO_APLICAR', 'Não deu para alterar o produto nesta loja. Tente de novo.');
+      }
+    }
+  }
+  return { resultados: resultados.map((r) => (r.status === 'erro' ? r : (() => { const { erro, ...x } = r; return x; })())) };
+}
+
 module.exports = {
   LIMITE_LOJAS,
   REFERENCIA,
@@ -830,4 +1037,8 @@ module.exports = {
   porLojaComFalha,
   nomesDasLojas,
   levarDepoisDoCadastro,
+  CAMPOS_EDITAVEIS,
+  lojasDoProduto,
+  lerPedidoDeAplicar,
+  aplicarNasLojas,
 };
