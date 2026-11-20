@@ -34,6 +34,8 @@ const { montarGrades } = require('../services/importGrade');
 const { coerceColorHex, skuSuffixFromAttrs } = require('./productsVariations');
 const { proximosCodigos } = require('./productsBarcodeGenerate');
 const { companyGroupWhere } = require('../utils/companyGroup');
+// 20/11/2026 (B2, "Em qual loja o produto entra"): lojas/estoque_em e D12.
+const nasLojas = require('../services/produtoNasLojas');
 
 // ─── Mapeamento de colunas — fuzzy match ────────────────────
 
@@ -407,6 +409,18 @@ router.post('/customers/import', requireAuth, async (req, res) => {
 // LIMITE 02/05/2026: aumentado de 5.000 para 6.000 produtos por
 // importação (clientes com catálogo de calçados/vestuário com
 // muitas variações de tamanho/cor passam fácil dos 5k).
+//
+// 20/11/2026 (B2, "Em qual loja o produto entra"):
+//   - `lojas` (inclui a loja do caminho) e `estoque_em` opcionais. Depois que
+//     a origem gravou, o que entrou vai tambem para as outras lojas marcadas
+//     (um produto privado por loja, services/produtoNasLojas.js), cada loja
+//     com o SEU lote de importacao (import_logs + import_batch_id): o
+//     "desfazer" continua por loja. O estoque da planilha entra em
+//     `estoque_em`; as outras lojas nascem com 0. Resposta + `por_loja`.
+//     Sem `lojas`: a resposta e o efeito de antes.
+//   - D12: loja num grupo de estoque unico cria o produto compartilhado (a
+//     regra do POST /products); antes a planilha nascia sempre privada. O
+//     INSERT so ganha a coluna is_group_shared nesse caso.
 
 router.post('/products/import', requireAuth, async (req, res) => {
   const companyId = req.params.id;
@@ -417,6 +431,15 @@ router.post('/products/import', requireAuth, async (req, res) => {
   }
   if (rows.length > 6000) {
     return res.status(400).json({ error: 'Máximo de 6.000 produtos por importação' });
+  }
+
+  // B2: em quais lojas a planilha entra (ausente = so a loja do caminho)
+  let pedidoLojas = null;
+  try {
+    pedidoLojas = nasLojas.lerLojasDoLote(req.body, companyId);
+  } catch (e) {
+    if (e instanceof nasLojas.ErroDeLojas) return res.status(e.status).json(e.body);
+    throw e;
   }
 
   const headers = Object.keys(rows[0]);
@@ -732,6 +755,9 @@ router.post('/products/import', requireAuth, async (req, res) => {
     });
   }
 
+  // D12: grupo de estoque unico cria compartilhado (regra do POST /products).
+  const compartilhar = await nasLojas.nasceCompartilhado(db, companyId);
+
   const batchId = uuidv4();
   let saved = 0;
   const dupes = duplicatas.length;
@@ -762,14 +788,14 @@ router.post('/products/import', requireAuth, async (req, res) => {
         p.unit, p.description, p.ncm, p.brand,
       ];
       if (incluirCardPrice) valores.push(p.card_price);
-      placeholders.push(`($1,${valores.map(() => '$' + (n++)).join(',')},$2)`);
+      placeholders.push(`($1,${valores.map(() => '$' + (n++)).join(',')},$2${compartilhar ? ',true' : ''})`);
       params.push(...valores);
     }
     const colCard = incluirCardPrice ? ', card_price' : '';
     return {
       sql: `INSERT INTO products
            (company_id, name, price, cost_price, stock_qty, stock_min,
-            barcode, sku, category, color, size, unit, description, ncm, brand${colCard}, import_batch_id)
+            barcode, sku, category, color, size, unit, description, ncm, brand${colCard}, import_batch_id${compartilhar ? ', is_group_shared' : ''})
          VALUES ${placeholders.join(',')}
          ON CONFLICT DO NOTHING
          RETURNING id, category`,
@@ -782,7 +808,7 @@ router.post('/products/import', requireAuth, async (req, res) => {
   let variacoesCriadas = 0;
   if (modelos.length > 0) {
     try {
-      const r = await gravarGrades({ companyId, batchId, modelos, comCardPrice: modelos.some((m) => m.p.card_price !== null) });
+      const r = await gravarGrades({ companyId, batchId, modelos, comCardPrice: modelos.some((m) => m.p.card_price !== null), compartilhar });
       saved += r.produtos.length;
       variacoesCriadas = r.variacoes;
       if (r.cardPriceIgnorado) cardPriceIgnorado = true;
@@ -852,6 +878,14 @@ router.post('/products/import', requireAuth, async (req, res) => {
   // 17/10/2026 (t2-04): o primeiro produto avança o passo do cadastro.
   if (saved > 0) avancarSemEsperar(companyId, 'produto');
 
+  // B2: o que entrou vai tambem para as outras lojas marcadas.
+  let porLoja = null;
+  if (pedidoLojas) {
+    porLoja = await levarImportacaoParaLojas(req, {
+      companyId, batchId, pedidoLojas: compartilhar ? { ...pedidoLojas, outras: [] } : pedidoLojas, dupes, map,
+    });
+  }
+
   res.status(201).json({
     saved,
     duplicates_skipped: dupes,
@@ -875,8 +909,70 @@ router.post('/products/import', requireAuth, async (req, res) => {
       grade: { modelos: modelos.length, variacoes: variacoesCriadas },
       avisos_grade: avisosGrade,
     } : {}),
+    ...(porLoja ? { por_loja: porLoja } : {}),
   });
 });
+
+// B2 (20/11/2026): leva o lote recem-importado para as outras lojas marcadas.
+// Le do banco o que entrou (o lote da origem, com o estoque e a grade) e
+// grava um lote de importacao por loja. Nunca derruba a resposta da origem.
+async function levarImportacaoParaLojas(req, { companyId, batchId, pedidoLojas, dupes, map }) {
+  let criados = [];
+  try {
+    const { rows: prods } = await db.query(
+      `SELECT id, name, stock_qty FROM products WHERE import_batch_id = $1 AND company_id = $2 ORDER BY created_at, id`,
+      [batchId, companyId]
+    );
+    const { rows: vars } = prods.length ? await db.query(
+      `SELECT id, product_id, stock_qty FROM product_variants WHERE product_id = ANY($1::uuid[]) AND is_active = true`,
+      [prods.map((p) => p.id)]
+    ) : { rows: [] };
+    const grade = new Map();
+    for (const v of vars) {
+      const pid = String(v.product_id).toLowerCase();
+      if (!grade.has(pid)) grade.set(pid, new Map());
+      grade.get(pid).set(String(v.id).toLowerCase(), Number(v.stock_qty) || 0);
+    }
+    criados = prods.map((p) => ({
+      product_id: p.id, name: p.name, stock_qty: Number(p.stock_qty) || 0,
+      variantes: grade.get(String(p.id).toLowerCase()) || null,
+    }));
+  } catch (err) {
+    console.error('[import-products] lote para as outras lojas:', err.message);
+    return [
+      { company_id: String(companyId).toLowerCase(), nome: null, criados: 0, ja_existiam: dupes, erros: [] },
+      ...pedidoLojas.outras.map((id) => ({
+        company_id: id, nome: null, criados: 0, ja_existiam: 0,
+        erros: [{ product_id: null, name: null, code: 'ERRO_AO_CRIAR', message: 'Não deu para criar os produtos nesta loja. Tente de novo.' }],
+      })),
+    ];
+  }
+  const lotes = new Map(pedidoLojas.outras.map((id) => [id, uuidv4()]));
+  const porLoja = await nasLojas.levarDepoisDoCadastro(db, {
+    origemId: companyId,
+    userId: req.user && req.user.id,
+    isStaff: !!(req.user && req.user.role === 'admin'),
+    pedido: pedidoLojas,
+    criados,
+    origemJaExistiam: dupes,
+    opcoes: { loteDaLoja: (id) => lotes.get(id) || null, notas: 'Estoque inicial da importação' },
+    depois: async (client, r) => {
+      for (const l of r.porLoja) {
+        if (!l.criados) continue;
+        await client.query(
+          `INSERT INTO import_logs
+             (company_id, module, format, total_rows, imported_rows, error_rows, batch_id, created_by, meta)
+           VALUES ($1,'products','csv',$2,$3,$4,$5,$6,$7)`,
+          [l.company_id, criados.length, l.criados, l.erros.length, lotes.get(l.company_id), req.user?.id || null,
+            JSON.stringify({ copia_de: { company_id: companyId, batch_id: batchId }, ja_existiam: l.ja_existiam, column_map: map })]
+        );
+      }
+    },
+  });
+  // o "criados" da origem e o que ela gravou (o mesmo `saved`)
+  porLoja[0].criados = criados.length;
+  return porLoja;
+}
 
 // ─── Grade da importacao: helpers (b-import-grade, 17/11/2026) ─
 
@@ -911,7 +1007,7 @@ function avisoCodigo(m, v, origem) {
  * RETURNING. O desfazer do lote (DELETE products por import_batch_id)
  * leva variantes e atributos junto (ON DELETE CASCADE).
  */
-async function gravarGrades({ companyId, batchId, modelos, comCardPrice }) {
+async function gravarGrades({ companyId, batchId, modelos, comCardPrice, compartilhar = false }) {
   const tentar = async (incluirCardPrice) => {
     const client = await db.connect();
     try {
@@ -953,12 +1049,12 @@ async function gravarGrades({ companyId, batchId, modelos, comCardPrice }) {
           const vals = [id, p.name, p.price, p.cost_price, p.stock_qty, p.stock_min,
             p.sku, p.category, p.unit, p.description, p.ncm, p.brand];
           if (incluirCardPrice) vals.push(p.card_price);
-          ph.push(`($1,${vals.map((val) => { params.push(val); return '$' + params.length; }).join(',')},$2)`);
+          ph.push(`($1,${vals.map((val) => { params.push(val); return '$' + params.length; }).join(',')},$2${compartilhar ? ',true' : ''})`);
         }
         const { rows: r } = await client.query(
           `INSERT INTO products
              (company_id, id, name, price, cost_price, stock_qty, stock_min,
-              sku, category, unit, description, ncm, brand${incluirCardPrice ? ', card_price' : ''}, import_batch_id)
+              sku, category, unit, description, ncm, brand${incluirCardPrice ? ', card_price' : ''}, import_batch_id${compartilhar ? ', is_group_shared' : ''})
            VALUES ${ph.join(',')}
            RETURNING id, category`,
           params
