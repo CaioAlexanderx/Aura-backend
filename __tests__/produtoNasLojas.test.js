@@ -297,6 +297,23 @@ describe('POST /products/:pid/lojas', () => {
     expect(chamadas.some((c) => /UPDATE products SET "tax_profile" = NULL WHERE id = ANY\(\$1::uuid\[\]\)/.test(c.sql))).toBe(true);
   });
 
+  test('D7: outro municipio nao leva o codigo municipal nem a aliquota do ISS; mesmo municipio leva', async () => {
+    const servico = produto({ tax_profile: null, nfse_ctribmun: '101', nfse_aliquota_iss: '2.50' });
+    const limpou = (chamadas, c) => chamadas.some((x) => new RegExp(`UPDATE products SET "${c}" = NULL WHERE id = ANY`).test(x.sql));
+
+    const outro = cenario({ prod: servico, grupo: [loja(MATRIZ), loja(FILIAL, { municipio: '3304557' })] });
+    const r1 = await enviar({ lojas: [{ company_id: FILIAL }] });
+    expect(r1.body.resultados[0]).toMatchObject({ status: 'criado', avisos: ['fiscal_conferir'] });
+    expect(limpou(outro, 'nfse_ctribmun')).toBe(true);
+    expect(limpou(outro, 'nfse_aliquota_iss')).toBe(true);
+
+    const mesmo = cenario({ prod: servico, grupo: [loja(MATRIZ), loja(FILIAL)] });
+    const r2 = await enviar({ lojas: [{ company_id: FILIAL }] });
+    expect(r2.body.resultados[0]).toMatchObject({ status: 'criado', avisos: [] });
+    expect(limpou(mesmo, 'nfse_ctribmun')).toBe(false);
+    expect(limpou(mesmo, 'nfse_aliquota_iss')).toBe(false);
+  });
+
   test('falha inesperada numa loja: ROLLBACK TO SAVEPOINT, erro so dela, as outras seguem', async () => {
     let primeira = true;
     const chamadas = bancoFalso((sql) => {
