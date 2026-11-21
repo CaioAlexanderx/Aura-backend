@@ -40,6 +40,7 @@ const lojaA = uuid();
 const lojaB = uuid();
 const lojaRegua = uuid();
 const lojaReguaFabrica = uuid();
+const lojaReguaProducao = uuid();
 let quem = dono;
 
 const base = (loja) => `/companies/${loja}/credit/message-templates`;
@@ -78,8 +79,9 @@ beforeAll(async () => {
   await client.query(
     `INSERT INTO companies (id, owner_id, legal_name, is_active) VALUES
        ($1, $5, 'Fixture Loja A', true), ($2, $6, 'Fixture Loja B', true),
-       ($3, $5, 'Fixture Loja Regua', true), ($4, $5, 'Fixture Loja Regua Fabrica', true)`,
-    [lojaA, lojaB, lojaRegua, lojaReguaFabrica, dono, outroDono]
+       ($3, $5, 'Fixture Loja Regua', true), ($4, $5, 'Fixture Loja Regua Fabrica', true),
+       ($7, $5, 'Fixture Loja Regua Producao', true)`,
+    [lojaA, lojaB, lojaRegua, lojaReguaFabrica, dono, outroDono, lojaReguaProducao]
   );
 
   const { requireCompanyAccess } = require('../src/middleware/auth');
@@ -224,6 +226,31 @@ describe('textos da régua', () => {
     const r = await request(app).get(base(lojaReguaFabrica));
     expect(r.body.source).toBe('aura');
     expect(await contar(lojaReguaFabrica)).toBe(0);
+  });
+
+  it('régua no formato de produção (template = chave) não importa nada: só os 4 prontos', async () => {
+    await client.query(
+      `INSERT INTO credit_collection_rules (company_id, rules) VALUES ($1, $2)`,
+      [lojaReguaProducao, JSON.stringify([
+        { id: 'd-3', name: 'Lembrete', days_relative: -3, channel: 'whatsapp', enabled: true, template: 'lembrete' },
+        { id: 'd-1', name: 'Confirmação', days_relative: -1, channel: 'whatsapp', enabled: true, template: 'confirmacao' },
+        { id: 'd0', name: 'Vencimento', days_relative: 0, channel: 'whatsapp', enabled: true, template: 'vencimento' },
+        { id: 'd+3', name: 'Atraso 1', days_relative: 3, channel: 'whatsapp', enabled: true, template: 'atraso_1' },
+        { id: 'd+10', name: 'Atraso 2', days_relative: 10, channel: 'whatsapp', enabled: true, template: 'atraso_2' },
+        { id: 'd+30', name: 'Bloqueio', days_relative: 30, channel: 'system', enabled: false, template: 'bloqueio' },
+      ])]
+    );
+    let r = await request(app).get(base(lojaReguaProducao));
+    expect(r.body.source).toBe('aura');
+    expect(r.body.templates.map((t) => t.name)).toEqual(['Lembrete', 'Vence hoje', 'Passou do dia', 'Vamos combinar']);
+    expect(await contar(lojaReguaProducao)).toBe(0);
+    // No primeiro modelo salvo: só os prontos + o novo, nada de "atraso_1".
+    r = await request(app).post(base(lojaReguaProducao)).send({ name: 'Meu', body: 'Oi, {nome}!' });
+    expect(r.status).toBe(201);
+    expect(r.body.templates.map((t) => t.body)).not.toContain('atraso_1');
+    expect(r.body.templates).toHaveLength(5);
+    const { rows } = await client.query('SELECT 1 FROM credit_message_template_imports WHERE company_id = $1', [lojaReguaProducao]);
+    expect(rows).toHaveLength(0);
   });
 
   it('texto próprio vira modelo da loja na primeira leitura, como padrão da situação', async () => {

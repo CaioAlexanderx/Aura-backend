@@ -99,14 +99,51 @@ describe('textos da régua', () => {
   });
 
   it('duas etapas de atraso com texto próprio: só a primeira ligada é o padrão; texto repetido entra uma vez', () => {
+    const A = 'Oi {nome}, passou do dia, tudo bem?';
+    const B = 'Oi {nome}, já faz {dias} dias, me chama?';
     const rules = [
-      { id: 'atraso_1', name: 'Atraso leve', days_relative: 1, enabled: true, template: 'A' },
-      { id: 'atraso_2', name: 'Atraso 2', days_relative: 7, enabled: true, template: 'B' },
-      { id: 'x', name: 'Outra', days_relative: 9, enabled: true, template: 'B' },
+      { id: 'atraso_1', name: 'Atraso leve', days_relative: 1, enabled: true, template: A },
+      { id: 'atraso_2', name: 'Atraso 2', days_relative: 7, enabled: true, template: B },
+      { id: 'x', name: 'Outra', days_relative: 9, enabled: true, template: B },
     ];
     expect(svc.modelosDaRegua(rules)).toEqual([
-      { name: 'Atraso leve', body: 'A', situation: 'em_atraso' },
-      { name: 'Atraso 2', body: 'B', situation: null },
+      { name: 'Atraso leve', body: A, situation: 'em_atraso' },
+      { name: 'Atraso 2', body: B, situation: null },
     ]);
+  });
+
+  // O formato que as 45 lojas têm em produção (medido em 21/11/2026): o
+  // `template` é a CHAVE do texto antigo do backend, não um texto.
+  const REGUA_DE_PRODUCAO = [
+    { id: 'd-3', name: 'Lembrete', days_relative: -3, channel: 'whatsapp', enabled: true, template: 'lembrete' },
+    { id: 'd-1', name: 'Confirmação', days_relative: -1, channel: 'whatsapp', enabled: true, template: 'confirmacao' },
+    { id: 'd0', name: 'Vencimento', days_relative: 0, channel: 'whatsapp', enabled: true, template: 'vencimento' },
+    { id: 'd+3', name: 'Atraso 1', days_relative: 3, channel: 'whatsapp', enabled: true, template: 'atraso_1' },
+    { id: 'd+10', name: 'Atraso 2', days_relative: 10, channel: 'whatsapp', enabled: true, template: 'atraso_2' },
+    { id: 'd+30', name: 'Bloqueio', days_relative: 30, channel: 'system', enabled: false, template: 'bloqueio' },
+  ];
+
+  it('régua de produção (template = chave do texto antigo) não vira modelo', () => {
+    expect(svc.modelosDaRegua(REGUA_DE_PRODUCAO)).toEqual([]);
+    expect(svc.modelosDaRegua(JSON.stringify(REGUA_DE_PRODUCAO))).toEqual([]);
+    // Chave em caixa diferente, palavra solta ou texto curto também não.
+    expect(svc.modelosDaRegua([
+      { id: 'd0', days_relative: 0, template: 'ATRASO_1' },
+      { id: 'd1', days_relative: 1, template: 'cobranca_personalizada' },
+      { id: 'd2', days_relative: 2, template: 'Pague já' },
+    ])).toEqual([]);
+  });
+
+  it('texto com variável desconhecida ou acima de 1.000 letras fica fora (nada é cortado)', () => {
+    expect(svc.modelosDaRegua([
+      { id: 'a', days_relative: 1, enabled: true, template: 'Oi {nome}, pague pelo link {link_pix} hoje' },
+      { id: 'b', days_relative: 2, enabled: true, template: 'Oi {nome}, ' + 'x'.repeat(1000) },
+    ])).toEqual([]);
+  });
+
+  it('texto de fábrica de outra etapa também não é da loja', () => {
+    expect(svc.modelosDaRegua([
+      { id: 'd-3', days_relative: -3, enabled: true, template: svc.REGUA_PADRAO.vencimento },
+    ])).toEqual([]);
   });
 });

@@ -100,6 +100,22 @@ function letras(s) {
   return Array.from(String(s || '')).length;
 }
 
+// Em produção (medido em 21/11/2026), a régua das 45 lojas guarda em
+// `template` a CHAVE do texto do backend antigo (services/credit/
+// collectionNotice.js), não um texto: 'lembrete', 'atraso_1'… Isso nunca é
+// texto da loja. Valor sem espaço ou curto demais também não é (ninguém
+// escreve uma cobrança de uma palavra só).
+const CHAVES_DE_TEMPLATE = new Set(['lembrete', 'confirmacao', 'vencimento', 'atraso_1', 'atraso_2', 'bloqueio']);
+const MIN_LETRAS_DA_REGUA = 15;
+
+function ehTextoDeVerdade(texto) {
+  const t = String(texto || '').trim();
+  if (!t) return false;
+  if (CHAVES_DE_TEMPLATE.has(t.toLowerCase())) return false;
+  if (!/\s/.test(t)) return false;
+  return Array.from(t).length >= MIN_LETRAS_DA_REGUA;
+}
+
 function normalizarTexto(s) {
   return String(s || '').replace(/\s+/g, ' ').trim();
 }
@@ -201,12 +217,16 @@ function modelosDaRegua(rawRules) {
     .sort((a, b) => ((a.r.enabled === false) - (b.r.enabled === false)) || (a.i - b.i));
   const out = [];
   const padraoTomado = new Set();
+  const deFabrica = new Set(Object.values(REGUA_PADRAO).map(normalizarTexto));
   for (const { r } of etapas) {
-    const texto = String(r.template == null ? '' : r.template).replace(/\r\n/g, '\n').trim();
-    if (!texto) continue;
+    const bruto = String(r.template == null ? '' : r.template).replace(/\r\n/g, '\n').trim();
+    if (!ehTextoDeVerdade(bruto)) continue;
+    // Mesma validação de quem salva pela tela: variável desconhecida ou
+    // texto acima de 1.000 letras fica fora (nada é cortado no meio).
+    let texto;
+    try { texto = validarTexto(bruto); } catch (_) { continue; }
     const norm = normalizarTexto(texto);
-    const padrao = REGUA_PADRAO[r.id];
-    if (padrao && normalizarTexto(padrao) === norm) continue;
+    if (deFabrica.has(norm)) continue;
     if (vistos.has(norm)) continue;
     vistos.add(norm);
 
@@ -220,7 +240,7 @@ function modelosDaRegua(rawRules) {
     if (viraPadrao) padraoTomado.add(sit);
     out.push({
       name: nome,
-      body: Array.from(texto).slice(0, MAX_BODY).join(''),
+      body: texto,
       situation: viraPadrao ? sit : null,
     });
   }
