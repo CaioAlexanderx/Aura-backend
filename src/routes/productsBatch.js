@@ -7,12 +7,23 @@
 //
 // Duplicados SAO PERMITIDOS (mesmo nome na mesma categoria OK) -- o
 // aviso de "X duplicados criados" fica no frontend.
+//
+// 20/11/2026 (B2, "Em qual loja o produto entra"):
+//   - `lojas` (inclui a loja do caminho) e `estoque_em` opcionais: depois do
+//     COMMIT, os criados vao tambem para as outras lojas do grupo, um produto
+//     privado por loja (services/produtoNasLojas.js); a resposta ganha
+//     `por_loja`. Sem `lojas`: a mesma resposta e o mesmo efeito de antes.
+//   - D12: loja num grupo de estoque unico (nenhuma empresa separou o
+//     estoque) cria o produto compartilhado, a mesma regra do POST /products
+//     -- antes o lote nascia sempre privado. O INSERT so ganha a coluna
+//     is_group_shared nesse caso; fora dele o SQL e o de sempre.
 // ============================================================
 
 const router = require('express').Router({ mergeParams: true });
 const db = require('../config/database');
 const { avancarSemEsperar } = require('../services/onboardingProgress');
 const { linkImportedCategories } = require('../services/importCategoryLink');
+const nasLojas = require('../services/produtoNasLojas');
 
 function getPlanLimit(plan) {
   switch ((plan || '').toLowerCase()) {
@@ -75,6 +86,15 @@ router.post('/batch-create', async (req, res) => {
     return res.status(400).json({ error: 'Nenhum produto valido no lote', errors });
   }
 
+  // B2: em quais lojas o lote entra (ausente = so a loja do caminho, como sempre)
+  let pedidoLojas = null;
+  try {
+    pedidoLojas = nasLojas.lerLojasDoLote(req.body, cid);
+  } catch (e) {
+    if (e instanceof nasLojas.ErroDeLojas) return res.status(e.status).json(e.body);
+    throw e;
+  }
+
   // Checa limite do plano: count atual + batch <= plan_limit
   try {
     const planLimit = getPlanLimit(req.user?.plan);
@@ -115,6 +135,9 @@ router.post('/batch-create', async (req, res) => {
     console.error('[productsBatch] duplicate detection error:', err.message);
   }
 
+  // D12: grupo de estoque unico cria compartilhado (regra do POST /products).
+  const compartilhar = await nasLojas.nasceCompartilhado(db, cid);
+
   // Bulk INSERT em transacao
   const client = await db.connect();
   const created = [];
@@ -124,16 +147,18 @@ router.post('/batch-create', async (req, res) => {
 
     // Monta VALUES parametrizado: ($1,$2,$3,...), ($N,$N+1,...)
     const cols = ['company_id', 'name', 'sku', 'barcode', 'category', 'price', 'cost_price', 'stock_qty', 'size', 'color'];
+    if (compartilhar) cols.push('is_group_shared');
     const N = cols.length;
     const params = [];
     const tuples = [];
     valid.forEach((v, i) => {
       const base = i * N;
-      tuples.push(`($${base + 1},$${base + 2},$${base + 3},$${base + 4},$${base + 5},$${base + 6},$${base + 7},$${base + 8},$${base + 9},$${base + 10})`);
+      tuples.push(`(${cols.map((_, k) => `$${base + k + 1}`).join(',')})`);
       params.push(
         cid, v.name, v.sku, v.barcode, v.category,
         v.price, v.cost_price, v.stock_qty, v.size, v.color
       );
+      if (compartilhar) params.push(true);
     });
 
     const { rows } = await client.query(
@@ -161,6 +186,19 @@ router.post('/batch-create', async (req, res) => {
   // 17/10/2026 (t2-04): o primeiro produto avança o passo do cadastro.
   if (created.length) avancarSemEsperar(cid, 'produto');
 
+  // B2: os criados nas outras lojas marcadas. Grupo de estoque unico: o
+  // produto ja aparece em todas (D12), nada a copiar.
+  let porLoja = null;
+  if (pedidoLojas) {
+    porLoja = await nasLojas.levarDepoisDoCadastro(db, {
+      origemId: cid,
+      userId: req.user && req.user.id,
+      isStaff: !!(req.user && req.user.role === 'admin'),
+      pedido: compartilhar ? { ...pedidoLojas, outras: [] } : pedidoLojas,
+      criados: created.map((r) => ({ product_id: r.id, name: r.name, stock_qty: r.stock_qty })),
+    });
+  }
+
   return res.status(201).json({
     created,
     total_created:   created.length,
@@ -174,6 +212,7 @@ router.post('/batch-create', async (req, res) => {
       pendentes:  categorias.pending,
       ambiguos:   categorias.ambiguous,
     },
+    ...(porLoja ? { por_loja: porLoja } : {}),
   });
 });
 

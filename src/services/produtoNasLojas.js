@@ -646,6 +646,173 @@ async function levarParaLojas(conn, { origemId, productId, userId, isStaff = fal
   return out.get(pid);
 }
 
+// ─── B2: o lote (lista, planilha, Chegou mercadoria) ─────────
+// `lojas` e `estoque_em` do corpo. Sem `lojas` (ou null): null — a rota
+// segue exatamente como antes. `lojas` inclui a origem (a loja do caminho);
+// em `stock-receipts` (origemImplicita) a origem vale sempre, esteja ou nao
+// na lista, e `estoque_em` e ignorado (a entrada e sempre na loja da rota).
+function lerLojasDoLote(body, origemId, { origemImplicita = false } = {}) {
+  const b = body && typeof body === 'object' ? body : {};
+  if (b.lojas === undefined || b.lojas === null) return null;
+  const origem = low(origemId);
+  if (!Array.isArray(b.lojas) || b.lojas.length === 0) {
+    throw new ErroDeLojas(400, 'LOJAS_INVALIDAS', 'Escolha pelo menos uma loja.');
+  }
+  if (b.lojas.length > LIMITE_LOJAS) {
+    throw new ErroDeLojas(400, 'LOJAS_INVALIDAS', `Escolha no máximo ${LIMITE_LOJAS} lojas.`, { limite: LIMITE_LOJAS });
+  }
+  const ids = [];
+  for (const x of b.lojas) {
+    const id = txt(x && typeof x === 'object' ? x.company_id : x);
+    if (!UUID.test(id)) throw new ErroDeLojas(400, 'LOJAS_INVALIDAS', 'Escolha a loja.');
+    if (!ids.includes(low(id))) ids.push(low(id));
+  }
+  if (!origemImplicita && !ids.includes(origem)) {
+    throw new ErroDeLojas(400, 'LOJAS_INVALIDAS', 'A loja em que você está precisa estar marcada.');
+  }
+  let estoqueEm = origem;
+  if (!origemImplicita && b.estoque_em !== undefined && b.estoque_em !== null && b.estoque_em !== '') {
+    const e = txt(b.estoque_em);
+    if (!UUID.test(e) || !ids.includes(low(e))) {
+      throw new ErroDeLojas(400, 'LOJAS_INVALIDAS', 'O estoque precisa entrar numa das lojas marcadas.');
+    }
+    estoqueEm = low(e);
+  }
+  return { lojas: [origem, ...ids.filter((id) => id !== origem)], outras: ids.filter((id) => id !== origem), estoqueEm };
+}
+
+// D12: o produto novo da loja nasce compartilhado no grupo? A mesma regra do
+// POST /products (grupo com 2+ empresas e nenhuma que separou o estoque).
+// Falhou a leitura: false (o comportamento de antes da regra nestas rotas).
+async function nasceCompartilhado(conn, companyId) {
+  try {
+    const { rows } = await conn.query(
+      `SELECT COUNT(*)::int AS empresas,
+              COUNT(*) FILTER (WHERE to_jsonb(c) ->> 'share_products_in_group' = 'false')::int AS separadas
+         FROM companies c
+        WHERE COALESCE(NULLIF(c.billing_owner_company_id, c.id), c.id) = (
+                SELECT COALESCE(NULLIF(billing_owner_company_id, id), id) FROM companies WHERE id = $1)`,
+      [companyId]
+    );
+    const r = rows && rows[0];
+    return !!r && Number(r.empresas) >= 2 && Number(r.separadas) === 0;
+  } catch (e) {
+    console.error('[produtoNasLojas] estoque unico do grupo:', e && e.message);
+    return false;
+  }
+}
+
+/**
+ * Leva os produtos recem-criados na origem para as `outras` lojas.
+ * criados: [{ product_id, name, stock_qty, variantes: Map(vid -> qtd) }]
+ * A loja `estoqueEm` (se for uma das outras) recebe as quantidades; as
+ * outras nascem com 0. Devolve { porProduto, porLoja } — porLoja so das
+ * outras, no formato do contrato.
+ */
+async function copiarLoteParaLojas(conn, { origemId, userId, isStaff = false, criados, outras, estoqueEm, opcoes = {} }) {
+  const itens = criados.map((c) => ({
+    product_id: low(c.product_id),
+    lojas: outras.map((id) => ({
+      company_id: id,
+      stock_qty: id === estoqueEm ? arred3(Number(c.stock_qty) || 0) : 0,
+      variantes: id === estoqueEm && c.variantes ? c.variantes : new Map(),
+    })),
+  }));
+  const porProduto = itens.length ? await levarLote(conn, { origemId, userId, isStaff, itens, opcoes }) : new Map();
+  const nomeDe = new Map(criados.map((c) => [low(c.product_id), c.name || null]));
+  const porLoja = outras.map((id) => ({ company_id: id, nome: null, criados: 0, ja_existiam: 0, erros: [] }));
+  const lojaDe = new Map(porLoja.map((l) => [l.company_id, l]));
+  for (const [pid, out] of porProduto) {
+    for (const r of out.resultados) {
+      const l = lojaDe.get(r.company_id);
+      if (!l) continue;
+      if (r.nome && !l.nome) l.nome = r.nome;
+      if (r.status === 'criado') l.criados += 1;
+      else if (r.status === 'ja_existia') l.ja_existiam += 1;
+      else l.erros.push({ product_id: pid, name: nomeDe.get(pid), ...r.erro });
+    }
+  }
+  return { porProduto, porLoja };
+}
+
+// A loja inteira falhou (ex.: a transacao da copia caiu): um erro por produto.
+function porLojaComFalha(outras, criados, erro) {
+  return outras.map((id) => ({
+    company_id: id, nome: null, criados: 0, ja_existiam: 0,
+    erros: criados.map((c) => ({ product_id: c.product_id, name: c.name || null, ...erro })),
+  }));
+}
+
+async function nomesDasLojas(conn, ids) {
+  if (!ids.length) return new Map();
+  const { rows } = await conn.query(
+    `SELECT id, COALESCE(trade_name, legal_name) AS nome FROM companies WHERE id = ANY($1::uuid[])`, [ids]);
+  return new Map(rows.map((r) => [low(r.id), r.nome]));
+}
+
+/**
+ * Lista e planilha: depois que a origem gravou (e fez COMMIT), leva os
+ * criados para as outras lojas numa transacao propria. Se a loja do estoque
+ * (estoque_em) nao e a origem, o estoque que a origem gravou passa para ela:
+ * a copia entra com a quantidade e a origem fica com 0 — so nos produtos que
+ * a copia criou de fato (o que falhou fica com o estoque na origem, nada se
+ * perde). `depois(client, resultado)` roda na mesma transacao (ex.: o
+ * import_logs de cada loja). Nunca lanca: falha vira erro em por_loja.
+ * Devolve por_loja com a origem primeiro.
+ */
+async function levarDepoisDoCadastro(db, {
+  origemId, userId, isStaff = false, pedido, criados, origemJaExistiam = 0, opcoes = {}, depois = null,
+}) {
+  const origem = low(origemId);
+  let outras = pedido.outras.map((id) => ({ company_id: id, nome: null, criados: 0, ja_existiam: 0, erros: [] }));
+  if (pedido.outras.length && criados.length) {
+    const client = await db.connect();
+    try {
+      await client.query('BEGIN');
+      const r = await copiarLoteParaLojas(client, {
+        origemId: origem, userId, isStaff, criados, outras: pedido.outras, estoqueEm: pedido.estoqueEm, opcoes,
+      });
+      if (pedido.estoqueEm !== origem) {
+        const levados = [];
+        for (const c of criados) {
+          const out = r.porProduto.get(low(c.product_id));
+          const naLoja = out && out.resultados.find((x) => x.company_id === pedido.estoqueEm);
+          if (naLoja && naLoja.status === 'criado' && naLoja.stock_qty > 0) levados.push(low(c.product_id));
+        }
+        if (levados.length) {
+          await client.query(
+            `UPDATE products SET stock_qty = 0, updated_at = NOW() WHERE id = ANY($1::uuid[]) AND company_id = $2`,
+            [levados, origem]
+          );
+          await client.query(
+            `UPDATE product_variants SET stock_qty = 0, updated_at = NOW() WHERE product_id = ANY($1::uuid[]) AND is_active = true`,
+            [levados]
+          );
+        }
+      }
+      if (depois) await depois(client, r);
+      await client.query('COMMIT');
+      outras = r.porLoja;
+    } catch (e) {
+      await client.query('ROLLBACK').catch(() => {});
+      if (!(e instanceof ErroDeLojas)) console.error('[produtoNasLojas] lote para as outras lojas:', e && e.message, e && e.code);
+      outras = porLojaComFalha(pedido.outras, criados, e instanceof ErroDeLojas
+        ? { code: e.code, message: e.message }
+        : { code: 'ERRO_AO_CRIAR', message: 'Não deu para criar os produtos nesta loja. Tente de novo.' });
+    } finally {
+      client.release();
+    }
+  }
+  let nomes = new Map();
+  try { nomes = await nomesDasLojas(db, pedido.lojas); } catch (_) { /* sem o nome, segue */ }
+  const porLoja = [
+    { company_id: origem, nome: nomes.get(origem) || null, criados: criados.length, ja_existiam: origemJaExistiam, erros: [] },
+    ...outras,
+  ];
+  for (const l of porLoja) if (!l.nome) l.nome = nomes.get(l.company_id) || null;
+  return porLoja;
+}
+
 module.exports = {
   LIMITE_LOJAS,
   REFERENCIA,
@@ -657,4 +824,10 @@ module.exports = {
   lerPedidoDeLojas,
   levarLote,
   levarParaLojas,
+  lerLojasDoLote,
+  nasceCompartilhado,
+  copiarLoteParaLojas,
+  porLojaComFalha,
+  nomesDasLojas,
+  levarDepoisDoCadastro,
 };

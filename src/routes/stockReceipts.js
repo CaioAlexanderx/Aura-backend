@@ -34,6 +34,14 @@
 // pelo mesmo caminho dos outros: custo médio, fornecedor principal,
 // movimento. Respeitam o limite de produtos do plano (tudo ou nada) e
 // avançam o passo "produto" do onboarding, como os imports.
+//
+// 20/11/2026 (B2, "Em qual loja o produto entra"): `lojas` opcional. A
+// entrada continua só na loja da rota; os produtos NOVOS desta entrada
+// nascem também nas outras lojas marcadas, um produto privado por loja, sem
+// estoque, sem custo e sem fornecedor (ficam na loja da entrada) — mesma
+// transação, num SAVEPOINT: se a cópia falhar, a entrada vale e o resultado
+// diz qual loja ficou sem. A resposta (e a guardada para a chave) ganha
+// `por_loja`. Sem `lojas`: tudo como antes.
 // ============================================================
 'use strict';
 
@@ -48,6 +56,7 @@ const {
 const { planejarEntradaEmLote, gravarEntradaEmLote } = require('../services/entradaEmLote');
 const { avancarSemEsperar } = require('../services/onboardingProgress');
 const { linkImportedCategories } = require('../services/importCategoryLink');
+const nasLojas = require('../services/produtoNasLojas');
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const CHAVE = /^[A-Za-z0-9._:-]{8,100}$/;
@@ -222,6 +231,13 @@ router.post('/stock-receipts', async (req, res) => {
   const lido = lerRecebimento(req);
   if (lido.erro) return responderErro(res, lido);
   const { chave, origem, nota, chaveNfe, linhas } = lido;
+  let pedidoLojas = null;
+  try {
+    pedidoLojas = nasLojas.lerLojasDoLote(req.body, cid, { origemImplicita: true });
+  } catch (e) {
+    if (e instanceof nasLojas.ErroDeLojas) return res.status(e.status).json(e.body);
+    throw e;
+  }
   const autor = req.user && UUID.test(String(req.user.id || '')) ? req.user.id : null;
   const inicio = Date.now();
 
@@ -337,6 +353,11 @@ router.post('/stock-receipts', async (req, res) => {
     const plano = planejarEntradaEmLote({ produtos, variantes, linhas });
     await gravarEntradaEmLote(client, { cid, plano, fornecedor, nota, receiptId: recibo.id });
 
+    // 4b. B2: os produtos novos também nas outras lojas marcadas.
+    const porLoja = pedidoLojas
+      ? await levarNovosParaLojas(client, req, { cid, novos, compartilhar: compartilharNovos, pedidoLojas })
+      : null;
+
     const quantidade = round(plano.porLinha.reduce((s, l) => s + l.quantity, 0), 3);
     const comCusto = plano.porLinha.filter((l) => l.unit_cost);
     const resultado = {
@@ -357,6 +378,7 @@ router.post('/stock-receipts', async (req, res) => {
     if (categorias && (categorias.pending.length || categorias.ambiguous.length)) {
       resultado.categorias = { pendentes: categorias.pending, ambiguos: categorias.ambiguous };
     }
+    if (porLoja) resultado.por_loja = porLoja;
     await client.query(
       `UPDATE stock_receipts SET supplier_id = $2, result = $3::jsonb WHERE id = $1`,
       [recibo.id, fornecedor ? fornecedor.id : null, JSON.stringify(resultado)]
@@ -374,6 +396,47 @@ router.post('/stock-receipts', async (req, res) => {
     client.release();
   }
 });
+
+// B2: cópia dos produtos novos da entrada para as outras lojas marcadas, sem
+// estoque, custo nem fornecedor. Produto compartilhado (grupo de estoque
+// único) já aparece em todas: nada a copiar. Falha da cópia não derruba a
+// entrada (SAVEPOINT): vira erro em por_loja.
+async function levarNovosParaLojas(client, req, { cid, novos, compartilhar, pedidoLojas }) {
+  const origemId = String(cid).toLowerCase();
+  const outras = compartilhar ? [] : pedidoLojas.outras;
+  const criados = novos.map((l) => ({ product_id: l.product_id, name: l.novo.name, stock_qty: 0 }));
+  let porOutras = outras.map((id) => ({ company_id: id, nome: null, criados: 0, ja_existiam: 0, erros: [] }));
+  if (outras.length && criados.length) {
+    await client.query('SAVEPOINT sp_outras_lojas');
+    try {
+      const r = await nasLojas.copiarLoteParaLojas(client, {
+        origemId, userId: req.user && req.user.id, isStaff: !!(req.user && req.user.role === 'admin'),
+        criados, outras, estoqueEm: null, opcoes: { soCadastro: true },
+      });
+      await client.query('RELEASE SAVEPOINT sp_outras_lojas');
+      porOutras = r.porLoja;
+    } catch (e) {
+      await client.query('ROLLBACK TO SAVEPOINT sp_outras_lojas');
+      if (!(e instanceof nasLojas.ErroDeLojas)) console.error('[stock-receipts] novos nas outras lojas:', e.message, e.code);
+      porOutras = nasLojas.porLojaComFalha(outras, criados, e instanceof nasLojas.ErroDeLojas
+        ? { code: e.code, message: e.message }
+        : { code: 'ERRO_AO_CRIAR', message: 'Não deu para criar os produtos nesta loja. Tente de novo.' });
+    }
+  }
+  const porLoja = [
+    { company_id: origemId, nome: null, criados: novos.length, ja_existiam: 0, erros: [] },
+    ...porOutras,
+  ];
+  await client.query('SAVEPOINT sp_nomes_lojas');
+  try {
+    const nomes = await nasLojas.nomesDasLojas(client, porLoja.map((l) => l.company_id));
+    await client.query('RELEASE SAVEPOINT sp_nomes_lojas');
+    for (const l of porLoja) if (!l.nome) l.nome = nomes.get(l.company_id) || null;
+  } catch (_) {
+    await client.query('ROLLBACK TO SAVEPOINT sp_nomes_lojas');
+  }
+  return porLoja;
+}
 
 // Quantos produtos a loja tem e se o produto novo nasce compartilhado no
 // grupo (mesma regra do POST /products: loja num grupo que não separou os
