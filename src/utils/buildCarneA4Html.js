@@ -21,6 +21,7 @@
 // sem coluna de QR e sem copia-e-cola — nada é inventado no lugar.
 // ============================================================================
 'use strict';
+const { nomeDaLoja } = require('./nomeDaLoja');
 
 const { autoPrintScript } = require('./autoPrintScript');
 const { qrInlineSvg } = require('./qrInline');
@@ -219,7 +220,7 @@ function buildCarneA4Html({ company, brand = {}, customer, groups = [], carneNam
   if (!customer) throw new Error('customer obrigatório');
 
   // companies não tem coluna `name`.
-  const lojaNome = company.trade_name || company.legal_name || 'Loja';
+  const lojaNome = nomeDaLoja(company, 'Loja');
   const logoUrl = (brand && brand.logo_url) || company.logo_url || null;
   const cor = /^#[0-9a-fA-F]{3,8}$/.test(String((brand && brand.primary_color) || ''))
     ? brand.primary_color : COR_NEUTRA;

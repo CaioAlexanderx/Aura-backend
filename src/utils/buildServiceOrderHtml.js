@@ -15,6 +15,7 @@
 // 14mm) nos dois meios, e o `@media print` so tira sombra e toolbar.
 // ============================================================================
 
+const { nomeDaLoja } = require('./nomeDaLoja');
 const { autoPrintScript } = require('./autoPrintScript');
 
 function escapeHtml(s) {
@@ -140,7 +141,7 @@ function buildServiceOrderHtml({ os, items = [], company, brand = {}, autoprint 
   if (!company) throw new Error('company obrigatório');
 
   // Armadilha #2 do CLAUDE.md: companies nao tem coluna `name`.
-  const empresaNome = company.trade_name || company.legal_name || 'Empresa';
+  const empresaNome = nomeDaLoja(company, 'Empresa');
   // Marca do lojista: a vitrine (digital_channel_config) e a fonte mais rica
   // — logo, cor e nome do site. companies.logo_url e o fallback.
   const logoUrl = brand.logo_url || company.logo_url || null;

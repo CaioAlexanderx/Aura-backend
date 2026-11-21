@@ -7,8 +7,12 @@
 // company so com `name` (razao social primeiro), sem os dois campos: o nome
 // da loja chegava vazio para todo mundo e a etiqueta nunca imprimia o topo.
 //
-// Agora os dois campos vem juntos; `name` continua exatamente o de antes.
-// A troca de empresa ja devolvia os dois: o teste so trava isso.
+// Agora os dois campos vem juntos. A troca de empresa ja devolvia os dois:
+// o teste so trava isso.
+//
+// 21/11/2026: `name` passou a ser o NOME DA LOJA (utils/nomeDaLoja.js:
+// fantasia, senao razao social) no login, no /auth/me e na troca de
+// empresa — antes o login mandava a razao social e a troca, o fantasia.
 // ============================================================
 const request = require('supertest');
 const jwt     = require('jsonwebtoken');
@@ -55,20 +59,20 @@ describe('POST /auth/me', () => {
     });
   }
 
-  test('traz trade_name e legal_name; name continua a razao social', async () => {
+  test('traz trade_name e legal_name; name e o nome da loja (fantasia)', async () => {
     bancoDoMe(DOCE);
     const res = await request(app).post('/api/v1/auth/me').set(auth);
     expect(res.status).toBe(200);
     expect(res.body.company).toMatchObject({
-      name: 'Doce Encanto Confeitaria LTDA',
+      name: 'Doce Encanto',
       trade_name: 'Doce Encanto',
       legal_name: 'Doce Encanto Confeitaria LTDA',
     });
     expect(consultas.find((s) => s.includes('AS member_role'))).toMatch(/c\.trade_name/);
   });
 
-  test('sem nome fantasia: trade_name null, name igual ao de antes', async () => {
-    for (const vazio of [null, '', undefined]) {
+  test('sem nome fantasia: trade_name null, name = razao social', async () => {
+    for (const vazio of [null, '', '   ', undefined]) {
       bancoDoMe({ legal_name: 'Loja da Ana ME', trade_name: vazio });
       const res = await request(app).post('/api/v1/auth/me').set(auth);
       expect(res.body.company).toMatchObject({ name: 'Loja da Ana ME', trade_name: null, legal_name: 'Loja da Ana ME' });
@@ -96,13 +100,13 @@ describe('POST /auth/login', () => {
   }
   const entrar = () => request(app).post('/api/v1/auth/login').send({ email: 'ana@loja.com', password: SENHA });
 
-  test('uma empresa: traz trade_name e legal_name; name continua a razao social', async () => {
+  test('uma empresa: traz trade_name e legal_name; name e o nome da loja (fantasia)', async () => {
     bancoDoLogin([{ id: cid, ...DOCE }]);
     const res = await entrar();
     expect(res.status).toBe(200);
     expect(res.body.company).toMatchObject({
       id: cid,
-      name: 'Doce Encanto Confeitaria LTDA',
+      name: 'Doce Encanto',
       trade_name: 'Doce Encanto',
       legal_name: 'Doce Encanto Confeitaria LTDA',
     });

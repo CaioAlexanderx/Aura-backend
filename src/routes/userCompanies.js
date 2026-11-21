@@ -30,6 +30,7 @@ const { requireAuth } = require('../middleware/auth');
 const db = require('../config/database');
 const { normalizarTelefone } = require('../utils/telefone');
 const { logAuditAction, contextoDaRequisicao } = require('../middleware/auditLog');
+const { nomeDaLoja, nomeFantasiaParaGravar } = require('../utils/nomeDaLoja');
 const {
   calculateMulticnpjValue,
   safeSyncSubscriptionValue,
@@ -74,7 +75,7 @@ router.get('/', async (req, res) => {
     res.json({
       companies: rows.map((c) => ({
         id: c.id,
-        name: c.trade_name || c.legal_name || '',
+        name: nomeDaLoja(c, ''),
         legal_name: c.legal_name || '',
         trade_name: c.trade_name || '',
         cnpj: c.cnpj || '',
@@ -336,7 +337,7 @@ router.post('/', async (req, res) => {
         return res.status(409).json({
           error: 'DUPLICATE_CNPJ',
           message: `Você já tem uma empresa cadastrada com este CNPJ: "${
-            dupRes.rows[0].trade_name || dupRes.rows[0].legal_name
+            nomeDaLoja(dupRes.rows[0], null)
           }".`,
         });
       }
@@ -367,7 +368,7 @@ router.post('/', async (req, res) => {
       [
         userId,
         String(legal_name).trim(),
-        trade_name ? String(trade_name).trim() : null,
+        nomeFantasiaParaGravar(trade_name),
         cleanCnpj || cnpj || null,
         vertical || null,
         tax_regime,
@@ -417,7 +418,7 @@ router.post('/', async (req, res) => {
             new_count: currentCount + 1,
             previous_count: currentCount,
             plan: primary.plan,
-            primary_company_name: primary.trade_name || primary.legal_name,
+            primary_company_name: nomeDaLoja(primary, null),
           }),
         ]
       );
@@ -436,7 +437,7 @@ router.post('/', async (req, res) => {
     const syncResult = await safeSyncSubscriptionValue(primary.id, {
       evento: 'add',
       companyId: newCompany.id,
-      companyName: newCompany.trade_name || newCompany.legal_name,
+      companyName: nomeDaLoja(newCompany, null),
     });
 
     // Decide a "note" exibida ao user com base no resultado real do sync
@@ -463,7 +464,7 @@ router.post('/', async (req, res) => {
     return res.status(201).json({
       company: {
         id: newCompany.id,
-        name: newCompany.trade_name || newCompany.legal_name,
+        name: nomeDaLoja(newCompany, null),
         legal_name: newCompany.legal_name,
         trade_name: newCompany.trade_name,
         cnpj: newCompany.cnpj,
@@ -497,7 +498,7 @@ router.post('/', async (req, res) => {
         new_total_monthly: getPlanValue(planKey, 'monthly') || 0,
         note: 'Cálculo de mensalidade indisponível no momento.',
       },
-      message: `Empresa "${newCompany.trade_name || newCompany.legal_name}" criada com sucesso.`,
+      message: `Empresa "${nomeDaLoja(newCompany, null)}" criada com sucesso.`,
     });
   } catch (err) {
     console.error('[userCompanies] POST error:', err.message, err.stack);
@@ -642,8 +643,8 @@ router.post('/:companyId/transfer-primary', async (req, res) => {
           currentPrimary.id,
           targetId,
           JSON.stringify({
-            old_primary_name: currentPrimary.trade_name || currentPrimary.legal_name,
-            new_primary_name: target.trade_name || target.legal_name,
+            old_primary_name: nomeDaLoja(currentPrimary, null),
+            new_primary_name: nomeDaLoja(target, null),
             asaas_customer_moved: !!currentPrimary.asaas_customer_id,
             asaas_subscription_moved: !!currentPrimary.asaas_subscription_id,
           }),
@@ -659,15 +660,15 @@ router.post('/:companyId/transfer-primary', async (req, res) => {
       transferred: true,
       old_primary: {
         id: currentPrimary.id,
-        name: currentPrimary.trade_name || currentPrimary.legal_name,
+        name: nomeDaLoja(currentPrimary, null),
       },
       new_primary: {
         id: targetId,
-        name: target.trade_name || target.legal_name,
+        name: nomeDaLoja(target, null),
       },
       asaas_customer_moved: !!currentPrimary.asaas_customer_id,
       asaas_subscription_moved: !!currentPrimary.asaas_subscription_id,
-      message: `"${target.trade_name || target.legal_name}" agora é sua empresa principal.`,
+      message: `"${nomeDaLoja(target, null)}" agora é sua empresa principal.`,
       next_step: 'Atualize o switcher fazendo logout/login ou recarregue a página.',
     });
   } catch (err) {
@@ -801,7 +802,7 @@ router.delete('/:companyId', async (req, res) => {
           company.billing_owner_company_id,
           companyId,
           JSON.stringify({
-            removed_company_name: company.trade_name || company.legal_name,
+            removed_company_name: nomeDaLoja(company, null),
           }),
         ]
       );
@@ -814,9 +815,9 @@ router.delete('/:companyId', async (req, res) => {
       userId,
       companyId,
       'remove_company',
-      'Empresa removida: ' + (company.trade_name || company.legal_name || companyId),
+      'Empresa removida: ' + nomeDaLoja(company, companyId),
       {
-        removed_company_name: company.trade_name || company.legal_name,
+        removed_company_name: nomeDaLoja(company, null),
         billing_owner_company_id: company.billing_owner_company_id || null,
       },
       contextoDaRequisicao(req)
@@ -826,7 +827,7 @@ router.delete('/:companyId', async (req, res) => {
     const syncResult = await safeSyncSubscriptionValue(company.billing_owner_company_id, {
       evento: 'remove',
       companyId,
-      companyName: company.trade_name || company.legal_name,
+      companyName: nomeDaLoja(company, null),
     });
     const billingCalc = await calculateMulticnpjValue(company.billing_owner_company_id);
 
@@ -846,7 +847,7 @@ router.delete('/:companyId', async (req, res) => {
     return res.json({
       removed: true,
       company_id: companyId,
-      company_name: company.trade_name || company.legal_name,
+      company_name: nomeDaLoja(company, null),
       billing_after: billingCalc ? {
         total_companies: billingCalc.total_companies,
         new_total_monthly: billingCalc.total_monthly,

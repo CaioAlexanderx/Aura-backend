@@ -17,6 +17,7 @@
 // Nada disso é dado do cliente.
 // ============================================================
 const express = require('express');
+const { nomeDaLoja } = require('../utils/nomeDaLoja');
 const router  = express.Router({ mergeParams: true });
 const db      = require('../config/database');
 const { vitrineDaEmpresa, montarMarca } = require('../services/marcaDaLoja');
@@ -111,7 +112,7 @@ function respostaDaAprovacao(a, { vitrine, prazo } = {}) {
     responded_at: a.responded_at,
     expires_at: a.expires_at,
     shop: {
-      name: a.trade_name || a.legal_name,
+      name: nomeDaLoja(a, null),
     },
     order: {
       id: a.order_id,

@@ -56,6 +56,7 @@
 
 const db = require('../config/database');
 const mpGatewaySvc = require('./mpGateway');
+const { nomeDaLoja: nomeDaLojaPelaRegra } = require('../utils/nomeDaLoja');
 // 14/11/2026: nome da cor da variante, o mesmo do Caixa (CP2a da revisao de cores).
 const { nomeDaCorDaVariante } = require('./nomeDaCor');
 // p-85 (08/11/2026, migration 427): De/Por na vitrine.
@@ -1101,7 +1102,7 @@ async function buildStorefront(config) {
   const alwaysOpen = config.always_open === true;
   const { is_open_now, next_open_text, next_open_when } = computeOpenState(businessHours, alwaysOpen);
 
-  const nomeDaLoja = config.site_name || company.trade_name || company.legal_name || 'Loja';
+  const nomeDaLoja = config.site_name || nomeDaLojaPelaRegra(company, 'Loja');
 
   // p-118: promocao no ar no catalogo INTEIRO (a pagina so carrega a
   // primeira pagina de pecas) e a campanha de Black Friday. As chaves so

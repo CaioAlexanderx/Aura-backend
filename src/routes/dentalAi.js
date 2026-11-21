@@ -26,6 +26,7 @@
 const router = require('express').Router({ mergeParams: true });
 const db     = require('../config/database');
 const { requireRole } = require('../middleware/auth');
+const { nomeDaLoja } = require('../utils/nomeDaLoja');
 
 const CLAUDE_API_KEY = process.env.CLAUDE_API_KEY || null;
 const CLAUDE_MODEL   = 'claude-sonnet-4-20250514';
@@ -535,7 +536,7 @@ router.post('/conversations/:cvid/messages', async (req, res) => {
            FROM companies WHERE id = $1`, [cid]);
       if (coRows[0]) {
         const co = coRows[0];
-        systemPrompt += `\n\n=== CLINICA ===\nNome: ${co.trade_name || co.legal_name || 'N/A'}\nLocal: ${co.address_city || ''}/${co.address_state || 'SP'}`;
+        systemPrompt += `\n\n=== CLINICA ===\nNome: ${nomeDaLoja(co, 'N/A')}\nLocal: ${co.address_city || ''}/${co.address_state || 'SP'}`;
       }
     } catch (_) {}
 

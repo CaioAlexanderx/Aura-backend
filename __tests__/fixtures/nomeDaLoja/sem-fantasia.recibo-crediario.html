@@ -1,0 +1,72 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8">
+  <title>Recibo Crediario - Ana Modas LTDA</title>
+  <style>
+    @page { margin: 10mm 12mm; size: auto; }
+    * { margin:0; padding:0; box-sizing:border-box; }
+    body { font-family:Consolas,'Lucida Console',Menlo,'Courier New',monospace; font-size:12px; color:#000; max-width:500px; margin:0 auto; }
+    .center { text-align:center; }
+    .bold { font-weight:bold; }
+    .divider { border-top:1px dashed #000; margin:8px 0; }
+    .company-name { font-size:16px; font-weight:bold; }
+    table { width:100%; border-collapse:collapse; }
+    td { vertical-align:top; font-size:12px; padding:3px 0; }
+    th { font-size:11px; font-weight:bold; border-bottom:1px solid #000; padding:2px 0; }
+    .total-row td { font-weight:bold; font-size:14px; border-top:2px solid #000; padding-top:5px; }
+    .footer { font-size:10px; text-align:center; margin-top:8px; }
+    .wa-block { background:#f0fdf4; border:1px solid #86efac; border-radius:4px; padding:10px; margin-top:12px; }
+    .wa-block textarea { width:100%; font-family:monospace; font-size:11px; border:none; background:transparent; resize:none; outline:none; }
+    @media print { body { -webkit-print-color-adjust:exact; print-color-adjust:exact; } button, .wa-block { display:none !important; } }
+    @media print and (max-width: 120mm) { @page { margin: 4mm 3mm; } body { max-width:none; } }
+  </style>
+</head>
+<body>
+  <div class="center" style="margin-bottom:8px">
+    <div class="company-name">Ana Modas LTDA</div>
+    <div>CNPJ: 12345678000190</div>
+    <div>Tel: (11) 90000-0000</div>
+    <div>São Paulo - SP</div>
+  </div>
+  <div class="divider"></div>
+  <div class="center bold" style="font-size:14px;margin-bottom:4px">RECIBO DE PAGAMENTO — CREDIARIO</div>
+  <div class="divider"></div>
+  <div style="margin-bottom:8px">
+    <div><strong>Cliente:</strong> Carlos</div>
+    <div><strong>Telefone:</strong> 11988881234</div>
+  </div>
+  <div class="divider"></div>
+  <table>
+    <tr><td style="padding:3px 0">Data</td><td style="text-align:right;padding:3px 0">08/10/2026, 11:00:00</td></tr>
+    <tr><td style="padding:3px 0">Metodo</td><td style="text-align:right;padding:3px 0">Pix</td></tr>
+    <tr class="total-row"><td>Valor pago</td><td style="text-align:right">R$100.00</td></tr>
+  </table>
+  <div class="divider"></div>
+  <div class="bold" style="margin-bottom:4px">Parcelas pagas</div>
+  <table>
+    <tr><th style="text-align:left">Parcela</th><th style="text-align:center">Vencimento</th><th style="text-align:right">Pago</th><th style="text-align:right">Situacao</th></tr>
+    <tr><td>1/2</td><td style="text-align:center">10/10/2026</td><td style="text-align:right">R$100.00</td><td style="text-align:right">Quitada</td></tr>
+  </table>
+  <div class="divider"></div>
+  <div class="footer">Powered by Aura. - getaura.com.br</div>
+  <br>
+  <button onclick="window.print()" style="width:100%;padding:10px;cursor:pointer;font-size:14px">Imprimir</button>
+  <div class="wa-block" style="margin-top:12px">
+    <div style="font-size:11px;font-weight:bold;margin-bottom:6px;color:#166534">Texto para WhatsApp</div>
+    <textarea rows="12" readonly onclick="this.select()">*Recibo de Pagamento — Crediario*
+Ana Modas LTDA
+
+Cliente: Carlos
+Data: 08/10/2026, 11:00:00
+Valor pago: R$100.00
+Metodo: Pix
+
+Parcelas pagas:
+Parcela 1/2 (venc. 10/10/2026): R$100.00 - quitada
+
+Powered by Aura. - getaura.com.br</textarea>
+  </div>
+  <script>(function(){var fired=false;function go(){if(fired)return;fired=true;try{window.focus();}catch(e){}try{window.print();}catch(e){}}function ready(){var imgs=[].slice.call(document.images||[]);var pend=imgs.filter(function(i){return !i.complete;});if(!pend.length){setTimeout(go,250);return;}var n=0,t=setTimeout(go,3000);pend.forEach(function(i){function fin(){if(++n>=pend.length){clearTimeout(t);setTimeout(go,250);}}i.addEventListener("load",fin);i.addEventListener("error",fin);});}setTimeout(ready,50);})();</script>
+</body>
+</html>

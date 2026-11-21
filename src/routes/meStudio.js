@@ -50,6 +50,7 @@ const { STUDIO_PLANS } = require('../services/segment');
 const pagamentoDoPedido = require('../services/pagamentoDoPedidoStudio');
 const { comItemEOrigem, NULL_ITEM_E_ORIGEM } = require('../services/itemEOrigemDoPedido');
 const { listaDaProducao: L } = require('./studioKdsApproval');
+const { nomeDaLoja: nomeDaLojaPelaRegra } = require('../utils/nomeDaLoja');
 
 router.use(requireAuth);
 
@@ -106,7 +107,7 @@ async function lojasDoUsuario(userId) {
     }))
     .map((r) => ({
       id: r.id,
-      nome: r.trade_name || r.legal_name || 'Empresa',
+      nome: nomeDaLojaPelaRegra(r, 'Empresa'),
       is_primary: !!r.is_primary,
       created_at: r.created_at,
     }));

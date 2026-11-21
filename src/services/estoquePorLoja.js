@@ -53,6 +53,7 @@
 'use strict';
 
 const db = require('../config/database');
+const { nomeDaLoja } = require('../utils/nomeDaLoja');
 // 14/11/2026: nome da cor da variante (CP2a da revisao de cores).
 const { nomeDaCor, nomeGravadoQueAparece } = require('./nomeDaCor');
 
@@ -151,7 +152,7 @@ async function lojasDoUsuario(userId) {
     if (!acesso.veEstoque) continue;
     lojas.push({
       id: r.id,
-      nome: r.trade_name || r.legal_name || 'Empresa',
+      nome: nomeDaLoja(r, 'Empresa'),
       raiz: r.raiz || r.id,
       vePreco: acesso.vePreco,
       is_primary: !!r.is_primary,

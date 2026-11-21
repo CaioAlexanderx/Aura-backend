@@ -6,6 +6,7 @@
 const router = require('express').Router({ mergeParams: true });
 const db = require('../config/database');
 const { generatePayslipPdf } = require('../services/payslipPdf');
+const { nomeDaLoja } = require('../utils/nomeDaLoja');
 
 const RESEND_API_KEY = process.env.RESEND_API_KEY;
 const FROM = process.env.SMTP_FROM || 'Aura. <noreply@getaura.com.br>';
@@ -46,7 +47,7 @@ router.post('/:eid/payslip/email', async (req, res) => {
     const { rows: companies } = await db.query(
       'SELECT trade_name, legal_name, cnpj FROM companies WHERE id=$1', [cid]);
     const company = companies[0] || {};
-    const companyName = company.trade_name || company.legal_name || 'Empresa';
+    const companyName = nomeDaLoja(company, 'Empresa');
     const salary = parseFloat(emp.salary || emp.base_salary) || 0;
     const role = emp.role || emp.role_title || 'Colaborador';
     const admDate = emp.admission_date ? new Date(emp.admission_date).toLocaleDateString('pt-BR') : '';

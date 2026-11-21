@@ -36,6 +36,7 @@ const { requireAuth } = require('../middleware/auth');
 const nuvemfiscal = require('../services/nuvemfiscal');
 const { buildStaticBrCode, validatePixKey } = require('../services/staticPixService');
 const { autoPrintScript } = require('../utils/autoPrintScript');
+const { nomeDaLoja } = require('../utils/nomeDaLoja');
 // 16/09/2026: cliente de outra loja do mesmo dono tambem vale (utils/customerScope.js).
 const { findOwnerScopedCustomer, CUSTOMER_NOT_FOUND_BODY } = require('../utils/customerScope');
 const { qrInlineSvg } = require('../utils/qrInline');
@@ -195,7 +196,7 @@ function receiptHTML({ company, sale, items, payments, installments = [], trocaC
     ? `<div class="head-logo">
     <div class="head-logo-img"><img src="${esc(logoUrl)}" alt=""></div>
     <div class="head-logo-txt">
-      <div class="company-name">${company.trade_name || company.legal_name}</div>
+      <div class="company-name">${nomeDaLoja(company)}</div>
       ${cnpjLine}
       ${phoneLine}
       ${streetLine}
@@ -203,7 +204,7 @@ function receiptHTML({ company, sale, items, payments, installments = [], trocaC
     </div>
   </div>`
     : `<div class="center">
-    <div class="company-name">${company.trade_name || company.legal_name}</div>
+    <div class="company-name">${nomeDaLoja(company)}</div>
     ${cnpjLine}
     ${phoneLine}
     ${streetLine}
@@ -214,7 +215,7 @@ function receiptHTML({ company, sale, items, payments, installments = [], trocaC
 <html lang="pt-BR">
 <head>
   <meta charset="UTF-8">
-  <title>Cupom - ${company.trade_name || company.legal_name}</title>
+  <title>Cupom - ${nomeDaLoja(company)}</title>
   <style>
     @page { margin: 4mm 5mm; size: ${width80 ? '80mm' : 'A4'} auto; }
     * { margin:0; padding:0; box-sizing:border-box; }
@@ -268,7 +269,7 @@ function receiptHTML({ company, sale, items, payments, installments = [], trocaC
   ${installmentsHTML}
   <div class="divider"></div>
   ${sale.notes ? `<div style="font-size:10px">Obs: ${sale.notes}</div><div class="divider"></div>` : ''}
-  <div class="footer">Obrigado pela preferencia!<br>${company.trade_name || company.legal_name}<br><small>Powered by Aura. - getaura.com.br</small></div>
+  <div class="footer">Obrigado pela preferencia!<br>${nomeDaLoja(company)}<br><small>Powered by Aura. - getaura.com.br</small></div>
   <br><button onclick="window.print()" style="width:100%;padding:8px;margin-top:8px;cursor:pointer">Imprimir</button>
   ${autoprint ? (logoUrl ? autoPrintScript({ bailMs: 2000 }) : autoPrintScript()) : ''}
 </body>
@@ -815,6 +816,9 @@ router.get('/credit/:cid/carne', requireAuth, async (req, res) => {
     }
     if (!companyRows.length) return res.status(404).json({ error: 'Empresa nao encontrada' });
     const company = companyRows[0];
+    // 21/11/2026: nome da loja pela regra unica (utils/nomeDaLoja.js). O
+    // COALESCE do SQL imprimia vazio com nome fantasia gravado em branco.
+    company.display_name = nomeDaLoja(company, company.display_name);
 
     // 2. Dados do cliente
     const customer = await findOwnerScopedCustomer(db, companyId, customerId, 'id, name, phone, cpf_cnpj');
@@ -1378,12 +1382,14 @@ router.get('/credit/receipts/:transactionId', requireAuth, async (req, res) => {
     // 1. Dados da empresa
     const { rows: companyRows } = await db.query(
       `SELECT COALESCE(trade_name, legal_name) AS display_name,
+              trade_name, legal_name,
               cnpj, phone, address_city, address_state
          FROM companies WHERE id = $1`,
       [companyId]
     );
     if (!companyRows.length) return res.status(404).json({ error: 'Empresa nao encontrada' });
     const company = companyRows[0];
+    company.display_name = nomeDaLoja(company, company.display_name);
 
     // 2. Transação de pagamento
     const { rows: txRows } = await db.query(

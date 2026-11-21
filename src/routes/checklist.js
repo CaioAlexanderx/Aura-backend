@@ -6,6 +6,7 @@
 const router = require('express').Router({ mergeParams: true });
 const db     = require('../config/database');
 const { requireAuth } = require('../middleware/auth');
+const { nomeDaLoja } = require('../utils/nomeDaLoja');
 
 // ── Templates de itens por regime/vertical ────────────────────
 // due_day: dia do mês do vencimento (null = sem vencimento fixo)
@@ -330,7 +331,7 @@ router.get('/', requireAuth, async (req, res) => {
 
     res.json({
       reference_month:  refStr,
-      company_name:     company.trade_name || company.legal_name,
+      company_name:     nomeDaLoja(company, null),
       tax_regime:       company.tax_regime,
       vertical_active:  company.vertical_active,
       progress: {

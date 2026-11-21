@@ -10,6 +10,7 @@ const db     = require('../config/database');
 const { requireRole } = require('../middleware/auth');
 const { getContextData } = require('../services/aiContext');
 const { lerConsulta } = require('../middleware/estoqueSoConsulta');
+const { nomeDaLoja } = require('../utils/nomeDaLoja');
 
 const CLAUDE_API_KEY = process.env.CLAUDE_API_KEY || null;
 const CLAUDE_MODEL = 'claude-sonnet-4-20250514';
@@ -175,7 +176,7 @@ router.post('/chat', requireRole('client', 'analyst', 'admin'), async (req, res)
        FROM companies WHERE id = $1`, [cid]);
     if (rows[0]) {
       const co = rows[0];
-      companyContext = `\n\nEmpresa: ${co.trade_name || co.legal_name || 'N/A'} | Regime: ${co.tax_regime || 'N/A'} | Plano: ${co.plan || 'N/A'} | ${co.address_city || ''}/${co.address_state || 'SP'}`;
+      companyContext = `\n\nEmpresa: ${nomeDaLoja(co, 'N/A')} | Regime: ${co.tax_regime || 'N/A'} | Plano: ${co.plan || 'N/A'} | ${co.address_city || ''}/${co.address_state || 'SP'}`;
     }
   } catch (_) {}
 

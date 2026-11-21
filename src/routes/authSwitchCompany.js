@@ -17,6 +17,7 @@ const { validateRuntimeEnv } = require('../config/env');
 const { logAuditAction } = require('../middleware/auditLog');
 const { datasDoAtraso } = require('../services/cobrancaAssinatura');
 const { buscarEmpresaComAcesso } = require('../services/empresaComAcesso');
+const { nomeDaLoja } = require('../utils/nomeDaLoja');
 
 const env = validateRuntimeEnv();
 const JWT_SECRET = env.JWT_SECRET;
@@ -60,7 +61,7 @@ router.get('/companies', requireAuth, async (req, res) => {
     res.json({
       companies: rows.map((c) => ({
         id: c.id,
-        name: c.trade_name || c.legal_name || '',
+        name: nomeDaLoja(c, ''),
         legal_name: c.legal_name || '',
         trade_name: c.trade_name || '',
         cnpj: c.cnpj || '',
@@ -213,7 +214,7 @@ router.post('/switch-company', requireAuth, async (req, res) => {
           JSON.stringify({
             previous_plan: req.user.plan,
             new_plan: company.plan,
-            target_name: company.trade_name || company.legal_name,
+            target_name: nomeDaLoja(company, null),
           }),
         ]
       );
@@ -225,7 +226,7 @@ router.post('/switch-company', requireAuth, async (req, res) => {
       userId,
       company.id,
       'switch_company',
-      'User switched to company: ' + (company.trade_name || company.legal_name)
+      'User switched to company: ' + nomeDaLoja(company, null)
     );
 
     const trialActive =
@@ -240,7 +241,7 @@ router.post('/switch-company', requireAuth, async (req, res) => {
       token_expires_in: ACCESS_TTL,
       current_company: {
         id: company.id,
-        name: company.trade_name || company.legal_name,
+        name: nomeDaLoja(company, null),
         legal_name: company.legal_name,
         trade_name: company.trade_name,
         cnpj: company.cnpj,

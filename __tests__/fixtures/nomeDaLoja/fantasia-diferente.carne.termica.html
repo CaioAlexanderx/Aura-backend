@@ -1,0 +1,137 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8">
+  <title>Carne - Layali Perfumaria Árabe</title>
+  <style>
+    /* 14/09/2026: size:auto — o papel vem da impressora. Com A4 fixo, a bobina
+       termica de 80mm encolhia a pagina inteira (~0,36x) e o carne saia miudo
+       e fraco. Em A4 nada muda: a impressora ja e A4. */
+    @page { margin: 10mm 12mm; size: auto; }
+    * { margin:0; padding:0; box-sizing:border-box; }
+    /* 14/09/2026: Courier New tem traco de 1 ponto na cabeca termica de 203dpi
+       e as letras saem falhadas (a pagina de teste do Windows, em fonte mais
+       grossa, sai legivel na mesma impressora). Consolas segura o traco. */
+    body { font-family:Consolas,'Lucida Console',Menlo,'Courier New',monospace; font-size:12px; color:#000; max-width:700px; margin:0 auto; }
+    .center { text-align:center; }
+    .bold { font-weight:bold; }
+    .divider { border-top:1px dashed #000; margin:8px 0; }
+    .company-name { font-size:18px; font-weight:bold; }
+    .section-title { font-size:14px; font-weight:bold; border-bottom:2px solid #000; padding-bottom:3px; margin-bottom:8px; }
+    @media print { body { -webkit-print-color-adjust:exact; print-color-adjust:exact; } button { display:none !important; } }
+    /* Bobina termica (58/80mm): margem curta, sem coluna de 700px, e a tabela
+       um ponto menor para as 5 colunas caberem sem encolher a pagina. */
+    @media print and (max-width: 120mm) {
+      @page { margin: 4mm 3mm; }
+      body { max-width:none; }
+      table { font-size:11px !important; }
+      th, td:not([colspan]) { padding:3px 2px !important; }
+    }
+  </style>
+</head>
+<body>
+  <div class="center" style="margin-bottom:8px">
+    <div class="company-name">Layali Perfumaria Árabe</div>
+    <div>CNPJ: 12345678000190</div>
+    <div>Tel: (11) 90000-0000</div>
+    <div>São Paulo - SP</div>
+  </div>
+  <div class="divider"></div>
+  <div class="center bold" style="font-size:15px;margin-bottom:4px">CARNE / EXTRATO DE CREDIARIO</div>
+  <div style="font-size:11px;text-align:center;margin-bottom:8px">Emitido em: 21/11/2026, 12:00:00</div>
+  <div class="divider"></div>
+  <div style="margin-bottom:8px">
+    <div><strong>Cliente:</strong> Carlos</div>
+    <div><strong>Telefone:</strong> 11988881234</div>
+    
+  </div>
+  <div class="divider"></div>
+  <div class="section-title">Cronograma de Parcelas</div>
+  <div style="font-size:11px;margin-bottom:10px">
+    Os valores exibidos sao de <strong>principal</strong>. Parcelas em atraso estao sujeitas a
+    multa e mora, calculadas no momento do pagamento.
+  </div>
+  
+          <div style="margin-bottom:16px">
+            <div style="font-weight:bold;font-size:13px;margin-bottom:4px">
+              Sem carne
+            </div>
+            
+            <div style="font-weight:bold;font-size:12px;margin:6px 0 2px">O que foi comprado</div>
+            <table style="width:100%;border-collapse:collapse;font-size:12px">
+              <thead>
+                <tr style="border-bottom:1px solid #000">
+                  <th style="text-align:left;padding:3px 4px">Data</th>
+                  <th style="text-align:left;padding:3px 4px">Produto</th>
+                  <th style="text-align:right;padding:3px 4px">Valor</th>
+                </tr>
+              </thead>
+              <tbody><tr>
+            <td style="padding:3px 4px">13/09/2026</td>
+            <td style="padding:3px 4px">Perfume 100ml</td>
+            <td style="padding:3px 4px;text-align:right">R$159.50</td>
+          </tr><tr>
+            <td style="padding:3px 4px">13/09/2026</td>
+            <td style="padding:3px 4px">Sacola</td>
+            <td style="padding:3px 4px;text-align:right">R$15.00</td>
+          </tr></tbody>
+            </table>
+            <div style="font-weight:bold;font-size:12px;margin:6px 0 2px">Parcelas pagas</div>
+            
+            <table style="width:100%;border-collapse:collapse;font-size:12px">
+              <thead>
+                <tr style="border-bottom:1px solid #000">
+                  <th style="text-align:left;padding:3px 4px">Parcela</th>
+                  <th style="text-align:left;padding:3px 4px">Vencimento</th>
+                  <th style="text-align:left;padding:3px 4px">Pago em</th>
+                  <th style="text-align:right;padding:3px 4px">Valor</th>
+                </tr>
+              </thead>
+              <tbody><tr>
+            <td style="padding:3px 4px">1/2</td>
+            <td style="padding:3px 4px">10/10/2026</td>
+            <td style="padding:3px 4px">08/10/2026</td>
+            <td style="padding:3px 4px;text-align:right">R$100.00</td>
+          </tr></tbody>
+            </table>
+            <div style="font-weight:bold;font-size:12px;margin:6px 0 2px">Parcelas a pagar</div>
+            
+            <table style="width:100%;border-collapse:collapse;font-size:12px">
+              <thead>
+                <tr style="border-bottom:1px solid #000">
+                  <th style="text-align:left;padding:3px 4px">Parcela</th>
+                  <th style="text-align:left;padding:3px 4px">Vencimento</th>
+                  <th style="text-align:right;padding:3px 4px">Valor</th>
+                  <th style="text-align:right;padding:3px 4px">Restante</th>
+                  <th style="text-align:center;padding:3px 4px">Status</th>
+                </tr>
+              </thead>
+              <tbody><tr>
+            <td style="padding:3px 4px">2/2</td>
+            <td style="padding:3px 4px">10/12/2026</td>
+            <td style="padding:3px 4px;text-align:right">R$100.00</td>
+            <td style="padding:3px 4px;text-align:right">R$100.00</td>
+            <td style="padding:3px 4px;text-align:center">Pendente</td>
+          </tr></tbody>
+            </table>
+            <div style="text-align:right;font-size:12px;margin-top:4px">
+              Saldo em aberto: <strong>R$100.00</strong>
+            </div>
+          </div>
+  <div class="divider"></div>
+  <div style="text-align:right;font-size:13px;font-weight:bold;margin-bottom:8px">
+    SALDO TOTAL EM ABERTO: R$100.00
+  </div>
+  
+        <div style="border:1px dashed #000;padding:8px;margin-top:12px;font-size:11px;text-align:center">
+          Pagamento confirmado manualmente pela loja. Nenhuma chave Pix configurada.
+        </div>
+  <div class="divider"></div>
+  <div style="font-size:10px;text-align:center;margin-top:6px">
+    Layali Perfumaria Árabe &mdash; Powered by Aura. &mdash; getaura.com.br
+  </div>
+  <br>
+  <button onclick="window.print()" style="width:100%;padding:10px;cursor:pointer;font-size:14px">Imprimir</button>
+  <script>(function(){var fired=false;function go(){if(fired)return;fired=true;try{window.focus();}catch(e){}try{window.print();}catch(e){}}function ready(){var imgs=[].slice.call(document.images||[]);var pend=imgs.filter(function(i){return !i.complete;});if(!pend.length){setTimeout(go,350);return;}var n=0,t=setTimeout(go,3000);pend.forEach(function(i){function fin(){if(++n>=pend.length){clearTimeout(t);setTimeout(go,350);}}i.addEventListener("load",fin);i.addEventListener("error",fin);});}setTimeout(ready,50);})();</script>
+</body>
+</html>
