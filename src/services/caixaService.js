@@ -1026,7 +1026,39 @@ async function getSessao(companyId, sessaoId) {
   if (!rows.length) throw new AppError('Sessão não encontrada', 404);
   // 30/10/2026 (422): as movimentações da sessão, para o detalhe e o PDF.
   const movimentos = await listarMovimentosDaSessao(rows[0].id);
-  return { ...rows[0], movimentos };
+  const relatorio = await relatorioDaSessaoFechada(companyId, rows[0]);
+  return { ...rows[0], movimentos, ...relatorio };
+}
+
+/**
+ * 23/11/2026 (reimpressão do fechamento, pedido do Caio): os campos do
+ * relatório que o /fechar devolve e que não ficam no snapshot
+ * caixa_fechamentos (métricas, devoluções, trocas). Recalculados com as
+ * MESMAS funções e a MESMA janela (abertura → fechamento), para o
+ * relatório reimpresso sair igual ao do dia. Só para sessão fechada;
+ * best-effort como no fechar(): nunca derruba o detalhe. Se uma venda da
+ * janela foi cancelada depois, o número acompanha (é a mesma conta de hoje).
+ */
+async function relatorioDaSessaoFechada(companyId, sessao) {
+  if (!sessao || sessao.status !== 'fechada' || !sessao.closed_at) return {};
+  const sessao_label = '#' + String(sessao.id).replace(/-/g, '').slice(0, 5).toUpperCase();
+  const [metricas, trocas, devolucoes] = await Promise.all([
+    calcularMetricas(companyId, sessao.id, sessao.opened_at, sessao.closed_at),
+    listarTrocasDaSessao(companyId, sessao.id),
+    calcularTotais(companyId, sessao.id, sessao.opened_at, sessao.closed_at)
+      .then((t) => t.devolucoes)
+      .catch(() => null),
+  ]);
+  const out = {
+    sessao_label,
+    sales_count: metricas.sales_count,
+    new_customers_count: metricas.new_customers_count,
+    total_vendas: metricas.total_vendas,
+    trocas: trocas.trocas,
+    trocas_resumo: trocas.trocas_resumo,
+  };
+  if (devolucoes != null) out.total_devolucoes = devolucoes;
+  return out;
 }
 
 module.exports = {
