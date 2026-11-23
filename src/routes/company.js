@@ -149,7 +149,10 @@ router.put('/profile', async (req, res) => {
     );
     if (!result.rows.length) return res.status(404).json({ error: 'Empresa nao encontrada' });
     const c = result.rows[0];
-    if (mexeNoNome) await vitrineAcompanhaONome(req.params.id, nomeAntes, nomeDaLoja(c, null));
+    // 23/11/2026: o app avisa a lojista quando a loja online mudou junto.
+    const siteNameAtualizado = mexeNoNome
+      ? await vitrineAcompanhaONome(req.params.id, nomeAntes, nomeDaLoja(c, null))
+      : false;
     res.json({
       id:         c.id,
       name:       nomeDaLoja(c, ''),
@@ -169,6 +172,7 @@ router.put('/profile', async (req, res) => {
       cro_pj_number:                       c.cro_pj_number,
       cnes_number:                         c.cnes_number,
       uses_controlled_meds:                !!c.uses_controlled_meds,
+      site_name_atualizado: siteNameAtualizado,
       updated:    true,
     });
   } catch (err) {
@@ -190,8 +194,9 @@ router.put('/profile', async (req, res) => {
 // nome antigo da loja (a lojista nunca deu um nome proprio a vitrine), ele
 // passa a ser o nome novo. Nome proprio da vitrine nao e tocado.
 // Best-effort: a troca do nome ja foi gravada; falha aqui so loga.
+// Devolve true quando o nome da vitrine mudou (23/11: o app mostra o aviso).
 async function vitrineAcompanhaONome(companyId, nomeAntes, nomeDepois) {
-  if (!nomeAntes || !nomeDepois || nomeAntes.trim() === nomeDepois.trim()) return;
+  if (!nomeAntes || !nomeDepois || nomeAntes.trim() === nomeDepois.trim()) return false;
   try {
     const { rows } = await db.query(
       `UPDATE digital_channel_config
@@ -202,8 +207,10 @@ async function vitrineAcompanhaONome(companyId, nomeAntes, nomeDepois) {
       [companyId, nomeDepois.trim(), nomeAntes]
     );
     for (const r of rows) esquecerPagina(r.slug || undefined);
+    return rows.length > 0;
   } catch (err) {
     console.warn('[company] vitrine nao acompanhou o nome:', err.message);
+    return false;
   }
 }
 

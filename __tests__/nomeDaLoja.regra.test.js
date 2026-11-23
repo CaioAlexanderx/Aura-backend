@@ -142,6 +142,107 @@ describe('3. PUT /profile', () => {
   });
 });
 
+describe('3b. decisoes do Caio (23/11)', () => {
+  const companyRouter = require('../src/routes/company');
+  const app = express();
+  app.use(express.json());
+  app.use('/companies/:id', companyRouter);
+  const LOJA = '08c05f0e-b75b-4c12-870e-d7fb65f1dca0';
+  const sqls = () => db.query.mock.calls.map(([s, p]) => ({ s: String(s), p }));
+
+  // UPDATE companies devolve a linha com o que o SET gravou (por coluna).
+  function despachar({ antes, vitrine = [] }) {
+    db.query.mockImplementation((sql, params) => {
+      const s = String(sql || '').trim();
+      if (/^SELECT trade_name, legal_name FROM companies/i.test(s)) return Promise.resolve({ rows: [antes] });
+      if (/^UPDATE companies SET/i.test(s)) {
+        const linha = { id: LOJA, ...antes };
+        for (const m of s.matchAll(/(\w+) = \$(\d+)/g)) linha[m[1]] = params[Number(m[2]) - 1];
+        return Promise.resolve({ rows: [linha] });
+      }
+      if (/UPDATE digital_channel_config/i.test(s)) return Promise.resolve({ rows: vitrine });
+      return Promise.resolve({ rows: [] });
+    });
+  }
+
+  beforeEach(() => { jest.clearAllMocks(); db.query.mockReset(); });
+
+  test('1. salvar o CNPJ grava a razao social da Receita e mantem o nome da loja', async () => {
+    // Conta que nasceu com CPF: o nome digitado foi gravado nos dois campos.
+    despachar({ antes: { trade_name: 'Doce Encanto', legal_name: 'Doce Encanto' }, vitrine: [{ slug: 'doce-encanto' }] });
+    const res = await request(app).put(`/companies/${LOJA}/profile`)
+      .send({ cnpj: '12345678000190', legal_name: 'MARIA DA SILVA DOCES LTDA' });
+    expect(res.status).toBe(200);
+    const upd = sqls().find(q => /^UPDATE companies SET/i.test(q.s.trim()));
+    expect(upd.s).toMatch(/legal_name = \$/);
+    expect(upd.s).not.toMatch(/trade_name = \$/);
+    expect(upd.p).toEqual(expect.arrayContaining(['12345678000190', 'MARIA DA SILVA DOCES LTDA']));
+    expect(res.body).toMatchObject({
+      name: 'Doce Encanto', trade_name: 'Doce Encanto', legal_name: 'MARIA DA SILVA DOCES LTDA', site_name_atualizado: false,
+    });
+    // O nome da loja nao mudou: a vitrine nao e tocada.
+    expect(sqls().some(q => /digital_channel_config/i.test(q.s))).toBe(false);
+  });
+
+  test('3. resposta diz quando o nome da loja online mudou junto', async () => {
+    despachar({ antes: { trade_name: 'Layali', legal_name: 'MARIA' }, vitrine: [{ slug: 'layali' }] });
+    const res = await request(app).put(`/companies/${LOJA}/profile`).send({ trade_name: 'Layali Perfumaria' });
+    expect(res.status).toBe(200);
+    expect(res.body.site_name_atualizado).toBe(true);
+  });
+
+  test('3. vitrine com nome proprio (nenhuma linha muda): site_name_atualizado false', async () => {
+    despachar({ antes: { trade_name: 'Layali', legal_name: 'MARIA' }, vitrine: [] });
+    const res = await request(app).put(`/companies/${LOJA}/profile`).send({ trade_name: 'Layali Perfumaria' });
+    expect(res.body.site_name_atualizado).toBe(false);
+  });
+
+  test('3. sem mexer no nome, ou com a vitrine falhando: false', async () => {
+    despachar({ antes: { trade_name: 'Layali', legal_name: 'MARIA' } });
+    const semNome = await request(app).put(`/companies/${LOJA}/profile`).send({ email: 'loja@exemplo.com.br' });
+    expect(semNome.body.site_name_atualizado).toBe(false);
+
+    db.query.mockReset();
+    db.query.mockImplementation((sql, params) => {
+      const s = String(sql || '').trim();
+      if (/^SELECT trade_name, legal_name/i.test(s)) return Promise.resolve({ rows: [{ trade_name: 'A', legal_name: 'B' }] });
+      if (/^UPDATE companies SET/i.test(s)) return Promise.resolve({ rows: [{ id: LOJA, trade_name: params[0], legal_name: 'B' }] });
+      if (/digital_channel_config/i.test(s)) return Promise.reject(new Error('boom'));
+      return Promise.resolve({ rows: [] });
+    });
+    const warn = jest.spyOn(console, 'warn').mockImplementation(() => {});
+    const falhou = await request(app).put(`/companies/${LOJA}/profile`).send({ trade_name: 'Nova' });
+    expect(falhou.status).toBe(200);
+    expect(falhou.body.site_name_atualizado).toBe(false);
+    warn.mockRestore();
+  });
+
+  test('2. holerite por e-mail sai com a razao social (igual ao impresso)', async () => {
+    jest.resetModules();
+    jest.doMock('../src/services/payslipPdf', () => ({ generatePayslipPdf: jest.fn(async () => Buffer.from('pdf')) }));
+    const dbFresh = require('../src/config/database');
+    const { generatePayslipPdf } = require('../src/services/payslipPdf');
+    dbFresh.query.mockImplementation((sql) => {
+      const s = String(sql || '');
+      if (/FROM employees/i.test(s)) return Promise.resolve({ rows: [{ name: 'Joana', email: 'joana@exemplo.com.br', salary: 2000, role: 'Vendedora' }] });
+      if (/FROM companies/i.test(s)) return Promise.resolve({ rows: [{ trade_name: 'Layali', legal_name: 'MARIA DA SILVA 12345678900', cnpj: '12345678000190' }] });
+      return Promise.resolve({ rows: [] });
+    });
+    const payslipRouter = require('../src/routes/payslipEmail');
+    const app2 = express();
+    app2.use(express.json());
+    app2.use('/companies/:id/employees', payslipRouter);
+    const log = jest.spyOn(console, 'log').mockImplementation(() => {});
+    const res = await request(app2).post(`/companies/${LOJA}/employees/e1/payslip/email`).send({ type: 'mensal' });
+    log.mockRestore();
+    expect(res.status).toBe(200);
+    expect(generatePayslipPdf).toHaveBeenCalledWith(expect.objectContaining({
+      companyName: 'MARIA DA SILVA 12345678900', companyCnpj: '12345678000190',
+    }));
+    jest.dontMock('../src/services/payslipPdf');
+  });
+});
+
 describe('4. trava: razao social na frente so onde a lei ou o contrato pedem', () => {
   // Fiscal (xNome do emitente, relatorios de obrigacao, TISS) e a cobranca
   // da propria Aura ao lojista (Asaas). Entrar um arquivo aqui e decisao,
