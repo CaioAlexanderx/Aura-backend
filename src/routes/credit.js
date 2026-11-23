@@ -45,6 +45,8 @@ const { editPayment }     = require('../services/credit/editPayment');
 const { deleteCarne }     = require('../services/credit/deleteCarne');
 // 04/11/2026: recebimento avisa o celular de quem cuida do dinheiro.
 const { avisarRecebimento } = require('../services/credit/avisoDeRecebimento');
+// 23/11/2026 (Looks Da Jenny): pagamento igual (cliente, valor, dia) pede confirmacao.
+const pagamentoRepetido = require('../services/credit/pagamentoRepetido');
 // 10/11/2026 (migration 438): recebimento emite a NFS-e da venda com servico.
 const nfseAutomatica = require('../services/nfseAutomatica');
 // 16/09/2026: cliente cadastrado em outra loja do mesmo dono tambem vale
@@ -763,6 +765,26 @@ router.post('/customer/:cid/payment', async (req, res) => {
       return res.status(404).json(CUSTOMER_NOT_FOUND_BODY);
     }
 
+    // 23/11/2026: mesmo valor + mesmo dia de pagamento para esta cliente ->
+    // 409 sem gravar, ate o app reenviar com confirmar_repetido: true. Nas
+    // alocacoes a chave que a primeira gravaria e '<key>-alloc-0'.
+    if (!pagamentoRepetido.confirmouRepetido(req.body)) {
+      const totalPedido = allocations
+        ? allocations.reduce((s, a) => s + (parseFloat(a.amount) || 0), 0)
+        : amount;
+      const repetido = await pagamentoRepetido.acharPagamentoRepetido(client, {
+        companyId:  req.params.id,
+        customerId: req.params.cid,
+        amount:     totalPedido,
+        paidAt,
+        idempotencyKey: idempotencyKey ? (allocations ? `${idempotencyKey}-alloc-0` : idempotencyKey) : null,
+      });
+      if (repetido) {
+        await client.query('ROLLBACK');
+        return res.status(409).json(pagamentoRepetido.corpoDoRepetido(repetido));
+      }
+    }
+
     let activeSessaoId = null;
     try {
       const sessRes = await client.query(
@@ -1477,6 +1499,18 @@ router.post('/customers/:cid/payments', async (req, res) => {
     if (!(await findOwnerScopedCustomer(client, companyId, customerId))) {
       await client.query('ROLLBACK');
       return res.status(404).json(CUSTOMER_NOT_FOUND_BODY);
+    }
+
+    // 23/11/2026: mesmo valor + mesmo dia de pagamento para esta cliente ->
+    // 409 sem gravar, ate o app reenviar com confirmar_repetido: true.
+    if (!pagamentoRepetido.confirmouRepetido(req.body)) {
+      const repetido = await pagamentoRepetido.acharPagamentoRepetido(client, {
+        companyId, customerId, amount, paidAt, idempotencyKey,
+      });
+      if (repetido) {
+        await client.query('ROLLBACK');
+        return res.status(409).json(pagamentoRepetido.corpoDoRepetido(repetido));
+      }
     }
 
     // Sessao de caixa aberta (best-effort)
