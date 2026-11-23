@@ -6,6 +6,7 @@
 const router = require('express').Router();
 const db     = require('../config/database');
 const { requireAuth } = require('../middleware/auth');
+const { nomeDaLoja } = require('../utils/nomeDaLoja');
 
 function maskEmail(email) {
   if (!email) return '';
@@ -41,7 +42,7 @@ router.get('/:token', async (req, res) => {
     }
 
     res.json({
-      company_name: inv.trade_name || inv.legal_name || 'Empresa',
+      company_name: nomeDaLoja(inv, 'Empresa'),
       role: inv.role_label || 'Colaborador',
       email: inv.invite_email,
       masked_email: maskEmail(inv.invite_email),

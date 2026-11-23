@@ -22,6 +22,7 @@ const express = require('express');
 const db = require('../config/database');
 const { requireAuth } = require('../middleware/auth');
 const consent = require('../services/customerConsent');
+const { nomeDaLoja } = require('../utils/nomeDaLoja');
 
 const companyRouter = express.Router({ mergeParams: true });
 const meRouter = express.Router();
@@ -220,7 +221,7 @@ meRouter.get('/whatsapp/consent/summary', requireAuth, async (req, res) => {
     const breakdown = [];
     for (const c of companies) {
       const s = await consent.getSummary(c.id);
-      breakdown.push({ ...s, company_name: c.trade_name || c.legal_name || 'Empresa' });
+      breakdown.push({ ...s, company_name: nomeDaLoja(c, 'Empresa') });
     }
     const tot = breakdown.reduce((acc, s) => ({
       total: acc.total + s.total_clientes_com_telefone,

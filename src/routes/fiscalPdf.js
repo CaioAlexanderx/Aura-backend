@@ -18,6 +18,7 @@ const router = require('express').Router({ mergeParams: true });
 const db = require('../config/database');
 const { requireAuth, requirePlan } = require('../middleware/auth');
 const { calculateMEIDAS, calculateSNDAS, checkMEILimit, calculateFGTS, calculateGPS } = require('../services/fiscalObligations');
+const { nomeDaLoja } = require('../utils/nomeDaLoja');
 
 const BRL = (v) => `R$\u00a0${parseFloat(v || 0).toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 const DATE_BR = (d) => new Date(d).toLocaleDateString('pt-BR', { timeZone: 'America/Sao_Paulo' });
@@ -79,7 +80,7 @@ footer{margin-top:20px;padding-top:8px;border-top:0.5px solid #ddd;font-size:9px
 .print-btn{display:block;margin:12px auto;padding:10px 28px;background:#6d28d9;color:#fff;border:none;border-radius:8px;font-size:13px;cursor:pointer;font-weight:600}
 </style></head><body>
 <header><div class="brand">Aura.</div><div class="company-info">
-<div><strong>${company.trade_name || company.legal_name}</strong></div>
+<div><strong>${nomeDaLoja(company, null)}</strong></div>
 ${cnpjFmt ? `<div>CNPJ: ${cnpjFmt}</div>` : ''}
 <div>Emitido em: ${today}</div>
 </div></header>

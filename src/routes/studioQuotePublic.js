@@ -17,6 +17,7 @@
 // sai so o primeiro nome (o link pode ser reencaminhado).
 // ============================================================
 const express = require('express');
+const { nomeDaLoja } = require('../utils/nomeDaLoja');
 const router  = express.Router();
 const db      = require('../config/database');
 // 04/11/2026: aceite pelo link avisa a loja no celular e no sino.
@@ -82,7 +83,7 @@ function respostaMatcon(q) {
     // e uma data pura viraria o dia anterior no fuso do Brasil.
     expires_at: q.valid_until + 'T23:59:59-03:00',
     shop: {
-      name:            q.site_name || q.trade_name || q.legal_name || 'Loja',
+      name:            q.site_name || nomeDaLoja(q, 'Loja'),
       logo_url:        q.logo_url || q.company_logo_url || null,
       primary_color:   q.primary_color || null,
       secondary_color: q.secondary_color || null,
@@ -253,7 +254,7 @@ router.get('/:token', async function(req, res) {
       status,
       expires_at:     q.expires_at,
       shop: {
-        name:            q.site_name || q.trade_name || q.legal_name || 'Estúdio',
+        name:            q.site_name || nomeDaLoja(q, 'Estúdio'),
         logo_url:        q.logo_url || null,
         primary_color:   q.primary_color || null,
         secondary_color: q.secondary_color || null,

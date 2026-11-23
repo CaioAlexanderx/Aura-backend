@@ -25,6 +25,7 @@
 const QRCode = require('qrcode');
 const db     = require('../config/database');
 const { sendMail, emailLayout, escapeHtml } = require('./mailer');
+const { nomeDaLoja } = require('../utils/nomeDaLoja');
 
 const QR_CID = 'pix-qrcode';
 const MAX_RECIPIENTS = 10;
@@ -82,7 +83,7 @@ async function listRecipients(companyId) {
   return {
     company: {
       id:         c.id,
-      name:       c.trade_name || c.legal_name || null,
+      name:       nomeDaLoja(c, null),
       legal_name: c.legal_name || null,
       vertical:   c.vertical || null,
     },

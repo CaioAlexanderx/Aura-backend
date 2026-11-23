@@ -11,6 +11,7 @@
 const router = require('express').Router({ mergeParams: true });
 const db     = require('../config/database');
 const { requireAuth, requirePlan } = require('../middleware/auth');
+const { nomeDaLoja } = require('../utils/nomeDaLoja');
 
 const guard = [requireAuth];
 
@@ -62,7 +63,7 @@ function aurapdfHtml({ title, subtitle, company, periodLabel, tableHead, rows, t
 <header>
   <div class="brand">aura.</div>
   <div class="company-info">
-    <div><strong>${company.trade_name || company.legal_name}</strong></div>
+    <div><strong>${nomeDaLoja(company, null)}</strong></div>
     ${company.cnpj ? `<div>CNPJ: ${company.cnpj}</div>` : ''}
     <div>Emitido em: ${new Date().toLocaleDateString('pt-BR')}</div>
   </div>
@@ -157,7 +158,7 @@ router.get('/dre', guard, async (req, res) => {
 
   const html = aurapdfHtml({
     title: 'DRE Gerencial',
-    subtitle: company.trade_name || company.legal_name,
+    subtitle: nomeDaLoja(company, null),
     company, periodLabel,
     tableHead, rows: tableRows, totals,
     notes: 'Relatório gerencial estimado pela Aura com base nos lançamentos confirmados. Não é documento contábil oficial.',
@@ -229,7 +230,7 @@ router.get('/sales', guard, async (req, res) => {
 
   const html = aurapdfHtml({
     title: 'Relatório de Vendas',
-    subtitle: company.trade_name || company.legal_name,
+    subtitle: nomeDaLoja(company, null),
     company, periodLabel, tableHead,
     rows: tableRows, totals,
     notes: '',
@@ -290,7 +291,7 @@ router.get('/payroll', guard, async (req, res) => {
 
   const html = aurapdfHtml({
     title: 'Folha de Pagamento',
-    subtitle: company.trade_name || company.legal_name,
+    subtitle: nomeDaLoja(company, null),
     company, periodLabel, tableHead: headers,
     rows: tableRows, totals,
     notes: 'Relatório gerado pela Aura. Confira com seu contador antes de transmitir.',
@@ -332,7 +333,7 @@ router.get('/prolabore', guard, requirePlan('negocio', 'expansao'), async (req, 
   const tableRows = csvRows;
   const html = aurapdfHtml({
     title: 'Histórico de Pró-labore',
-    subtitle: company.trade_name || company.legal_name,
+    subtitle: nomeDaLoja(company, null),
     company, periodLabel, tableHead: headers,
     rows: tableRows, totals: [],
     notes: 'Valores registrados na Aura. Fator R = pró-labore acumulado 12m ÷ receita 12m.',

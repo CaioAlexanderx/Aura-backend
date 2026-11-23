@@ -7,6 +7,7 @@
 const db = require('../config/database');
 const crypto = require('crypto');
 const { validateRuntimeEnv } = require('../config/env');
+const { nomeDaLoja } = require('../utils/nomeDaLoja');
 
 const env = validateRuntimeEnv();
 
@@ -177,7 +178,7 @@ async function getReviews(companyId, options = {}) {
  * Monta mensagem WhatsApp com os dois links separados
  */
 function buildWhatsAppMessage(company, baseUrl, token) {
-  const name = company.trade_name || company.legal_name;
+  const name = nomeDaLoja(company, null);
 
   return encodeURIComponent(
     `Olá! Obrigado por comprar na ${name} 😊\n\n` +

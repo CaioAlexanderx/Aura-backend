@@ -5,6 +5,8 @@
 const router = require('express').Router({ mergeParams: true });
 const db = require('../config/database');
 const { normalizarTelefone } = require('../utils/telefone');
+const { nomeDaLoja, nomeFantasiaParaGravar } = require('../utils/nomeDaLoja');
+const { esquecerPagina } = require('../services/cacheDaPaginaDaLoja');
 
 router.get('/profile', async (req, res) => {
   try {
@@ -24,7 +26,7 @@ router.get('/profile', async (req, res) => {
     const c = rows[0];
     res.json({
       id:              c.id,
-      name:            c.trade_name || c.legal_name || '',
+      name:            nomeDaLoja(c, ''),
       trade_name:      c.trade_name  || '',
       legal_name:      c.legal_name  || '',
       cnpj:            c.cnpj         || '',
@@ -106,6 +108,10 @@ router.put('/profile', async (req, res) => {
         if (!tel.ok) return res.status(400).json({ error: tel.error, code: tel.code, field: 'phone' });
         req.body[bodyKey] = tel.valor;
       }
+      // 21/11/2026: nome fantasia em branco vira NULL (utils/nomeDaLoja.js):
+      // assim o COALESCE(trade_name, legal_name) dos SQL cai na razao social
+      // em vez de imprimir vazio no carne e no recibo.
+      if (dbCol === 'trade_name') req.body[bodyKey] = nomeFantasiaParaGravar(req.body[bodyKey]);
       if (dbCol === 'tax_regime' && req.body[bodyKey]) {
         const valid = ['mei', 'simples', 'simples_nacional', 'lucro_presumido', 'lucro_real', 'pessoa_fisica'];
         if (!valid.includes(req.body[bodyKey])) {
@@ -127,16 +133,33 @@ router.put('/profile', async (req, res) => {
   values.push(req.params.id);
 
   try {
+    // 21/11/2026: o nome da loja antes da troca, para a vitrine acompanhar
+    // (abaixo). So le quando o pedido mexe no nome.
+    const mexeNoNome = seen.has('trade_name') || seen.has('legal_name');
+    let nomeAntes = null;
+    if (mexeNoNome) {
+      const { rows: antes } = await db.query(
+        'SELECT trade_name, legal_name FROM companies WHERE id = $1', [req.params.id]
+      );
+      nomeAntes = antes.length ? nomeDaLoja(antes[0], null) : null;
+    }
     const result = await db.query(
       `UPDATE companies SET ${updates.join(', ')} WHERE id = $${idx} RETURNING *`,
       values
     );
     if (!result.rows.length) return res.status(404).json({ error: 'Empresa nao encontrada' });
     const c = result.rows[0];
+    // 23/11/2026: o app avisa a lojista quando a loja online mudou junto.
+    const siteNameAtualizado = mexeNoNome
+      ? await vitrineAcompanhaONome(req.params.id, nomeAntes, nomeDaLoja(c, null))
+      : false;
     res.json({
       id:         c.id,
-      name:       c.trade_name || c.legal_name || '',
+      name:       nomeDaLoja(c, ''),
       trade_name: c.trade_name || '',
+      // 21/11/2026: o app atualiza a empresa guardada na hora (nome da loja
+      // = nome fantasia, senao razao social) sem precisar sair e entrar.
+      legal_name: c.legal_name || '',
       cnpj:       c.cnpj        || '',
       phone:      c.phone       || '',
       email:      c.email       || '',
@@ -149,6 +172,7 @@ router.put('/profile', async (req, res) => {
       cro_pj_number:                       c.cro_pj_number,
       cnes_number:                         c.cnes_number,
       uses_controlled_meds:                !!c.uses_controlled_meds,
+      site_name_atualizado: siteNameAtualizado,
       updated:    true,
     });
   } catch (err) {
@@ -162,4 +186,33 @@ router.put('/profile', async (req, res) => {
   }
 });
 
+// -- A vitrine acompanha o nome da loja (21/11/2026) ----------------------
+// O nome da vitrine (digital_channel_config.site_name) nasce com o nome da
+// loja (GET /digital-channel sem config) e, gravado, ficava parado: trocar o
+// nome em Configuracoes nao chegava a vitrine, ao link de aprovacao, ao
+// orcamento nem ao e-mail do pedido. Regra: se o nome da vitrine e o mesmo
+// nome antigo da loja (a lojista nunca deu um nome proprio a vitrine), ele
+// passa a ser o nome novo. Nome proprio da vitrine nao e tocado.
+// Best-effort: a troca do nome ja foi gravada; falha aqui so loga.
+// Devolve true quando o nome da vitrine mudou (23/11: o app mostra o aviso).
+async function vitrineAcompanhaONome(companyId, nomeAntes, nomeDepois) {
+  if (!nomeAntes || !nomeDepois || nomeAntes.trim() === nomeDepois.trim()) return false;
+  try {
+    const { rows } = await db.query(
+      `UPDATE digital_channel_config
+          SET site_name = LEFT($2, 100)
+        WHERE company_id = $1
+          AND BTRIM(site_name) = BTRIM($3)
+        RETURNING slug`,
+      [companyId, nomeDepois.trim(), nomeAntes]
+    );
+    for (const r of rows) esquecerPagina(r.slug || undefined);
+    return rows.length > 0;
+  } catch (err) {
+    console.warn('[company] vitrine nao acompanhou o nome:', err.message);
+    return false;
+  }
+}
+
 module.exports = router;
+module.exports.vitrineAcompanhaONome = vitrineAcompanhaONome;

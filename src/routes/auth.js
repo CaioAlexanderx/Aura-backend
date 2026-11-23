@@ -136,6 +136,7 @@ const { datasDoAtraso } = require('../services/cobrancaAssinatura');
 const refreshDeSessao = require('../services/refreshDeSessao');
 const { buscarEmpresaComAcesso } = require('../services/empresaComAcesso');
 const equipeAura = require('../utils/equipeAura');
+const { nomeDaLoja } = require('../utils/nomeDaLoja');
 
 let redis = null;
 try { redis = require('../config/redis').default || require('../config/redis'); } catch (_) {}
@@ -319,11 +320,16 @@ function shapeCompany(company, fallbackMemberRole) {
   const karate = resolveKarateContext({ ...company, member_role });
   return {
     id: company.id,
-    name: company.legal_name || company.name || company.trade_name,
-    // 24/10/2026: nome fantasia e razao social separados. `name` continua o
-    // mesmo de sempre (razao social primeiro); a etiqueta do app usa
-    // trade_name para o nome da loja no topo. null quando vazio.
-    trade_name: company.trade_name || null,
+    // 21/11/2026: `name` e o NOME DA LOJA pela regra unica
+    // (utils/nomeDaLoja.js): nome fantasia, senao razao social. Antes vinha
+    // a razao social primeiro (24/10) e o app mostrava, em mensagens,
+    // fechamento de caixa e telas, o nome da dona (conta CPF/MEI) ou o nome
+    // antigo, enquanto a troca de loja ja mostrava o fantasia. A razao
+    // social, para o que a lei pede, continua em `legal_name`.
+    name: nomeDaLoja(company, company.name || null),
+    // 24/10/2026: nome fantasia e razao social separados. null quando vazio
+    // (21/11: so espacos tambem e vazio).
+    trade_name: typeof company.trade_name === 'string' && company.trade_name.trim() ? company.trade_name : null,
     legal_name: company.legal_name || null,
     plan: company.plan,
     onboarding_step: company.onboarding_step,
@@ -744,7 +750,7 @@ router.post('/register', async (req, res) => {
     if (isNewCompany && trialDays > 0 && (isSelfServe || codeType === 'trial' || codeType === 'referral')) {
       sendSelfServeSignupNotification({
         name: user.name,
-        companyName: company.trade_name || company.legal_name,
+        companyName: nomeDaLoja(company, null),
         email: user.email,
         phone: telefoneDaPessoa || null,
         cnpj: cnpj || null,
@@ -792,6 +798,8 @@ router.post('/register', async (req, res) => {
       user: { id: user.id, name: user.name, email: user.email, role: user.role, is_staff: user.is_staff === true, email_verified: user.email_verified || false },
       company: company ? {
         ...company,
+        // 21/11/2026: o cadastro tambem manda o nome da loja (regra unica).
+        name: nomeDaLoja(company, company.name || null),
         module_overrides: company.module_overrides || {},
         trial_active: !!(company.trial_ends_at),
         trial_ends_at: company.trial_ends_at,

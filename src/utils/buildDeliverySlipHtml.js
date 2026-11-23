@@ -23,6 +23,7 @@
 // com quebra de palavra longa. Sem QZ Tray: e window.print() como o cupom.
 // ============================================================
 'use strict';
+const { nomeDaLoja } = require('./nomeDaLoja');
 
 function esc(s) {
   return String(s == null ? '' : s)
@@ -120,7 +121,7 @@ function dadosDoPapel({ company = {}, sale = {}, items = [], payments = [], entr
   const quando = dataDaVenda(sale.created_at) || { dia: '', hora: '' };
   const e = entrega || {};
   return {
-    loja: t(company.trade_name) || t(company.legal_name),
+    loja: t(nomeDaLoja(company)),
     lojaTelefone: telefone(company.phone),
     lojaEndereco: [
       t(company.address_street) + (t(company.address_number) ? ', ' + t(company.address_number) : ''),

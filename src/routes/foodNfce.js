@@ -18,6 +18,7 @@ const router = require('express').Router({ mergeParams: true });
 const db     = require('../config/database');
 const QRCode = require('qrcode');
 const { requirePlan } = require('../middleware/auth');
+const { nomeDaLoja } = require('../utils/nomeDaLoja');
 
 // Nota: requireAuth + requireCompanyAccess já aplicados em private.js
 const guard = [requirePlan('negocio', 'expansao')];
@@ -37,7 +38,7 @@ function fmtDate(d) {
 }
 // Nome de exibição da empresa — companies não tem coluna 'name' (memory companies_sem_coluna_name).
 function companyDisplayName(company) {
-  return company.trade_name || company.legal_name || 'Estabelecimento';
+  return nomeDaLoja(company, 'Estabelecimento');
 }
 
 // URLs públicas de consulta NFC-e por UF — espelha tabela do nfce.js

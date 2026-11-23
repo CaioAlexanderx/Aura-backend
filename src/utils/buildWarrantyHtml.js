@@ -18,6 +18,7 @@
 // logado; abrir a URL fora do app nao revela nada.
 // ============================================================================
 
+const { nomeDaLoja } = require('./nomeDaLoja');
 const { autoPrintScript } = require('./autoPrintScript');
 const { qrInlineSvg } = require('./qrInline');
 const { DEFAULT_WARRANTY_TERMS } = require('./warrantyTerms');
@@ -120,7 +121,7 @@ function buildWarrantyHtml({ warranty, items = [], company, brand = {}, autoprin
   if (!company) throw new Error('company obrigatório');
 
   // Armadilha #2 do CLAUDE.md: companies nao tem coluna `name`.
-  const empresaNome = company.trade_name || company.legal_name || 'Empresa';
+  const empresaNome = nomeDaLoja(company, 'Empresa');
   const logoUrl = brand.logo_url || company.logo_url || null;
   const cor = /^#[0-9a-fA-F]{3,8}$/.test(String(brand.primary_color || '')) ? brand.primary_color : '#5b21b6';
 

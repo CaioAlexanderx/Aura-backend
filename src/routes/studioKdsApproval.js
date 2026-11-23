@@ -27,6 +27,7 @@
 // ============================================================
 const express = require('express');
 const { linkDoPosCompraDaEmpresa } = require('../services/marcaDaLoja');
+const { nomeDaLoja } = require('../utils/nomeDaLoja');
 const router  = express.Router({ mergeParams: true });
 const crypto  = require('crypto');
 const db      = require('../config/database');
@@ -1032,7 +1033,7 @@ router.post('/orders/:oid/approval', async function(req, res) {
   // A assinatura e o nome da LOJA, o que a cliente viu na vitrine (QA
   // 28/09/2026: saia "_Aura QA_", o nome da empresa). Sem loja
   // configurada, o da empresa, como antes.
-  const shopName = order.site_name || order.trade_name || order.legal_name || 'nossa loja';
+  const shopName = order.site_name || nomeDaLoja(order, 'nossa loja');
 
   let token = null;
   for (let i = 0; i < 5; i++) {

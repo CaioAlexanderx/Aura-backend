@@ -24,6 +24,7 @@ const router = require('express').Router({ mergeParams: true });
 const db     = require('../config/database');
 const { requireRole } = require('../middleware/auth');
 const { uploadToR2, deleteFromR2 } = require('../utils/r2Storage');
+const { nomeDaLoja } = require('../utils/nomeDaLoja');
 // Salvar a loja ou subir imagem esquece a home guardada (10/09/2026).
 const { esquecerPagina } = require('../services/cacheDaPaginaDaLoja');
 const { validatePixKey } = require('../services/staticPixService');
@@ -208,7 +209,7 @@ router.get('/', async (req, res) => {
       const co = companies[0] || {};
       return res.json({
         ...DEFAULT_CONFIG,
-        site_name: co.trade_name || co.legal_name || null,
+        site_name: nomeDaLoja(co, null),
         phone: co.phone || '',
         exists: false,
         storefront_url: null,

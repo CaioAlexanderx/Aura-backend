@@ -61,6 +61,7 @@ const { hasSaleHiddenColumn, visibleInListCond } = require('../utils/saleHidden'
 const attribution = require('../services/marketingAttribution');
 const { addressFromRow, isMissingReferenceColumn } = require('../services/customerAddress');
 const catSql = require('../utils/categoriaDoLancamento');
+const { nomeDaLoja } = require('../utils/nomeDaLoja');
 
 // 09/11/2026: address_reference e da migration 433. Sem ela, a lista
 // consolidada segue sem o ponto de referencia (mesmo contrato do
@@ -137,7 +138,7 @@ router.get('/dashboard', async (req, res) => {
 
     const companyIds = companies.map(c => c.id);
     const companyNameById = new Map(
-      companies.map(c => [c.id, c.trade_name || c.legal_name || 'Empresa'])
+      companies.map(c => [c.id, nomeDaLoja(c, 'Empresa')])
     );
 
     const [
@@ -264,7 +265,7 @@ router.get('/dashboard', async (req, res) => {
 
       return {
         company_id: c.id,
-        company_name: c.trade_name || c.legal_name || 'Empresa',
+        company_name: nomeDaLoja(c, 'Empresa'),
         is_primary: c.is_primary,
         revenue: inflow,
         expenses: exp,
@@ -516,7 +517,7 @@ router.get('/transactions', async (req, res) => {
         idempotency_key: r.idempotency_key,
         source: r.idempotency_key && /^pdv-sale-/i.test(r.idempotency_key) ? 'pdv' : 'manual',
         company_id: r.company_id,
-        company_name: c ? (c.trade_name || c.legal_name || 'Empresa') : 'Empresa',
+        company_name: c ? nomeDaLoja(c, 'Empresa') : 'Empresa',
       };
     });
 
@@ -530,7 +531,7 @@ router.get('/transactions', async (req, res) => {
       const expenses = parseFloat(s.expenses) || 0;
       return {
         company_id: c.id,
-        company_name: c.trade_name || c.legal_name || 'Empresa',
+        company_name: nomeDaLoja(c, 'Empresa'),
         is_primary: c.is_primary,
         income,
         expenses,
@@ -583,7 +584,7 @@ router.get('/customers', async (req, res) => {
 
     const companyIds = companies.map(c => c.id);
     const companyNameById = new Map(
-      companies.map(c => [c.id, c.trade_name || c.legal_name || 'Empresa'])
+      companies.map(c => [c.id, nomeDaLoja(c, 'Empresa')])
     );
 
     let where = 'WHERE company_id = ANY($1)';
@@ -813,7 +814,7 @@ router.get('/sales', async (req, res) => {
       const b = breakdownMap.get(c.id) || {};
       return {
         company_id: c.id,
-        company_name: c.trade_name || c.legal_name || 'Empresa',
+        company_name: nomeDaLoja(c, 'Empresa'),
         is_primary: c.is_primary,
         total_sales: parseInt(b.total_sales) || 0,
         active_sales: parseInt(b.active_sales) || 0,
@@ -841,7 +842,7 @@ router.get('/sales', async (req, res) => {
         items_count: r.items_count,
         transaction_id: r.transaction_id,
         company_id: r.company_id,
-        company_name: c ? (c.trade_name || c.legal_name || 'Empresa') : 'Empresa',
+        company_name: c ? nomeDaLoja(c, 'Empresa') : 'Empresa',
       };
     });
 
@@ -1156,7 +1157,7 @@ router.get('/marketing/results', requirePlan('negocio', 'expansao'), async (req,
       rotulo: 'estimativa',
       breakdown: porEmpresa.map(({ company, resultado: r }) => ({
         company_id: company.id,
-        company_name: company.trade_name || company.legal_name,
+        company_name: nomeDaLoja(company, null),
         enviadas: r.enviadas, entregues: r.entregues, lidas: r.lidas,
         clientes_que_voltaram: r.clientes_que_voltaram,
         receita_total: r.receita_total,

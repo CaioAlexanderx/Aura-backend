@@ -4,6 +4,7 @@
 // ============================================================
 const router = require('express').Router();
 const db = require('../config/database');
+const { nomeDaLoja } = require('../utils/nomeDaLoja');
 
 async function resolveToken(token) {
   const { rows } = await db.query(
@@ -79,7 +80,7 @@ router.get('/:token', async (req, res) => {
 
     res.json({
       patient: { name: data.full_name, phone: data.phone, email: data.email },
-      clinic:  { name: data.trade_name || data.legal_name },
+      clinic:  { name: nomeDaLoja(data, null) },
       appointments: appointments.map(a => ({
         id: a.id, date: a.scheduled_at, duration: a.duration_min,
         status: a.status, complaint: a.chief_complaint,

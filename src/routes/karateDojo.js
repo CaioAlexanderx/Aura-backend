@@ -57,6 +57,7 @@ const db = require('../config/database');
 const { requireDojoAccess } = require('../middleware/requireDojoAccess');
 const { getDojoLinkStatus } = require('../services/karateDojoLinkStatus');
 const { uploadToR2 } = require('../utils/r2Storage');
+const { nomeDaLoja } = require('../utils/nomeDaLoja');
 
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
@@ -143,7 +144,7 @@ function affiliationStatus(row, link) {
 function shapeDojo(row, { authChannel, link }) {
   return {
     id: row.id,
-    name: row.trade_name || row.legal_name || null,
+    name: nomeDaLoja(row, null),
     slug: row.slug || null,
     cnpj: row.cnpj || null,
     // e-mail do CADASTRO do dojô (o que o PATCH edita). owner_email não
