@@ -59,6 +59,8 @@ const collectionNotice = require('../services/credit/collectionNotice');
 const { avisarRecebimento } = require('../services/credit/avisoDeRecebimento');
 // 10/11/2026 (migration 438): recebimento emite a NFS-e da venda com servico.
 const nfseAutomatica = require('../services/nfseAutomatica');
+// 23/11/2026 (Looks Da Jenny): pagamento igual (cliente, valor, dia) pede confirmacao.
+const pagamentoRepetido = require('../services/credit/pagamentoRepetido');
 // Fase 6: a régua do crediário passa a poder enfileirar na fila paga do
 // WhatsApp (wa_outbox). Ligar isso é o único botão desta tela que gasta
 // dinheiro por clique — daí o gate próprio no PUT de regras.
@@ -830,6 +832,19 @@ router.patch('/installments/:iid/pay', async (req, res) => {
     if (payAmount <= 0) {
       await client.query('ROLLBACK');
       return res.status(400).json({ error: 'Valor de pagamento deve ser > 0.' });
+    }
+
+    // 23/11/2026: mesma regra do recebimento da ficha -- pagamento igual
+    // (cliente, valor, hoje) pede confirmar_repetido: true. Esta rota nao
+    // tem paid_at nem Idempotency-Key.
+    if (!pagamentoRepetido.confirmouRepetido(req.body)) {
+      const repetido = await pagamentoRepetido.acharPagamentoRepetido(client, {
+        companyId, customerId: ins.customer_id, amount: payAmount, paidAt: null,
+      });
+      if (repetido) {
+        await client.query('ROLLBACK');
+        return res.status(409).json(pagamentoRepetido.corpoDoRepetido(repetido));
+      }
     }
 
     const result = await creditLedger.applyPayment(client, {
