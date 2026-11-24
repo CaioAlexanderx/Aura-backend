@@ -84,8 +84,8 @@ describe('endpoints — MG', () => {
     }
   });
 
-  test('BA continua fora (erro claro)', () => {
-    expect(() => getEndpoints('BA', 2)).toThrow(/BA.*não suportada/);
+  test('GO continua fora (erro claro)', () => {
+    expect(() => getEndpoints('GO', 2)).toThrow(/GO.*não suportada/);
   });
 
   test('soapActionFor: MG = <wsdl ns>/<operação> (nomes do ACBr); SP/AP = null', () => {

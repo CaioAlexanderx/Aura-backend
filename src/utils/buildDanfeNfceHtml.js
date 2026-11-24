@@ -125,9 +125,11 @@ function paymentLabel(m) {
 // MG = Portal SPED MG "Web Services" (produção) e ACBr [NFCe_MG_P];
 // RJ = ACBr [NFCe_RJ_P] URL-ConsultaNFCe_2.00. Os hosts antigos não eram
 // o portal de consulta (nfce.fazenda.mg.gov.br é o dos webservices).
+// 23/11/2026: BA = urlChave de produção da ENCAT, a mesma do XML.
 const CONSULTA_NFCE_URL = {
   SP: 'https://www.nfce.fazenda.sp.gov.br/NFCeConsultaPublica',
   RJ: 'https://www.fazenda.rj.gov.br/nfce/consulta',
+  BA: 'https://www.sefaz.ba.gov.br/nfce/consulta',
   MG: 'https://portalsped.fazenda.mg.gov.br/portalnfce',
   RS: 'https://www.sefaz.rs.gov.br/NFCE/NFCE-COM.aspx',
   PR: 'http://www.fazenda.pr.gov.br/nfce',

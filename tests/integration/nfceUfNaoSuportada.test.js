@@ -3,7 +3,7 @@
 // Caso real: loja do RJ recebeu "Erro ao transmitir nota para SEFAZ-SP:
 // sefazSp: UF RJ não suportada na emissão própria. UFs disponíveis: ...".
 // Agora:
-//   - UF sem endpoints (ex.: BA), sem gateway → 422 com texto gentil, ANTES
+//   - UF sem endpoints (ex.: GO), sem gateway → 422 com texto gentil, ANTES
 //     de reservar número; nada de "SEFAZ-SP"; detalhe técnico só no log;
 //   - RJ entra no caminho normal da engine;
 //   - rede de segurança: se a engine lançar UF_NAO_SUPORTADA, mesma mensagem
@@ -113,7 +113,7 @@ const OK_RESULT = {
   xml_signed: '<xml/>', tp_emis: 1, provider: 'sefaz_sp',
 };
 
-const GENTIL_BA = 'A emissão de NFC-e para lojas de BA está sendo ligada pela equipe Aura. A venda foi registrada normalmente.';
+const GENTIL_GO = 'A emissão de NFC-e para lojas de GO está sendo ligada pela equipe Aura. A venda foi registrada normalmente.';
 
 let warnSpy;
 let errorSpy;
@@ -128,15 +128,15 @@ beforeEach(() => {
 });
 afterEach(() => { warnSpy.mockRestore(); errorSpy.mockRestore(); });
 
-describe('UF sem emissão própria (BA) → texto gentil antes de reservar número', () => {
+describe('UF sem emissão própria (GO) → texto gentil antes de reservar número', () => {
   test('422 gentil, sem SEFAZ-SP, sem reservar número, sem criar emissão; detalhe no log', async () => {
-    const db = makeDb({ config: { uf: 'BA' }, company: { address_state: 'BA' } });
+    const db = makeDb({ config: { uf: 'GO' }, company: { address_state: 'GO' } });
     const res = await supertest(buildApp(db)).post(`/c/${CID}/nfce/emit`).set(auth)
       .send({ ...EMIT_BODY, sale_id: 'sale-1' });
 
     expect(res.status).toBe(422);
     expect(res.body.code).toBe('NFCE_UF_NAO_SUPORTADA');
-    expect(res.body.error).toBe(GENTIL_BA);
+    expect(res.body.error).toBe(GENTIL_GO);
     expect(JSON.stringify(res.body)).not.toMatch(/SEFAZ-SP|sefazSp|não suportada|UFs disponíveis/);
     expect(sefazSp.emitNfce).not.toHaveBeenCalled();
     expect(db.state.ownSeriesReserved).toBe(false);
@@ -144,9 +144,9 @@ describe('UF sem emissão própria (BA) → texto gentil antes de reservar núme
     expect(db.query.mock.calls.some((c) => /INSERT INTO nfce_emissions/.test(c[0]))).toBe(false);
     // tentativas antigas em erro dessa venda passam a mostrar o texto gentil
     const fix = db.query.mock.calls.find((c) => /UPDATE nfce_emissions SET error_message=\$1/.test(c[0]));
-    expect(fix[1]).toEqual([GENTIL_BA, CID, 'sale-1', 'nfce']);
+    expect(fix[1]).toEqual([GENTIL_GO, CID, 'sale-1', 'nfce']);
     // detalhe técnico no log
-    expect(warnSpy.mock.calls.map((c) => c.join(' ')).join('\n')).toMatch(/UF BA.*UFs disponíveis: .*RJ/);
+    expect(warnSpy.mock.calls.map((c) => c.join(' ')).join('\n')).toMatch(/UF GO.*UFs disponíveis: .*RJ/);
   });
 });
 
@@ -165,17 +165,17 @@ describe('RJ → caminho normal da engine', () => {
 
 describe('rede de segurança no catch da emissão', () => {
   test('engine lança UF_NAO_SUPORTADA → 422 gentil, error_message gentil, breaker intocado', async () => {
-    sefazSp.emitNfce.mockRejectedValueOnce(new UfNaoSuportadaError('BA'));
+    sefazSp.emitNfce.mockRejectedValueOnce(new UfNaoSuportadaError('GO'));
     const db = makeDb();
     const res = await supertest(buildApp(db)).post(`/c/${CID}/nfce/emit`).set(auth).send(EMIT_BODY);
     expect(res.status).toBe(422);
     expect(res.body.code).toBe('NFCE_UF_NAO_SUPORTADA');
-    expect(res.body.error).toBe(GENTIL_BA);
+    expect(res.body.error).toBe(GENTIL_GO);
     expect(res.body.nfce_id).toBe('em-1');
-    expect(db.state.emission.error_message).toBe(GENTIL_BA);
+    expect(db.state.emission.error_message).toBe(GENTIL_GO);
     expect(engineBreaker.snapshot(CID).consecutiveFailures).toBe(0);
     // detalhe técnico continua no log
-    expect(errorSpy.mock.calls.map((c) => c.join(' ')).join('\n')).toMatch(/UF BA não suportada na emissão própria/);
+    expect(errorSpy.mock.calls.map((c) => c.join(' ')).join('\n')).toMatch(/UF GO não suportada na emissão própria/);
   });
 
   test('erro genérico em loja do RJ cita SEFAZ-RJ, nunca SEFAZ-SP', async () => {
