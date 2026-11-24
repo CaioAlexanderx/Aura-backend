@@ -76,7 +76,7 @@ describe('sefazSp/nfe55 — endpoints multi-UF (NF-e 55 devolução)', () => {
     expect(() => getEndpoints55('MG', 'homologacao')).toThrow(/MG.*não suportada/);
   });
 
-  test('ENDPOINTS_NFE55 expõe exatamente as UFs suportadas hoje (SP, AP, RJ)', () => {
-    expect(Object.keys(ENDPOINTS_NFE55).sort()).toEqual(['AP', 'RJ', 'SP']);
+  test('ENDPOINTS_NFE55 expõe exatamente as UFs suportadas hoje (SP, AP, RJ, BA)', () => {
+    expect(Object.keys(ENDPOINTS_NFE55).sort()).toEqual(['AP', 'BA', 'RJ', 'SP']);
   });
 });
