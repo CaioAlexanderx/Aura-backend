@@ -138,8 +138,20 @@ const PASSOS = ['certificado', 'prefeitura', 'dados_fiscais', 'codigo_padrao', '
  * faz: E0084 (CNPJ sem estabelecimento no município / fora do CNC), E0116
  * (Inscrição Municipal exigida pelo cadastro complementar), E0120
  * (Inscrição Municipal informada sem cadastro no CNC).
+ *
+ * 23/11/2026 (Bahia): E0039 — "O município emissor informado na DPS deve
+ * estar parametrizado para utilizar os emissores públicos nacionais". A
+ * cidade compartilha as notas com o Ambiente Nacional, mas emite pelo
+ * sistema próprio (planilha oficial de adesões, gov.br/nfse, 10/11/2026:
+ * na Bahia, 230 de 417 municípios, entre eles Salvador, Feira de Santana,
+ * Vitória da Conquista e Camaçari). Exceções do Anexo I: MEI sempre; ME/EPP
+ * apurando pelo Simples (regApTribSN 1) com competência a partir de
+ * 01/11/2026 — na produção restrita desde a NT 009 (20/10/2026); na
+ * produção, o Anexo I v1.01-20260209 só traz a do MEI, e a NT 009 entra em
+ * produção em 01/12/2026. Também é coisa da cidade, não da loja: a nota de
+ * verdade voltaria com o mesmo aviso, então nunca libera o "Ligar".
  */
-const CODIGOS_PREFEITURA = new Set(['E0084', 'E0116', 'E0120']);
+const CODIGOS_PREFEITURA = new Set(['E0084', 'E0116', 'E0120', 'E0039']);
 
 /**
  * Rejeições que só acontecem no ambiente de testes do gov.br (produção
@@ -259,6 +271,7 @@ const MOTIVO_PREFEITURA = {
   E0084: 'A prefeitura ainda não liberou a sua empresa no Emissor Nacional. Falta um cadastro que só a prefeitura faz.',
   E0116: 'A prefeitura pede a Inscrição Municipal na nota. Preencha a Inscrição Municipal e emita a nota de teste de novo.',
   E0120: 'A Inscrição Municipal informada ainda não aparece no cadastro da prefeitura no Emissor Nacional.',
+  E0039: 'A sua cidade ainda emite NFS-e pelo sistema da prefeitura, e o gov.br ainda não aceita a nota desta empresa pelo Emissor Nacional. A equipe Aura acompanha com você.',
 };
 
 function passoPrefeitura(config) {
