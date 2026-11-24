@@ -238,6 +238,11 @@ router.use('/billing/seat-pass', require('./seatPass'));
 router.use('/billing', require('./billing'));
 router.use('/support', require('./support'));
 router.use('/customers', require('./customers'));
+// 23/11/2026 (p-209, migration 465): cadastro do cliente por link enviado
+// pelo lojista no WhatsApp. Prefixo proprio (fora de /customers) para nao
+// cair nos requirePlan dos mounts de /customers abaixo. Gate da otica na
+// criacao, dentro do router.
+router.use('/customer-signup-links', require('./customerSignupLinks'));
 router.use('/employees', require('./employees'));
 // Notificações do app (endomarketing banners + avisos de pedido) — sem gate de plano
 router.use('/notifications', require('./notifications'));
