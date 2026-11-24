@@ -13,7 +13,7 @@ const {
   buildInfNfe55Venda, buildIde55VendaXml, buildTransp55VendaXml,
 } = require('../../src/services/sefazSp/nfe55Venda');
 const { cfopVenda55 } = require('../../src/services/sefazSp/taxEngine');
-const { ieSpValida, ieValida, ratearFrete } = require('../../src/services/nfe55Venda');
+const { ieSpValida, ieBaValida, ieValida, ratearFrete } = require('../../src/services/nfe55Venda');
 
 const EMITENTE = {
   id: '00000000-0000-4000-8000-0000000000e1',
@@ -297,6 +297,56 @@ describe('regras auxiliares', () => {
     expect(ieValida('1', 'MG')).toBe(false);
     expect(ieValida('0623079040081', 'MG')).toBe(true);
   });
+  // 23/11/2026: IE da BA — exemplos públicos do Sintegra (roteiro de crítica
+  // da BA) e duas IEs BA ativas conferidas na Receita (cnpj.ws), que a regra
+  // TEM de aceitar. Para cada válida, trocar qualquer dígito verificador
+  // tem de recusar.
+  it('IE da BA: 8 e 9 dígitos, módulo 10 e 11 pelo dígito de controle', () => {
+    const validas = [
+      '12345663',    // Sintegra: 8 dígitos, módulo 10 (1º dígito 1)
+      '61234557',    // Sintegra: 8 dígitos, módulo 11 (1º dígito 6)
+      '100000306',   // Sintegra: 9 dígitos, módulo 10 (2º dígito 0)
+      '248563246',   // IE BA ativa (Receita), 9 dígitos, módulo 10
+      '238680995',   // IE BA ativa (Receita), 9 dígitos, módulo 10
+    ];
+    for (const ie of validas) {
+      expect(ieBaValida(ie)).toBe(true);
+      for (const pos of [ie.length - 2, ie.length - 1]) {
+        const trocada = ie.slice(0, pos) + String((Number(ie[pos]) + 1) % 10) + ie.slice(pos + 1);
+        expect(ieBaValida(trocada)).toBe(false);
+      }
+    }
+    // máscaras aceitas (só dígitos contam)
+    expect(ieBaValida('123456-63')).toBe(true);
+    expect(ieBaValida('1000003-06')).toBe(true);
+    expect(ieBaValida('248.563.246')).toBe(true);
+    // tamanho fora de 8/9
+    for (const ie of ['1234567', '1234567890', '', null, undefined, 'ISENTO']) expect(ieBaValida(ie)).toBe(false);
+    // um dígito da base trocado
+    expect(ieBaValida('248563146')).toBe(false);
+    expect(ieBaValida('12345763')).toBe(false);
+  });
+
+  it('IE da BA: módulo 11 nos 9 dígitos (2º dígito 6, 7 ou 9) e resto 0/1 → DV 0', () => {
+    // Contas feitas à mão pela regra do Sintegra:
+    //   061234557 = o exemplo de 8 dígitos 612345-57 com zero à esquerda
+    //   170000059: 1·8+7·7 = 57, 57%11 = 2 → 9; 1·9+7·8+9·2 = 83, 83%11 = 6 → 5
+    //   390000180: 3·8+9·7+1·2 = 89, 89%11 = 1 → 0; 3·9+9·8+1·3 = 102, 102%11 = 3 → 8
+    for (const ie of ['061234557', '170000059', '390000180']) expect(ieBaValida(ie)).toBe(true);
+    expect(ieBaValida('170000058')).toBe(false);
+    expect(ieBaValida('390000181')).toBe(false);
+    // a mesma base com o DV do módulo 10 não passa no módulo 11
+    expect(ieBaValida('170000093')).toBe(false); // DVs do módulo 10 (3 e 9)
+  });
+
+  it('ieValida: confere o DV na BA, só o formato nas UFs sem regra', () => {
+    expect(ieValida('248563246', 'BA')).toBe(true);
+    expect(ieValida('248563246', 'ba')).toBe(true);
+    expect(ieValida('248563247', 'BA')).toBe(false);
+    expect(ieValida('248563247', 'MG')).toBe(true);
+    expect(ieValida('110042490114', 'BA')).toBe(false); // IE de SP numa UF BA
+  });
+
   it('ratearFrete: proporcional, maior resto, soma exata, sem teto por linha', () => {
     expect(ratearFrete([1000, 1000, 1000], 100)).toEqual([34, 33, 33]);
     expect(ratearFrete([100], 5000)).toEqual([5000]);
