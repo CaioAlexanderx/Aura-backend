@@ -67,6 +67,41 @@
 // de pFCP/vFCP — fora do escopo: a engine emite ICMS00 zerado em toda UF.
 // Sem flag nova: o RJ segue o caminho do AP (sem SOAPAction, sem infRespTec).
 //
+// 23/11/2026 — BA entra. A Bahia NÃO autoriza NFC-e na própria SEFAZ: usa a
+// SVRS, como AP e RJ (os 6 webservices são os de SVRS_NFCE_WS). A NF-e 55 da
+// BA é que fica na SEFAZ-BA (nfe.sefaz.ba.gov.br) — outro arquivo (nfe55.js).
+// O que é da BA: QR Code e urlChave. cUF 29 sai do endereço da empresa.
+// Fontes, conferidas em 23/11/2026:
+//   - SEFAZ-BA, Inspetoria Eletrônica > ICMS > Documentos fiscais > NFC-e
+//     (https://www.sefaz.ba.gov.br/inspetoria-eletronica/icms/documentos-fiscais/nota-fiscal-de-consumidor-eletronica/):
+//     "Relação dos Serviços WEB - Produção/Homologação NFC-e - SEFAZ Virtual
+//     SVRS", as mesmas URLs 4.00 de SVRS_NFCE_WS; manuais, schemas e NTs
+//     apontam para o portal DF-e da SVRS;
+//   - SEFAZ-BA, notícia de 08/05/2024 (enchentes no RS): a NFC-e da BA é
+//     processada na Procergs (SVRS); a NF-e é autorizada pelo fisco baiano;
+//   - ACBr, ACBrNFeServicos.ini, [NFCe_BA_P]/[NFCe_BA_H]: Usar=NFCe_SVRS_P/H;
+//   - QR Code: ENCAT, "URL por UF utilizada QR code"
+//     (https://nfce.encat.org/desenvolvedor/qrcode/), BA produção
+//     http://nfe.sefaz.ba.gov.br/servicos/nfce/qrcode.aspx e homologação
+//     http://hnfe.sefaz.ba.gov.br/servicos/nfce/qrcode.aspx. Vai o literal da
+//     ENCAT, com http:// (é o que os cupons da BA em circulação trazem; o host
+//     responde nos dois esquemas). O ACBr lista para a v2 o
+//     .../modulos/geral/NFCEC_consulta_chave_acesso.aspx e deixa o qrcode.aspx
+//     como "_1.00"; cupons v2 de produção circulam com os dois. Se a
+//     homologação devolver 395, trocar para o NFCEC_consulta_chave_acesso.aspx;
+//   - urlChave: ENCAT, "URL por UF utilizada para consulta chave - QR Code
+//     versão 2.0", BA produção www.sefaz.ba.gov.br/nfce/consulta (vai com
+//     https://, no padrão de AP/RJ — o literal da ENCAT é sem esquema) e
+//     homologação http://hinternet.sefaz.ba.gov.br/nfce/consulta (literal da
+//     ENCAT e do ACBr URL-ConsultaNFCe_2.00). Se a homologação devolver 878,
+//     tirar o esquema da produção.
+// Campo próprio da BA no XML: nenhum para o Simples Nacional (CRT 1/4) — o
+// adicional do Fundo de Pobreza do optante vai no DAS; ICMSSN102 não tem FCP.
+// Sem flag nova: SVRS = caminho do AP/RJ (sem SOAPAction). infRespTec: a BA
+// não está entre as UFs que validam o grupo (AM, MS, PE, PR, SC, TO); se a
+// homologação devolver 972, ligar infRespTec: true na BA (respTec.js).
+// Prazo de cancelamento: RICMS-BA art. 107-H, I (nfcePrazoCancelamento.js).
+//
 // Flags por UF (opcionais; ausentes = comportamento de SP/AP, intocado):
 //   soapAction  — manda o header SOAPAction "<wsdl ns>/<operação>", como o
 //                 ACBr faz em todas as UFs. SP/AP nunca precisaram dele;
@@ -78,7 +113,7 @@
 'use strict';
 
 // Os 6 webservices da NFC-e na SVRS (Sefaz Virtual do RS), versão 4.00 —
-// valem para toda UF autorizada pela SVRS (hoje AP e RJ). Fonte:
+// valem para toda UF autorizada pela SVRS (hoje AP, RJ e BA). Fonte:
 // https://dfe-portal.svrs.rs.gov.br/Nfce/Servicos (tabela "SVRS").
 const SVRS_NFCE_WS = {
   homologacao: {
@@ -150,6 +185,20 @@ const ENDPOINTS = {
       ...SVRS_NFCE_WS.producao,
       qrCodeBase:     'https://consultadfe.fazenda.rj.gov.br/consultaNFCe/QRCode',
       urlConsulta:    'https://www.fazenda.rj.gov.br/nfce/consulta',
+    },
+  },
+  // BA — também autorizada pela SVRS; QR Code e urlChave da BA (ver
+  // cabeçalho: fontes de 23/11/2026). Cada ambiente com o seu host.
+  BA: {
+    homologacao: {
+      ...SVRS_NFCE_WS.homologacao,
+      qrCodeBase:     'http://hnfe.sefaz.ba.gov.br/servicos/nfce/qrcode.aspx',
+      urlConsulta:    'http://hinternet.sefaz.ba.gov.br/nfce/consulta',
+    },
+    producao: {
+      ...SVRS_NFCE_WS.producao,
+      qrCodeBase:     'http://nfe.sefaz.ba.gov.br/servicos/nfce/qrcode.aspx',
+      urlConsulta:    'https://www.sefaz.ba.gov.br/nfce/consulta',
     },
   },
   // MG — SEFAZ própria (ver cabeçalho: fontes e flags).
@@ -245,7 +294,7 @@ function mensagemUfNaoSuportada(uf) {
 }
 
 /**
- * @param {'SP'|'AP'|'MG'|'RJ'} uf
+ * @param {'SP'|'AP'|'MG'|'RJ'|'BA'} uf
  * @param {'homologacao'|'producao'|1|2} ambiente — aceita tpAmb numérico
  */
 function getEndpoints(uf, ambiente) {

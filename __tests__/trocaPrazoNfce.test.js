@@ -28,11 +28,11 @@ const ENV = {}; // sem NFCE_CANCEL_DEADLINE_MIN: vale a tabela por UF
 // Chave fictícia de NFC-e (modelo 65) com o cUF pedido.
 // cUF(2) AAMM(4) CNPJ(14) mod(2) série(3) nNF(9) tpEmis(1) cNF(8) DV(1) = 44
 const chave = (cuf, modelo = '65') => `${cuf}2611` + '11222333000181' + modelo + '002' + '000000900' + '1' + '12345678' + '0';
-const CUF = { SP: '35', AP: '16', RJ: '33', MG: '31' };
+const CUF = { SP: '35', AP: '16', RJ: '33', MG: '31', BA: '29' };
 
 describe('prazo de cancelamento por UF (nfcePrazoCancelamento)', () => {
-  test('tabela: SP, AP, RJ e MG com 30 minutos e fonte citada', () => {
-    for (const uf of ['SP', 'AP', 'RJ', 'MG']) {
+  test('tabela: SP, AP, RJ, MG e BA com 30 minutos e fonte citada', () => {
+    for (const uf of ['SP', 'AP', 'RJ', 'MG', 'BA']) {
       expect(prazo.PRAZO_NFCE_POR_UF[uf].minutos).toBe(30);
       expect(prazo.PRAZO_NFCE_POR_UF[uf].fonte).toMatch(/\S/);
     }

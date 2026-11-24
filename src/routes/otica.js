@@ -6,7 +6,7 @@
 // referencia e o que so a otica tem.
 //
 // GET    /otica/settings                → {settings}
-// PUT    /otica/settings                → {settings}
+// PUT    /otica/settings                → {settings}  (sale_terms: p-207)
 // GET    /otica/labs                    → {labs}
 // POST   /otica/labs                    → 201 {lab}
 // PATCH  /otica/labs/:labId             → {lab}
@@ -17,6 +17,8 @@
 // GET    /otica/prescriptions/:rxId     → {prescription}
 // PATCH  /otica/prescriptions/:rxId     → {prescription}
 // DELETE /otica/prescriptions/:rxId     → {deleted:true}
+// POST   /otica/prescriptions/:rxId/photo → {prescription}  (foto do papel)
+// DELETE /otica/prescriptions/:rxId/photo → {prescription}
 // GET    /otica/dashboard               → {counts, expiring_prescriptions_30d}
 //
 // GATE: otica_enabled em companies.pdv_settings. So na ESCRITA — ver
@@ -26,9 +28,18 @@
 // autenticada) e pro snapshot da OS; NUNCA vai em WhatsApp nem no tracker
 // publico. Quem for reaproveitar estas queries em rota publica deve
 // reler o cabecalho do studioTrackPublic.js antes.
+//
+// FOTO DA RECEITA (p-212, 23/11/2026): o papel da receita vai para o bucket
+// PRIVADO (utils/r2Privado.js), nunca para o publico das fotos de produto.
+// Em photo_url fica a CHAVE (otica/<empresa>/prescriptions/<receita>/...);
+// toda resposta troca a chave por URL assinada de 15 minutos. A foto nao
+// entra no snapshot da OS, no /print/os, no tracker nem em WhatsApp.
 // ============================================================
+const crypto = require('crypto');
 const router = require('express').Router({ mergeParams: true });
 const db     = require('../config/database');
+const r2Privado = require('../utils/r2Privado');
+const { getOwnerScopedCompanyIds } = require('../utils/ownerScope');
 
 // ─── Gate do modulo ──────────────────────────────────────────
 //
@@ -73,10 +84,31 @@ const OTICA_DEFAULTS = {
   wa_ready_auto: false,
   wa_adaptation_auto: false,
   wa_revision_auto: false,
+  // p-207 (23/11/2026): termos da venda, impressos nas duas vias da OS de
+  // otica. O TEXTO E DA LOJA: o Aura so guarda e imprime o que ela
+  // escreveu (cancelamento, devolucao e garantia dependem de cada loja).
+  // Em branco, a folha sai sem o quadro de termos. Mora no mesmo JSONB
+  // otica_settings (migration 334): nao ha coluna nova.
+  sale_terms: '',
 };
 
 const SETTINGS_INT_KEYS  = ['prescription_validity_months', 'adaptation_warranty_days'];
 const SETTINGS_STR_KEYS  = ['rt_name', 'rt_registry', 'sanitary_license'];
+
+// Termos da venda: texto de varias linhas. Diferente das chaves curtas
+// acima, as quebras de linha ficam (a loja escreve em paragrafos); so o
+// \r\n vira \n, as pontas sao aparadas e 3+ linhas vazias viram uma.
+// Teto de 4000 letras: cabe com folga no quadro da folha A4 (o mockup
+// tem ~600) e nao deixa um colar acidental virar um livro na impressao.
+const SALE_TERMS_MAX = 4000;
+
+function normalizarTermos(raw) {
+  return String(raw == null ? '' : raw)
+    .replace(/\r\n?/g, '\n')
+    .replace(/[ \t]+\n/g, '\n')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+}
 const SETTINGS_BOOL_KEYS = ['wa_ready_auto', 'wa_adaptation_auto', 'wa_revision_auto'];
 
 // {...DEFAULTS, ...salvo}. 42703 (334 pendente) devolve os defaults: a
@@ -134,7 +166,8 @@ router.get('/settings', async function (req, res) {
   try {
     const settings = await carregarOticaSettings(req.params.id);
     if (!settings) return res.status(404).json({ error: 'Empresa nao encontrada' });
-    res.json({ settings });
+    // p-212: o app so desenha o anexo da foto quando o bucket privado existe.
+    res.json({ settings, capabilities: { prescription_photo: r2Privado.disponivel() } });
   } catch (err) {
     falhar(res, err, 'GET:settings');
   }
@@ -166,6 +199,19 @@ router.put('/settings', async function (req, res) {
       return res.status(400).json({ error: `${k} deve ser texto` });
     }
     patch[k] = String(body[k] || '').trim();
+  }
+  if ('sale_terms' in body) {
+    if (body.sale_terms != null && typeof body.sale_terms !== 'string') {
+      return res.status(400).json({ error: 'sale_terms deve ser texto', field: 'sale_terms' });
+    }
+    const termos = normalizarTermos(body.sale_terms);
+    if (termos.length > SALE_TERMS_MAX) {
+      return res.status(400).json({
+        error: `Os termos passaram de ${SALE_TERMS_MAX} letras. Encurte o texto para caber na folha.`,
+        field: 'sale_terms', code: 'TERMOS_LONGOS', max: SALE_TERMS_MAX,
+      });
+    }
+    patch.sale_terms = termos;
   }
   for (const k of SETTINGS_BOOL_KEYS) {
     if (!(k in body)) continue;
@@ -459,11 +505,59 @@ async function carregarReceita(rxId, companyId) {
   return rows[0] || null;
 }
 
+// ─── Foto da receita (p-212) ─────────────────────────────────
+const FOTO_TIPOS = { 'image/jpeg': 'jpg', 'image/png': 'png', 'image/webp': 'webp' };
+const FOTO_MAX_BYTES = 5 * 1024 * 1024;
+const FOTO_URL_SEGUNDOS = 15 * 60;
+
+const prefixoDaFoto = (companyId, rxId) => `otica/${companyId}/prescriptions/${rxId}/`;
+// Chave que este modulo gravou (qualquer receita). Usado para nao aceitar
+// chave forjada pelo PATCH e para saber quando apagar no bucket.
+const ehChavePrivada = (v) => typeof v === 'string' && v.startsWith('otica/');
+
+// Assinatura confere com o tipo declarado: base64 de outra coisa com
+// content_type de imagem nao passa.
+function bytesConferem(buf, tipo) {
+  if (!buf || buf.length < 12) return false;
+  if (tipo === 'image/jpeg') return buf[0] === 0xff && buf[1] === 0xd8 && buf[2] === 0xff;
+  if (tipo === 'image/png') return buf.slice(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]));
+  if (tipo === 'image/webp') return buf.slice(0, 4).toString('ascii') === 'RIFF' && buf.slice(8, 12).toString('ascii') === 'WEBP';
+  return false;
+}
+
+/**
+ * A receita como sai da API: photo_url vira URL assinada (15 min) quando e
+ * chave DESTA receita no bucket privado. Chave de outra receita ou empresa
+ * vira null (nunca assina fora do proprio prefixo). Um link http(s) gravado
+ * antes desta rota fica como esta; qualquer outra coisa, null.
+ */
+async function comFotoAssinada(rx) {
+  if (!rx) return rx;
+  const v = rx.photo_url;
+  let url = null;
+  if (typeof v === 'string' && v) {
+    if (v.startsWith(prefixoDaFoto(rx.company_id, rx.id))) url = await r2Privado.urlAssinada(v, FOTO_URL_SEGUNDOS);
+    else if (/^https?:\/\//i.test(v)) url = v;
+  }
+  return { ...rx, photo_url: url };
+}
+
+function erroFoto(res, msg) {
+  return res.status(400).json({ error: msg, code: 'FOTO_INVALIDA' });
+}
+
+// Cliente: do DONO, como na lista de clientes do app (owner-scope,
+// customers.js). Antes so valia o cliente cadastrado NESTA loja, e numa
+// conta com duas lojas o cliente da outra aparecia na lista mas a receita
+// dava 404 (p-213). A receita continua nascendo nesta loja (company_id); so
+// a checagem do cliente olha as lojas do mesmo dono. Quem mede (employees)
+// segue sendo desta loja.
 async function validarClienteEMedidor(cid, { customer_id, measured_by }) {
   if (customer_id) {
+    const lojasDoDono = await getOwnerScopedCompanyIds(cid);
     const cust = await db.query(
-      'SELECT id FROM customers WHERE id = $1 AND company_id = $2',
-      [customer_id, cid]
+      'SELECT id FROM customers WHERE id = $1 AND company_id = ANY($2)',
+      [customer_id, lojasDoDono]
     );
     if (!cust.rows.length) {
       const err = new Error('Cliente nao encontrado nesta empresa');
@@ -527,7 +621,7 @@ router.get('/prescriptions', async function (req, res) {
       `${SELECT_RX} WHERE ${where} ORDER BY p.issued_at DESC, p.created_at DESC LIMIT $${params.length}`,
       params
     );
-    res.json({ prescriptions: rows });
+    res.json({ prescriptions: await Promise.all(rows.map(comFotoAssinada)) });
   } catch (err) {
     if (err.code === '42P01') return res.json({ prescriptions: [] });
     falhar(res, err, 'GET:prescriptions');
@@ -551,6 +645,8 @@ router.post('/prescriptions', async function (req, res) {
     const meses = Number(settings && settings.prescription_validity_months) || OTICA_DEFAULTS.prescription_validity_months;
 
     const valores = { prescriber_type: 'medico', ...v.valores };
+    // A chave da foto privada so nasce pela rota /photo.
+    if (ehChavePrivada(valores.photo_url)) delete valores.photo_url;
     const colunas = ['company_id', 'customer_id', 'created_by'];
     const params  = [cid, body.customer_id, req.user?.id || null];
     for (const col of RX_COLUNAS) {
@@ -579,7 +675,7 @@ router.post('/prescriptions', async function (req, res) {
        RETURNING id`,
       params
     );
-    res.status(201).json({ prescription: await carregarReceita(rows[0].id, cid) });
+    res.status(201).json({ prescription: await comFotoAssinada(await carregarReceita(rows[0].id, cid)) });
   } catch (err) {
     falhar(res, err, 'POST:prescriptions');
   }
@@ -629,7 +725,7 @@ router.get('/prescriptions/:rxId', async function (req, res) {
   try {
     const rx = await carregarReceita(req.params.rxId, req.params.id);
     if (!rx) return res.status(404).json({ error: 'Receita nao encontrada' });
-    res.json({ prescription: rx });
+    res.json({ prescription: await comFotoAssinada(rx) });
   } catch (err) {
     falhar(res, err, 'GET:prescriptions/id');
   }
@@ -662,6 +758,12 @@ router.patch('/prescriptions/:rxId', async function (req, res) {
 
     await validarClienteEMedidor(cid, { measured_by: v.valores.measured_by });
 
+    // p-212: a foto privada so muda pelas rotas /photo (que apagam o arquivo
+    // antigo); o PATCH nao grava chave forjada nem solta a que ja existe.
+    if ('photo_url' in v.valores && (ehChavePrivada(v.valores.photo_url) || ehChavePrivada(atual.photo_url))) {
+      delete v.valores.photo_url;
+    }
+
     const sets = [];
     const params = [];
     for (const col of RX_COLUNAS) {
@@ -669,7 +771,7 @@ router.patch('/prescriptions/:rxId', async function (req, res) {
       params.push(v.valores[col]);
       sets.push(`${col} = $${params.length}`);
     }
-    if (!sets.length) return res.json({ prescription: atual });
+    if (!sets.length) return res.json({ prescription: await comFotoAssinada(atual) });
 
     params.push(req.params.rxId, cid);
     await db.query(
@@ -677,7 +779,7 @@ router.patch('/prescriptions/:rxId', async function (req, res) {
         WHERE id = $${params.length - 1} AND company_id = $${params.length}`,
       params
     );
-    res.json({ prescription: await carregarReceita(req.params.rxId, cid) });
+    res.json({ prescription: await comFotoAssinada(await carregarReceita(req.params.rxId, cid)) });
   } catch (err) {
     falhar(res, err, 'PATCH:prescriptions');
   }
@@ -714,9 +816,74 @@ router.delete('/prescriptions/:rxId', async function (req, res) {
     }
 
     await db.query('DELETE FROM optical_prescriptions WHERE id = $1 AND company_id = $2', [rx.id, cid]);
+    // p-212: a foto vai junto (dado de saude nao fica orfao no bucket).
+    if (ehChavePrivada(rx.photo_url)) await r2Privado.apagar(rx.photo_url);
     res.json({ deleted: true });
   } catch (err) {
     falhar(res, err, 'DELETE:prescriptions');
+  }
+});
+
+// ─── POST /otica/prescriptions/:rxId/photo ───────────────────
+// Corpo igual ao da foto de produto: { content: <base64 sem data:>,
+// content_type: image/jpeg|png|webp }. Ate 5 MB depois de decodificar.
+// Trocar a foto apaga a anterior. Parser de 8 MB so nesta rota (app.js).
+router.post('/prescriptions/:rxId/photo', async function (req, res) {
+  const cid = req.params.id;
+  const rxId = req.params.rxId;
+  const body = req.body || {};
+  if (!UUID_RE.test(String(rxId))) return res.status(404).json({ error: 'Receita nao encontrada' });
+
+  const tipo = String(body.content_type || '').toLowerCase();
+  if (!FOTO_TIPOS[tipo]) return erroFoto(res, 'A foto deve ser JPG, PNG ou WEBP.');
+  if (typeof body.content !== 'string' || !body.content) return erroFoto(res, 'Envie a foto (content em base64).');
+  const b64 = body.content.replace(/^data:[^,]*,/, '').replace(/\s/g, '');
+  if (!/^[A-Za-z0-9+/]+={0,2}$/.test(b64)) return erroFoto(res, 'A foto nao chegou inteira. Tente de novo.');
+  const buf = Buffer.from(b64, 'base64');
+  if (!buf.length) return erroFoto(res, 'A foto chegou vazia.');
+  if (buf.length > FOTO_MAX_BYTES) return erroFoto(res, 'A foto passa de 5 MB. Tire outra com menos zoom ou mande em JPG.');
+  if (!bytesConferem(buf, tipo)) return erroFoto(res, 'O arquivo nao parece uma imagem JPG, PNG ou WEBP.');
+
+  try {
+    await assertOticaEnabled(cid);
+    if (!r2Privado.disponivel()) {
+      return res.status(503).json({ error: 'Anexo de foto ainda indisponivel.', code: 'FOTO_INDISPONIVEL' });
+    }
+    const atual = await carregarReceita(rxId, cid);
+    if (!atual) return res.status(404).json({ error: 'Receita nao encontrada' });
+
+    const key = `${prefixoDaFoto(cid, rxId)}${crypto.randomUUID()}.${FOTO_TIPOS[tipo]}`;
+    const enviado = await r2Privado.enviar(key, buf, tipo);
+    if (!enviado.ok) return res.status(502).json({ error: 'Nao foi possivel guardar a foto. Tente de novo.', code: 'FOTO_FALHOU' });
+
+    await db.query(
+      'UPDATE optical_prescriptions SET photo_url = $1 WHERE id = $2 AND company_id = $3',
+      [key, rxId, cid]
+    );
+    if (ehChavePrivada(atual.photo_url) && atual.photo_url !== key) await r2Privado.apagar(atual.photo_url);
+    res.json({ prescription: await comFotoAssinada(await carregarReceita(rxId, cid)) });
+  } catch (err) {
+    falhar(res, err, 'POST:prescriptions/photo');
+  }
+});
+
+// ─── DELETE /otica/prescriptions/:rxId/photo ─────────────────
+router.delete('/prescriptions/:rxId/photo', async function (req, res) {
+  const cid = req.params.id;
+  const rxId = req.params.rxId;
+  if (!UUID_RE.test(String(rxId))) return res.status(404).json({ error: 'Receita nao encontrada' });
+  try {
+    await assertOticaEnabled(cid);
+    const atual = await carregarReceita(rxId, cid);
+    if (!atual) return res.status(404).json({ error: 'Receita nao encontrada' });
+    await db.query(
+      'UPDATE optical_prescriptions SET photo_url = NULL WHERE id = $1 AND company_id = $2',
+      [rxId, cid]
+    );
+    if (ehChavePrivada(atual.photo_url)) await r2Privado.apagar(atual.photo_url);
+    res.json({ prescription: await comFotoAssinada(await carregarReceita(rxId, cid)) });
+  } catch (err) {
+    falhar(res, err, 'DELETE:prescriptions/photo');
   }
 });
 
@@ -794,3 +961,4 @@ module.exports.OTICA_DEFAULTS = OTICA_DEFAULTS;
 module.exports.waParam = waParam;
 module.exports.primeiroNome = primeiroNome;
 module.exports._validarReceita = validarReceita;
+module.exports._comFotoAssinada = comFotoAssinada;

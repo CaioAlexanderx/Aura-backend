@@ -112,6 +112,46 @@ const ENDPOINTS_NFE55 = {
 // [NFe_RJ_P]/[NFe_RJ_H] (Usar=NFe_SVRS_P/H). Mesmos endpoints do AP.
 ENDPOINTS_NFE55.RJ = ENDPOINTS_NFE55.AP;
 
+// 23/11/2026 — BA: a Bahia autoriza a NF-e 55 na PRÓPRIA SEFAZ-BA (não usa
+// SVRS nem SVAN; só a NFC-e 65 da BA vai à SVRS). Fontes conferidas:
+//   - ACBr ACBrNFeServicos.ini, [NFe_BA_P] / [NFe_BA_H]: sem "Usar=", URLs
+//     próprias em nfe.sefaz.ba.gov.br / hnfe.sefaz.ba.gov.br (versão 4.00);
+//     [NFCe_BA_P]/[NFCe_BA_H] = Usar=NFCe_SVRS_P/H.
+//   - Os 12 endereços abaixo respondem (medido em 23/11) por TLS com a cadeia
+//     AC Certisign ICP-Brasil SSL EV G4 -> Raiz Brasileira v10, que já está
+//     em ./certs (icp-brasil-v10.pem); sem certificado de cliente o IIS
+//     devolve 403 (mTLS exigido), como esperado.
+// Cancelamento (110111) e carta de correção (110110) vão ao MESMO
+// NFeRecepcaoEvento4 (um web service de eventos por autorizador). Prazo de
+// cancelamento na BA: 24 h da autorização (regra nacional, Ajuste SINIEF
+// 07/05, cláusula décima segunda; a SEFAZ-BA não estende), que já é o
+// padrão de NFE55_CANCEL_DEADLINE_H em nfe55Eventos.js.
+// SOAPAction: o ACBr usa para a BA um conjunto próprio (SOAP_V4_BA:
+// "NFeConsulta4/nfeConsultaNF" e "nfeRecepcaoEventoNF"), diferente do
+// padrão. Por isso a BA NÃO liga a flag soapAction (que mandaria o action
+// padrão de endpoints.js): fica como SP/AP/RJ, sem header, e o .asmx
+// despacha pelo namespace do corpo (nfeDadosMsg, WSDL_V4 padrão).
+// ⚠️ Conferir na primeira chamada em homologação com certificado
+// (statusServico, cUF 29) antes de pôr BA em NFE55_VENDA_UFS.
+ENDPOINTS_NFE55.BA = {
+  homologacao: {
+    autorizacao:       'https://hnfe.sefaz.ba.gov.br/webservices/NFeAutorizacao4/NFeAutorizacao4.asmx',
+    retAutorizacao:    'https://hnfe.sefaz.ba.gov.br/webservices/NFeRetAutorizacao4/NFeRetAutorizacao4.asmx',
+    statusServico:     'https://hnfe.sefaz.ba.gov.br/webservices/NFeStatusServico4/NFeStatusServico4.asmx',
+    consultaProtocolo: 'https://hnfe.sefaz.ba.gov.br/webservices/NFeConsultaProtocolo4/NFeConsultaProtocolo4.asmx',
+    recepcaoEvento:    'https://hnfe.sefaz.ba.gov.br/webservices/NFeRecepcaoEvento4/NFeRecepcaoEvento4.asmx',
+    inutilizacao:      'https://hnfe.sefaz.ba.gov.br/webservices/NFeInutilizacao4/NFeInutilizacao4.asmx',
+  },
+  producao: {
+    autorizacao:       'https://nfe.sefaz.ba.gov.br/webservices/NFeAutorizacao4/NFeAutorizacao4.asmx',
+    retAutorizacao:    'https://nfe.sefaz.ba.gov.br/webservices/NFeRetAutorizacao4/NFeRetAutorizacao4.asmx',
+    statusServico:     'https://nfe.sefaz.ba.gov.br/webservices/NFeStatusServico4/NFeStatusServico4.asmx',
+    consultaProtocolo: 'https://nfe.sefaz.ba.gov.br/webservices/NFeConsultaProtocolo4/NFeConsultaProtocolo4.asmx',
+    recepcaoEvento:    'https://nfe.sefaz.ba.gov.br/webservices/NFeRecepcaoEvento4/NFeRecepcaoEvento4.asmx',
+    inutilizacao:      'https://nfe.sefaz.ba.gov.br/webservices/NFeInutilizacao4/NFeInutilizacao4.asmx',
+  },
+};
+
 function getEndpoints55(uf, ambiente) {
   const ufKey = String(uf || 'SP').toUpperCase();
   if (!ENDPOINTS_NFE55[ufKey]) {

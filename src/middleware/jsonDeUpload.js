@@ -37,23 +37,36 @@ const ROTAS_DE_UPLOAD = [
  * @param {object} [opcoes]
  * @param {string} [opcoes.limite]  teto do corpo (default 25mb)
  * @param {Function} [opcoes.verify] o mesmo verify do parser global
+ * @param {object} [opcoes.resposta413] corpo do 413 (default: o do Studio)
  */
-function jsonDeUpload({ limite = LIMITE_DO_CORPO_DE_UPLOAD, verify } = {}) {
+function jsonDeUpload({ limite = LIMITE_DO_CORPO_DE_UPLOAD, verify, resposta413 } = {}) {
   const parser = express.json({ limit: limite, verify });
+  const corpo413 = resposta413 || { error: MENSAGEM_ARQUIVO_GRANDE };
   return function parserDeUpload(req, res, next) {
     parser(req, res, (err) => {
       if (err && err.type === 'entity.too.large') {
-        return res.status(413).json({ error: MENSAGEM_ARQUIVO_GRANDE });
+        return res.status(413).json(corpo413);
       }
       next(err);
     });
   };
 }
 
+// 23/11/2026 (otica, p-212): foto do papel da receita, ate 5 MB de arquivo
+// (~6,7 MB em base64). 8 MB de corpo; acima disso, o 413 fala da foto.
+const ROTA_DA_FOTO_DA_RECEITA = '/api/v1/companies/:id/otica/prescriptions/:rxId/photo';
+const LIMITE_DA_FOTO_DA_RECEITA = '8mb';
+const RESPOSTA_FOTO_GRANDE = { error: 'A foto passa de 5 MB. Tire outra com menos zoom ou mande em JPG.', code: 'FOTO_INVALIDA' };
+
 /** Monta o parser nas rotas de upload (so POST). Chamar antes do express.json global. */
 function montarJsonDeUpload(app, opcoes) {
   const mw = jsonDeUpload(opcoes);
   for (const rota of ROTAS_DE_UPLOAD) app.post(rota, mw);
+  app.post(ROTA_DA_FOTO_DA_RECEITA, jsonDeUpload({
+    limite: LIMITE_DA_FOTO_DA_RECEITA,
+    verify: opcoes && opcoes.verify,
+    resposta413: RESPOSTA_FOTO_GRANDE,
+  }));
   return app;
 }
 
@@ -61,6 +74,7 @@ module.exports = {
   jsonDeUpload,
   montarJsonDeUpload,
   ROTAS_DE_UPLOAD,
+  ROTA_DA_FOTO_DA_RECEITA,
   LIMITE_DO_CORPO_DE_UPLOAD,
   MENSAGEM_ARQUIVO_GRANDE,
 };

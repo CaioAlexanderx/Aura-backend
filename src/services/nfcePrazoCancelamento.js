@@ -25,6 +25,13 @@
 //   - RJ: Resolução SEFAZ 720/2014, Parte II, Anexo II-A, redação da
 //     Resolução SEFAZ 349/2018: 30 minutos (antes 24 h).
 //   - AP: sem redução estadual encontrada; vale o teto nacional, 30 minutos.
+//   - BA (23/11/2026): RICMS-BA (Decreto 13.780/2012), art. 107-H, I, incluído
+//     pelo Decreto 19.142/2019: "em até 30 (trinta) minutos, quando emitida
+//     com incorreção e não tiver ocorrido a circulação da mercadoria". O
+//     inciso II (168 h quando outra NFC-e em contingência acobertou a mesma
+//     operação) é o cancelamento da nota duplicada pela contingência, não o
+//     da venda — fica fora desta tabela.
+//     https://www.legisweb.com.br/legislacao/?id=380821
 // Fora do prazo a SEFAZ recusa com cStat 501 ("Prazo de cancelamento superior
 // ao previsto na Legislação"). O caminho é a NF-e de devolução (modelo 55,
 // finalidade 4), que já existe (services/trocaDevolucao55.js).
@@ -44,6 +51,7 @@ const PRAZO_NFCE_POR_UF = Object.freeze({
   AP: Object.freeze({ minutos: 30, fonte: 'Ajuste SINIEF 19/2016, cláusula décima quinta (redação do Ajuste SINIEF 7/2018)' }),
   RJ: Object.freeze({ minutos: 30, fonte: 'Resolução SEFAZ 720/2014, Parte II, Anexo II-A (redação da Resolução SEFAZ 349/2018)' }),
   MG: Object.freeze({ minutos: 30, fonte: 'RICMS/MG 2023, Anexo V, Parte 1, art. 40 (prazo do Ajuste SINIEF 19/2016)' }),
+  BA: Object.freeze({ minutos: 30, fonte: 'RICMS-BA (Decreto 13.780/2012), art. 107-H, I (incluído pelo Decreto 19.142/2019)' }),
 });
 
 // Código IBGE da UF (os dois primeiros dígitos da chave de acesso).

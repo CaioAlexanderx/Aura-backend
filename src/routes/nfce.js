@@ -61,8 +61,8 @@ const { buildDanfeNfceHtml }       = require('../utils/buildDanfeNfceHtml');
 const { cnpjRequiredBody }         = require('../services/documentoEmpresa');
 // 06/08/2026 — Nuvem Fiscal não existe mais: precisamos validar, na hora de
 // SALVAR a config (não só na hora de emitir), se a UF da empresa já tem
-// suporte na engine própria — hoje SP, AP (SVRS), MG (08/11/2026) e RJ (SVRS,
-// 11/11/2026). Ver services/sefazSp/endpoints.js.
+// suporte na engine própria — hoje SP, AP (SVRS), MG (08/11/2026), RJ (SVRS,
+// 11/11/2026) e BA (SVRS, 23/11/2026). Ver services/sefazSp/endpoints.js.
 const {
   ENDPOINTS: SEFAZ_SP_ENDPOINTS_65, ufSuportada, mensagemUfNaoSuportada,
 } = require('../services/sefazSp/endpoints');
@@ -92,9 +92,12 @@ const INSTRUCOES_NOTA = {
 // MG = Portal SPED MG "Web Services" (produção) e ACBr [NFCe_MG_P];
 // RJ = ACBr [NFCe_RJ_P] URL-ConsultaNFCe_2.00. Os hosts antigos não eram
 // o portal de consulta (nfce.fazenda.mg.gov.br é o dos webservices).
+// 23/11/2026: BA = urlChave de produção da ENCAT (www.sefaz.ba.gov.br/nfce/consulta),
+// a mesma do XML (services/sefazSp/endpoints.js).
 const CONSULTA_NFCE_URL = {
   SP: 'https://www.nfce.fazenda.sp.gov.br/NFCeConsultaPublica',
   RJ: 'https://www.fazenda.rj.gov.br/nfce/consulta',
+  BA: 'https://www.sefaz.ba.gov.br/nfce/consulta',
   MG: 'https://portalsped.fazenda.mg.gov.br/portalnfce',
   RS: 'https://www.sefaz.rs.gov.br/NFCE/NFCE-COM.aspx',
   PR: 'http://www.fazenda.pr.gov.br/nfce',
@@ -443,7 +446,7 @@ router.post('/config', requireAuth, requireRole('client','analyst','admin'), asy
     // (engine própria) pra uma UF sem endpoints configurados vai estourar só
     // na hora de emitir (erro genérico no meio do fluxo do PDV). Bloqueia
     // aqui, na config, com uma mensagem clara — antes era só SP; hoje
-    // inclui AP (via SVRS) e MG (ver services/sefazSp/endpoints.js).
+    // inclui AP, RJ e BA (via SVRS) e MG (ver services/sefazSp/endpoints.js).
     // 08/11/2026: sem uf no corpo, vale a UF já gravada (o update é parcial).
     if (provider === 'sefaz_sp') {
       let ufEfetiva = uf;
