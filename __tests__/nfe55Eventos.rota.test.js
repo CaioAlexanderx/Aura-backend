@@ -312,3 +312,37 @@ describe('carta de correção 110110', () => {
     expect(state.emissions[EM(1)].metadata.cartas_correcao).toBeUndefined();
   });
 });
+
+// 23/11/2026: loja da BA — cancelamento e carta vão ao NFeRecepcaoEvento4
+// da SEFAZ-BA (o mesmo serviço para os dois eventos), cOrgao 29 da chave.
+describe('eventos da NF-e 55 de loja da BA', () => {
+  const CHAVE_BA = '29' + CHAVE_55.slice(2);
+  const NFE_BA = NFE.replace(CHAVE_55, CHAVE_BA);
+  const URL_BA = 'https://hnfe.sefaz.ba.gov.br/webservices/NFeRecepcaoEvento4/NFeRecepcaoEvento4.asmx';
+  beforeEach(() => {
+    state.config.uf = 'BA';
+    Object.assign(state.emissions[EM(1)], { chave_acesso: CHAVE_BA, xml_signed: NFE_BA });
+    state.resposta = (url, env) => retEnvEvento('135', 'Evento registrado e vinculado a NF-e', {
+      chave: CHAVE_BA, tpEvento: (env.match(/<tpEvento>(\d+)/) || [])[1], seq: (env.match(/<nSeqEvento>(\d+)/) || [])[1],
+    });
+  });
+
+  it('cancelamento 110111 dentro de 24 h vai à SEFAZ-BA com cOrgao 29', async () => {
+    const r = await post(`/nfe55/${EM(1)}/cancelar`, { justificativa: JUST });
+    expect(r.status).toBe(200);
+    expect(state.soap).toHaveLength(1);
+    expect(state.soap[0].url).toBe(URL_BA);
+    expect(state.soap[0].envelope).toContain('<cOrgao>29</cOrgao>');
+    expect(state.soap[0].envelope).toContain('<tpEvento>110111</tpEvento>');
+    expect(state.emissions[EM(1)].status).toBe('cancelada');
+  });
+
+  it('carta de correção 110110 vai ao mesmo serviço de eventos da SEFAZ-BA', async () => {
+    const r = await post(`/nfe55/${EM(1)}/carta-correcao`, { texto: 'Corrigir o complemento do endereco do destinatario para Sala 3' });
+    expect(r.status).toBe(201);
+    expect(state.soap).toHaveLength(1);
+    expect(state.soap[0].url).toBe(URL_BA);
+    expect(state.soap[0].envelope).toContain('<cOrgao>29</cOrgao>');
+    expect(state.soap[0].envelope).toContain('<tpEvento>110110</tpEvento>');
+  });
+});

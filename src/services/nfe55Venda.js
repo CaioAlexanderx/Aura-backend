@@ -16,7 +16,7 @@
 //
 // Regras do v1 (decisões de 14/11):
 //   • só Simples Nacional e MEI (regime normal: recusa gentil);
-//   • UF do emitente: SP; AP/RJ abrem com NFE55_VENDA_UFS=SP,AP,RJ;
+//   • UF do emitente: SP; AP/RJ/BA abrem com NFE55_VENDA_UFS=SP,AP,RJ,BA;
 //   • DIFAL (outra UF + não contribuinte) fora: recusa gentil;
 //   • CFOP pelo destino: 5102/5405 na UF, 6102/6404 fora (taxEngine);
 //   • uma nota de PRODUTOS por venda (NFC-e ou NF-e, nos dois sentidos).
@@ -95,11 +95,45 @@ function ieSpValida(ie) {
   return (s2 % 11) % 10 === n[11];
 }
 
-/** Formato do XSD (2 a 14 dígitos) + DV quando a UF é SP. */
+/**
+ * IE da BA (23/11/2026): 8 ou 9 dígitos, os DOIS últimos verificadores.
+ * Regra do Sintegra (roteiro de crítica da IE, Bahia) e do ACBr
+ * (ACBrValidador.pas, complemento 'BA'):
+ *   • 8 dígitos (antigas): base = 6 primeiros; o MÓDULO sai do 1º dígito;
+ *   • 9 dígitos (desde 2005): base = 7 primeiros; o MÓDULO sai do 2º dígito;
+ *   • dígito de controle em 0,1,2,3,4,5,8 → módulo 10; em 6,7,9 → módulo 11;
+ *   • calcula-se PRIMEIRO o último dígito (pesos 2.. da direita, sobre a
+ *     base) e depois o penúltimo (pesos 2.. sobre a base + o último dígito).
+ *   • módulo 10: DV = (10 − soma % 10) % 10; módulo 11: resto 0 ou 1 → 0,
+ *     senão 11 − resto.
+ * Com 8 dígitos, completar com um zero à esquerda dá a mesma conta da regra
+ * de 9 (é o que o ACBr faz): o zero não pesa e o 2º dígito vira o 1º.
+ */
+function ieBaValida(ie) {
+  let d = onlyDigits(ie);
+  if (d.length === 8) d = '0' + d;
+  if (d.length !== 9) return false;
+  const n = d.split('').map(Number);
+  const mod = '0123458'.includes(d[1]) ? 10 : 11;
+  const dv = (soma) => {
+    if (mod === 10) return (10 - (soma % 10)) % 10;
+    const r = soma % 11;
+    return r < 2 ? 0 : 11 - r;
+  };
+  const base = n.slice(0, 7);
+  const soma2 = base.reduce((s, x, i) => s + x * (8 - i), 0);          // pesos 8..2
+  if (dv(soma2) !== n[8]) return false;
+  const soma1 = base.concat(n[8]).reduce((s, x, i) => s + x * (9 - i), 0); // pesos 9..2
+  return dv(soma1) === n[7];
+}
+
+/** Formato do XSD (2 a 14 dígitos) + DV quando a UF é SP ou BA. */
 function ieValida(ie, uf) {
   const d = onlyDigits(ie);
   if (d.length < 2 || d.length > 14) return false;
-  if (String(uf || '').toUpperCase() === 'SP') return ieSpValida(d);
+  const u = String(uf || '').toUpperCase();
+  if (u === 'SP') return ieSpValida(d);
+  if (u === 'BA') return ieBaValida(d);
   return true;
 }
 
@@ -757,6 +791,6 @@ async function salvarNoCadastro(db, companyId, customerId, dest) {
 module.exports = {
   montarNotaDaVenda, resolverDestinatario, notasDaVenda, nfeDeVendaQueTrava, salvarNoCadastro,
   situacaoDaTrocaPorNfe,
-  motivoCertificado, ufsHabilitadas, mensagemUfNaoHabilitada, ieValida, ieSpValida, ratearFrete,
+  motivoCertificado, ufsHabilitadas, mensagemUfNaoHabilitada, ieValida, ieSpValida, ieBaValida, ratearFrete,
   pagamentoDaNota, STATUS_QUE_TRAVAM, MSG, _resetCaches,
 };
