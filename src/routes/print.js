@@ -41,6 +41,8 @@ const { nomeDaLoja } = require('../utils/nomeDaLoja');
 const { findOwnerScopedCustomer, CUSTOMER_NOT_FOUND_BODY } = require('../utils/customerScope');
 const { qrInlineSvg } = require('../utils/qrInline');
 const { buildServiceOrderHtml } = require('../utils/buildServiceOrderHtml');
+// p-206 (23/11/2026): folha A4 da OS de otica, duas vias iguais.
+const { buildOticaOsHtml } = require('../utils/buildOticaOsHtml');
 // 14/11/2026: nome da cor da variante no cupom (CP2a da revisao de cores).
 const { rotuloDaVariante } = require('../services/nomeDaCor');
 const { buildWarrantyHtml } = require('../utils/buildWarrantyHtml');
@@ -515,6 +517,81 @@ router.get('/receipt/:saleId/a4', requireAuth, async (req, res) => {
 //
 // ?autoprint=1 abre ja no dialogo de impressao.
 // ============================================================
+// p-206: dados da folha da otica. Cada leitura extra e best-effort (42P01 /
+// 42703 = deploy parcial): a folha sai sem a linha que faltar, nunca 500.
+async function lerOuVazio(sql, params) {
+  try {
+    const { rows } = await db.query(sql, params);
+    return rows;
+  } catch (e) {
+    if (e.code === '42P01' || e.code === '42703') return [];
+    throw e;
+  }
+}
+
+async function folhaDaOtica(req, companyId, os) {
+  const [companyRows, brandRows, customerRows, parcelas, sinalRows] = await Promise.all([
+    // Armadilha #2: companies nao tem coluna `name`.
+    db.query(
+      `SELECT trade_name, legal_name, cnpj, phone, logo_url, otica_settings,
+              address_street, address_number, address_district,
+              address_city, address_state, address_zip
+         FROM companies WHERE id = $1`,
+      [companyId]
+    ).then((r) => r.rows).catch((e) => {
+      if (e.code !== '42703') throw e;
+      return db.query(
+        `SELECT trade_name, legal_name, cnpj, phone, logo_url,
+                address_street, address_number, address_district,
+                address_city, address_state, address_zip
+           FROM companies WHERE id = $1`,
+        [companyId]
+      ).then((r) => r.rows);
+    }),
+    lerOuVazio(`SELECT logo_url FROM digital_channel_config WHERE company_id = $1`, [companyId]),
+    // Cliente da OS: CPF e endereco so no papel (dado que a folha precisa).
+    lerOuVazio(
+      `SELECT cpf_cnpj, phone, street, number, complement, neighborhood, city, state, zip_code
+         FROM customers WHERE id = $1`,
+      [os.customer_id]
+    ),
+    os.deposit_sale_id
+      ? lerOuVazio(
+        `SELECT amount_due, covered_amount, status, due_date
+           FROM credit_installments
+          WHERE company_id = $1 AND sale_id = $2
+          ORDER BY installment_number, due_date`,
+        [companyId, os.deposit_sale_id]
+      )
+      : Promise.resolve([]),
+    // A forma do sinal: o PRIMEIRO pagamento da venda do sinal. Os seguintes
+    // sao o saldo recebido depois (p-208), que nao e sinal.
+    os.deposit_sale_id
+      ? lerOuVazio(
+        `SELECT method FROM sale_payments WHERE sale_id = $1 AND company_id = $2
+          ORDER BY created_at ASC LIMIT 1`,
+        [os.deposit_sale_id, companyId]
+      )
+      : Promise.resolve([]),
+  ]);
+  const company = companyRows[0] || {};
+  const settings = (company.otica_settings && typeof company.otica_settings === 'object') ? company.otica_settings : {};
+
+  const umaVia = String(req.query.vias || '') === '1';
+  const via = req.query.via === 'laboratorio' ? 'laboratorio' : 'cliente';
+  return buildOticaOsHtml({
+    os,
+    company,
+    brand: brandRows[0] || {},
+    customer: customerRows[0] || {},
+    settings,
+    parcelas,
+    formaDoSinal: (sinalRows[0] && sinalRows[0].method) || null,
+    vias: umaVia ? [via] : ['laboratorio', 'cliente'],
+    autoprint: req.query.autoprint === '1',
+  });
+}
+
 router.get('/os/:osId', requireAuth, async (req, res) => {
   try {
     const companyId = req.params.id;
@@ -559,6 +636,14 @@ router.get('/os/:osId', requireAuth, async (req, res) => {
       ));
     }
     if (!osRows.length) return res.status(404).json({ error: 'Ordem de servico nao encontrada' });
+
+    // p-206 (23/11/2026): a OS de otica sai na folha A4 propria, em duas vias
+    // iguais (laboratorio e cliente). ?vias=1&via=cliente|laboratorio imprime
+    // uma so. A OS de reparo segue abaixo, sem nenhuma mudanca.
+    if (osRows[0].kind === 'otica') {
+      res.setHeader('Content-Type', 'text/html; charset=utf-8');
+      return res.send(await folhaDaOtica(req, companyId, osRows[0]));
+    }
 
     // Saldo do sinal (otica): soma das parcelas em aberto da venda do sinal.
     // Best-effort — sem crediario o documento sai sem a linha de saldo.

@@ -175,6 +175,8 @@ async function hasExchangeCols(client) {
 // 'crediario' fica de fora de proposito -- sinal pago no crediario seria
 // so mais saldo devedor, nao sinal.
 const SIGNAL_METHODS = ['dinheiro', 'pix', 'cartao', 'debito'];
+// p-205: teto das parcelas do saldo da venda com sinal (ver /sale-com-sinal).
+const SALDO_INSTALLMENTS_MAX = 24;
 
 const isValidISODate = (s) => {
   if (!/^\d{4}-\d{2}-\d{2}$/.test(s || '')) return false;
@@ -317,6 +319,9 @@ async function handleSale(req, res, opts = {}) {
   const signalAmount  = opts.signalSale ? parseFloat(req.body?.sinal?.amount ?? 0) : 0;
   const signalMethod  = opts.signalSale ? String(req.body?.sinal?.method || 'dinheiro').toLowerCase() : null;
   const signalDueDate = opts.signalSale ? (req.body?.saldo_due_date || null) : null;
+  // p-205 (23/11/2026): o saldo do sinal pode virar N parcelas. 1 (o padrao)
+  // e exatamente a venda com sinal de sempre; o /sale-com-sinal ja validou.
+  const signalInstallments = opts.signalSale ? (parseInt(req.body?.saldo_installments, 10) || 1) : 1;
 
   // F1 (29/05/2026): 422 quando crediario sem customer_id
   // Nao pode virar venda a vista silenciosa (bug #4 do plano).
@@ -600,6 +605,15 @@ async function handleSale(req, res, opts = {}) {
         });
       }
       creditAmount = parseFloat((totalAmount - signalAmount).toFixed(2));
+      // p-205: parcela de zero centavo nunca quitaria (o FIFO pula parcela sem
+      // valor) e ficaria "em aberto" para sempre no carne.
+      if (signalInstallments > 1 && Math.floor((creditAmount / signalInstallments) * 100) < 1) {
+        await client.query('ROLLBACK');
+        return res.status(422).json({
+          error: `O saldo (R$ ${fmt(creditAmount)}) nao da ${signalInstallments} parcelas. Use menos parcelas.`,
+          code: 'SALDO_INSTALLMENTS_INVALIDO',
+        });
+      }
     } else {
       const rawCreditAmount = calcCreditAmount({ payment_method, payments, totalAmount });
       creditAmount = (rawCreditAmount > 0 && customerId) ? rawCreditAmount : 0;
@@ -824,9 +838,14 @@ async function handleSale(req, res, opts = {}) {
         // F2: o saldo do sinal e sempre 1x na data combinada, com juros ZERO
         // explicito -- e reserva, nao financiamento. Sem o 0 explicito o saldo
         // herdaria o juros do crediario da empresa (ver ledger.js).
-        installments: opts.signalSale ? 1 : parseInt(req.body?.installments || 1),
+        // p-205: com saldo_installments > 1 o saldo vira N parcelas, a 1a na
+        // data combinada e as outras de 30 em 30 dias (dias corridos, nao o
+        // periodo do crediario da loja), sempre com juros zero. Com 1, os
+        // parametros sao os de sempre (periodo null: nada muda na gravacao).
+        installments: opts.signalSale ? signalInstallments : parseInt(req.body?.installments || 1),
         firstDueDate: opts.signalSale ? signalDueDate : (req.body?.first_due_date || null),
         interestRate: opts.signalSale ? 0 : undefined,
+        ...(opts.signalSale && signalInstallments > 1 ? { periodUnit: 'day', periodCount: 30 } : {}),
         // Venda com sinal nao e fiado: bloqueio de credito do cliente nao
         // pode derrubar uma venda em que a lojista ja recebeu o sinal.
         enforceCreditBlock: !opts.signalSale,
@@ -1077,6 +1096,8 @@ async function handleSale(req, res, opts = {}) {
         balance_due_date: signalDueDate,
         customer_id:      customerId,
         installment:      creditSaleResult?.schedule?.[0] || null,
+        // p-205: a agenda inteira (1 item quando o saldo e 1x).
+        installments:     creditSaleResult?.schedule || [],
       } : undefined,
       receipt_url: `/companies/${req.params.id}/print/receipt/${sale.id}`,
       // K3 (18/08/2026): URL de acompanhamento, pronta pro app colar na
@@ -1148,6 +1169,9 @@ router.post('/sale', (req, res) => handleSale(req, res));
 //   items[]         -- igual ao POST /sale
 //   sinal           -- { method: dinheiro|pix|cartao|debito, amount }
 //   saldo_due_date  -- 'YYYY-MM-DD', vencimento do saldo
+//   saldo_installments -- opcional (p-205), 1 a 24; padrao 1. Com N, o saldo
+//                      vira N parcelas: a 1a em saldo_due_date, as outras de
+//                      30 em 30 dias, juros zero.
 //   customer_id     -- opcional; sem ele, find-or-create por
 //   customer        -- { name, phone, cpf_cnpj }
 //   ...demais campos do POST /sale (discount, coupon, seller, notes, sale_date)
@@ -1155,8 +1179,8 @@ router.post('/sale', (req, res) => handleSale(req, res));
 // Numa transacao so (a do handleSale):
 //   1. sales pelo valor CHEIO -- a NFC-e sai aqui, na conclusao
 //   2. sale_payments do sinal na forma escolhida -> entra no caixa hoje
-//   3. createCreditSale do saldo: 1x, na data combinada, juros 0
-//      -> debit + A Receber pending + parcela 1/1 (regua de cobranca e Pix)
+//   3. createCreditSale do saldo: 1x (ou N, p-205), na data combinada, juros 0
+//      -> debit + A Receber pending + parcela(s) 1/N (regua de cobranca e Pix)
 //
 // O estorno do sinal sai pelo cancelamento na aba Vendas, que ja apaga a
 // transacao pdv-sale-<id>, os sale_payments e reverte o crediario.
@@ -1188,6 +1212,22 @@ router.post('/sale-com-sinal', async (req, res) => {
     });
   }
 
+  // p-205 (23/11/2026, OS de otica): `saldo_installments` divide o saldo em N
+  // parcelas no crediario (1a na data combinada, as outras de 30 em 30 dias).
+  // Ausente = 1, a venda com sinal de sempre. Inteiro de 1 a 24: acima disso
+  // nao e "saldo do oculos", e financiamento, e vai pelo crediario normal.
+  let saldoInstallments = 1;
+  if (b.saldo_installments !== undefined && b.saldo_installments !== null && b.saldo_installments !== '') {
+    const n = Number(b.saldo_installments);
+    if (!Number.isInteger(n) || n < 1 || n > SALDO_INSTALLMENTS_MAX) {
+      return res.status(422).json({
+        error: `Parcelas do saldo: informe um numero inteiro de 1 a ${SALDO_INSTALLMENTS_MAX}.`,
+        code: 'SALDO_INSTALLMENTS_INVALIDO',
+      });
+    }
+    saldoInstallments = n;
+  }
+
   // Mesmo idioma do POST /troca -> trocaV2.handle: normaliza o body pro
   // formato que o handleSale ja entende e delega. O sinal vira o UNICO
   // sale_payments; o saldo o handleSale deriva de total - sinal.
@@ -1195,6 +1235,7 @@ router.post('/sale-com-sinal', async (req, res) => {
     ...b,
     sinal: { method, amount },
     saldo_due_date: dueDate,
+    saldo_installments: saldoInstallments,
     payments: [{ method, value: amount }],
     payment_method: b.payment_method || 'sinal',
   };
