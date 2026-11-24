@@ -27,6 +27,12 @@ jest.mock('../src/utils/r2Privado', () => ({
   apagar: jest.fn(async () => ({ ok: true })),
 }));
 
+// 24/11/2026: com o #1100 no main, a receita confere o cliente nas lojas do
+// mesmo dono (utils/ownerScope). Aqui so importa a loja do teste.
+jest.mock('../src/utils/ownerScope', () => ({
+  getOwnerScopedCompanyIds: jest.fn(async (cid) => [cid]),
+}));
+
 const db = require('../src/config/database');
 const r2Privado = require('../src/utils/r2Privado');
 const oticaRouter = require('../src/routes/otica');

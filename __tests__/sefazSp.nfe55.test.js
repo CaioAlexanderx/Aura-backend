@@ -149,7 +149,27 @@ describe('nfe55 — getEndpoints55', () => {
   });
 
   it('UF fora do escopo lança erro pedindo o gateway', () => {
-    expect(() => getEndpoints55('BA', 1)).toThrow(/não suportada/);
+    expect(() => getEndpoints55('PE', 1)).toThrow(/não suportada/);
+  });
+
+  // 23/11/2026: BA autoriza a 55 na própria SEFAZ-BA (ACBr [NFe_BA_P/H]).
+  it('BA: SEFAZ-BA própria (hnfe/nfe.sefaz.ba.gov.br), seis serviços, sem SVRS e sem SOAPAction', () => {
+    const servicos = ['autorizacao', 'retAutorizacao', 'statusServico', 'consultaProtocolo', 'recepcaoEvento', 'inutilizacao'];
+    const h = getEndpoints55('BA', 2);
+    const p = getEndpoints55('ba', 'producao');
+    expect(Object.keys(h).sort()).toEqual([...servicos].sort());
+    expect(Object.keys(p).sort()).toEqual([...servicos].sort());
+    for (const s of servicos) {
+      expect(h[s]).toMatch(/^https:\/\/hnfe\.sefaz\.ba\.gov\.br\/webservices\/NFe\w+4\/NFe\w+4\.asmx$/);
+      expect(p[s]).toBe(h[s].replace('https://hnfe.', 'https://nfe.'));
+      expect(p[s]).not.toContain('svrs');
+    }
+    expect(h.statusServico).toBe('https://hnfe.sefaz.ba.gov.br/webservices/NFeStatusServico4/NFeStatusServico4.asmx');
+    expect(p.recepcaoEvento).toBe('https://nfe.sefaz.ba.gov.br/webservices/NFeRecepcaoEvento4/NFeRecepcaoEvento4.asmx');
+    expect(h.soapAction).toBeUndefined();
+    // SP/AP/RJ intactos
+    expect(getEndpoints55('RJ', 1)).toBe(getEndpoints55('AP', 1));
+    expect(getEndpoints55('SP', 1).statusServico).toBe('https://nfe.fazenda.sp.gov.br/ws/nfestatusservico4.asmx');
   });
 });
 

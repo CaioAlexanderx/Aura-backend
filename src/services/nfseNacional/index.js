@@ -70,6 +70,7 @@ const { conferirNfseComDps } = require('./conferenciaDps');
 const { lerNfse } = require('./nfseParser');
 const { gerarDanfsePdf } = require('./danfseLocal');
 const { pendenciaDaSerieAntesDaPrimeiraNota } = require('./config');
+const municipio = require('./municipio');
 const {
   idDaDpsEmbutida, conferirNotaGravada, podeServirNota, SERVIVEIS, MSG_NOTA_DE_OUTRO_EMISSOR, MSG_NOTA_NAO_CONFERIDA,
 } = require('./notaDaAura');
@@ -839,6 +840,35 @@ function traduzirResultadoTeste({ nota = null, aguardando = false, erro = null, 
         ],
       };
     }
+    if (daPref && daPref.codigo === 'E0039') {
+      // "habilitar, nunca retirar": a loja segue emitindo pela prefeitura e
+      // a Aura acompanha a cidade; nada é desligado nem escondido.
+      return {
+        status: 'rejeitado', passo: 'prefeitura', codigo: 'E0039',
+        titulo: `${Pref} ainda emite NFS-e pelo sistema próprio, não pelo Emissor Nacional.`,
+        mensagem: 'O certificado e os dados da nota estão certos. Fora do MEI e do Simples Nacional, o gov.br só aceita a NFS-e '
+          + 'das cidades que já usam o Emissor Nacional, e a sua ainda não usa. Não é erro seu nem da Aura.',
+        caminho: [
+          'Enquanto isso, continue emitindo a NFS-e no site da prefeitura, como hoje. A venda na Aura segue normal.',
+          'Se a empresa é MEI ou ME/EPP do Simples Nacional, confira a Situação perante o Simples Nacional no passo Dados da nota: '
+            + 'desde 01/11/2026 a NFS-e dessas empresas sai pelo Emissor Nacional em qualquer cidade.',
+          'Chame o suporte Aura: a gente acompanha a sua cidade com você e avisa assim que der para emitir por aqui.',
+        ],
+      };
+    }
+    if (cods.some((c) => c.codigo === 'E0160')) {
+      return {
+        status: 'rejeitado', passo: 'dados_fiscais', codigo: 'E0160',
+        titulo: 'A Situação perante o Simples Nacional não bate com o cadastro da Receita.',
+        mensagem: 'O gov.br confere, no mês da nota, se a empresa é MEI, ME/EPP do Simples Nacional ou não optante, '
+          + 'e a opção escolhida aqui é diferente do cadastro do Simples Nacional. Nenhuma nota de verdade saiu.',
+        caminho: [
+          'Confira com o seu contador a situação da empresa no Simples Nacional neste mês.',
+          'Ajuste a Situação perante o Simples Nacional no passo Dados da nota.',
+          'Emita a nota de teste de novo.',
+        ],
+      };
+    }
     const primeiro = cods[0] || null;
     return {
       status: 'rejeitado', passo: 'teste', codigo: primeiro ? primeiro.codigo : null,
@@ -958,8 +988,51 @@ async function avaliarLigar(db, companyId, configFinal) {
   return { ok: motivos.length === 0, motivos, passos: av.passos };
 }
 
-/** Situação da configuração (sem segredo) para a tela/GET /config. */
-async function situacaoConfig(db, companyId) {
+// 23/11/2026 (lojas da Bahia): a sugestão do município e da situação no
+// Simples não depende mais de companies.ibge_code — ver ./municipio.js.
+// Prazo total da resolução na abertura da tela; o que não chegar a tempo
+// segue em segundo plano e enche o cache para a próxima abertura.
+const PRAZO_SUGESTAO_MS = 6000;
+
+function depsPadraoDoMunicipio() {
+  // carregado só aqui: o lookup da Receita puxa https e o Redis opcional
+  const { lookupCNPJ } = require('../cnpj');
+  return { lookupReceita: (cnpj) => lookupCNPJ(cnpj, null) };
+}
+
+/**
+ * Sugestão da tela com o município (IBGE) e a situação no Simples
+ * resolvidos. Só consulta fora (IBGE, ViaCEP, Receita) enquanto a loja
+ * ainda está montando a NFS-e (dados da nota ou nota de teste pendentes);
+ * nunca lança.
+ */
+async function sugestaoResolvida({ config, company, apt, deps }) {
+  const base = sugestaoDaEmpresa(company);
+  const passos = (apt && apt.passos) || {};
+  const montando = !passos.dados_fiscais || passos.dados_fiscais.estado !== 'ok'
+    || !passos.teste || passos.teste.estado !== 'ok';
+  if (!company || !montando) return base;
+  let timer = null;
+  try {
+    const d = deps || depsPadraoDoMunicipio();
+    const resolucao = await Promise.race([
+      municipio.resolverMunicipioERegime(company, d),
+      new Promise((resolve) => { timer = setTimeout(() => resolve(null), d.prazoMs || PRAZO_SUGESTAO_MS); }),
+    ]);
+    return resolucao ? municipio.completarSugestao(base, resolucao, company, config) : base;
+  } catch (e) {
+    console.warn('[nfse nacional] sugestão do município falhou:', e && e.message);
+    return base;
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+/**
+ * Situação da configuração (sem segredo) para a tela/GET /config.
+ * ctx.municipioDeps: dependências da resolução do município (testes).
+ */
+async function situacaoConfig(db, companyId, ctx = {}) {
   const { config, company, certInfo } = await repo.carregarContexto(db, companyId);
   const apt = avaliarAptidao({ config, company, certInfo, producaoLiberada: producaoHabilitada() });
   return {
@@ -967,7 +1040,7 @@ async function situacaoConfig(db, companyId) {
     ligado: nacionalHabilitado(),
     ambiente: getEndpoints(config && config.ambiente).ambiente,
     certificado: certInfo ? { subject_cn: certInfo.subject_cn, not_after: certInfo.not_after } : null,
-    sugestao: sugestaoDaEmpresa(company),
+    sugestao: await sugestaoResolvida({ config, company, apt, deps: ctx.municipioDeps }),
     serie_teste: SERIE_TESTE,
   };
 }

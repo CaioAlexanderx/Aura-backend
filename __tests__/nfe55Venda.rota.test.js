@@ -51,6 +51,7 @@ const VIACEP = {
   12245000: { ibge: '3549904', municipio: 'Sao Jose dos Campos', uf: 'SP', logradouro: 'Avenida Central', bairro: 'Jardim Exemplo', cep: '12245000' },
   30110000: { ibge: '3106200', municipio: 'Belo Horizonte', uf: 'MG', logradouro: 'Rua Dois', bairro: 'Centro', cep: '30110000' },
   12327000: { ibge: '3524402', municipio: 'Jacarei', uf: 'SP', logradouro: '', bairro: '', cep: '12327000' },
+  45000000: { ibge: '2933307', municipio: 'Vitoria da Conquista', uf: 'BA', logradouro: 'Praca Exemplo', bairro: 'Centro', cep: '45000000' },
 };
 
 let state;
@@ -782,5 +783,95 @@ describe('Trocar por NF-e: GET /venda/:saleId/trocar-nfce e o caminho inteiro', 
     });
     const r = await situacao(V_OUTRA_LOJA);
     expect(r.body).toMatchObject({ situacao: 'sem_nfce', nfce: null });
+  });
+});
+
+// ── BA (23/11/2026): SEFAZ-BA própria, cUF 29, IE da BA com DV ──
+describe('NF-e 55 de venda numa loja da BA', () => {
+  // Loja fictícia em Vitória da Conquista (IBGE 2933307); IE do exemplo
+  // público do Sintegra (1000003-06).
+  function lojaNaBahia(taxRegime = 'simples_nacional') {
+    Object.assign(state.company, {
+      address_street: 'Praca Exemplo', address_number: '10', address_neighborhood: 'Centro',
+      address_city: 'Vitoria da Conquista', address_state: 'BA', address_zip: '45000000',
+      inscricao_estadual: '100000306', ibge_code: '2933307', tax_regime: taxRegime,
+    });
+    Object.assign(state.config, { uf: 'BA', inscricao_estadual: '100000306' });
+  }
+  const clienteBaiano = { documento: '11444777000161', nome: 'Construtora Exemplo Ltda', ie: '12345663',
+    endereco: { cep: '45000000', logradouro: 'Praca Exemplo', numero: '20', bairro: 'Centro',
+      municipio: 'Vitoria da Conquista', uf: 'BA', codigo_municipio_ibge: '2933307' } };
+
+  it('fica fechada até NFE55_VENDA_UFS ter BA (habilitar é só a variável)', async () => {
+    lojaNaBahia();
+    process.env.NFE55_VENDA_UFS = 'SP,RJ';
+    const r = await emitir(V_OK);
+    expect(r.status).toBe(422);
+    expect(r.body.code).toBe('NFE55_UF_NAO_HABILITADA');
+    expect(r.body.error).toContain('BA');
+    expect(state.reservas).toBe(0);
+    expect(ctx.soap.autorizar).not.toHaveBeenCalled();
+  });
+
+  it('Simples (CRT 1), cliente da BA: hnfe.sefaz.ba.gov.br, cUF 29, 5102, IE da BA conferida', async () => {
+    lojaNaBahia('simples_nacional');
+    process.env.NFE55_VENDA_UFS = 'SP,RJ,BA';
+    ctx.soap.autorizar.mockImplementation(async ({ signedNfeXml }) => AUTORIZADO(signedNfeXml));
+    const r = await emitir(V_OK, { destinatario: clienteBaiano });
+    expect(r.status).toBe(201);
+    const { signedNfeXml: xml, endpoints, tpAmb } = ctx.soap.autorizar.mock.calls[0][0];
+    expect(tpAmb).toBe(2);
+    expect(endpoints.autorizacao).toBe('https://hnfe.sefaz.ba.gov.br/webservices/NFeAutorizacao4/NFeAutorizacao4.asmx');
+    expect(endpoints.soapAction).toBeUndefined();
+    expect(chaveDoXml(xml).slice(0, 2)).toBe('29');
+    expect(xml).toContain('<cUF>29</cUF>');
+    expect(xml).toContain('<cMunFG>2933307</cMunFG>');
+    expect(xml).toContain('<CRT>1</CRT>');
+    expect(xml).toContain('<IE>100000306</IE>');
+    expect(xml).toContain('<IE>12345663</IE>');
+    expect(xml).toContain('<idDest>1</idDest>');
+    expect(xml).toContain('<CFOP>5102</CFOP>');
+    expect(xml).toContain('<CFOP>5405</CFOP>');
+    expect(xml).toContain('optante pelo Simples Nacional');
+    expect(nfeRows()[0]).toMatchObject({ status: 'autorizada', serie: 2 });
+  });
+
+  it('Simples (CRT 1) da BA para cliente de SP: interestadual 6102 (contribuinte)', async () => {
+    lojaNaBahia('simples_nacional');
+    process.env.NFE55_VENDA_UFS = 'SP,BA';
+    const r = await previa(V_OK);
+    expect(r.body.bloqueio).toBeNull();
+    expect(r.body.operacao).toMatchObject({ uf_emitente: 'BA', uf_destino: 'SP', id_dest: 2 });
+    expect(r.body.itens.map((i) => i.cfop)).toEqual(['6102', '6404']);
+  });
+
+  it('IE de cliente da BA com dígito errado vira faltante "invalido", sem reservar número', async () => {
+    lojaNaBahia();
+    process.env.NFE55_VENDA_UFS = 'SP,RJ,BA';
+    const r = await emitir(V_OK, { destinatario: { ...clienteBaiano, ie: '12345664' } });
+    expect(r.status).toBe(422);
+    expect(r.body.faltantes).toEqual([expect.objectContaining({ campo: 'destinatario.ie', tipo: 'invalido' })]);
+    expect(state.reservas).toBe(0);
+  });
+
+  it('MEI da BA sai com CRT 4 e o texto do SIMEI (mesma engine)', async () => {
+    lojaNaBahia('mei');
+    process.env.NFE55_VENDA_UFS = 'BA';
+    ctx.soap.autorizar.mockImplementation(async ({ signedNfeXml }) => AUTORIZADO(signedNfeXml));
+    const r = await emitir(V_OK, { destinatario: clienteBaiano });
+    expect(r.status).toBe(201);
+    const xml = ctx.soap.autorizar.mock.calls[0][0].signedNfeXml;
+    expect(xml).toContain('<CRT>4</CRT>');
+    expect(xml).toContain('(SIMEI)');
+  });
+
+  it('loja da BA sem IBGE no cadastro: recusa gentil antes de reservar número', async () => {
+    lojaNaBahia();
+    state.company.ibge_code = null;
+    process.env.NFE55_VENDA_UFS = 'SP,RJ,BA';
+    const r = await emitir(V_OK, { destinatario: clienteBaiano });
+    expect(r.status).toBe(422);
+    expect(r.body.code).toBe('NFE_EMITENTE_INCOMPLETO');
+    expect(state.reservas).toBe(0);
   });
 });

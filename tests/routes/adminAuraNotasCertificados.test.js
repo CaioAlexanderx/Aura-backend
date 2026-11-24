@@ -267,7 +267,7 @@ describe('GET /admin/aura-notas/:companyId — requisitos', () => {
     expect(nfse.itens.find((i) => i.chave === 'ativa').estado).toBe('falta');
     expect(nfse.apta).toBe(false); // desligada
     expect(r.body.nfse).toMatchObject({ provider: 'nacional', serie: '1', next_dps_number: '1' });
-    expect(r.body.ufs_atendidas).toEqual(expect.arrayContaining(['SP', 'AP', 'MG', 'RJ']));
+    expect(r.body.ufs_atendidas).toEqual(expect.arrayContaining(['SP', 'AP', 'MG', 'RJ', 'BA']));
     expect(JSON.stringify(r.body)).not.toMatch(/SEGREDO|api_key|certificate_pwd|certificate_url|pfx_enc|password_enc/);
   });
 
@@ -394,7 +394,7 @@ describe('services/auraNotas/requisitos', () => {
     expect(req_.ufsAtendidas()).toEqual(Object.keys(ENDPOINTS).sort());
   });
   test('UF fora do mapa vira problema', () => {
-    const r = req_.requisitosNfce({ company: { cnpj: cnpjValido(1), address_state: 'BA' }, nfce: null, certRow: null });
+    const r = req_.requisitosNfce({ company: { cnpj: cnpjValido(1), address_state: 'GO' }, nfce: null, certRow: null });
     expect(r.itens.find((i) => i.chave === 'uf').estado).toBe('problema');
   });
   test('NFS-e completa e ligada fica apta (mesma conta da emissão)', () => {

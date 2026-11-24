@@ -6,7 +6,7 @@
 // referencia e o que so a otica tem.
 //
 // GET    /otica/settings                → {settings}
-// PUT    /otica/settings                → {settings}
+// PUT    /otica/settings                → {settings}  (sale_terms: p-207)
 // GET    /otica/labs                    → {labs}
 // POST   /otica/labs                    → 201 {lab}
 // PATCH  /otica/labs/:labId             → {lab}
@@ -39,6 +39,7 @@ const crypto = require('crypto');
 const router = require('express').Router({ mergeParams: true });
 const db     = require('../config/database');
 const r2Privado = require('../utils/r2Privado');
+const { getOwnerScopedCompanyIds } = require('../utils/ownerScope');
 
 // ─── Gate do modulo ──────────────────────────────────────────
 //
@@ -83,10 +84,31 @@ const OTICA_DEFAULTS = {
   wa_ready_auto: false,
   wa_adaptation_auto: false,
   wa_revision_auto: false,
+  // p-207 (23/11/2026): termos da venda, impressos nas duas vias da OS de
+  // otica. O TEXTO E DA LOJA: o Aura so guarda e imprime o que ela
+  // escreveu (cancelamento, devolucao e garantia dependem de cada loja).
+  // Em branco, a folha sai sem o quadro de termos. Mora no mesmo JSONB
+  // otica_settings (migration 334): nao ha coluna nova.
+  sale_terms: '',
 };
 
 const SETTINGS_INT_KEYS  = ['prescription_validity_months', 'adaptation_warranty_days'];
 const SETTINGS_STR_KEYS  = ['rt_name', 'rt_registry', 'sanitary_license'];
+
+// Termos da venda: texto de varias linhas. Diferente das chaves curtas
+// acima, as quebras de linha ficam (a loja escreve em paragrafos); so o
+// \r\n vira \n, as pontas sao aparadas e 3+ linhas vazias viram uma.
+// Teto de 4000 letras: cabe com folga no quadro da folha A4 (o mockup
+// tem ~600) e nao deixa um colar acidental virar um livro na impressao.
+const SALE_TERMS_MAX = 4000;
+
+function normalizarTermos(raw) {
+  return String(raw == null ? '' : raw)
+    .replace(/\r\n?/g, '\n')
+    .replace(/[ \t]+\n/g, '\n')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+}
 const SETTINGS_BOOL_KEYS = ['wa_ready_auto', 'wa_adaptation_auto', 'wa_revision_auto'];
 
 // {...DEFAULTS, ...salvo}. 42703 (334 pendente) devolve os defaults: a
@@ -177,6 +199,19 @@ router.put('/settings', async function (req, res) {
       return res.status(400).json({ error: `${k} deve ser texto` });
     }
     patch[k] = String(body[k] || '').trim();
+  }
+  if ('sale_terms' in body) {
+    if (body.sale_terms != null && typeof body.sale_terms !== 'string') {
+      return res.status(400).json({ error: 'sale_terms deve ser texto', field: 'sale_terms' });
+    }
+    const termos = normalizarTermos(body.sale_terms);
+    if (termos.length > SALE_TERMS_MAX) {
+      return res.status(400).json({
+        error: `Os termos passaram de ${SALE_TERMS_MAX} letras. Encurte o texto para caber na folha.`,
+        field: 'sale_terms', code: 'TERMOS_LONGOS', max: SALE_TERMS_MAX,
+      });
+    }
+    patch.sale_terms = termos;
   }
   for (const k of SETTINGS_BOOL_KEYS) {
     if (!(k in body)) continue;
@@ -511,11 +546,18 @@ function erroFoto(res, msg) {
   return res.status(400).json({ error: msg, code: 'FOTO_INVALIDA' });
 }
 
+// Cliente: do DONO, como na lista de clientes do app (owner-scope,
+// customers.js). Antes so valia o cliente cadastrado NESTA loja, e numa
+// conta com duas lojas o cliente da outra aparecia na lista mas a receita
+// dava 404 (p-213). A receita continua nascendo nesta loja (company_id); so
+// a checagem do cliente olha as lojas do mesmo dono. Quem mede (employees)
+// segue sendo desta loja.
 async function validarClienteEMedidor(cid, { customer_id, measured_by }) {
   if (customer_id) {
+    const lojasDoDono = await getOwnerScopedCompanyIds(cid);
     const cust = await db.query(
-      'SELECT id FROM customers WHERE id = $1 AND company_id = $2',
-      [customer_id, cid]
+      'SELECT id FROM customers WHERE id = $1 AND company_id = ANY($2)',
+      [customer_id, lojasDoDono]
     );
     if (!cust.rows.length) {
       const err = new Error('Cliente nao encontrado nesta empresa');
