@@ -36,6 +36,8 @@ const {
   assertOticaEnabled, erroOticaDesligada, carregarOticaSettings, OTICA_DEFAULTS, waParam, primeiroNome,
 } = require('./otica');
 const waOutbox = require('../services/waOutbox');
+// 24/11/2026: cliente do dono vale em qualquer loja dele (utils/ownerScope.js).
+const { getOwnerScopedCompanyIds } = require('../utils/ownerScope');
 // 10/11/2026 (migration 438): NFS-e automatica da OS concluida.
 const nfseAutomatica = require('../services/nfseAutomatica');
 
@@ -573,12 +575,20 @@ router.post('/', async function (req, res) {
   try {
     await gateParaKind(cid, kind);
 
-    // Cliente tem que ser DESTA empresa — sem isso, um customer_id de outra
-    // empresa passaria pela FK (que so olha customers.id) e a OS nasceria
-    // apontando pra fora do tenant.
+    // Cliente tem que ser DO DONO desta empresa — sem isso, um customer_id
+    // de outro dono passaria pela FK (que so olha customers.id) e a OS
+    // nasceria apontando pra fora do tenant.
+    //
+    // 24/11/2026: era "desta empresa". Mas a lista de clientes do app e do
+    // DONO (owner-scope, customers.js): numa conta com duas lojas o cliente
+    // cadastrado na outra aparecia na lista e a OS dava 404 "Cliente nao
+    // encontrado nesta empresa", em reparo e em otica. Mesma regra da receita
+    // (Aura-backend#1100). A OS continua nascendo nesta loja (company_id);
+    // so a checagem do cliente olha as lojas do mesmo dono.
+    const lojasDoDono = await getOwnerScopedCompanyIds(cid);
     const cust = await db.query(
-      'SELECT id FROM customers WHERE id = $1 AND company_id = $2',
-      [customer_id, cid]
+      'SELECT id FROM customers WHERE id = $1 AND company_id = ANY($2)',
+      [customer_id, lojasDoDono]
     );
     if (!cust.rows.length) {
       return res.status(404).json({ error: 'Cliente nao encontrado nesta empresa' });
