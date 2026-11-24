@@ -29,6 +29,7 @@
 // ============================================================
 const router = require('express').Router({ mergeParams: true });
 const db     = require('../config/database');
+const { getOwnerScopedCompanyIds } = require('../utils/ownerScope');
 
 // ─── Gate do modulo ──────────────────────────────────────────
 //
@@ -459,11 +460,18 @@ async function carregarReceita(rxId, companyId) {
   return rows[0] || null;
 }
 
+// Cliente: do DONO, como na lista de clientes do app (owner-scope,
+// customers.js). Antes so valia o cliente cadastrado NESTA loja, e numa
+// conta com duas lojas o cliente da outra aparecia na lista mas a receita
+// dava 404 (p-213). A receita continua nascendo nesta loja (company_id); so
+// a checagem do cliente olha as lojas do mesmo dono. Quem mede (employees)
+// segue sendo desta loja.
 async function validarClienteEMedidor(cid, { customer_id, measured_by }) {
   if (customer_id) {
+    const lojasDoDono = await getOwnerScopedCompanyIds(cid);
     const cust = await db.query(
-      'SELECT id FROM customers WHERE id = $1 AND company_id = $2',
-      [customer_id, cid]
+      'SELECT id FROM customers WHERE id = $1 AND company_id = ANY($2)',
+      [customer_id, lojasDoDono]
     );
     if (!cust.rows.length) {
       const err = new Error('Cliente nao encontrado nesta empresa');
