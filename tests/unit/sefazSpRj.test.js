@@ -7,7 +7,7 @@
 //   2. SP, AP e MG NÃO mudaram: objetos de endpoints com o mesmo hash dos de
 //      origin/main (antes desta mudança) e o XML de SP/AP segue no golden
 //      byte a byte de sefazSpMg.test.js.
-//   3. UF ainda sem emissão própria (ex.: BA): erro tipado p/ as rotas e
+//   3. UF ainda sem emissão própria (ex.: GO): erro tipado p/ as rotas e
 //      texto gentil para o lojista.
 // Empresa e documentos FICTÍCIOS.
 // ============================================================
@@ -134,25 +134,25 @@ describe('endpoints — SP, AP e MG idênticos aos de antes', () => {
   }
 });
 
-describe('UF ainda sem emissão própria (ex.: BA)', () => {
+describe('UF ainda sem emissão própria (ex.: GO)', () => {
   test('getEndpoints lança UfNaoSuportadaError com code e uf (detalhe técnico na mensagem)', () => {
     let err;
-    try { getEndpoints('BA', 2); } catch (e) { err = e; }
+    try { getEndpoints('GO', 2); } catch (e) { err = e; }
     expect(err).toBeInstanceOf(UfNaoSuportadaError);
     expect(err.code).toBe('UF_NAO_SUPORTADA');
-    expect(err.uf).toBe('BA');
-    expect(err.message).toMatch(/UF BA não suportada na emissão própria\. UFs disponíveis: .*RJ/);
+    expect(err.uf).toBe('GO');
+    expect(err.message).toMatch(/UF GO não suportada na emissão própria\. UFs disponíveis: .*RJ/);
   });
 
-  test('ufSuportada deriva do mapa de endpoints (SP, AP, MG, RJ)', () => {
-    for (const uf of ['SP', 'AP', 'MG', 'RJ', 'rj', ' mg ']) expect(ufSuportada(uf)).toBe(true);
-    for (const uf of ['BA', 'PR', 'XX']) expect(ufSuportada(uf)).toBe(false);
+  test('ufSuportada deriva do mapa de endpoints (SP, AP, MG, RJ, BA)', () => {
+    for (const uf of ['SP', 'AP', 'MG', 'RJ', 'BA', 'rj', ' mg ', 'ba']) expect(ufSuportada(uf)).toBe(true);
+    for (const uf of ['GO', 'PR', 'XX']) expect(ufSuportada(uf)).toBe(false);
     expect(ufSuportada(null)).toBe(true); // sem UF = SP, como a engine inteira
   });
 
   test('mensagem gentil: cita a UF, não cita SEFAZ-SP nem soa como recusa', () => {
-    const m = mensagemUfNaoSuportada('ba');
-    expect(m).toBe('A emissão de NFC-e para lojas de BA está sendo ligada pela equipe Aura. A venda foi registrada normalmente.');
+    const m = mensagemUfNaoSuportada('go');
+    expect(m).toBe('A emissão de NFC-e para lojas de GO está sendo ligada pela equipe Aura. A venda foi registrada normalmente.');
     expect(m).not.toMatch(/SEFAZ|sefazSp|não suportada|indisponível/i);
     expect(mensagemUfNaoSuportada('')).toMatch(/lojas do seu estado/);
   });
@@ -279,11 +279,11 @@ describe('sefazSp — RJ fim a fim', () => {
     expect(calls[0].envelope).toContain('<cUF>33</cUF>');
   });
 
-  test('loja da BA: a engine lança o erro tipado ANTES de abrir certificado', async () => {
+  test('loja de GO: a engine lança o erro tipado ANTES de abrir certificado', async () => {
     db.query.mockClear();
-    const companyBa = { ...companyRj, address_state: 'BA', ibge_code: '2927408', address_city: 'Salvador' };
-    await expect(sefazSp.emitNfce(companyBa, nfceData, { db, config: { ...CONFIG_RJ, uf: 'BA' } }))
-      .rejects.toMatchObject({ code: 'UF_NAO_SUPORTADA', uf: 'BA' });
+    const companyGo = { ...companyRj, address_state: 'GO', ibge_code: '5208707', address_city: 'Goiânia' };
+    await expect(sefazSp.emitNfce(companyGo, nfceData, { db, config: { ...CONFIG_RJ, uf: 'GO' } }))
+      .rejects.toMatchObject({ code: 'UF_NAO_SUPORTADA', uf: 'GO' });
     expect(db.query).not.toHaveBeenCalled();
   });
 });

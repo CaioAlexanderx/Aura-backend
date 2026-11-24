@@ -616,7 +616,7 @@ router.put('/:companyId/fiscal', async (req, res) => {
 
   // 06/08/2026 — Nuvem Fiscal não existe mais: se o provider vai ficar
   // 'sefaz_sp' (engine própria), a UF final precisa ter endpoints cadastrados
-  // (ver services/sefazSp/endpoints.js — hoje SP, AP via SVRS e MG), senão a
+  // (ver services/sefazSp/endpoints.js — hoje SP, MG e, via SVRS, AP, RJ e BA), senão a
   // emissão real ia estourar depois. Bloqueia aqui, na config.
   if (prov.value === 'sefaz_sp') {
     let effectiveUf = uf.value;
