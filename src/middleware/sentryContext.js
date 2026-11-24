@@ -11,12 +11,20 @@ const SENSITIVE_KEYS = [
   'invite_token', 'reset_token', 'access_token', 'refresh_token',
 ];
 
+// 23/11/2026 (ótica, p-204): chaves curtas demais para busca por pedaço
+// ('rg' casaria com 'charge', 'target'...) entram por nome exato; a receita
+// (od_*/oe_*: grau, eixo, DNP, altura) é dado de saúde e sai inteira.
+const SENSITIVE_EXACT_KEYS = ['rg'];
+const SENSITIVE_PREFIXES = ['od_', 'oe_'];
+
 function maskSensitive(obj) {
   if (!obj || typeof obj !== 'object') return obj;
   return Object.fromEntries(
     Object.entries(obj).map(([k, v]) => {
       const lower = k.toLowerCase();
       if (SENSITIVE_KEYS.some(s => lower.includes(s))) return [k, '***'];
+      if (SENSITIVE_EXACT_KEYS.includes(lower)) return [k, '***'];
+      if (SENSITIVE_PREFIXES.some(p => lower.startsWith(p))) return [k, '***'];
       if (v && typeof v === 'object') return [k, maskSensitive(v)];
       return [k, v];
     })

@@ -60,6 +60,11 @@ const { hasSaleNumberColumn, saleNumberSelect } = require('../utils/saleNumber')
 const { hasSaleHiddenColumn, visibleInListCond } = require('../utils/saleHidden');
 const attribution = require('../services/marketingAttribution');
 const { addressFromRow, isMissingReferenceColumn } = require('../services/customerAddress');
+// 23/11/2026 (p-204): rg/gender/occupation, documento mascarado e o aviso
+// customer_fields -- mesmo contrato do per-company (customers.js).
+const {
+  isMissingOccupationColumn, mascararDocumento, customerFieldsAceitos, ocupacao,
+} = require('../services/customerDadosCompletos');
 const catSql = require('../utils/categoriaDoLancamento');
 const { nomeDaLoja } = require('../utils/nomeDaLoja');
 
@@ -579,6 +584,7 @@ router.get('/customers', async (req, res) => {
       return res.json({
         customers: [], total: 0, limit, offset,
         plan_limit: planLimit, company_count: 0,
+        customer_fields: customerFieldsAceitos(),
       });
     }
 
@@ -610,22 +616,41 @@ router.get('/customers', async (req, res) => {
               total_purchases, total_spent, last_purchase_at, first_purchase_at,
               notes, is_active, created_at, company_id,
               zip_code, street, number, complement, neighborhood, city, state,
-              ${meReferenceColumnAvailable !== false ? 'address_reference' : 'NULL::text AS address_reference'}
+              ${meReferenceColumnAvailable !== false ? 'address_reference' : 'NULL::text AS address_reference'},
+              rg, gender, ${ocupacao.get() !== false ? 'occupation' : 'NULL::text AS occupation'}
          FROM customers ${where}
         ${orderBy}
         LIMIT $${params.length + 1} OFFSET $${params.length + 2}`;
+    // Sem a 433 (address_reference) ou a 463 (occupation), a coluna sai e a
+    // lista segue.
     let dataRes;
-    try {
-      dataRes = await db.query(selectMeCustomers(), [...params, limit, offset]);
-    } catch (e) {
-      if (meReferenceColumnAvailable === false || !isMissingReferenceColumn(e)) throw e;
-      meReferenceColumnAvailable = false;
-      dataRes = await db.query(selectMeCustomers(), [...params, limit, offset]);
+    for (let tentativa = 0; tentativa < 3 && !dataRes; tentativa++) {
+      try {
+        dataRes = await db.query(selectMeCustomers(), [...params, limit, offset]);
+        if (ocupacao.get() === null) ocupacao.set(true);
+      } catch (e) {
+        if (meReferenceColumnAvailable !== false && isMissingReferenceColumn(e)) {
+          meReferenceColumnAvailable = false;
+          continue;
+        }
+        if (ocupacao.get() !== false && isMissingOccupationColumn(e)) {
+          ocupacao.set(false);
+          continue;
+        }
+        throw e;
+      }
     }
+    if (!dataRes) dataRes = await db.query(selectMeCustomers(), [...params, limit, offset]);
 
     const customers = dataRes.rows.map(r => ({
       id: r.id, name: r.name || '', email: r.email || '', phone: r.phone || '',
-      cpf_cnpj: r.cpf_cnpj || '',
+      // 23/11/2026 (p-204): documento mascarado na lista; inteiro no
+      // GET /companies/:id/customers/:cid.
+      cpf_cnpj: mascararDocumento(r.cpf_cnpj),
+      rg: r.rg ? mascararDocumento(r.rg) : null,
+      gender: r.gender || null,
+      occupation: r.occupation || null,
+      docs_masked: true,
       birthday: r.birth_date ? new Date(r.birth_date).toLocaleDateString('pt-BR', { day: '2-digit', month: '2-digit' }) : '',
       birth_date: r.birth_date,
       instagram: r.instagram_handle || '',
@@ -654,6 +679,7 @@ router.get('/customers', async (req, res) => {
       limit, offset,
       plan_limit: planLimit,
       company_count: companies.length,
+      customer_fields: customerFieldsAceitos(),
     });
   } catch (err) {
     console.error('[meAggregates] /customers error:', err.message, err.stack);

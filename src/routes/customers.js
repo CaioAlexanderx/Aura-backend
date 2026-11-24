@@ -55,6 +55,16 @@
 // src/services/customerAddress.js. O cliente e do DONO (owner-scope): o
 // endereco gravado de qualquer loja vale em todas. Sem a 433 aplicada, o
 // address_reference cai fora como o perfil da 341 (ignored_fields).
+//
+// 23/11/2026 (Otica, cadastro completo -- p-204): POST e PATCH aceitam rg,
+// gender e occupation (regras em src/services/customerDadosCompletos.js);
+// occupation e da migration 463 e cai fora como o address_reference
+// (ignored_fields) enquanto ela nao for aplicada. O GET de clientes avisa
+// no topo `customer_fields` com o que o POST/PATCH de fato gravam -- o app
+// so mostra os campos quando o aviso vem. O POST passa a validar cpf_cnpj
+// como o PATCH (digito verificador, so digitos). A LISTA devolve CPF e RG
+// MASCARADOS (com docs_masked: true); o valor inteiro sai so no novo
+// GET /:cid, que a ficha aberta e o formulario de edicao usam.
 // ============================================================
 const router = require('express').Router({ mergeParams: true });
 const db = require('../config/database');
@@ -67,12 +77,50 @@ const { attachProfessionalsToCustomers } = require('../services/matconProfession
 const {
   parseCustomerAddress, hasDeliveryAddress, addressFromRow, isMissingReferenceColumn,
 } = require('../services/customerAddress');
+const {
+  parseDadosCompletos, isMissingOccupationColumn, mascararDocumento, customerFieldsAceitos, ocupacao,
+} = require('../services/customerDadosCompletos');
+
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 // Colunas da migration 341. null = ainda nao sabemos; false = 42703 visto.
 let profileColumnsAvailable = null;
 // Coluna da migration 433 (address_reference). Mesma ideia.
 let referenceColumnAvailable = null;
-function _resetProfileColumnsCache() { profileColumnsAvailable = null; referenceColumnAvailable = null; }
+// Coluna da migration 463 (occupation): cache em customerDadosCompletos.js
+// (ocupacao.get/set), compartilhado com o /me/customers.
+function _resetProfileColumnsCache() {
+  profileColumnsAvailable = null; referenceColumnAvailable = null; ocupacao.reset();
+}
+
+/**
+ * Roda a query e, se faltar uma coluna opcional (433 ou 463), marca o cache
+ * e tenta de novo sem ela. buildSql le os caches na hora de montar o SQL.
+ */
+async function queryComColunasOpcionais(buildSql, params) {
+  for (let tentativa = 0; tentativa < 3; tentativa++) {
+    try {
+      const r = await db.query(buildSql(), params);
+      if (referenceColumnAvailable === null) referenceColumnAvailable = true;
+      if (ocupacao.get() === null) ocupacao.set(true);
+      return r;
+    } catch (e) {
+      if (referenceColumnAvailable !== false && isMissingReferenceColumn(e)) {
+        referenceColumnAvailable = false;
+        continue;
+      }
+      if (ocupacao.get() !== false && isMissingOccupationColumn(e)) {
+        ocupacao.set(false);
+        continue;
+      }
+      throw e;
+    }
+  }
+  return db.query(buildSql(), params);
+}
+
+const colReferencia = (a) => (referenceColumnAvailable !== false ? `${a}address_reference` : 'NULL::text AS address_reference');
+const colOcupacao = (a) => (ocupacao.get() !== false ? `${a}occupation` : 'NULL::text AS occupation');
 
 function getPlanLimit(plan) {
   switch ((plan || '').toLowerCase()) {
@@ -140,6 +188,39 @@ function buildOrderBy(sort, alias) {
   }
 }
 
+/**
+ * Linha do banco -> cliente da API. Lista (docsInteiros=false): CPF/CNPJ e
+ * RG mascarados. Ficha (GET /:cid, docsInteiros=true): valor inteiro.
+ */
+function linhaParaCliente(r, { docsInteiros = false } = {}) {
+  return {
+    id: r.id, name: r.name || '', email: r.email || '', phone: r.phone || '',
+    // 23/11/2026 (p-204): documento mascarado na lista; inteiro no GET /:cid.
+    cpf_cnpj: docsInteiros ? (r.cpf_cnpj || '') : mascararDocumento(r.cpf_cnpj),
+    rg: r.rg ? (docsInteiros ? r.rg : mascararDocumento(r.rg)) : null,
+    gender: r.gender || null,
+    occupation: r.occupation || null,
+    docs_masked: !docsInteiros,
+    birthday: r.birth_date ? new Date(r.birth_date).toLocaleDateString('pt-BR', { day: '2-digit', month: '2-digit' }) : '',
+    birth_date: r.birth_date, instagram: r.instagram_handle || '', instagram_handle: r.instagram_handle || '',
+    total_spent: parseFloat(r.total_spent) || 0, totalSpent: parseFloat(r.total_spent) || 0,
+    visits: parseInt(r.total_purchases) || 0, visit_count: parseInt(r.total_purchases) || 0,
+    last_purchase: r.last_purchase_at,
+    // Alias explicito: o nome da coluna, pro app nao ter que adivinhar
+    // que 'last_purchase' e um timestamp. Aditivo -- last_purchase fica.
+    last_purchase_at: r.last_purchase_at,
+    first_visit: r.first_purchase_at, first_purchase_at: r.first_purchase_at,
+    notes: r.notes || '', is_active: r.is_active !== false, rating: null, created_at: r.created_at,
+    // Multi-CNPJ: empresa onde foi cadastrado (FE mostra badge se owner tem 2+ lojas)
+    company_id: r.company_id,
+    company_name: r.company_trade || r.company_legal || 'Empresa',
+    // Crediario: saldo > 0 = cliente deve. Saldo na empresa onde ele foi cadastrado.
+    credit_balance: parseFloat(r.credit_balance) || 0,
+    // 09/11/2026: endereco para entrega + has_address (selo do Caixa).
+    ...addressFromRow(r),
+  };
+}
+
 // GET / -- list customers (owner-scoped: todas as empresas do owner)
 router.get('/', async (req, res) => {
   const companyId = req.params.id;
@@ -153,7 +234,10 @@ router.get('/', async (req, res) => {
     // MULTICNPJ Onda 2.3: expande pra todas as empresas do owner
     const ownerCompanyIds = await getOwnerScopedCompanyIds(companyId);
     if (ownerCompanyIds.length === 0) {
-      return res.json({ customers: [], total: 0, limit, offset, plan_limit: planLimit });
+      return res.json({
+        customers: [], total: 0, limit, offset, plan_limit: planLimit,
+        customer_fields: customerFieldsAceitos(),
+      });
     }
 
     let where = 'WHERE c.company_id = ANY($1)';
@@ -179,7 +263,8 @@ router.get('/', async (req, res) => {
              c.total_purchases, c.total_spent, c.last_purchase_at, c.first_purchase_at,
              c.notes, c.is_active, c.created_at, c.company_id,
              c.zip_code, c.street, c.number, c.complement, c.neighborhood, c.city, c.state,
-             ${referenceColumnAvailable !== false ? 'c.address_reference' : 'NULL::text AS address_reference'},
+             ${colReferencia('c.')},
+             c.rg, c.gender, ${colOcupacao('c.')},
              comp.trade_name AS company_trade, comp.legal_name AS company_legal,
              ${comCredito ? 'COALESCE(cb.balance, 0)' : '0'} AS credit_balance
         FROM customers c
@@ -191,18 +276,8 @@ router.get('/', async (req, res) => {
        LIMIT $${params.length + 1} OFFSET $${params.length + 2}`;
 
     // Sem a 433, o address_reference sai da lista e ela segue (o resto do
-    // endereco ja existe desde a 001/073).
-    const queryList = async (buildSql) => {
-      try {
-        const r = await db.query(buildSql(), [...params, limit, offset]);
-        if (referenceColumnAvailable === null) referenceColumnAvailable = true;
-        return r;
-      } catch (e) {
-        if (referenceColumnAvailable === false || !isMissingReferenceColumn(e)) throw e;
-        referenceColumnAvailable = false;
-        return db.query(buildSql(), [...params, limit, offset]);
-      }
-    };
+    // endereco ja existe desde a 001/073). Sem a 463, o mesmo com occupation.
+    const queryList = (buildSql) => queryComColunasOpcionais(buildSql, [...params, limit, offset]);
 
     let dataRes;
     try {
@@ -213,27 +288,7 @@ router.get('/', async (req, res) => {
       dataRes = await queryList(() => selectCustomers(false));
     }
 
-    const customers = dataRes.rows.map(r => ({
-      id: r.id, name: r.name || '', email: r.email || '', phone: r.phone || '',
-      cpf_cnpj: r.cpf_cnpj || '',
-      birthday: r.birth_date ? new Date(r.birth_date).toLocaleDateString('pt-BR', { day: '2-digit', month: '2-digit' }) : '',
-      birth_date: r.birth_date, instagram: r.instagram_handle || '', instagram_handle: r.instagram_handle || '',
-      total_spent: parseFloat(r.total_spent) || 0, totalSpent: parseFloat(r.total_spent) || 0,
-      visits: parseInt(r.total_purchases) || 0, visit_count: parseInt(r.total_purchases) || 0,
-      last_purchase: r.last_purchase_at,
-      // Alias explicito: o nome da coluna, pro app nao ter que adivinhar
-      // que 'last_purchase' e um timestamp. Aditivo -- last_purchase fica.
-      last_purchase_at: r.last_purchase_at,
-      first_visit: r.first_purchase_at, first_purchase_at: r.first_purchase_at,
-      notes: r.notes || '', is_active: r.is_active !== false, rating: null, created_at: r.created_at,
-      // Multi-CNPJ: empresa onde foi cadastrado (FE mostra badge se owner tem 2+ lojas)
-      company_id: r.company_id,
-      company_name: r.company_trade || r.company_legal || 'Empresa',
-      // Crediario: saldo > 0 = cliente deve. Saldo na empresa onde ele foi cadastrado.
-      credit_balance: parseFloat(r.credit_balance) || 0,
-      // 09/11/2026: endereco para entrega + has_address (selo do Caixa).
-      ...addressFromRow(r),
-    }));
+    const customers = dataRes.rows.map(r => linhaParaCliente(r));
 
     // 23/09/2026 (Matcon M3): com Matcon + clube do profissional ligados,
     // cada cliente ganha `professional: {id, trade, points_balance,
@@ -246,10 +301,43 @@ router.get('/', async (req, res) => {
       total: parseInt(countRes.rows[0]?.total) || 0,
       limit, offset,
       plan_limit: planLimit,
+      customer_fields: customerFieldsAceitos(),
     });
   } catch (err) {
     console.error('[customers] list error:', err.message);
     res.status(500).json({ error: 'Erro ao listar clientes' });
+  }
+});
+
+// GET /:cid -- a ficha de UM cliente, com CPF/CNPJ e RG inteiros (p-204).
+// Owner-scoped como o PATCH: o cliente cadastrado em outra loja do mesmo
+// dono abre aqui tambem. So uuid: /ranking, /birthdays e /retention (crm.js,
+// retention.js) moram no mesmo prefixo e seguem para os routers deles.
+router.get('/:cid', async (req, res, next) => {
+  const { id: companyId, cid } = req.params;
+  if (!UUID_RE.test(String(cid || ''))) return next();
+  try {
+    const ownerCompanyIds = await getOwnerScopedCompanyIds(companyId);
+    const sql = () => `
+      SELECT c.id, c.name, c.cpf_cnpj, c.email, c.phone, c.birth_date, c.instagram_handle,
+             c.total_purchases, c.total_spent, c.last_purchase_at, c.first_purchase_at,
+             c.notes, c.is_active, c.created_at, c.company_id,
+             c.zip_code, c.street, c.number, c.complement, c.neighborhood, c.city, c.state,
+             ${colReferencia('c.')},
+             c.rg, c.gender, ${colOcupacao('c.')},
+             comp.trade_name AS company_trade, comp.legal_name AS company_legal
+        FROM customers c
+        JOIN companies comp ON comp.id = c.company_id
+       WHERE c.id = $1 AND c.company_id = ANY($2)`;
+    const { rows } = await queryComColunasOpcionais(sql, [cid, ownerCompanyIds]);
+    if (!rows.length) return res.status(404).json({ error: 'Cliente nao encontrado' });
+    // credit_balance fica de fora da ficha: o saldo tem rota propria (credito).
+    const customer = linhaParaCliente(rows[0], { docsInteiros: true });
+    delete customer.credit_balance;
+    res.json({ customer, customer_fields: customerFieldsAceitos() });
+  } catch (err) {
+    console.error('[customers] get error:', err.message);
+    res.status(500).json({ error: 'Erro ao carregar cliente' });
   }
 });
 
@@ -269,6 +357,14 @@ router.post('/', async (req, res) => {
   // Endereco: tudo opcional; se vier, CEP com 8 digitos e UF com 2 letras.
   const addr = parseCustomerAddress(req.body);
   if (!addr.ok) return res.status(400).json({ error: addr.error, field: addr.field });
+  // 23/11/2026 (p-204): CPF validado como no PATCH (digito verificador, so
+  // digitos). Antes ia cru para o banco -- importacao e outros clientes da
+  // API gravavam qualquer coisa.
+  const doc = parseCpfCnpjInput(cpf_cnpj);
+  if (!doc.ok) return res.status(400).json({ error: doc.error, field: 'cpf_cnpj' });
+  // RG, sexo e profissao (cadastro completo da otica). Ausente nao grava.
+  const extras = parseDadosCompletos(req.body);
+  if (!extras.ok) return res.status(400).json({ error: extras.error, field: extras.field });
 
   // MULTICNPJ Onda 2.3: plan limit conta TODOS os clientes do owner,
   // alinhado com a decisao de lista unica.
@@ -299,25 +395,33 @@ router.post('/', async (req, res) => {
     const base = [
       ['company_id', companyId], ['name', String(name).trim()], ['email', email || null],
       ['phone', phone || null], ['notes', notes || null], ['birth_date', finalBirthDate],
-      ['instagram_handle', finalInstagram], ['cpf_cnpj', cpf_cnpj || null],
+      ['instagram_handle', finalInstagram], ['cpf_cnpj', doc.value],
     ];
+    for (const k of ['rg', 'gender']) {
+      if (k in extras.values) base.push([k, extras.values[k]]);
+    }
+    const pedeOcupacao = 'occupation' in extras.values;
     const addrCols = Object.entries(addr.values);
     const pedeReferencia = addrCols.some(([k]) => k === 'address_reference');
     const ignoredFields = [];
     let withProfile = profileColumnsAvailable !== false;
     let withRef = referenceColumnAvailable !== false;
     if (pedeReferencia && !withRef) ignoredFields.push('address_reference');
+    let withOcc = ocupacao.get() !== false;
+    if (pedeOcupacao && !withOcc) ignoredFields.push('occupation');
 
-    // Ate 3 tentativas: sem a 433 cai o address_reference; sem a 341 cai o
-    // phone_e164 (qualquer outro 42703, como era antes).
+    // Ate 4 tentativas: sem a 433 cai o address_reference; sem a 463 cai o
+    // occupation; sem a 341 cai o phone_e164 (qualquer outro 42703, como
+    // era antes).
     let result;
-    for (let tentativa = 0; tentativa < 3 && !result; tentativa++) {
+    for (let tentativa = 0; tentativa < 4 && !result; tentativa++) {
       const cols = [...base];
       if (withProfile) cols.push(['phone_e164', toPhoneE164BR(phone)]);
       for (const [k, v] of addrCols) {
         if (k === 'address_reference' && !withRef) continue;
         cols.push([k, v]);
       }
+      if (pedeOcupacao && withOcc) cols.push(['occupation', extras.values.occupation]);
       try {
         result = await db.query(
           `INSERT INTO customers (${cols.map(c => c[0]).join(', ')})
@@ -327,12 +431,19 @@ router.post('/', async (req, res) => {
         );
         if (withProfile) profileColumnsAvailable = true;
         if (withRef && pedeReferencia) referenceColumnAvailable = true;
+        if (withOcc && pedeOcupacao) ocupacao.set(true);
       } catch (e) {
         if (e.code !== '42703') throw e;
         if (withRef && pedeReferencia && isMissingReferenceColumn(e)) {
           withRef = false;
           referenceColumnAvailable = false; // migration 433 ainda nao aplicada
           ignoredFields.push('address_reference');
+          continue;
+        }
+        if (withOcc && pedeOcupacao && isMissingOccupationColumn(e)) {
+          withOcc = false;
+          ocupacao.set(false); // migration 463 ainda nao aplicada
+          ignoredFields.push('occupation');
           continue;
         }
         if (withProfile) {
@@ -425,11 +536,17 @@ router.patch('/:cid', async (req, res) => {
   for (const [col, val] of Object.entries(addr.values)) {
     sets.push(col === 'address_reference' ? { col, val, ref: true, field: col } : { col, val });
   }
+  // 23/11/2026 (p-204): RG, sexo e profissao. Ausente nao mexe; '' apaga.
+  const extras = parseDadosCompletos(body);
+  if (!extras.ok) return res.status(400).json({ error: extras.error, field: extras.field });
+  for (const [col, val] of Object.entries(extras.values)) {
+    sets.push(col === 'occupation' ? { col, val, occ: true, field: col } : { col, val });
+  }
 
   if (sets.length === 0) return res.status(400).json({ error: 'Nenhum campo para atualizar' });
 
-  const runUpdate = (ownerCompanyIds, withProfile, withRef) => {
-    const active = sets.filter(x => (withProfile || !x.profile) && (withRef || !x.ref));
+  const runUpdate = (ownerCompanyIds, withProfile, withRef, withOcc) => {
+    const active = sets.filter(x => (withProfile || !x.profile) && (withRef || !x.ref) && (withOcc || !x.occ));
     if (!active.length) return null;
     const values = [];
     const parts = active.map((x) => {
@@ -454,18 +571,34 @@ router.patch('/:cid', async (req, res) => {
     const hasRef = sets.some(x => x.ref);
     let withRef = hasRef && referenceColumnAvailable !== false;
     if (hasRef && !withRef) ignoredFields.push('address_reference');
+    // Sem a 463, o occupation cai fora do mesmo jeito.
+    const hasOcc = sets.some(x => x.occ);
+    let withOcc = hasOcc && ocupacao.get() !== false;
+    if (hasOcc && !withOcc) ignoredFields.push('occupation');
     const tryUpdate = async (withProfile) => {
-      try {
-        const r = await runUpdate(ownerCompanyIds, withProfile, withRef);
-        if (withRef) referenceColumnAvailable = true;
-        return r;
-      } catch (e) {
-        if (!withRef || !isMissingReferenceColumn(e)) throw e;
-        withRef = false;
-        referenceColumnAvailable = false; // migration 433 ainda nao aplicada
-        ignoredFields.push('address_reference');
-        return runUpdate(ownerCompanyIds, withProfile, false);
+      for (let tentativa = 0; tentativa < 2; tentativa++) {
+        try {
+          const r = await runUpdate(ownerCompanyIds, withProfile, withRef, withOcc);
+          if (withRef) referenceColumnAvailable = true;
+          if (withOcc) ocupacao.set(true);
+          return r;
+        } catch (e) {
+          if (withRef && isMissingReferenceColumn(e)) {
+            withRef = false;
+            referenceColumnAvailable = false; // migration 433 ainda nao aplicada
+            ignoredFields.push('address_reference');
+            continue;
+          }
+          if (withOcc && isMissingOccupationColumn(e)) {
+            withOcc = false;
+            ocupacao.set(false); // migration 463 ainda nao aplicada
+            ignoredFields.push('occupation');
+            continue;
+          }
+          throw e;
+        }
       }
+      return runUpdate(ownerCompanyIds, withProfile, withRef, withOcc);
     };
     let result = null;
     if (hasProfile && profileColumnsAvailable !== false) {
