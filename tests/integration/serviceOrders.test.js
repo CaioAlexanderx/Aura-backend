@@ -118,6 +118,7 @@ describe('POST /service-orders — abertura', () => {
     // A FK só olha customers.id — sem este SELECT a OS nasceria apontando
     // pra fora do tenant.
     comAcesso();
+    db.query.mockResolvedValueOnce({ rows: [{ id: cid }] });     // lojas do dono
     db.query.mockResolvedValueOnce({ rows: [] });
 
     const res = await request(app).post(base).set(auth)
@@ -129,6 +130,7 @@ describe('POST /service-orders — abertura', () => {
 
   test('recusa técnico de OUTRA empresa', async () => {
     comAcesso();
+    db.query.mockResolvedValueOnce({ rows: [{ id: cid }] });    // lojas do dono
     db.query.mockResolvedValueOnce({ rows: [{ id: custId }] }); // cliente ok
     db.query.mockResolvedValueOnce({ rows: [] });               // técnico não
 
@@ -154,6 +156,7 @@ describe('POST /service-orders — abertura', () => {
     db.connect.mockReturnValue(client);
 
     comAcesso();
+    db.query.mockResolvedValueOnce({ rows: [{ id: cid }] });     // lojas do dono
     db.query.mockResolvedValueOnce({ rows: [{ id: custId }] });  // cliente ok
     db.query.mockResolvedValueOnce({ rows: [osRow()] });         // carregarOs
     db.query.mockResolvedValueOnce({ rows: [] });                // carregarItens
