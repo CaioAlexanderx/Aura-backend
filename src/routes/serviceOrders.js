@@ -12,6 +12,8 @@
 // POST   /service-orders/:osId/status                          → {order}
 // POST   /service-orders/:osId/lab                             → {order}   (so kind='otica')
 // POST   /service-orders/:osId/notify-ready                    → {queued, skip_reason, track_url, wa_link}
+// GET    /service-orders/otica-no-caixa?customer_id=           → {orders}  (p-208, faixa do Caixa)
+// POST   /service-orders/:osId/receber-saldo                   → {order, paid, remaining, ...} (p-208)
 // DELETE /service-orders/:osId                                 → {deleted:true}
 //
 // A OS NASCE ANTES DA VENDA (decisao de produto, 31/08/2026): ela e aberta na
@@ -36,6 +38,8 @@ const {
   assertOticaEnabled, erroOticaDesligada, carregarOticaSettings, OTICA_DEFAULTS, waParam, primeiroNome,
 } = require('./otica');
 const waOutbox = require('../services/waOutbox');
+// p-208 (23/11/2026): o saldo da OS de otica e quitado no razao do crediario.
+const creditLedger = require('../services/creditLedger');
 // 24/11/2026: cliente do dono vale em qualquer loja dele (utils/ownerScope.js).
 const { getOwnerScopedCompanyIds } = require('../utils/ownerScope');
 // 10/11/2026 (migration 438): NFS-e automatica da OS concluida.
@@ -153,6 +157,11 @@ const LAB_STATUS_PRONTA_OK = ['recebida', 'em_montagem'];
 // a opcao e o backend recusava a OS inteira).
 const USOS = ['longe', 'perto', 'multifocal', 'bifocal', 'sol'];
 
+// p-205: 'par' (as duas lentes) ou 'unidade' (uma lente so). O que o
+// laboratorio faz: so a lente, so a montagem, ou as duas.
+const QUANTIDADES = ['par', 'unidade'];
+const TIPOS_DE_SERVICO = ['lente', 'montagem', 'lente_montagem'];
+
 // Shape minimo do snapshot `optical`. Nao valida o grau em si (isso e a
 // receita, em otica.js): aqui so garante que a OS nasceu com o que a
 // montagem precisa — receita com os dois olhos, lente e armacao.
@@ -179,6 +188,14 @@ function validarOptical(optical) {
     if (!Number.isInteger(n) || n < 0) {
       return { erro: 'optical.adaptation_warranty_days deve ser inteiro >= 0' };
     }
+  }
+  // p-205 (23/11/2026): quantidade e tipo de servico. Opcionais: a OS que
+  // nao manda os dois continua exatamente como era (e a folha nao marca nada).
+  if (optical.quantity != null && !QUANTIDADES.includes(optical.quantity)) {
+    return { erro: `optical.quantity deve ser um de: ${QUANTIDADES.join(', ')}`, code: 'QUANTIDADE_INVALIDA' };
+  }
+  if (optical.service_type != null && !TIPOS_DE_SERVICO.includes(optical.service_type)) {
+    return { erro: `optical.service_type deve ser um de: ${TIPOS_DE_SERVICO.join(', ')}`, code: 'SERVICO_INVALIDO' };
   }
   return null;
 }
@@ -711,6 +728,84 @@ router.post('/', async function (req, res) {
   }
 });
 
+// ─── GET /service-orders/otica-no-caixa?customer_id= ─────────
+// p-208 (23/11/2026): a faixa "Óculos deste cliente" do Caixa. OS de otica
+// do cliente que pedem uma acao no balcao: pronta para retirada OU com saldo
+// em aberto na venda do sinal. Sem gate (leitura, ver assertOsEnabled).
+//
+// Fica antes de GET /:osId de proposito: senao o Express leria
+// "otica-no-caixa" como um osId.
+//
+// O que NAO vai aqui: a receita (grau) e o CPF. A faixa do Caixa nao precisa
+// deles, e a regra da otica e que dado de saude so sai na tela da OS e no
+// papel. Lente e armacao vao, para o balconista reconhecer o oculos.
+//
+// Multi-CNPJ: e por empresa (so.company_id), como toda OS. A OS aberta na
+// outra loja do grupo aparece no Caixa DAQUELA loja: e la que esta a venda
+// do sinal e o saldo dela.
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+router.get('/otica-no-caixa', async function (req, res) {
+  const cid = req.params.id;
+  const customerId = String(req.query.customer_id || '');
+  if (!UUID_RE.test(customerId)) {
+    return res.status(400).json({ error: 'customer_id obrigatorio' });
+  }
+  try {
+    const { rows } = await db.query(
+      `SELECT so.id, so.os_number, so.status, so.lab_status, so.promised_at,
+              so.estimated_amount, so.deposit_sale_id, so.sale_id, so.created_at,
+              so.optical->'lens'  AS lens,
+              so.optical->'frame' AS frame,
+              so.optical->>'use'  AS use,
+              so.optical->>'quantity'     AS quantity,
+              so.optical->>'service_type' AS service_type,
+              ds.status       AS deposit_sale_status,
+              ds.total_amount AS deposit_sale_total,
+              COALESCE(bal.open_amount, 0) AS open_amount,
+              COALESCE(bal.open_count, 0)  AS open_installments,
+              COALESCE(bal.total_count, 0) AS total_installments,
+              bal.next_due_date
+         FROM service_orders so
+         LEFT JOIN sales ds ON ds.id = so.deposit_sale_id
+         LEFT JOIN LATERAL (
+           SELECT ROUND(SUM(CASE WHEN ci.status NOT IN ('paid', 'cancelled')
+                                 THEN GREATEST(ci.amount_due - COALESCE(ci.covered_amount, 0), 0)
+                                 ELSE 0 END)::numeric, 2) AS open_amount,
+                  COUNT(*) FILTER (WHERE ci.status NOT IN ('paid', 'cancelled')
+                                     AND ci.amount_due - COALESCE(ci.covered_amount, 0) > 0.005) AS open_count,
+                  COUNT(*) FILTER (WHERE ci.status <> 'cancelled') AS total_count,
+                  MIN(ci.due_date) FILTER (WHERE ci.status NOT IN ('paid', 'cancelled')
+                                             AND ci.amount_due - COALESCE(ci.covered_amount, 0) > 0.005) AS next_due_date
+             FROM credit_installments ci
+            WHERE ci.company_id = so.company_id AND ci.sale_id = so.deposit_sale_id
+         ) bal ON so.deposit_sale_id IS NOT NULL
+        WHERE so.company_id = $1 AND so.customer_id = $2
+          AND so.kind = 'otica' AND so.status <> 'cancelada'
+          AND (so.status = 'pronta' OR COALESCE(bal.open_amount, 0) > 0.005)
+        ORDER BY so.created_at DESC
+        LIMIT 10`,
+      [cid, customerId]
+    );
+    res.json({
+      orders: rows.map((r) => ({
+        ...r,
+        open_amount: Number(r.open_amount) || 0,
+        open_installments: Number(r.open_installments) || 0,
+        total_installments: Number(r.total_installments) || 0,
+        // Sem sinal nao ha venda: o Caixa cobra como venda nova e entrega
+        // vinculando (POST /:osId/status com sale_id). Com sinal, o saldo e
+        // recebido em POST /:osId/receber-saldo, sem venda nova.
+        sem_venda: !r.deposit_sale_id && !r.sale_id,
+      })),
+    });
+  } catch (err) {
+    // 313/334 pendentes, ou credit_installments ausente: a faixa nao aparece.
+    if (err.code === '42P01' || err.code === '42703') return res.json({ orders: [] });
+    falhar(res, err, 'GET:otica-no-caixa');
+  }
+});
+
 // ─── GET /service-orders/:osId ───────────────────────────────
 router.get('/:osId', async function (req, res) {
   try {
@@ -767,6 +862,17 @@ router.patch('/:osId', async function (req, res) {
     }
     if ((body.lab_id || body.deposit_sale_id) && os.kind !== 'otica') {
       return res.status(400).json({ error: 'lab_id e deposit_sale_id so existem em OS de otica', code: 'OS_NAO_E_OTICA' });
+    }
+    // p-208: trocar a venda do sinal de uma OS que ja tem venda abriria a
+    // porta para a segunda cobranca (o saldo e parcela da venda que ja esta la).
+    if (body.deposit_sale_id) {
+      const jaTem = os.deposit_sale_id || os.sale_id;
+      if (jaTem && String(jaTem) !== String(body.deposit_sale_id)) {
+        return res.status(409).json({
+          error: 'Esta OS de óculos já tem venda. A venda do sinal não pode ser trocada.',
+          code: 'OS_JA_TEM_VENDA',
+        });
+      }
     }
     await validarRefsOtica(cid, {
       lab_id: body.lab_id, deposit_sale_id: body.deposit_sale_id,
@@ -954,11 +1060,31 @@ router.post('/:osId/status', async function (req, res) {
       // proprio e nao "tem venda => entregue".
       if (sale_id) {
         const venda = await db.query(
-          'SELECT id FROM sales WHERE id = $1 AND company_id = $2',
+          'SELECT id, customer_id FROM sales WHERE id = $1 AND company_id = $2',
           [sale_id, cid]
         );
         if (!venda.rows.length) {
           return res.status(404).json({ error: 'Venda nao encontrada nesta empresa' });
+        }
+        // p-208 (23/11/2026): a OS de otica tem UMA venda. A que tem sinal ja
+        // tem a dela (deposit_sale_id) e o saldo e parcela do crediario dessa
+        // venda: amarrar outra venda aqui seria cobrar o cliente duas vezes.
+        // O saldo se recebe em POST /:osId/receber-saldo. A sem sinal aceita
+        // a venda do Caixa, desde que seja do mesmo cliente.
+        if (os.kind === 'otica') {
+          const jaTem = os.deposit_sale_id || os.sale_id;
+          if (jaTem && String(jaTem) !== String(sale_id)) {
+            return res.status(409).json({
+              error: 'Esta OS de óculos já tem venda. Receba o saldo pela OS, sem uma venda nova.',
+              code: 'OS_JA_TEM_VENDA',
+            });
+          }
+          if (String(venda.rows[0].customer_id || '') !== String(os.customer_id)) {
+            return res.status(409).json({
+              error: 'A venda é de outro cliente. Escolha o cliente da OS na venda.',
+              code: 'VENDA_DE_OUTRO_CLIENTE',
+            });
+          }
         }
         params.push(sale_id);
         sets.push(`sale_id = $${params.length}`);
@@ -1102,6 +1228,252 @@ router.post('/:osId/lab', async function (req, res) {
     falhar(res, err, 'POST:lab');
   }
 });
+
+// ─── POST /service-orders/:osId/receber-saldo ────────────────
+// p-208 (23/11/2026): "Receber saldo e entregar" no Caixa, numa operacao so.
+//
+// A REGRA QUE NAO QUEBRA: o saldo da OS de otica ja e parcela do crediario
+// da venda do sinal (deposit_sale_id). Receber aqui QUITA essas parcelas e
+// NUNCA cria segunda venda. Por baixo e o mesmo applyPayment do Studio
+// (/studio/orders/:oid/registrar-pagamento): liquida o A Receber, cobre a
+// parcela, lanca sale_payments na venda do sinal e entra no caixa aberto.
+// `saleId` prende o pagamento a ESTA venda: sem ele o FIFO e por cliente e
+// quitaria o oculos (ou o fiado) mais antigo dele.
+//
+// Body: { method: dinheiro|pix|cartao|debito, entregar?: bool (padrao true),
+//         amount?: number (padrao: o saldo inteiro), pickup_signature_url? }
+// Header Idempotency-Key (opcional, recomendado): a mesma chave na mesma OS
+// devolve o que ja foi gravado, sem receber de novo. Sem a chave, o FOR UPDATE
+// na OS e nas parcelas faz o segundo clique ver o saldo zerado: recebe 0.
+//
+// entregar=true exige a OS pronta (ou ja entregue: so recebe). A entrega e a
+// mesma do POST /:osId/status 'entregue' (delivered_at, assinatura, NFS-e
+// automatica), sem sale_id: a venda da OS continua sendo a do sinal.
+//
+// Fora daqui: OS SEM sinal. Ela nao tem venda; o Caixa cobra como venda nova
+// e entrega vinculando (POST /:osId/status com sale_id). Encargos de atraso
+// (mora/multa) tambem nao sao cobrados aqui, como no Studio: o valor cobrado
+// e o saldo das parcelas.
+const METODOS_DO_SALDO = ['dinheiro', 'pix', 'cartao', 'debito'];
+const CHAVE_RE = /^[A-Za-z0-9_:.-]{8,120}$/;
+const r2 = (n) => Math.round((Number(n) || 0) * 100) / 100;
+
+router.post('/:osId/receber-saldo', async function (req, res) {
+  const cid = req.params.id;
+  const body = req.body || {};
+  const method = String(body.method || '').toLowerCase();
+  const entregar = body.entregar !== false;
+  const chave = String(req.get('Idempotency-Key') || '').trim();
+
+  if (!METODOS_DO_SALDO.includes(method)) {
+    return res.status(400).json({
+      error: `Forma de pagamento invalida. Use: ${METODOS_DO_SALDO.join(', ')}.`,
+      code: 'METHOD_INVALIDO',
+    });
+  }
+  if (chave && !CHAVE_RE.test(chave)) {
+    return res.status(400).json({ error: 'Idempotency-Key invalida', code: 'CHAVE_INVALIDA' });
+  }
+  let pedido = null;
+  if (body.amount !== undefined && body.amount !== null && body.amount !== '') {
+    pedido = r2(body.amount);
+    if (!(pedido > 0)) {
+      return res.status(400).json({ error: 'O valor recebido deve ser maior que zero.', code: 'AMOUNT_INVALIDO' });
+    }
+  }
+  if (!UUID_RE.test(String(req.params.osId || ''))) {
+    return res.status(404).json({ error: 'Ordem de servico nao encontrada' });
+  }
+
+  let client;
+  try {
+    const flags = await lerFlagsDoModulo(cid);
+    client = await db.connect();
+    await client.query('BEGIN');
+
+    // FOR UPDATE na OS: duas abas (ou dois cliques) no mesmo oculos esperam
+    // uma a outra, e a segunda ja le o saldo que a primeira quitou.
+    const { rows: osRows } = await client.query(
+      `SELECT id, kind, status, customer_id, deposit_sale_id, sale_id
+         FROM service_orders WHERE id = $1 AND company_id = $2
+        FOR UPDATE`,
+      [req.params.osId, cid]
+    );
+    const os = osRows[0];
+    if (!os) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ error: 'Ordem de servico nao encontrada' });
+    }
+    if (os.kind !== 'otica') {
+      await client.query('ROLLBACK');
+      return res.status(400).json({ error: 'Receber saldo so existe em OS de otica', code: 'OS_NAO_E_OTICA' });
+    }
+    exigirGate(flags, 'otica');
+
+    // Repeticao da mesma chave: o pagamento ja esta no razao. Nada e gravado.
+    const ledgerKey = chave ? `otica-saldo:${os.id}:${chave}` : null;
+    if (ledgerKey) {
+      const { rows: ja } = await client.query(
+        `SELECT id, amount, payment_method FROM customer_credit_transactions
+          WHERE idempotency_key = $1 AND company_id = $2`,
+        [ledgerKey, cid]
+      );
+      if (ja.length) {
+        await client.query('COMMIT');
+        const restante = await saldoDaVenda(db, cid, os.deposit_sale_id);
+        const atual = await carregarOs(os.id, cid);
+        return res.json({
+          replayed: true,
+          order: atual,
+          items: await carregarItens(os.id),
+          paid: r2(ja[0].amount),
+          method: ja[0].payment_method,
+          remaining: restante,
+          settled: restante <= 0.005,
+          delivered: !!atual && atual.status === 'entregue',
+          transaction_id: ja[0].id,
+          receipt_url: `/companies/${cid}/print/credit/receipts/${ja[0].id}`,
+        });
+      }
+    }
+
+    if (os.status === 'cancelada') {
+      await client.query('ROLLBACK');
+      return res.status(409).json({ error: 'OS cancelada', code: 'OS_FECHADA' });
+    }
+    if (!os.deposit_sale_id) {
+      await client.query('ROLLBACK');
+      return res.status(409).json({
+        error: 'Esta OS foi aberta sem sinal: não há saldo no crediário. Cobre no Caixa como venda e entregue vinculando a venda.',
+        code: 'OS_SEM_SINAL',
+      });
+    }
+    if (entregar && !['pronta', 'entregue'].includes(os.status)) {
+      await client.query('ROLLBACK');
+      return res.status(409).json({
+        error: 'Os óculos ainda não estão prontos. Dá para receber o saldo sem entregar.',
+        code: 'OS_NAO_PRONTA',
+        status: os.status,
+      });
+    }
+
+    const { rows: vendaRows } = await client.query(
+      'SELECT id, status, customer_id FROM sales WHERE id = $1 AND company_id = $2',
+      [os.deposit_sale_id, cid]
+    );
+    const venda = vendaRows[0];
+    if (!venda || venda.status === 'cancelled') {
+      await client.query('ROLLBACK');
+      return res.status(409).json({
+        error: 'A venda do sinal desta OS foi cancelada. Confira a venda antes de entregar.',
+        code: 'VENDA_DO_SINAL_CANCELADA',
+      });
+    }
+
+    // Parcelas em aberto DA VENDA DO SINAL, travadas ate o COMMIT.
+    const { rows: abertas } = await client.query(
+      `SELECT ci.id, ci.customer_id,
+              ROUND((ci.amount_due - COALESCE(ci.covered_amount, 0))::numeric, 2) AS open_amount
+         FROM credit_installments ci
+        WHERE ci.company_id = $1 AND ci.sale_id = $2
+          AND ci.status NOT IN ('paid', 'cancelled')
+          AND (ci.amount_due - COALESCE(ci.covered_amount, 0)) > 0.005
+        ORDER BY ci.due_date ASC
+        FOR UPDATE`,
+      [cid, os.deposit_sale_id]
+    );
+    const aberto = r2(abertas.reduce((s, a) => s + Number(a.open_amount || 0), 0));
+    const pagar = pedido == null ? aberto : pedido;
+    if (pagar > aberto + 0.005) {
+      await client.query('ROLLBACK');
+      return res.status(422).json({
+        error: `O valor (R$ ${pagar.toFixed(2)}) é maior que o saldo em aberto (R$ ${aberto.toFixed(2)}).`,
+        code: 'AMOUNT_ACIMA_DO_SALDO',
+        open_amount: aberto,
+      });
+    }
+
+    let result = null;
+    if (pagar > 0.005) {
+      let sessaoId = null;
+      try {
+        const s = await client.query(
+          `SELECT id FROM caixa_sessoes WHERE company_id = $1 AND status = 'aberta' LIMIT 1`,
+          [cid]
+        );
+        sessaoId = (s.rows[0] && s.rows[0].id) || null;
+      } catch (_) { /* sem caixa: o pagamento entra sem sessao, como no Studio */ }
+
+      result = await creditLedger.applyPayment(client, {
+        companyId: cid,
+        // O cliente DA VENDA (e das parcelas): o razao e por cliente, e o
+        // A Receber da venda do sinal e casado por s.customer_id.
+        customerId: (abertas[0] && abertas[0].customer_id) || venda.customer_id,
+        amount: pagar,
+        method,
+        sessaoId,
+        createdBy: (req.user && req.user.id) || null,
+        idempotencyKey: ledgerKey,
+        saleId: os.deposit_sale_id,
+      });
+    }
+
+    let entregou = false;
+    if (entregar && os.status === 'pronta') {
+      const sets = [`status = 'entregue'`, 'delivered_at = NOW()'];
+      const params = [os.id, cid];
+      if (body.pickup_signature_url) {
+        params.push(String(body.pickup_signature_url));
+        sets.push(`pickup_signature_url = $${params.length}`, 'pickup_signed_at = NOW()');
+      }
+      await client.query(
+        `UPDATE service_orders SET ${sets.join(', ')} WHERE id = $1 AND company_id = $2`,
+        params
+      );
+      entregou = true;
+    }
+
+    const restante = await saldoDaVenda(client, cid, os.deposit_sale_id);
+    await client.query('COMMIT');
+
+    // Depois do COMMIT, sem esperar, como nas rotas de origem.
+    if (result) nfseAutomatica.aoReceberPagamento({ companyId: cid, result, saleId: os.deposit_sale_id });
+    if (entregou) nfseAutomatica.aoConcluirOs({ companyId: cid, osId: os.id });
+
+    const tx = result && result.transaction;
+    res.json({
+      replayed: false,
+      order: await carregarOs(os.id, cid),
+      items: await carregarItens(os.id),
+      paid: result ? pagar : 0,
+      method,
+      remaining: restante,
+      settled: restante <= 0.005,
+      delivered: entregou,
+      transaction_id: tx ? tx.id : null,
+      receipt_url: tx ? `/companies/${cid}/print/credit/receipts/${tx.id}` : null,
+    });
+  } catch (err) {
+    if (client) { try { await client.query('ROLLBACK'); } catch {} }
+    falhar(res, err, 'POST:receber-saldo');
+  } finally {
+    if (client) client.release();
+  }
+});
+
+// Saldo em aberto das parcelas de uma venda (o que a OS ainda deve).
+async function saldoDaVenda(q, cid, saleId) {
+  if (!saleId) return 0;
+  const { rows } = await q.query(
+    `SELECT COALESCE(ROUND(SUM(ci.amount_due - COALESCE(ci.covered_amount, 0))::numeric, 2), 0) AS restante
+       FROM credit_installments ci
+      WHERE ci.company_id = $1 AND ci.sale_id = $2
+        AND ci.status NOT IN ('paid', 'cancelled')
+        AND (ci.amount_due - COALESCE(ci.covered_amount, 0)) > 0.005`,
+    [cid, saleId]
+  );
+  return r2(rows[0] && rows[0].restante);
+}
 
 // ─── POST /service-orders/:osId/notify-ready ─────────────────
 // Aviso "oculos prontos" na mao (o automatico e o wa_ready_auto do status).
