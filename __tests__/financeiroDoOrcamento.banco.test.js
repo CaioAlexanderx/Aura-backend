@@ -17,6 +17,11 @@
 // saldo, Producao com "falta receber", cancelamento, multi-CNPJ e a mesma
 // Idempotency-Key em outro marco.
 //
+// Trava da frente: a loja do cenario e de teste
+// (studio_settings.personalizados_teste). A loja semTrava nao e, e prova a
+// paridade com o main: aprovar sem conta nem marco do saldo, mark-paid sem
+// lancar, Producao sem os campos novos. A env da virada liga para qualquer loja.
+//
 // Fixtures com uuid proprio, apagadas no afterAll.
 // ============================================================
 'use strict';
@@ -41,8 +46,8 @@ const CONN =
 
 jest.setTimeout(60000);
 
-const ID = { dono: uuid(), loja: uuid(), outra: uuid() };
-const EMPRESAS = [ID.loja, ID.outra];
+const ID = { dono: uuid(), loja: uuid(), outra: uuid(), semTrava: uuid() };
+const EMPRESAS = [ID.loja, ID.outra, ID.semTrava];
 
 let pool;
 let app;
@@ -92,6 +97,9 @@ beforeAll(async () => {
   for (const id of EMPRESAS) {
     await q(`INSERT INTO companies (id, owner_id, legal_name) VALUES ($1, $2, 'Fixture Orcamento Financeiro')`, [id, ID.dono]);
   }
+  // Loja de teste da frente: a trava liga so para ela.
+  await q(`UPDATE companies SET studio_settings = COALESCE(studio_settings, '{}'::jsonb) || '{"personalizados_teste": true}'::jsonb
+            WHERE id = $1`, [ID.loja]);
 
   app = express();
   app.use(express.json());
@@ -103,8 +111,11 @@ beforeAll(async () => {
   app.use('/companies/:id/dashboard', require('../src/routes/dashboard'));
 });
 
+beforeEach(() => { delete process.env.PERSONALIZADOS_FINANCEIRO_LIBERADO; });
+
 afterAll(async () => {
   if (!pool) return;
+  delete process.env.PERSONALIZADOS_FINANCEIRO_LIBERADO;
   await limpar();
   await pool.end();
 });
@@ -415,5 +426,56 @@ describe('cancelamento do pedido de orcamento', () => {
     expect(depois.status).toBe(409);
     expect(depois.body.code).toBe('PAGAMENTO_CANCELADO');
     expect(Object.keys(await lancamentos(oid))).toEqual(['pedido-areceber', 'pedido-sinal']);
+  });
+});
+
+describe('trava desligada: loja sem personalizados_teste e sem a env = o main de hoje', () => {
+  test('aprovar: pedido e so o marco do sinal, sem conta a receber nem marco do saldo', async () => {
+    const r = await aprovar(await novoOrcamento({ empresa: ID.semTrava, total: 100, sinal: 30 }), ID.semTrava);
+    expect(r.status).toBe(200);
+    const oid = r.body.order_id;
+    expect(Object.keys(await lancamentos(oid))).toEqual([]);
+    expect((await marcos(oid)).map((m) => [m.kind, m.status, m.amount])).toEqual([['deposit', 'pending', 30]]);
+    const { rows: [o] } = await q(`SELECT transaction_id, deposit_paid FROM digital_orders WHERE id = $1`, [oid]);
+    expect(o).toEqual({ transaction_id: null, deposit_paid: false });
+  });
+
+  test('sinal 0: nenhum marco (como antes)', async () => {
+    const r = await aprovar(await novoOrcamento({ empresa: ID.semTrava, total: 50, sinal: null }), ID.semTrava);
+    expect(await marcos(r.body.order_id)).toEqual([]);
+    expect(Object.keys(await lancamentos(r.body.order_id))).toEqual([]);
+  });
+
+  test('mark-paid: marca pago e libera o sinal, sem lancar nada no Financeiro', async () => {
+    const r = await aprovar(await novoOrcamento({ empresa: ID.semTrava, total: 100, sinal: 30 }), ID.semTrava);
+    const oid = r.body.order_id;
+    const [sinal] = await marcos(oid);
+    const p = await pagar(sinal.id, { method: 'pix' }, { empresa: ID.semTrava });
+    expect(p.status).toBe(200);
+    expect(p.body).toEqual({ ok: true, payment: expect.objectContaining({ status: 'paid', method: 'pix' }), deposit_released: true });
+    const { rows: [o] } = await q(`SELECT deposit_paid FROM digital_orders WHERE id = $1`, [oid]);
+    expect(o.deposit_paid).toBe(true);
+    const { rows } = await q(`SELECT COUNT(*)::int AS n FROM transactions WHERE company_id = $1`, [ID.semTrava]);
+    expect(rows[0].n).toBe(0);
+  });
+
+  test('Producao sem os campos novos; cancelamento nao mexe em nada', async () => {
+    const r = await aprovar(await novoOrcamento({ empresa: ID.semTrava, total: 100, sinal: 30 }), ID.semTrava);
+    const oid = r.body.order_id;
+    const card = await naProducao(oid, ID.semTrava);
+    expect(card).toBeTruthy();
+    expect(card).not.toHaveProperty('orcamento_falta_receber');
+    expect(card).not.toHaveProperty('orcamento_pagamentos_pendentes');
+    const F = require('../src/services/financeiroDoOrcamento');
+    expect(await F.fecharNoCancelamento(pool, { companyId: ID.semTrava, orderId: oid })).toBe(false);
+    expect((await marcos(oid))[0].status).toBe('pending');
+  });
+
+  test('a env da virada liga para qualquer loja', async () => {
+    process.env.PERSONALIZADOS_FINANCEIRO_LIBERADO = 'true';
+    const r = await aprovar(await novoOrcamento({ empresa: ID.semTrava, total: 100, sinal: 30 }), ID.semTrava);
+    const oid = r.body.order_id;
+    expect((await lancamentos(oid))['pedido-areceber']).toMatchObject({ status: 'pending', amount: 100, company_id: ID.semTrava });
+    expect((await marcos(oid)).map((m) => m.kind)).toEqual(['balance', 'deposit']);
   });
 });

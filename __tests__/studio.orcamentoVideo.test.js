@@ -306,6 +306,8 @@ describe('ciclo do orçamento sem página pública', () => {
   }
 
   test('aprovar vira pedido na esteira com itens, arte, sinal e as condições nas notas', async () => {
+    // p-185: com a trava da frente ligada (a virada), conta e marcos.
+    process.env.PERSONALIZADOS_FINANCEIRO_LIBERADO = 'true';
     const q = orcamento({
       status: 'sent', deposit_pct: '50', deposit_amount: '266.40',
       condicoes: { pix_desconto_pct: 5, parcelas: 6, prazo_dias_uteis: 5 },
@@ -335,11 +337,26 @@ describe('ciclo do orçamento sem página pública', () => {
     expect(conta.params[1]).toBe(532.8);
     const marcos = chamadas.filter((c) => /INSERT INTO studio_payments/.test(c.s)).map((c) => [c.params[2], c.params[3]]);
     expect(marcos).toEqual([['deposit', 266.4], ['balance', 266.4]]);
+    delete process.env.PERSONALIZADOS_FINANCEIRO_LIBERADO;
     // o orçamento é lido já travado, dentro da transação
     const ordem = chamadas.map((c) => c.s);
     expect(ordem[0]).toBe('BEGIN');
     expect(ordem[1]).toMatch(/SELECT \* FROM studio_quotes[\s\S]*FOR UPDATE/);
     expect(ordem).toContain('COMMIT');
+  });
+
+  test('p-185, trava desligada: aprovar faz o de antes (só o marco do sinal, sem conta a receber)', async () => {
+    delete process.env.PERSONALIZADOS_FINANCEIRO_LIBERADO;
+    const q = orcamento({ status: 'sent', deposit_amount: '266.40' });
+    const chamadas = [];
+    db.connect.mockImplementation(() => clienteCom(q, chamadas));
+    const r = await request(app()).post(`/companies/${CID}/studio/quotes/${QID}/aprovar`);
+    expect(r.status).toBe(200);
+    expect(chamadas.some((c) => /INSERT INTO transactions/.test(c.s))).toBe(false);
+    const marcos = chamadas.filter((c) => /INSERT INTO studio_payments/.test(c.s));
+    expect(marcos).toHaveLength(1);
+    expect(marcos[0].s).toMatch(/'deposit'/);
+    expect(marcos[0].params).toEqual([CID, 'o1', 266.4]);
   });
 
   test('aprovar é idempotente e recusa orçamento fechado', async () => {

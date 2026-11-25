@@ -64,8 +64,43 @@ describe('chaves, categorias e guarda do saldo', () => {
   });
 });
 
+describe('trava da frente (financeiroDoOrcamentoLigado)', () => {
+  afterEach(() => { delete process.env.PERSONALIZADOS_FINANCEIRO_LIBERADO; });
+  const q = (ligado) => ({ query: jest.fn(async () => ({ rows: ligado === undefined ? [] : [{ ligado }] })) });
+
+  test('loja de teste (personalizados_teste) liga; a leitura e a do /auth/me, pela loja', async () => {
+    const b = q(true);
+    expect(await F.financeiroDoOrcamentoLigado(b, 'loja-a')).toBe(true);
+    expect(b.query.mock.calls[0][0]).toMatch(/COALESCE\(studio_settings->>'personalizados_teste', ''\) = 'true'/);
+    expect(b.query.mock.calls[0][1]).toEqual(['loja-a']);
+  });
+  test('loja sem a flag, ou sem linha: desligada', async () => {
+    expect(await F.financeiroDoOrcamentoLigado(q(false), 'loja-a')).toBe(false);
+    expect(await F.financeiroDoOrcamentoLigado(q(undefined), 'loja-a')).toBe(false);
+  });
+  test("env PERSONALIZADOS_FINANCEIRO_LIBERADO = 'true' (a virada) liga sem ler o banco; outro valor nao", async () => {
+    process.env.PERSONALIZADOS_FINANCEIRO_LIBERADO = 'true';
+    const b = q(false);
+    expect(await F.financeiroDoOrcamentoLigado(b, 'loja-a')).toBe(true);
+    expect(b.query).not.toHaveBeenCalled();
+    process.env.PERSONALIZADOS_FINANCEIRO_LIBERADO = '1';
+    expect(await F.financeiroDoOrcamentoLigado(q(false), 'loja-a')).toBe(false);
+  });
+  test('desligada: a Producao volta a lista como veio e o cancelamento nao mexe em nada', async () => {
+    const b = q(false);
+    const lista = [{ id: 'a', d: 'o1' }];
+    expect(await F.comFaltaReceber(b, 'loja-a', lista, (o) => o.d)).toBe(lista);
+    expect(await F.fecharNoCancelamento(b, { companyId: 'loja-a', orderId: 'o1' })).toBe(false);
+    expect(b.query).toHaveBeenCalledTimes(2);
+    expect(b.query.mock.calls.every(([s]) => /FROM companies/.test(s))).toBe(true);
+  });
+});
+
 describe('falta receber na leitura da Producao', () => {
-  const fakeQ = (rows) => ({ query: jest.fn(async () => ({ rows })) });
+  // A trava responde ligada; as outras consultas, as linhas do teste.
+  const fakeQ = (rows) => ({
+    query: jest.fn(async (sql) => (/personalizados_teste/.test(String(sql)) ? { rows: [{ ligado: true }] } : { rows })),
+  });
 
   test('total menos o recebido; marcos pendentes com o id do mark-paid; loja na consulta', async () => {
     const q = fakeQ([

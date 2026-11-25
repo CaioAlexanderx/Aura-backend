@@ -98,7 +98,9 @@ router.post('/payments/:pid/mark-paid', async (req, res) => {
     // baixa pelo que entrou e quita quando nada falta. Pix sem taxa da
     // maquininha. Tudo numa transacao, com o pedido e o marco travados;
     // marco ja pago responde sem lancar de novo.
-    if (await financeiroDoOrcamento.ePedidoDeOrcamento(db, company_id, payment.order_id)) {
+    // Trava da frente (loja de teste ou a virada): desligada, o de antes.
+    if (await financeiroDoOrcamento.financeiroDoOrcamentoLigado(db, company_id)
+        && await financeiroDoOrcamento.ePedidoDeOrcamento(db, company_id, payment.order_id)) {
       try {
         const r = await financeiroDoOrcamento.receberMarco(db, {
           companyId: company_id,

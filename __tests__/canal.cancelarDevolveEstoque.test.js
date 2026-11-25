@@ -70,6 +70,7 @@ describe('Cancelar pedido no painel', () => {
       [/SELECT id, status, payment_status FROM digital_orders/, [{ id: OID, status: 'confirmed', payment_status: 'pending' }]],
       [/UPDATE digital_orders SET/, [{ id: OID, status: 'cancelled', stock_deducted: false }]],
       [/FROM studio_quotes WHERE order_id/, [{ '?column?': 1 }]],
+      [/personalizados_teste/, [{ ligado: true }]],
     ]);
     const r = await cancelar();
     expect(r.status).toBe(200);
@@ -81,10 +82,14 @@ describe('Cancelar pedido no painel', () => {
     expect(marcos[1]).toEqual([OID, CID]);
   });
 
-  test('p-185: pedido que nao e de orcamento nao mexe em conta nem marco', async () => {
+  test.each([
+    ['pedido que nao e de orcamento (trava ligada)', [[/personalizados_teste/, [{ ligado: true }]]]],
+    ['trava desligada (loja sem a flag), mesmo sendo de orcamento', [[/FROM studio_quotes WHERE order_id/, [{ '?column?': 1 }]]]],
+  ])('p-185: %s nao mexe em conta nem marco', async (_nome, extras) => {
     banco([
       [/SELECT id, status, payment_status FROM digital_orders/, [{ id: OID, status: 'confirmed', payment_status: 'confirmed' }]],
       [/UPDATE digital_orders SET/, [{ id: OID, status: 'cancelled', stock_deducted: false }]],
+      ...extras,
     ]);
     expect((await cancelar()).status).toBe(200);
     const calls = db.query.mock.calls.map(([s, p]) => [String(s), p || []]);

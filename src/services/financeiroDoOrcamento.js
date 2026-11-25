@@ -41,6 +41,14 @@
 //
 // Multi-CNPJ: tudo pela company_id do pedido. O marco e o pedido sao lidos
 // com company_id = loja do :id; marco de outra loja e 404.
+//
+// TRAVA (revisao de 25/11): nenhum lojista ve nada ate a virada (p-190), e o
+// Studio de hoje segue em uso por loja real. Tudo acima so vale quando
+// financeiroDoOrcamentoLigado(q, loja) e true: a empresa de teste
+// (studio_settings.personalizados_teste, a mesma leitura do /auth/me) ou a
+// env PERSONALIZADOS_FINANCEIRO_LIBERADO = 'true' (desligada por padrao; a
+// virada liga). Desligada, aprovar, mark-paid, cancelar e a Producao fazem
+// exatamente o que faziam antes.
 // ============================================================
 'use strict';
 
@@ -71,6 +79,22 @@ function lerFormaDoMarco(body) {
   const f = String(bruto).trim().toLowerCase();
   if (f === 'card') return 'cartao';
   return sinalDoPedido.lerForma(f);
+}
+
+/**
+ * A trava da frente. true quando a env PERSONALIZADOS_FINANCEIRO_LIBERADO e
+ * 'true' (a virada) ou quando a loja e de teste
+ * (studio_settings->>'personalizados_teste' = 'true', como em routes/auth.js).
+ * Loja sem linha: false.
+ */
+async function financeiroDoOrcamentoLigado(q, companyId) {
+  if (process.env.PERSONALIZADOS_FINANCEIRO_LIBERADO === 'true') return true;
+  const { rows } = await q.query(
+    `SELECT (COALESCE(studio_settings->>'personalizados_teste', '') = 'true') AS ligado
+       FROM companies WHERE id = $1`,
+    [companyId]
+  );
+  return !!(rows[0] && rows[0].ligado);
 }
 
 /** O pedido saiu de um orcamento da mesma loja? */
@@ -218,9 +242,11 @@ async function receberMarco(db, { companyId, paymentId, body, chave, userId }) {
 /**
  * Item 3: pedido de orcamento cancelado. A conta ainda pendente e os marcos
  * pendentes vao a 'cancelled'. O que ja entrou fica. Nunca lanca.
+ * Trava desligada: nada (como antes).
  */
 async function fecharNoCancelamento(q, { companyId, orderId }) {
   try {
+    if (!(await financeiroDoOrcamentoLigado(q, companyId))) return false;
     if (!(await ePedidoDeOrcamento(q, companyId, orderId))) return false;
     await q.query(
       `UPDATE transactions
@@ -288,9 +314,13 @@ async function faltaReceberDosPedidos(q, companyId, orderIds) {
 
 const NULL_FALTA = { orcamento_recebido: null, orcamento_falta_receber: null, orcamento_pagamentos_pendentes: null };
 
-/** Soma os campos do item 4 a cada pedido da lista. Nunca lanca. */
+/**
+ * Soma os campos do item 4 a cada pedido da lista. Nunca lanca.
+ * Trava desligada: a lista volta como veio (sem os campos, como antes).
+ */
 async function comFaltaReceber(q, companyId, orders, idDoPedido) {
   try {
+    if (!(await financeiroDoOrcamentoLigado(q, companyId))) return orders;
     const mapa = await faltaReceberDosPedidos(q, companyId, orders.map(idDoPedido));
     return orders.map((o) => {
       const id = idDoPedido(o);
@@ -305,6 +335,7 @@ async function comFaltaReceber(q, companyId, orders, idDoPedido) {
 module.exports = {
   NOTA,
   NULL_FALTA,
+  financeiroDoOrcamentoLigado,
   lerFormaDoMarco,
   ePedidoDeOrcamento,
   lancarAprovacao,
