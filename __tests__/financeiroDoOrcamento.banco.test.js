@@ -398,9 +398,9 @@ describe('cancelamento do pedido de orcamento', () => {
     await pagar(m.find((x) => x.kind === 'deposit').id);
 
     // A ligacao com o PATCH /status do Canal esta em canal.cancelarDevolveEstoque.test.js
-    // (no banco do CI o payment_status ainda e o ENUM da 070, sem 'confirmed',
-    // e o UPDATE da rota nao roda). Aqui, o que o cancelamento grava.
-    await q(`UPDATE digital_orders SET status = 'cancelled' WHERE id = $1`, [oid]);
+    // (no banco do CI o payment_status ainda e o ENUM da 070, sem 'confirmed'
+    // nem 'expired', e nem a rota nem o gatilho da 359 conseguem cancelar o
+    // pedido). Aqui, o que o cancelamento grava no dinheiro.
     const F = require('../src/services/financeiroDoOrcamento');
     expect(await F.fecharNoCancelamento(pool, { companyId: ID.loja, orderId: oid })).toBe(true);
     // Outra loja nao fecha nada.
@@ -413,6 +413,7 @@ describe('cancelamento do pedido de orcamento', () => {
 
     const depois = await pagar(m.find((x) => x.kind === 'balance').id);
     expect(depois.status).toBe(409);
+    expect(depois.body.code).toBe('PAGAMENTO_CANCELADO');
     expect(Object.keys(await lancamentos(oid))).toEqual(['pedido-areceber', 'pedido-sinal']);
   });
 });
