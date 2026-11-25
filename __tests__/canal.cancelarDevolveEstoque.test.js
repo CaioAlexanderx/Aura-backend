@@ -65,36 +65,88 @@ describe('Cancelar pedido no painel', () => {
     expect(r.body.order.stock_deducted).toBe(false);
   });
 
-  test('p-185: pedido de orcamento cancelado fecha a conta a receber e os marcos pendentes da loja', async () => {
+  // p-185: pedido de orcamento com conta a receber cancela numa transacao
+  // (pedido travado; status, conta e marcos juntos; erro desfaz tudo).
+  function clienteDaTransacao({ falhaNaConta = false, statusTravado = 'confirmed' } = {}) {
+    const chamadas = [];
+    const client = {
+      query: jest.fn(async (sql, params) => {
+        const s = String(sql);
+        chamadas.push([s, params]);
+        if (/FOR UPDATE/.test(s)) return { rows: [{ status: statusTravado }] };
+        if (/UPDATE digital_orders SET/.test(s)) return { rows: [{ id: OID, status: 'cancelled', stock_deducted: false }] };
+        if (/'pedido-areceber-' \|\| sq\.order_id/.test(s)) return { rows: [{ '?column?': 1 }] };
+        if (/UPDATE transactions/.test(s) && falhaNaConta) throw new Error('conexao caiu');
+        return { rows: [], rowCount: 1 };
+      }),
+      release: jest.fn(),
+    };
+    db.connect.mockReset();
+    db.connect.mockImplementation(async () => client);
+    return { client, chamadas };
+  }
+  const COM_CONTA = [/'pedido-areceber-' \|\| sq\.order_id/, [{ '?column?': 1 }]];
+
+  test('p-185: pedido de orcamento com conta: status, conta e marcos na mesma transacao', async () => {
     banco([
       [/SELECT id, status, payment_status FROM digital_orders/, [{ id: OID, status: 'confirmed', payment_status: 'pending' }]],
-      [/UPDATE digital_orders SET/, [{ id: OID, status: 'cancelled', stock_deducted: false }]],
-      [/FROM studio_quotes WHERE order_id/, [{ '?column?': 1 }]],
-      [/personalizados_teste/, [{ ligado: true }]],
+      COM_CONTA,
     ]);
+    const { chamadas, client } = clienteDaTransacao();
     const r = await cancelar();
     expect(r.status).toBe(200);
-    const chamadas = db.query.mock.calls.map(([s, p]) => [String(s), p]);
-    const conta = chamadas.find(([s]) => /UPDATE transactions/.test(s));
+    const sqls = chamadas.map(([q]) => q);
+    expect(sqls[0]).toBe('BEGIN');
+    expect(sqls[1]).toMatch(/FROM digital_orders WHERE id = \$1 AND company_id = \$2 FOR UPDATE/);
+    expect(sqls[2]).toMatch(/UPDATE digital_orders SET/);
+    const conta = chamadas.find(([q]) => /UPDATE transactions/.test(q));
     expect(conta[0]).toMatch(/status = 'pending'/);
     expect(conta[1]).toEqual(['Pedido cancelado', `pedido-areceber-${OID}`, CID]);
-    const marcos = chamadas.find(([s]) => /UPDATE studio_payments SET status = 'cancelled'/.test(s));
+    const marcos = chamadas.find(([q]) => /UPDATE studio_payments SET status = 'cancelled'/.test(q));
     expect(marcos[1]).toEqual([OID, CID]);
+    expect(sqls[sqls.length - 1]).toBe('COMMIT');
+    expect(client.release).toHaveBeenCalled();
+    // nada do dinheiro fora da transacao
+    expect(db.query.mock.calls.some(([q]) => /UPDATE transactions|UPDATE studio_payments|UPDATE digital_orders SET/.test(String(q)))).toBe(false);
   });
 
-  test.each([
-    ['pedido que nao e de orcamento (trava ligada)', [[/personalizados_teste/, [{ ligado: true }]]]],
-    ['trava desligada (loja sem a flag), mesmo sendo de orcamento', [[/FROM studio_quotes WHERE order_id/, [{ '?column?': 1 }]]]],
-  ])('p-185: %s nao mexe em conta nem marco', async (_nome, extras) => {
+  test('p-185: erro ao fechar a conta desfaz o cancelamento (ROLLBACK, 500, sem COMMIT)', async () => {
+    banco([
+      [/SELECT id, status, payment_status FROM digital_orders/, [{ id: OID, status: 'confirmed', payment_status: 'pending' }]],
+      COM_CONTA,
+    ]);
+    const { chamadas } = clienteDaTransacao({ falhaNaConta: true });
+    const r = await cancelar();
+    expect(r.status).toBe(500);
+    const sqls = chamadas.map(([q]) => q);
+    expect(sqls).toContain('ROLLBACK');
+    expect(sqls).not.toContain('COMMIT');
+    expect(devolverEstoqueDoPedido).not.toHaveBeenCalled();
+  });
+
+  test('p-185: outro toque ja cancelou (visto com o pedido travado): 409, nada muda', async () => {
+    banco([
+      [/SELECT id, status, payment_status FROM digital_orders/, [{ id: OID, status: 'confirmed', payment_status: 'pending' }]],
+      COM_CONTA,
+    ]);
+    const { chamadas } = clienteDaTransacao({ statusTravado: 'cancelled' });
+    const r = await cancelar();
+    expect(r.status).toBe(409);
+    expect(chamadas.map(([q]) => q)).toContain('ROLLBACK');
+    expect(chamadas.some(([q]) => /^\s*UPDATE/.test(q))).toBe(false);
+  });
+
+  test('p-185: pedido sem conta do orcamento (trava desligada no aprovar, ou nao e orcamento): o de antes', async () => {
     banco([
       [/SELECT id, status, payment_status FROM digital_orders/, [{ id: OID, status: 'confirmed', payment_status: 'confirmed' }]],
       [/UPDATE digital_orders SET/, [{ id: OID, status: 'cancelled', stock_deducted: false }]],
-      ...extras,
     ]);
+    db.connect.mockReset();
     expect((await cancelar()).status).toBe(200);
-    const calls = db.query.mock.calls.map(([s, p]) => [String(s), p || []]);
-    expect(calls.some(([s, p]) => /UPDATE transactions/.test(s) && p.some((x) => String(x).startsWith('pedido-areceber')))).toBe(false);
-    expect(calls.some(([s]) => /UPDATE studio_payments/.test(s))).toBe(false);
+    expect(db.connect).not.toHaveBeenCalled();
+    const calls = db.query.mock.calls.map(([q, p]) => [String(q), p || []]);
+    expect(calls.some(([q, p]) => /UPDATE transactions/.test(q) && p.some((x) => String(x).startsWith('pedido-areceber')))).toBe(false);
+    expect(calls.some(([q]) => /UPDATE studio_payments/.test(q))).toBe(false);
   });
 
   test('sem baixa (nada devolvido): o marcador da resposta fica como veio', async () => {

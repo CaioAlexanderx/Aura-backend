@@ -26,6 +26,14 @@ describe('lerFormaDoMarco ("Registrar Pix recebido")', () => {
     expect(F.lerFormaDoMarco({ forma: 'debito' })).toBe('debito');
     expect(F.lerFormaDoMarco({ forma: 'debito', method: 'pix' })).toBe('debito');
   });
+  test('sem nada no corpo: a forma ja gravada no marco (forma, depois method), antes do Pix', () => {
+    expect(F.lerFormaDoMarco({}, { method: 'card' })).toBe('cartao');
+    expect(F.lerFormaDoMarco(undefined, { method: 'cash' })).toBe('dinheiro');
+    expect(F.lerFormaDoMarco({}, { forma: 'debito', method: 'card' })).toBe('debito');
+    expect(F.lerFormaDoMarco({ method: 'pix' }, { method: 'card' })).toBe('pix');
+    expect(F.lerFormaDoMarco({}, { method: null })).toBe('pix');
+    expect(F.lerFormaDoMarco({}, { method: 'other' })).toBeNull();
+  });
   test("'other' e desconhecida: null (a rota responde 422)", () => {
     expect(F.lerFormaDoMarco({ method: 'other' })).toBeNull();
     expect(F.lerFormaDoMarco({ method: 'boleto' })).toBeNull();
@@ -86,13 +94,12 @@ describe('trava da frente (financeiroDoOrcamentoLigado)', () => {
     process.env.PERSONALIZADOS_FINANCEIRO_LIBERADO = '1';
     expect(await F.financeiroDoOrcamentoLigado(q(false), 'loja-a')).toBe(false);
   });
-  test('desligada: a Producao volta a lista como veio e o cancelamento nao mexe em nada', async () => {
+  test('desligada: a Producao volta a lista como veio', async () => {
     const b = q(false);
     const lista = [{ id: 'a', d: 'o1' }];
     expect(await F.comFaltaReceber(b, 'loja-a', lista, (o) => o.d)).toBe(lista);
-    expect(await F.fecharNoCancelamento(b, { companyId: 'loja-a', orderId: 'o1' })).toBe(false);
-    expect(b.query).toHaveBeenCalledTimes(2);
-    expect(b.query.mock.calls.every(([s]) => /FROM companies/.test(s))).toBe(true);
+    expect(b.query).toHaveBeenCalledTimes(1);
+    expect(b.query.mock.calls[0][0]).toMatch(/FROM companies/);
   });
 });
 
@@ -135,5 +142,43 @@ describe('falta receber na leitura da Producao', () => {
     const l2 = await F.comFaltaReceber(quebrado, 'loja-a', [{ id: 'a', d: 'o1' }], (o) => o.d);
     expect(l2[0]).toMatchObject({ id: 'a', ...F.NULL_FALTA });
     spy.mockRestore();
+  });
+});
+
+describe('conta do orcamento decide, nao so a trava', () => {
+  const fq = (porSql) => ({ query: jest.fn(async (sql) => {
+    for (const [re, rows] of porSql) if (re.test(String(sql))) return { rows };
+    return { rows: [] };
+  }) });
+  const ORC = [/FROM studio_quotes WHERE order_id/, [{ x: 1 }]];
+  const CONTA = [/'pedido-areceber-' \|\| sq\.order_id/, [{ x: 1 }]];
+  const LIGADA = [/personalizados_teste/, [{ ligado: true }]];
+
+  test('com conta: caminho novo mesmo com a trava desligada', async () => {
+    expect(await F.marcoLancaNoFinanceiro(fq([ORC, CONTA]), 'l', 'o')).toBe(true);
+  });
+  test('sem conta: so com a trava ligada', async () => {
+    expect(await F.marcoLancaNoFinanceiro(fq([ORC, LIGADA]), 'l', 'o')).toBe(true);
+    expect(await F.marcoLancaNoFinanceiro(fq([ORC]), 'l', 'o')).toBe(false);
+  });
+  test('fora de orcamento: nunca', async () => {
+    expect(await F.marcoLancaNoFinanceiro(fq([CONTA, LIGADA]), 'l', 'o')).toBe(false);
+  });
+  test('cancelamento: sem conta nao mexe; com conta fecha conta e marcos da loja', async () => {
+    const sem = fq([]);
+    expect(await F.fecharNoCancelamento(sem, { companyId: 'l', orderId: 'o' })).toBe(false);
+    expect(sem.query).toHaveBeenCalledTimes(1);
+    const com = fq([CONTA]);
+    expect(await F.fecharNoCancelamento(com, { companyId: 'l', orderId: 'o' })).toBe(true);
+    const sqls = com.query.mock.calls.map(([s, p]) => [String(s), p]);
+    expect(sqls[1][1]).toEqual(['Pedido cancelado', 'pedido-areceber-o', 'l']);
+    expect(sqls[2][1]).toEqual(['o', 'l']);
+  });
+  test('cancelamento: erro sobe (quem chama desfaz a transacao)', async () => {
+    const quebra = { query: jest.fn(async (sql) => {
+      if (/'pedido-areceber-' \|\| sq/.test(String(sql))) return { rows: [{ x: 1 }] };
+      throw new Error('caiu');
+    }) };
+    await expect(F.fecharNoCancelamento(quebra, { companyId: 'l', orderId: 'o' })).rejects.toThrow('caiu');
   });
 });

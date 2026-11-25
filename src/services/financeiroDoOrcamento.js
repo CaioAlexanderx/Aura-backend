@@ -19,9 +19,14 @@
 //      marco desse pedido lanca pelo caminho do sinal (lancarEntradaEBaixar):
 //        - sinal: entrada 'confirmed' "Sinal de pedido" (pedido-sinal-<id>),
 //          deposit_paid = TRUE;
-//        - saldo: entrada 'confirmed' "Saldo de pedido" (pedido-saldo-<id>);
-//        - nos dois a conta cai para o que falta; nada faltando, a conta vai
-//          a 'cancelled' com a nota "Quitada pelo ...", como no sinal = total.
+//        - saldo: entrada 'confirmed' "Saldo de pedido" (pedido-saldo-<marco>;
+//          o saldo pode vir em mais de um marco, com teto na soma);
+//        - nos dois a conta e abatida pelo que entrou; nada faltando, vai a
+//          'cancelled' com a nota "Quitada pelo ...", como no sinal = total.
+//      Pedido de orcamento sem conta (aprovado com a trava desligada) ganha a
+//      conta no primeiro pagamento pelo caminho novo, pelo que FALTA (total -
+//      marcos ja pagos), com a nota do que foi recebido antes fora do
+//      Financeiro; nada e lancado retroativamente.
 //      Pix sem taxa da maquininha (caiu na chave da loja); credito e debito,
 //      se vierem, pela regra da venda (taxaDaMaquininha.js).
 //   3. Cancelar o pedido (PATCH /orders/:oid/status 'cancelled') leva a conta
@@ -47,8 +52,10 @@
 // financeiroDoOrcamentoLigado(q, loja) e true: a empresa de teste
 // (studio_settings.personalizados_teste, a mesma leitura do /auth/me) ou a
 // env PERSONALIZADOS_FINANCEIRO_LIBERADO = 'true' (desligada por padrao; a
-// virada liga). Desligada, aprovar, mark-paid, cancelar e a Producao fazem
-// exatamente o que faziam antes.
+// virada liga). A trava decide so se um pedido NOVO ganha conta: pedido que
+// ja tem a conta (pedido-areceber-<id>) segue o caminho novo no mark-paid e
+// no cancelamento mesmo com ela desligada. Pedido sem conta e trava
+// desligada: aprovar, mark-paid, cancelar e a Producao fazem o de antes.
 // ============================================================
 'use strict';
 
@@ -56,6 +63,9 @@ const sinalDoPedido = require('./sinalDoPedido');
 
 const round2 = (n) => Math.round((Number(n) + Number.EPSILON) * 100) / 100;
 const brl = (n) => `R$ ${round2(n).toFixed(2).replace('.', ',')}`;
+
+// Indice unico (company_id, idempotency_key) de studio_payments (460).
+const INDICE_DA_CHAVE = 'uq_studio_payments_company_idempotency_key';
 
 const NOTA = {
   sinal: 'Quitada pelo sinal do pedido',
@@ -66,16 +76,20 @@ function erro(status, message, code, extra) {
   return Object.assign(new Error(message), { status, code, ...(extra || {}) });
 }
 
+const vazio = (v) => v === undefined || v === null || String(v).trim() === '';
+
 /**
  * Forma do "Registrar Pix recebido". O app manda `method` no vocabulario do
  * Studio (pix/card/cash, migration 140); `forma` no do Caixa tambem vale.
- * Sem nada: Pix (e o nome do botao). 'card' = credito. 'other' nao tem
- * entrada certa no Financeiro: null (422).
+ * Sem nada no corpo: a forma ja gravada no marco (forma, depois method), como
+ * o COALESCE($1, method) de antes; sem nada no marco, Pix (o nome do botao).
+ * 'card' = credito. 'other' nao tem entrada certa no Financeiro: null (422).
  */
-function lerFormaDoMarco(body) {
+function lerFormaDoMarco(body, marco) {
   const b = body && typeof body === 'object' ? body : {};
-  const bruto = b.forma ?? b.method;
-  if (bruto === undefined || bruto === null || String(bruto).trim() === '') return 'pix';
+  const m = marco && typeof marco === 'object' ? marco : {};
+  const bruto = [b.forma, b.method, m.forma, m.method].find((v) => !vazio(v));
+  if (bruto === undefined) return 'pix';
   const f = String(bruto).trim().toLowerCase();
   if (f === 'card') return 'cartao';
   return sinalDoPedido.lerForma(f);
@@ -95,6 +109,37 @@ async function financeiroDoOrcamentoLigado(q, companyId) {
     [companyId]
   );
   return !!(rows[0] && rows[0].ligado);
+}
+
+/**
+ * O pedido de orcamento ja tem a conta a receber (pedido-areceber-<pedido>)?
+ * Quem ja tem conta segue o caminho novo no mark-paid e no cancelamento
+ * mesmo com a trava desligada: a trava so decide se um pedido NOVO ganha
+ * conta. So pedido que saiu de orcamento da mesma loja.
+ */
+async function temContaDoOrcamento(q, companyId, orderId) {
+  const { rows } = await q.query(
+    `SELECT 1
+       FROM studio_quotes sq
+       JOIN transactions t
+         ON t.company_id = sq.company_id
+        AND t.idempotency_key = 'pedido-areceber-' || sq.order_id::text
+      WHERE sq.order_id = $1 AND sq.company_id = $2
+      LIMIT 1`,
+    [orderId, companyId]
+  );
+  return rows.length > 0;
+}
+
+/**
+ * O mark-paid deste marco segue o caminho novo (lanca no Financeiro)? Pedido
+ * de orcamento que ja tem conta, sempre; sem conta, so com a trava ligada (a
+ * conta nasce no primeiro pagamento, pelo que falta).
+ */
+async function marcoLancaNoFinanceiro(q, companyId, orderId) {
+  if (!(await ePedidoDeOrcamento(q, companyId, orderId))) return false;
+  if (await temContaDoOrcamento(q, companyId, orderId)) return true;
+  return financeiroDoOrcamentoLigado(q, companyId);
 }
 
 /** O pedido saiu de um orcamento da mesma loja? */
@@ -184,11 +229,11 @@ async function receberMarco(db, { companyId, paymentId, body, chave, userId }) {
         WHERE order_id = $1 AND company_id = $2 AND status = 'paid'`,
       [pedido.id, companyId]
     );
-    // Um sinal e um saldo por pedido: a entrada de cada um tem chave unica.
-    if (pagos.some((p) => (p.kind === 'deposit') === (tipo === 'sinal'))) {
-      throw erro(409,
-        tipo === 'sinal' ? 'O sinal deste pedido já foi recebido.' : 'O saldo deste pedido já foi recebido.',
-        tipo === 'sinal' ? 'PEDIDO_SINAL_JA_PAGO' : 'PEDIDO_SALDO_JA_PAGO');
+    // Um sinal por pedido (a entrada tem a chave do pedido, como no balcao).
+    // O saldo pode vir em mais de um marco: a chave e a do marco, e o teto e
+    // a soma (PEDIDO_PAGAMENTO_MAIOR, abaixo).
+    if (tipo === 'sinal' && pagos.some((p) => p.kind === 'deposit')) {
+      throw erro(409, 'O sinal deste pedido já foi recebido.', 'PEDIDO_SINAL_JA_PAGO');
     }
     const valor = round2(marco.amount);
     const total = round2(pedido.total);
@@ -199,7 +244,7 @@ async function receberMarco(db, { companyId, paymentId, body, chave, userId }) {
         `Este pagamento (${brl(valor)}) passa do que falta receber do pedido (${brl(Math.max(total - pagoAntes, 0))}).`,
         'PEDIDO_PAGAMENTO_MAIOR');
     }
-    const forma = lerFormaDoMarco(body);
+    const forma = lerFormaDoMarco(body, marco);
     if (!forma) {
       throw erro(422, 'Escolha como a cliente pagou: Pix, dinheiro, crédito ou débito.', 'PEDIDO_SINAL_FORMA');
     }
@@ -214,9 +259,34 @@ async function receberMarco(db, { companyId, paymentId, body, chave, userId }) {
         RETURNING *`,
       [sinalDoPedido.FORMAS[forma].method, forma, chave || null, paymentId, companyId]
     );
+
+    // Conta tardia: pedido de orcamento sem conta (aprovado antes da trava)
+    // ganha a conta agora, pelo que FALTA (total - marcos ja pagos). O que foi
+    // pago antes pelo caminho antigo nao e lancado retroativamente; fica a nota.
+    const { rows: [conta] } = await client.query(
+      `SELECT id FROM transactions WHERE idempotency_key = $1 AND company_id = $2`,
+      [sinalDoPedido.CHAVE_A_RECEBER(pedido.id), companyId]
+    );
+    if (!conta) {
+      const base = round2(total - pagoAntes);
+      await sinalDoPedido.criarContaAReceber(client, { companyId, pedido: { ...pedido, total: base }, itens, userId });
+      if (pagoAntes > 0) {
+        await client.query(
+          `UPDATE transactions
+              SET notes = CASE WHEN COALESCE(notes, '') = '' THEN $1 ELSE notes || ' · ' || $1 END,
+                  updated_at = NOW()
+            WHERE idempotency_key = $2 AND company_id = $3`,
+          [`Valor recebido antes no pedido fora do Financeiro: ${brl(pagoAntes)}`,
+            sinalDoPedido.CHAVE_A_RECEBER(pedido.id), companyId]
+        );
+      }
+    }
+
+    // A entrada e o abatimento da conta pelo que ela diz que falta.
     const taxa = await sinalDoPedido.lancarEntradaEBaixar(client, {
       companyId, pedido, itens, valor, forma, userId, tipo,
-      pago: pagoAntes + valor, nota: NOTA[tipo], semTaxa: forma === 'pix',
+      nota: NOTA[tipo], semTaxa: forma === 'pix', abater: true,
+      chaveId: tipo === 'saldo' ? marco.id : pedido.id,
     });
     await client.query('COMMIT');
     return {
@@ -229,9 +299,14 @@ async function receberMarco(db, { companyId, paymentId, body, chave, userId }) {
   } catch (e) {
     await client.query('ROLLBACK').catch(() => {});
     if (e && e.code === '23505') {
-      // A mesma Idempotency-Key noutro marco da loja (indice da 460), ou a
-      // entrada desse tipo ja lancada para o pedido (chave de transactions).
-      throw erro(409, 'Esse pagamento já foi registrado. Atualize a tela para ver.', 'IDEMPOTENCY_KEY_REUSED');
+      // A mesma Idempotency-Key noutro marco da loja (indice unico da 460).
+      if (String(e.constraint || '') === INDICE_DA_CHAVE) {
+        throw erro(409, 'Essa tentativa já registrou outro pagamento. Toque de novo para registrar este.', 'IDEMPOTENCY_KEY_REUSED');
+      }
+      // A entrada deste pagamento ja existe em transactions (chave unica).
+      if (String(e.table || '') === 'transactions') {
+        throw erro(409, 'Este pagamento já está no Financeiro. Atualize a tela para ver.', 'PAGAMENTO_JA_LANCADO');
+      }
     }
     throw e;
   } finally {
@@ -241,31 +316,28 @@ async function receberMarco(db, { companyId, paymentId, body, chave, userId }) {
 
 /**
  * Item 3: pedido de orcamento cancelado. A conta ainda pendente e os marcos
- * pendentes vao a 'cancelled'. O que ja entrou fica. Nunca lanca.
- * Trava desligada: nada (como antes).
+ * pendentes vao a 'cancelled'. O que ja entrou fica.
+ * Roda na MESMA transacao do UPDATE do status (a rota abre a transacao, com
+ * o pedido travado, quando temContaDoOrcamento): erro aqui sobe e desfaz o
+ * cancelamento. Pedido sem conta (aprovado com a trava desligada): nada,
+ * como antes. Devolve true quando fechou.
  */
-async function fecharNoCancelamento(q, { companyId, orderId }) {
-  try {
-    if (!(await financeiroDoOrcamentoLigado(q, companyId))) return false;
-    if (!(await ePedidoDeOrcamento(q, companyId, orderId))) return false;
-    await q.query(
-      `UPDATE transactions
-          SET status = 'cancelled',
-              notes = CASE WHEN COALESCE(notes, '') = '' THEN $1 ELSE notes || ' · ' || $1 END,
-              updated_at = NOW()
-        WHERE idempotency_key = $2 AND company_id = $3 AND status = 'pending'`,
-      ['Pedido cancelado', sinalDoPedido.CHAVE_A_RECEBER(orderId), companyId]
-    );
-    await q.query(
-      `UPDATE studio_payments SET status = 'cancelled', updated_at = NOW()
-        WHERE order_id = $1 AND company_id = $2 AND status = 'pending'`,
-      [orderId, companyId]
-    );
-    return true;
-  } catch (e) {
-    console.error('[financeiroDoOrcamento] cancelamento: a conta do pedido ficou pendente', orderId, e.message);
-    return false;
-  }
+async function fecharNoCancelamento(client, { companyId, orderId }) {
+  if (!(await temContaDoOrcamento(client, companyId, orderId))) return false;
+  await client.query(
+    `UPDATE transactions
+        SET status = 'cancelled',
+            notes = CASE WHEN COALESCE(notes, '') = '' THEN $1 ELSE notes || ' · ' || $1 END,
+            updated_at = NOW()
+      WHERE idempotency_key = $2 AND company_id = $3 AND status = 'pending'`,
+    ['Pedido cancelado', sinalDoPedido.CHAVE_A_RECEBER(orderId), companyId]
+  );
+  await client.query(
+    `UPDATE studio_payments SET status = 'cancelled', updated_at = NOW()
+      WHERE order_id = $1 AND company_id = $2 AND status = 'pending'`,
+    [orderId, companyId]
+  );
+  return true;
 }
 
 /**
@@ -338,6 +410,8 @@ module.exports = {
   financeiroDoOrcamentoLigado,
   lerFormaDoMarco,
   ePedidoDeOrcamento,
+  temContaDoOrcamento,
+  marcoLancaNoFinanceiro,
   lancarAprovacao,
   receberMarco,
   fecharNoCancelamento,

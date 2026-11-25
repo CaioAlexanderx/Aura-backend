@@ -145,13 +145,26 @@ function pagar(pid, body = { method: 'pix' }, { empresa = ID.loja, k } = {}) {
   return r.send(body);
 }
 
-async function lancamentos(oid) {
+// Lancamentos do pedido: chaves do pedido (pedido-*-<pedido>) e do saldo,
+// que e por marco (pedido-saldo-<marco>, pedido-saldo-taxa-<marco>). O id
+// some do nome: 'pedido-areceber', 'pedido-sinal', 'pedido-saldo'...
+async function lancamentosCrus(oid) {
   const { rows } = await q(
-    `SELECT idempotency_key, type::text AS type, status::text AS status, amount::numeric AS amount,
-            original_amount::numeric AS original_amount, category, notes, company_id
-       FROM transactions WHERE idempotency_key LIKE $1 ORDER BY idempotency_key`,
-    [`pedido-%${oid}`]);
-  return Object.fromEntries(rows.map((r) => [r.idempotency_key.replace(`-${oid}`, ''), {
+    `SELECT t.idempotency_key, t.type::text AS type, t.status::text AS status, t.amount::numeric AS amount,
+            t.original_amount::numeric AS original_amount, t.category, t.notes, t.company_id
+       FROM transactions t
+      WHERE t.idempotency_key LIKE $1
+         OR t.idempotency_key IN (SELECT 'pedido-saldo-' || sp.id::text FROM studio_payments sp WHERE sp.order_id = $2
+                                  UNION SELECT 'pedido-saldo-taxa-' || sp.id::text FROM studio_payments sp WHERE sp.order_id = $2)
+      ORDER BY t.idempotency_key`,
+    [`pedido-%${oid}`, oid]);
+  return rows;
+}
+
+async function lancamentos(oid) {
+  const rows = await lancamentosCrus(oid);
+  const UUID = /-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+  return Object.fromEntries(rows.map((r) => [r.idempotency_key.replace(UUID, ''), {
     ...r, amount: Number(r.amount), original_amount: r.original_amount == null ? null : Number(r.original_amount),
   }]));
 }
@@ -366,6 +379,7 @@ describe('mark-paid', () => {
     expect((await pagar(m.find((x) => x.kind === 'deposit').id, { method: 'pix' }, { k })).status).toBe(200);
     const segundo = await pagar(m.find((x) => x.kind === 'balance').id, { method: 'pix' }, { k });
     expect(segundo.status).toBe(409);
+    expect(segundo.body.code).toBe('IDEMPOTENCY_KEY_REUSED');
     expect(Object.keys(await lancamentos(oid))).toEqual(['pedido-areceber', 'pedido-sinal']);
     expect((await marcos(oid)).find((x) => x.kind === 'balance').status).toBe('pending');
   });
@@ -477,5 +491,152 @@ describe('trava desligada: loja sem personalizados_teste e sem a env = o main de
     const oid = r.body.order_id;
     expect((await lancamentos(oid))['pedido-areceber']).toMatchObject({ status: 'pending', amount: 100, company_id: ID.semTrava });
     expect((await marcos(oid)).map((m) => m.kind)).toEqual(['balance', 'deposit']);
+  });
+});
+
+describe('revisao independente do #1106', () => {
+  test('1. pedido aprovado antes da trava, sinal pago pelo caminho antigo: a conta nasce pelo que falta, sem lancar o de antes', async () => {
+    // Aprovado sem a trava: so o marco do sinal, sem conta. Sinal 30 pago pelo
+    // caminho antigo (sem entrada no Financeiro).
+    const r = await aprovar(await novoOrcamento({ empresa: ID.semTrava, total: 100, sinal: 30 }), ID.semTrava);
+    const oid = r.body.order_id;
+    const [sinal] = await marcos(oid);
+    expect((await pagar(sinal.id, { method: 'pix' }, { empresa: ID.semTrava })).status).toBe(200);
+    expect(Object.keys(await lancamentos(oid))).toEqual([]);
+    // O saldo vira marco e e pago depois da virada.
+    const c = await request(app).post(`/companies/${ID.semTrava}/studio/orders/${oid}/payments`).send({ kind: 'balance', amount: 70 });
+    expect(c.status).toBe(201);
+    process.env.PERSONALIZADOS_FINANCEIRO_LIBERADO = 'true';
+    const p = await pagar(c.body.id, { method: 'pix' }, { empresa: ID.semTrava });
+    expect(p.status).toBe(200);
+    expect(p.body).toMatchObject({ lancamento: 'saldo', falta_receber: 0 });
+
+    const l = await lancamentos(oid);
+    expect(Object.keys(l)).toEqual(['pedido-areceber', 'pedido-saldo']);
+    expect(l['pedido-areceber']).toMatchObject({ status: 'cancelled', amount: 70, category: 'Pedido a receber' });
+    expect(l['pedido-areceber'].notes).toContain('Valor recebido antes no pedido fora do Financeiro: R$ 30,00');
+    expect(l['pedido-areceber'].notes).toContain('Quitada pelo saldo do pedido');
+    expect(l['pedido-saldo']).toMatchObject({ status: 'confirmed', amount: 70 });
+    // Nada retroativo: so os 70 entraram.
+    const { rows: [soma] } = await q(
+      `SELECT COALESCE(SUM(amount), 0)::numeric AS v FROM transactions WHERE company_id = $1 AND type = 'income' AND status = 'confirmed'
+          AND idempotency_key LIKE 'pedido-%'`, [ID.semTrava]);
+    expect(Number(soma.v)).toBe(70);
+  });
+
+  test('1b. conta tardia com saldo em parte: nasce pelo que falta e cai pelo que entrou', async () => {
+    const r = await aprovar(await novoOrcamento({ empresa: ID.semTrava, total: 100, sinal: 30 }), ID.semTrava);
+    const oid = r.body.order_id;
+    const [sinal] = await marcos(oid);
+    await pagar(sinal.id, { method: 'pix' }, { empresa: ID.semTrava });
+    const c = await request(app).post(`/companies/${ID.semTrava}/studio/orders/${oid}/payments`).send({ kind: 'balance', amount: 40 });
+    process.env.PERSONALIZADOS_FINANCEIRO_LIBERADO = 'true';
+    const p = await pagar(c.body.id, { method: 'pix' }, { empresa: ID.semTrava });
+    expect(p.body.falta_receber).toBe(30);
+    expect((await lancamentos(oid))['pedido-areceber']).toMatchObject({ status: 'pending', amount: 30, original_amount: 70 });
+  });
+
+  test('2. marco gravado como card e pago sem corpo: credito, com a taxa da maquininha', async () => {
+    await q(`UPDATE companies SET pdv_settings = $2::jsonb WHERE id = $1`,
+      [ID.loja, JSON.stringify({ card_fee_enabled: true, card_fee_credit_pct: 3.5, card_fee_debit_pct: 1.5 })]);
+    try {
+      const r = await aprovar(await novoOrcamento({ total: 100, sinal: null }));
+      const oid = r.body.order_id;
+      const [saldo] = await marcos(oid);
+      await q(`UPDATE studio_payments SET method = 'card' WHERE id = $1`, [saldo.id]);
+      const p = await request(app).post(`/companies/${ID.loja}/studio/payments/${saldo.id}/mark-paid`).send({});
+      expect(p.status).toBe(200);
+      expect(p.body.taxa).toBe(3.5);
+      expect((await marcos(oid))[0]).toMatchObject({ method: 'card', forma: 'cartao' });
+      expect((await lancamentos(oid))['pedido-saldo-taxa']).toMatchObject({ type: 'expense', amount: 3.5 });
+    } finally {
+      await q(`UPDATE companies SET pdv_settings = NULL WHERE id = $1`, [ID.loja]);
+    }
+  });
+
+  test('3. liga, aprova, desliga: o pedido com conta segue o caminho novo (paga baixa, cancelamento fecha)', async () => {
+    process.env.PERSONALIZADOS_FINANCEIRO_LIBERADO = 'true';
+    const r = await aprovar(await novoOrcamento({ empresa: ID.semTrava, total: 100, sinal: 30 }), ID.semTrava);
+    const oid = r.body.order_id;
+    delete process.env.PERSONALIZADOS_FINANCEIRO_LIBERADO;
+
+    const m = await marcos(oid);
+    const p = await pagar(m.find((x) => x.kind === 'deposit').id, { method: 'pix' }, { empresa: ID.semTrava });
+    expect(p.status).toBe(200);
+    expect(p.body.lancamento).toBe('sinal');
+    const l = await lancamentos(oid);
+    expect(l['pedido-sinal']).toMatchObject({ status: 'confirmed', amount: 30 });
+    expect(l['pedido-areceber']).toMatchObject({ status: 'pending', amount: 70, original_amount: 100 });
+
+    const F = require('../src/services/financeiroDoOrcamento');
+    expect(await F.temContaDoOrcamento(pool, ID.semTrava, oid)).toBe(true);
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      expect(await F.fecharNoCancelamento(client, { companyId: ID.semTrava, orderId: oid })).toBe(true);
+      await client.query('COMMIT');
+    } finally { client.release(); }
+    expect((await lancamentos(oid))['pedido-areceber'].status).toBe('cancelled');
+    expect((await marcos(oid)).find((x) => x.kind === 'balance').status).toBe('cancelled');
+  });
+
+  test('4. o fechamento roda na transacao de quem chama: ROLLBACK desfaz conta e marcos', async () => {
+    const r = await aprovar(await novoOrcamento({ total: 100, sinal: 30 }));
+    const oid = r.body.order_id;
+    const F = require('../src/services/financeiroDoOrcamento');
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      expect(await F.fecharNoCancelamento(client, { companyId: ID.loja, orderId: oid })).toBe(true);
+      await client.query('ROLLBACK');
+    } finally { client.release(); }
+    expect((await lancamentos(oid))['pedido-areceber'].status).toBe('pending');
+    expect((await marcos(oid)).every((x) => x.status === 'pending')).toBe(true);
+  });
+
+  test('5. saldo em 2 marcos: cada um com a sua entrada; o segundo quita', async () => {
+    const r = await aprovar(await novoOrcamento({ total: 100, sinal: null }));
+    const oid = r.body.order_id;
+    const [saldo] = await marcos(oid);
+    await q(`UPDATE studio_payments SET amount = 60 WHERE id = $1`, [saldo.id]);
+    const c = await request(app).post(`/companies/${ID.loja}/studio/orders/${oid}/payments`).send({ kind: 'balance', amount: 40 });
+    expect(c.status).toBe(201);
+
+    const p1 = await pagar(saldo.id);
+    expect(p1.body).toMatchObject({ lancamento: 'saldo', falta_receber: 40 });
+    let conta = (await lancamentos(oid))['pedido-areceber'];
+    expect(conta).toMatchObject({ status: 'pending', amount: 40, original_amount: 100 });
+
+    const p2 = await pagar(c.body.id);
+    expect(p2.status).toBe(200);
+    expect(p2.body.falta_receber).toBe(0);
+    const crus = await lancamentosCrus(oid);
+    const saldos = crus.filter((t) => /^pedido-saldo-[0-9a-f-]{36}$/.test(t.idempotency_key));
+    expect(saldos.map((t) => [t.idempotency_key, Number(t.amount)]).sort()).toEqual(
+      [[`pedido-saldo-${saldo.id}`, 60], [`pedido-saldo-${c.body.id}`, 40]].sort());
+    conta = (await lancamentos(oid))['pedido-areceber'];
+    expect(conta.status).toBe('cancelled');
+    expect(conta.notes).toContain('Quitada pelo saldo do pedido');
+
+    // Um terceiro saldo passaria do total: 422.
+    const c3 = await request(app).post(`/companies/${ID.loja}/studio/orders/${oid}/payments`).send({ kind: 'balance', amount: 1 });
+    const p3 = await pagar(c3.body.id);
+    expect(p3.status).toBe(422);
+    expect(p3.body.code).toBe('PEDIDO_PAGAMENTO_MAIOR');
+  });
+
+  test('6. 23505: so o indice da Idempotency-Key vira IDEMPOTENCY_KEY_REUSED; entrada ja no Financeiro e PAGAMENTO_JA_LANCADO', async () => {
+    const r = await aprovar(await novoOrcamento({ total: 100, sinal: 30 }));
+    const oid = r.body.order_id;
+    const m = await marcos(oid);
+    // Uma entrada com a chave do sinal ja existe (estado inconsistente).
+    await q(`INSERT INTO transactions (company_id, type, status, amount, description, category, due_date, paid_at, idempotency_key)
+             VALUES ($1, 'income', 'confirmed', 30, 'fixture', 'Sinal de pedido', CURRENT_DATE, NOW(), $2)`,
+      [ID.loja, `pedido-sinal-${oid}`]);
+    const p = await pagar(m.find((x) => x.kind === 'deposit').id, { method: 'pix' }, { k: chave() });
+    expect(p.status).toBe(409);
+    expect(p.body.code).toBe('PAGAMENTO_JA_LANCADO');
+    expect((await marcos(oid)).find((x) => x.kind === 'deposit').status).toBe('pending');
+    expect((await lancamentos(oid))['pedido-areceber']).toMatchObject({ status: 'pending', amount: 100 });
   });
 });

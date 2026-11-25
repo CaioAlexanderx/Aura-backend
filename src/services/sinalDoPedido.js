@@ -40,8 +40,8 @@
 // p-185 (25/11/2026): o pedido de ORCAMENTO do Studio usa o mesmo caminho
 // (services/financeiroDoOrcamento.js): a conta pelo valor cheio na aprovacao,
 // o sinal pela mesma entrada, e o SALDO, que ali nao passa pelo Caixa, como
-// a entrada 'confirmed' "Saldo de pedido" (chave pedido-saldo-<pedido>), que
-// quita a conta. Os passos 2 a 5 do sinal viraram lancarEntradaEBaixar, sem
+// a entrada 'confirmed' "Saldo de pedido" (chave pedido-saldo-<marco>), que
+// abate a conta e a quita quando nada falta. Os passos 2 a 5 do sinal viraram lancarEntradaEBaixar, sem
 // mudar o SQL nem a ordem do sinal do balcao.
 // ============================================================
 'use strict';
@@ -54,7 +54,8 @@ const CHAVE_A_RECEBER = (orderId) => `pedido-areceber-${orderId}`;
 const CHAVE_SINAL = (orderId) => `pedido-sinal-${orderId}`;
 const CHAVE_TAXA_SINAL = (orderId) => `pedido-sinal-taxa-${orderId}`;
 // p-185 (25/11/2026): o saldo do pedido de orcamento do Studio, recebido fora
-// do Caixa ("Registrar Pix recebido"). Mesmo formato do sinal.
+// do Caixa ("Registrar Pix recebido"). Mesmo formato do sinal, mas a chave e
+// a do MARCO de saldo (pedido-saldo-<marco>): o saldo pode vir em partes.
 const CATEGORIA_SALDO = 'Saldo de pedido';
 const CHAVE_SALDO = (orderId) => `pedido-saldo-${orderId}`;
 const CHAVE_TAXA_SALDO = (orderId) => `pedido-saldo-taxa-${orderId}`;
@@ -220,6 +221,42 @@ async function baixarContaAReceber(client, { companyId, pedido, itens, userId, p
 }
 
 /**
+ * Abate `valor` da conta a receber pendente do pedido (p-185, orcamento).
+ * A conta diz o que falta: amount cai para amount - valor e original_amount
+ * guarda com quanto ela nasceu. Nada faltando: 'cancelled' com a nota.
+ * Sem conta pendente: nada (devolve null). Dentro da transacao de quem chama,
+ * com o pedido ja travado.
+ */
+async function abaterContaAReceber(client, { companyId, orderId, valor, nota }) {
+  const { rows: [c] } = await client.query(
+    `SELECT id, amount FROM transactions
+      WHERE idempotency_key = $1 AND company_id = $2 AND status = 'pending'
+      FOR UPDATE`,
+    [CHAVE_A_RECEBER(orderId), companyId]
+  );
+  if (!c) return null;
+  const falta = round2(Number(c.amount) - round2(valor));
+  if (falta > 0) {
+    await client.query(
+      `UPDATE transactions
+          SET amount = $1, original_amount = COALESCE(original_amount, $2), updated_at = NOW()
+        WHERE id = $3 AND company_id = $4`,
+      [falta, round2(c.amount), c.id, companyId]
+    );
+  } else {
+    await client.query(
+      `UPDATE transactions
+          SET status = 'cancelled',
+              notes = CASE WHEN COALESCE(notes, '') = '' THEN $1 ELSE notes || ' · ' || $1 END,
+              updated_at = NOW()
+        WHERE id = $2 AND company_id = $3`,
+      [nota, c.id, companyId]
+    );
+  }
+  return Math.max(falta, 0);
+}
+
+/**
  * Registra o sinal num pedido JA TRAVADO (SELECT ... FOR UPDATE) pela
  * transacao de quem chama. `pedido` = linha de digital_orders (id,
  * order_number, total, promised_date). Nao confere situacao nem sinal
@@ -262,17 +299,25 @@ async function registrarSinal(client, { companyId, pedido, itens, valor, forma, 
  * transacao de quem chama, com o pedido ja travado. Usado pelo sinal do
  * balcao e pelos marcos do orcamento (services/financeiroDoOrcamento.js).
  *   tipo 'sinal': "Sinal de pedido", chave pedido-sinal-<pedido>
- *   tipo 'saldo': "Saldo de pedido", chave pedido-saldo-<pedido> (p-185: o
+ *   tipo 'saldo': "Saldo de pedido", chave pedido-saldo-<chaveId> (p-185: o
  *                 saldo do orcamento nao passa pelo Caixa)
- * Uma entrada de cada tipo por pedido: a chave e unica em transactions.
+ * A chave e unica em transactions: a mesma entrada nao entra duas vezes.
  * `pago` = soma ja paga contando esta; `nota` = a da conta quitada.
+ * `abater` (orcamento, p-185): em vez de recalcular pelo total, abate `valor`
+ * do que a conta diz que falta (abaterContaAReceber); a conta ja existe.
+ * `chaveId`: o id da chave da entrada e da taxa (padrao: o pedido). O saldo
+ * do orcamento usa o id do MARCO (pedido-saldo-<marco>): mais de um marco de
+ * saldo por pedido, cada um com a sua entrada.
  * `semTaxa`: o Pix que caiu direto na chave da loja ("Registrar Pix
  * recebido", decisao do Caio 25/11) nao passa pela maquininha.
  * Devolve a taxa (ou null).
  */
-async function lancarEntradaEBaixar(client, { companyId, pedido, itens, valor, forma, userId, tipo, pago, nota, semTaxa = false }) {
+async function lancarEntradaEBaixar(client, {
+  companyId, pedido, itens, valor, forma, userId, tipo, pago, nota, semTaxa = false, abater = false, chaveId,
+}) {
   const v = round2(valor);
   const t = TIPOS[tipo];
+  const idDaChave = chaveId || pedido.id;
   const f = FORMAS[forma];
   const resumo = resumoDosItens(itens);
   const descricao = `${t.rotulo} do pedido ${pedido.order_number}${resumo ? ` - ${resumo}` : ''} (${f.rotulo})`.slice(0, 500);
@@ -280,9 +325,10 @@ async function lancarEntradaEBaixar(client, { companyId, pedido, itens, valor, f
     `INSERT INTO transactions
        (company_id, type, status, amount, description, category, due_date, paid_at, created_by, idempotency_key)
      VALUES ($1, 'income', 'confirmed', $2, $3, '${t.categoria}', ${SP_DATE_NOW}, NOW(), $4, $5)`,
-    [companyId, v, descricao, userId || null, t.chave(pedido.id)]
+    [companyId, v, descricao, userId || null, t.chave(idDaChave)]
   );
-  await baixarContaAReceber(client, { companyId, pedido, itens, userId, pago, nota });
+  if (abater) await abaterContaAReceber(client, { companyId, orderId: pedido.id, valor: v, nota });
+  else await baixarContaAReceber(client, { companyId, pedido, itens, userId, pago, nota });
   if (tipo === 'sinal') {
     await client.query(
       `UPDATE digital_orders SET deposit_paid = TRUE, updated_at = NOW() WHERE id = $1 AND company_id = $2`,
@@ -294,7 +340,7 @@ async function lancarEntradaEBaixar(client, { companyId, pedido, itens, valor, f
     taxa = await insertCardFeeExpense(client, {
       companyId,
       saleId: null,
-      chave: t.chaveTaxa(pedido.id),
+      chave: t.chaveTaxa(idDaChave),
       cardBase: { [f.taxa]: v },
       createdBy: userId || null,
       itemsSummary: `${t.rotulo} do pedido ${pedido.order_number}`,
@@ -395,6 +441,7 @@ module.exports = {
   registrarSinal,
   lancarEntradaEBaixar,
   baixarContaAReceber,
+  abaterContaAReceber,
   receberSinal,
   lerSinalPago,
   apresentarSinal,
