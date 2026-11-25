@@ -25,6 +25,8 @@ const { devolverEstoqueDoPedido } = require('../services/devolucaoDoEstoqueDoPed
 const lojaEvents = require('../services/lojaEvents');
 // Pagar na entrega com aceite (tq-44, 29/10/2026).
 const aceite = require('../services/aceiteDoPedido');
+// 25/11/2026 (p-185): pedido de orcamento cancelado fecha a conta a receber.
+const financeiroDoOrcamento = require('../services/financeiroDoOrcamento');
 const { AGUARDANDO_ACEITE, fraseDoPagamento, trocoALevar, usaFluxoComAceite } = require('../services/pagarNaEntrega');
 // Aviso a cliente pelo wa.me da lojista, com texto pronto (tq-47).
 const { avisoDoPedido, precisaDevolver } = require('../services/avisoDoPedidoNoWhatsapp');
@@ -242,7 +244,10 @@ router.patch('/:oid/status', requireRole('client', 'analyst', 'admin'), async (r
       });
     }
 
-    const { rows: updated } = await db.query(`
+    // p-185: pedido de orcamento com conta a receber cancela numa transacao,
+    // com o pedido travado: o status, a conta e os marcos mudam juntos, e um
+    // erro no dinheiro desfaz o cancelamento (nada fica pela metade).
+    const SQL_DO_STATUS = `
       UPDATE digital_orders SET
         status       = $1,
         payment_status = CASE
@@ -257,7 +262,31 @@ router.patch('/:oid/status', requireRole('client', 'analyst', 'admin'), async (r
         updated_at   = NOW()
       WHERE id = $2 AND company_id = $3
       RETURNING *
-    `, [status, oid, cid, motivoDoCancelamento]);
+    `;
+    const PARAMS_DO_STATUS = [status, oid, cid, motivoDoCancelamento];
+    let updated;
+    if (status === 'cancelled' && await financeiroDoOrcamento.temContaDoOrcamento(db, cid, oid)) {
+      const client = await db.connect();
+      try {
+        await client.query('BEGIN');
+        const { rows: [travado] } = await client.query(
+          `SELECT status FROM digital_orders WHERE id = $1 AND company_id = $2 FOR UPDATE`, [oid, cid]);
+        if (!travado || travado.status === 'delivered' || travado.status === 'cancelled') {
+          await client.query('ROLLBACK');
+          return res.status(409).json({ error: `Pedido já finalizado com status "${travado ? travado.status : current}"` });
+        }
+        ({ rows: updated } = await client.query(SQL_DO_STATUS, PARAMS_DO_STATUS));
+        await financeiroDoOrcamento.fecharNoCancelamento(client, { companyId: cid, orderId: oid });
+        await client.query('COMMIT');
+      } catch (e) {
+        await client.query('ROLLBACK').catch(() => {});
+        throw e;
+      } finally {
+        client.release();
+      }
+    } else {
+      ({ rows: updated } = await db.query(SQL_DO_STATUS, PARAMS_DO_STATUS));
+    }
 
     // Cancelado: devolve o estoque se o pedido deu baixa (pago, ou pagar na
     // entrega). Esperado ANTES da resposta, para o painel ja ver o saldo
@@ -269,6 +298,8 @@ router.patch('/:oid/status', requireRole('client', 'analyst', 'admin'), async (r
       // Pagar na entrega ja aceito: o lancamento a receber e estornado.
       await aceite.estornarAReceber(updated[0])
         .catch(err => console.error('[orders] estorno do a receber falhou:', oid, err.message));
+      // (p-185: a conta e os marcos do pedido de orcamento ja foram fechados
+      // na transacao do status, acima. O sinal que ja entrou fica.)
       // Cancelar quem ainda esperava aceite e recusar: fica registrado assim.
       if (current === AGUARDANDO_ACEITE) updated[0].cancel_kind = await marcarComoRecusado(oid, updated[0]);
     }

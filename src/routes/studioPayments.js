@@ -3,12 +3,17 @@
 // GET  /studio/orders/:oid/payments     → lista marcos do pedido
 // POST /studio/orders/:oid/payments     → cria marco {kind, amount, due_at, method}
 // POST /studio/payments/:pid/mark-paid  → confirma Pix manual recebido
+//   (p-185: no pedido de orcamento lanca a entrada e baixa a conta a receber,
+//    services/financeiroDoOrcamento.js)
 // POST /studio/payments/:pid/charge-link→ retorna chave Pix da empresa (MVP)
 // ============================================================
 const express = require('express');
 const router  = express.Router({ mergeParams: true }); // company_id = req.params.id
 const db      = require('../config/database');
 const lojaEvents = require('../services/lojaEvents');
+// 25/11/2026 (p-185): marco de pedido de orcamento lanca no Financeiro.
+const financeiroDoOrcamento = require('../services/financeiroDoOrcamento');
+const { lerChave } = require('../services/pedidoBalcao');
 
 // 18/11/2026 (B4a, revisao do Fable): o pedido guardado no Caixa (origem
 // 'balcao') tem o sinal pela rota propria (POST /pedidos/:oid/sinal), que
@@ -86,6 +91,44 @@ router.post('/payments/:pid/mark-paid', async (req, res) => {
     }
     const payment = found[0];
     if (await eDoBalcao(payment.order_id)) return res.status(409).json(PEDIDO_DO_BALCAO);
+
+    // p-185 (25/11/2026, decisao do Caio): pedido que saiu de orcamento lanca
+    // pelo caminho do sinal do pedido guardado. Sinal: entrada "Sinal de
+    // pedido"; saldo: entrada "Saldo de pedido"; a conta "Pedido a receber"
+    // baixa pelo que entrou e quita quando nada falta. Pix sem taxa da
+    // maquininha. Tudo numa transacao, com o pedido e o marco travados;
+    // marco ja pago responde sem lancar de novo.
+    // Pedido de orcamento que ja tem a conta a receber: sempre pelo caminho
+    // novo. Sem conta: so com a trava da frente ligada (loja de teste ou a
+    // virada), e a conta nasce agora pelo que falta. Senao, o de antes.
+    if (await financeiroDoOrcamento.marcoLancaNoFinanceiro(db, company_id, payment.order_id)) {
+      try {
+        const r = await financeiroDoOrcamento.receberMarco(db, {
+          companyId: company_id,
+          paymentId: pid,
+          body: req.body,
+          chave: lerChave(req),
+          userId: req.user && req.user.id,
+        });
+        const deposit_released = r.tipo === 'sinal';
+        if (r.repetido) {
+          res.set('Idempotent-Replayed', 'true');
+          return res.json({ ok: true, payment: r.payment, deposit_released, ja_pago: true, idempotent_replay: true });
+        }
+        if (deposit_released) lojaEvents.emit('loja_sinal_pago', { id: payment.order_id, company_id });
+        return res.json({
+          ok: true,
+          payment: r.payment,
+          deposit_released,
+          lancamento: r.tipo,
+          taxa: r.taxa,
+          falta_receber: r.falta_receber,
+        });
+      } catch (e) {
+        if (e && e.status) return res.status(e.status).json({ error: e.message, code: e.code });
+        throw e;
+      }
+    }
 
     // Atualiza o pagamento para paid
     const { rows: updated } = await db.query(

@@ -170,7 +170,8 @@ const APELIDOS = {
 //     da migracao e da contagem, como a anuidade. Ligar a qualquer despesa
 //     ou a "Trocas e devolucoes" a poria em Despesas ou em deducoes.
 const TEXTOS_DO_PEDIDO = {
-  income: { 'sinal de pedido': ['vendas'], 'pedido a receber': ['vendas'] },
+  // p-185: "Saldo de pedido" (o saldo do orcamento, fora do Caixa) tambem.
+  income: { 'sinal de pedido': ['vendas'], 'saldo de pedido': ['vendas'], 'pedido a receber': ['vendas'] },
   expense: { 'devolucao de sinal': null },
 };
 

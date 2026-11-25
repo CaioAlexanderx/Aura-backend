@@ -11,6 +11,11 @@
 //      so (o orcamento e lido com FOR UPDATE; quem chega depois espera e
 //      devolve o pedido ja criado)
 //
+// p-185 (25/11/2026): as empresas daqui NAO sao de teste da frente
+// Personalizados (sem studio_settings.personalizados_teste, env desligada),
+// entao estes testes sao tambem a paridade com o main: sem conta a receber e
+// so o marco do sinal. Com a trava ligada: financeiroDoOrcamento.banco.test.js.
+//
 // Corrida precisa de COMMIT de verdade em varias conexoes, entao as
 // fixtures usam uuid proprio e sao apagadas no afterAll.
 // ============================================================

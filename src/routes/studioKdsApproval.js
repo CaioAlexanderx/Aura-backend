@@ -36,6 +36,8 @@ const creditLedger     = require('../services/creditLedger');
 // 10/11/2026 (migration 438): baixa do saldo da encomenda emite a NFS-e da venda com servico.
 const nfseAutomatica   = require('../services/nfseAutomatica');
 const pagamentoDoPedido = require('../services/pagamentoDoPedidoStudio');
+// 25/11/2026 (p-185): o que falta receber do pedido de orcamento.
+const financeiroDoOrcamento = require('../services/financeiroDoOrcamento');
 // QA final 28/09/2026 (LJ-33): pedido cancelado e etapa 'cancelled' tambem
 // na leitura — o cancelamento so mudava `status`, e o quadro lia a etapa.
 const { sqlDaEtapa, etapaDaProducao } = require('../services/cancelamentoDoPedido');
@@ -75,6 +77,8 @@ const VALID_PRODUCTION_STATUS = [
 // deposit_paid, migration 141) e outro mecanismo, sem parcela e sem id que os
 // endpoints de cobranca aceitem -- misturar os dois num campo so confundiria a
 // tela e a lojista.
+// p-185 (25/11/2026): o pedido de orcamento tem o seu "falta receber" em
+// campos proprios (orcamento_*), de services/financeiroDoOrcamento.js.
 const BALANCE_LATERAL = `
     LEFT JOIN LATERAL (
       SELECT ci.id AS installment_id,
@@ -635,6 +639,15 @@ ${ITENS_E_APROVACAO_COLS}
     // Nunca lanca: falha deixa os quatro campos null.
     orders = await comItemEOrigem(db, cid, orders);
 
+    // 25/11/2026 (p-185): pedido de orcamento traz orcamento_recebido,
+    // orcamento_falta_receber e orcamento_pagamentos_pendentes (ids do
+    // mark-paid), para "Falta receber R$ X" ao entregar. Campos a parte do
+    // balance_* (saldo do crediario da venda do Caixa). Nunca lanca: falha
+    // deixa os tres null; pedido que nao e de orcamento tambem fica null.
+    orders = await financeiroDoOrcamento.comFaltaReceber(
+      db, cid, orders, (o) => (o.source === 'digital' ? o.digital_order_id : null)
+    );
+
     return res.json({ orders });
   } catch (errRich) {
     console.error('[studio/orders:GET][rich]', errRich.message, errRich.code, errRich.stack);
@@ -820,6 +833,8 @@ router.get('/orders/:oid', async function(req, res) {
       try {
         order = { ...order, ...(await pagamentoDoPedido.entregaENotaDoPedido(db, req.params.id, head.digital_order_id)) };
       } catch (e) { console.error('[studio/orders/:oid][entrega]', e.message); }
+      // p-185: o que falta receber do pedido de orcamento (mesmos campos da lista).
+      [order] = await financeiroDoOrcamento.comFaltaReceber(db, req.params.id, [order], (o) => o.digital_order_id);
     }
 
     res.json({ order, items, approvals });

@@ -201,7 +201,8 @@ test('3. o mapa padrao do DRE so ganhou chaves novas', () => {
   };
   for (const [k, linha] of Object.entries(ANTES)) expect(DEFAULT_LINE_MAP[k].line).toBe(linha);
   const novas = Object.keys(DEFAULT_LINE_MAP).filter((k) => !(k in ANTES)).sort();
-  expect(novas).toEqual(['devolucao de sinal', 'devolução de sinal', 'pedido a receber', 'sinal de pedido'].sort());
+  // p-185 (25/11/2026): "saldo de pedido", o saldo do orcamento do Studio, na linha do sinal.
+  expect(novas).toEqual(['devolucao de sinal', 'devolução de sinal', 'pedido a receber', 'saldo de pedido', 'sinal de pedido'].sort());
 });
 
 test('4. lancamento comum continua editavel no Financeiro (a guarda e so do pedido)', async () => {
