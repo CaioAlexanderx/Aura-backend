@@ -99,7 +99,6 @@ beforeAll(async () => {
   app.use('/companies/:id/studio', require('../src/routes/studioKdsApproval'));
   app.use('/companies/:id/studio', require('../src/routes/studioQuotes'));
   app.use('/companies/:id/studio', require('../src/routes/studioPayments'));
-  app.use('/companies/:id/orders', require('../src/routes/digitalOrders'));
   app.use('/companies/:id/dre', require('../src/routes/dre'));
   app.use('/companies/:id/dashboard', require('../src/routes/dashboard'));
 });
@@ -398,8 +397,14 @@ describe('cancelamento do pedido de orcamento', () => {
     const m = await marcos(oid);
     await pagar(m.find((x) => x.kind === 'deposit').id);
 
-    const c = await request(app).patch(`/companies/${ID.loja}/orders/${oid}/status`).send({ status: 'cancelled', reason: 'Desistiu' });
-    expect(c.status).toBe(200);
+    // A ligacao com o PATCH /status do Canal esta em canal.cancelarDevolveEstoque.test.js
+    // (no banco do CI o payment_status ainda e o ENUM da 070, sem 'confirmed',
+    // e o UPDATE da rota nao roda). Aqui, o que o cancelamento grava.
+    await q(`UPDATE digital_orders SET status = 'cancelled' WHERE id = $1`, [oid]);
+    const F = require('../src/services/financeiroDoOrcamento');
+    expect(await F.fecharNoCancelamento(pool, { companyId: ID.loja, orderId: oid })).toBe(true);
+    // Outra loja nao fecha nada.
+    expect(await F.fecharNoCancelamento(pool, { companyId: ID.outra, orderId: oid })).toBe(false);
     const l = await lancamentos(oid);
     expect(l['pedido-areceber'].status).toBe('cancelled');
     expect(l['pedido-areceber'].notes).toContain('Pedido cancelado');

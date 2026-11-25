@@ -65,6 +65,33 @@ describe('Cancelar pedido no painel', () => {
     expect(r.body.order.stock_deducted).toBe(false);
   });
 
+  test('p-185: pedido de orcamento cancelado fecha a conta a receber e os marcos pendentes da loja', async () => {
+    banco([
+      [/SELECT id, status, payment_status FROM digital_orders/, [{ id: OID, status: 'confirmed', payment_status: 'pending' }]],
+      [/UPDATE digital_orders SET/, [{ id: OID, status: 'cancelled', stock_deducted: false }]],
+      [/FROM studio_quotes WHERE order_id/, [{ '?column?': 1 }]],
+    ]);
+    const r = await cancelar();
+    expect(r.status).toBe(200);
+    const chamadas = db.query.mock.calls.map(([s, p]) => [String(s), p]);
+    const conta = chamadas.find(([s]) => /UPDATE transactions/.test(s));
+    expect(conta[0]).toMatch(/status = 'pending'/);
+    expect(conta[1]).toEqual(['Pedido cancelado', `pedido-areceber-${OID}`, CID]);
+    const marcos = chamadas.find(([s]) => /UPDATE studio_payments SET status = 'cancelled'/.test(s));
+    expect(marcos[1]).toEqual([OID, CID]);
+  });
+
+  test('p-185: pedido que nao e de orcamento nao mexe em conta nem marco', async () => {
+    banco([
+      [/SELECT id, status, payment_status FROM digital_orders/, [{ id: OID, status: 'confirmed', payment_status: 'confirmed' }]],
+      [/UPDATE digital_orders SET/, [{ id: OID, status: 'cancelled', stock_deducted: false }]],
+    ]);
+    expect((await cancelar()).status).toBe(200);
+    const calls = db.query.mock.calls.map(([s, p]) => [String(s), p || []]);
+    expect(calls.some(([s, p]) => /UPDATE transactions/.test(s) && p.some((x) => String(x).startsWith('pedido-areceber')))).toBe(false);
+    expect(calls.some(([s]) => /UPDATE studio_payments/.test(s))).toBe(false);
+  });
+
   test('sem baixa (nada devolvido): o marcador da resposta fica como veio', async () => {
     devolverEstoqueDoPedido.mockResolvedValueOnce({ devolvido: false, motivo: 'sem_baixa' });
     banco([
