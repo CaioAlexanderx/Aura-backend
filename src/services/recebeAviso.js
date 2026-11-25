@@ -30,10 +30,26 @@
 // situação da conta compara a data do evento (retrato mais velho não
 // sobrescreve) e pagamento é idempotente pelo id do evento.
 //
+// TOKEN POR SUBCONTA (revisão de 25/11): cada subconta recebe o seu
+// authToken, HMAC-SHA256(segredo mestre do ambiente, company_id) em hex
+// (64 caracteres). A rota do aviso lê a conta do corpo (account.id), acha a
+// empresa e recalcula: um token vazado de uma subconta não forja aviso de
+// outra. Deriva do company_id (e não do id da conta na Asaas) porque o aviso
+// vai DENTRO do POST /v3/accounts, antes de a Asaas devolver o id da conta;
+// assim a subconta continua nascendo com o aviso, numa chamada só. O token
+// mestre puro NÃO vale como aviso (hoje há 0 subcontas, nada a migrar).
+//
+// IMPRESSÃO DO TOKEN NO NOME: o nome do webhook leva os 12 primeiros hex do
+// SHA-256 do token (`[a1b2c3d4e5f6]`). A Asaas não devolve o token na
+// listagem; pela impressão a rota de staff sabe se o token cadastrado é o
+// atual (rotação do segredo) sem guardar nada no banco. A impressão não
+// permite recuperar o token.
+//
 // O token nunca é logado nem devolvido.
 // ============================================================
 'use strict';
 
+const nodeCrypto = require('crypto');
 const { str } = require('./baasShared');
 const { PADRAO: API_PADRAO } = require('../config/enderecoDaApi');
 
@@ -115,11 +131,26 @@ function webhookEmail() {
   return v || DEFAULT_WEBHOOK_EMAIL;
 }
 
-// O objeto do webhook, igual para POST /v3/accounts (dentro de `webhooks`)
-// e para POST /v3/webhooks (corpo inteiro).
+// authToken da subconta da empresa: HMAC-SHA256(mestre, company_id), hex.
+function tokenDaSubconta(masterToken, companyId) {
+  return nodeCrypto.createHmac('sha256', str(masterToken)).update(str(companyId).toLowerCase()).digest('hex');
+}
+
+// Impressão do token (vai no nome do webhook). Não revela o token.
+function impressaoDoToken(token) {
+  return nodeCrypto.createHash('sha256').update(str(token)).digest('hex').slice(0, 12);
+}
+
+// O nome do webhook cadastrado traz a impressão deste token?
+function nomeTemImpressao(name, token) {
+  return str(name).includes(`[${impressaoDoToken(token)}]`);
+}
+
+// O objeto do webhook, igual para POST /v3/accounts (dentro de `webhooks`),
+// POST /v3/webhooks e PUT /v3/webhooks/:id. `token` = o da SUBCONTA.
 function buildWebhookConfig(token) {
   return {
-    name: WEBHOOK_NAME,
+    name: `${WEBHOOK_NAME} [${impressaoDoToken(token)}]`,
     url: webhookUrl(),
     email: webhookEmail(),
     enabled: true,
@@ -150,5 +181,8 @@ module.exports = {
   resolveSecret,
   webhookUrl,
   webhookEmail,
+  tokenDaSubconta,
+  impressaoDoToken,
+  nomeTemImpressao,
   buildWebhookConfig,
 };

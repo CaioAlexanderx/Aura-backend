@@ -259,7 +259,8 @@ async function createAccount(companyId, body, opts = {}) {
   const holderType = normalizeHolderType(opts.holderType != null ? opts.holderType : b.holder_type);
   const kyc = validateHolder(b, holderType);
   // Sem o segredo do aviso, a subconta não nasce (nem a linha é reservada).
-  const avisoToken = segredoDoAviso();
+  // Token próprio desta subconta (recebeAviso.tokenDaSubconta).
+  const avisoToken = aviso.tokenDaSubconta(segredoDoAviso(), companyId);
 
   // 1. Reserva a linha da empresa. Quem não reservou não chama a Asaas.
   let reserved;
@@ -425,8 +426,10 @@ async function refreshStatus(companyId) {
 // ── Aviso (webhook) numa subconta JÁ CRIADA sem ele (rota de staff) ──
 // Idempotente: lista os webhooks DA subconta e, se já houver um com a URL do
 // Recebe na Aura, não cria outro (a Asaas aceita até 10 por conta e um
-// segundo igual entregaria cada aviso duas vezes). Se a listagem falhar, não
-// cria (502): sem saber o que existe, criar poderia duplicar.
+// segundo igual entregaria cada aviso duas vezes). Se esse um estiver
+// desligado, com a fila interrompida, com token antigo (rotação), URL ou
+// eventos diferentes, ATUALIZA (PUT) e responde `updated`; `already_registered`
+// só quando está tudo certo. Se a listagem falhar, não cria nem atualiza (502).
 // Nunca loga a chave, o token nem o corpo.
 function shapeWebhook(w) {
   if (!w) return null;
@@ -443,7 +446,7 @@ function shapeWebhook(w) {
 async function registerWebhook(companyId) {
   if (!isEnabled()) throw indisponivel();
   if (!UUID_RE.test(str(companyId))) throw svcError(422, 'VALIDATION_ERROR', 'company_id deve ser um UUID');
-  const token = segredoDoAviso();
+  const token = aviso.tokenDaSubconta(segredoDoAviso(), companyId);
 
   let row;
   try {
@@ -487,12 +490,37 @@ async function registerWebhook(companyId) {
   const list = listed && Array.isArray(listed.data) ? listed.data : [];
   const existing = list.find((w) => w && str(w.url).replace(/\/+$/, '') === url.replace(/\/+$/, ''));
   if (existing) {
-    return { registered: false, already_registered: true, webhook: shapeWebhook(existing) };
+    const motivos = motivosParaAtualizar(existing, token, url);
+    if (!motivos.length) {
+      return { registered: false, updated: false, already_registered: true, webhook: shapeWebhook(existing) };
+    }
+    // Reativa, desinterrompe a fila, troca o token (rotação) e acerta URL e
+    // eventos, no MESMO webhook (PUT /v3/webhooks/:id): nunca um segundo.
+    const updated = await call('PUT', `/webhooks/${encodeURIComponent(existing.id)}`,
+      aviso.buildWebhookConfig(token), 'atualização');
+    console.log(`[companyBaas] aviso do ${RECEBE_NA_AURA_NAME} atualizado na subconta da empresa ${companyId} (${motivos.join(', ')})`);
+    return {
+      registered: false, updated: true, already_registered: false, reasons: motivos,
+      webhook: shapeWebhook({ ...existing, ...(updated || {}) }),
+    };
   }
 
   const created = await call('POST', '/webhooks', aviso.buildWebhookConfig(token), 'cadastro');
   console.log(`[companyBaas] aviso do ${RECEBE_NA_AURA_NAME} cadastrado na subconta da empresa ${companyId}`);
-  return { registered: true, already_registered: false, webhook: shapeWebhook(created || {}) };
+  return { registered: true, updated: false, already_registered: false, webhook: shapeWebhook(created || {}) };
+}
+
+// O que está fora do lugar num webhook que já tem a nossa URL. [] = tudo certo.
+// O token não volta na listagem da Asaas: a impressão dele no nome diz se é o
+// atual (recebeAviso.nomeTemImpressao).
+function motivosParaAtualizar(w, token, url) {
+  const m = [];
+  if (w.enabled === false) m.push('desligado');
+  if (w.interrupted === true) m.push('fila_interrompida');
+  if (w.hasAuthToken === false || !aviso.nomeTemImpressao(w.name, token)) m.push('token_diferente');
+  if (str(w.url) !== url) m.push('url');
+  if (Array.isArray(w.events) && aviso.WEBHOOK_EVENTS.some((e) => !w.events.includes(e))) m.push('eventos');
+  return m;
 }
 
 module.exports = {

@@ -1,7 +1,7 @@
 // ============================================================
 // AURA. — Testes: Recebe na Aura, avisos da Asaas das subcontas (RA-07)
 // Cobre:
-//   token: sem segredo configurado → 401 sempre; segredo curto → 401; token
+//   token POR SUBCONTA (HMAC do company_id): sem segredo → 401; segredo curto → 401; token
 //     errado ou ausente → 401; nada lido nem gravado; token nunca no log;
 //     sandbox usa o segredo do sandbox (o de produção não vale lá)
 //   flag desligada: 200 sem processar, evento registrado como flag_off
@@ -115,11 +115,22 @@ const statusBody = (id, event, at, st, accId = ACC_A) => ({
   accountStatus: { id: accId, ...st },
 });
 
-const post = (body, token = TOKEN) => {
+// Token POR SUBCONTA (25/11): HMAC-SHA256(segredo do ambiente, company_id).
+const tokenDe = (master, cid) => require('crypto').createHmac('sha256', master).update(cid).digest('hex');
+// Sem token explícito: o token certo da subconta do corpo, no ambiente atual.
+function tokenCerto(body) {
+  const master = process.env.ASAAS_ENV === 'sandbox' ? SANDBOX_TOKEN : TOKEN;
+  const accId = body && ((body.account && body.account.id) || (body.accountStatus && body.accountStatus.id));
+  const row = Object.values(baas).find((r) => r.asaas_account_id === accId);
+  return tokenDe(master, row ? row.company_id : 'sem-empresa');
+}
+const post = (body, token) => {
   const r = request(app).post(URL);
-  if (token != null) r.set('asaas-access-token', token);
+  const t = token === undefined ? tokenCerto(body) : token;
+  if (t != null) r.set('asaas-access-token', t);
   return r.send(body);
 };
+const escritas = () => db.query.mock.calls.filter(([sql]) => /^\s*(INSERT|UPDATE|DELETE)/.test(String(sql)));
 
 let logSpies;
 beforeEach(() => {
@@ -170,11 +181,32 @@ describe('token do webhook', () => {
     ['errado', 'token-errado-mas-bem-comprido-0123456789abc'],
     ['ausente', null],
     ['vazio', ''],
-  ])('token %s → 401, nada lido nem gravado', async (_n, t) => {
+  ])('token %s → 401, nada gravado', async (_n, t) => {
     const r = await post(docAprovado('evt_1', '2026-11-13 10:00:00'), t);
     expect(r.status).toBe(401);
-    expect(db.query).not.toHaveBeenCalled();
+    expect(escritas()).toHaveLength(0);
     expect(Object.keys(events)).toHaveLength(0);
+    if (!t) expect(db.query).not.toHaveBeenCalled(); // sem token nem lê a conta
+  });
+
+  test('o segredo mestre puro não vale como aviso (só o token da subconta)', async () => {
+    const r = await post(docAprovado('evt_1', '2026-11-13 10:00:00'), TOKEN);
+    expect(r.status).toBe(401);
+    expect(escritas()).toHaveLength(0);
+  });
+
+  test('token de OUTRA subconta não forja aviso desta', async () => {
+    const companyB = 'b0000000-0000-4000-8000-00000000000b';
+    contaCriada(companyB, 'acc-subconta-b-teste');
+    const r = await post(docAprovado('evt_1', '2026-11-13 10:00:00'), tokenDe(TOKEN, companyB));
+    expect(r.status).toBe(401);
+    expect(Object.keys(events)).toHaveLength(0);
+    expect(baas[companyA].saves).toBeUndefined();
+    // e o token certo da B vale para o aviso da B
+    const rb = await post(statusBody('evt_2', 'ACCOUNT_STATUS_DOCUMENT_APPROVED', '2026-11-13 10:00:00',
+      { documentation: 'APPROVED' }, 'acc-subconta-b-teste'), tokenDe(TOKEN, companyB));
+    expect(rb.status).toBe(200);
+    expect(events.evt_2).toMatchObject({ company_id: companyB });
   });
 
   test('o token nunca aparece no log', async () => {
@@ -182,14 +214,15 @@ describe('token do webhook', () => {
     await post(docAprovado('evt_2', '2026-11-13 10:00:00'));
     const txt = loggedText();
     expect(txt).not.toContain(TOKEN);
+    expect(txt).not.toContain(tokenDe(TOKEN, companyA));
     expect(txt).not.toContain('token-errado-mas-bem-comprido');
   });
 
   test('sandbox: vale o segredo do sandbox; o de produção é recusado', async () => {
     process.env.ASAAS_ENV = 'sandbox';
     process.env.RECEBE_ASAAS_SANDBOX_WEBHOOK_TOKEN = SANDBOX_TOKEN;
-    expect((await post(docAprovado('evt_1', '2026-11-13 10:00:00'), TOKEN)).status).toBe(401);
-    expect((await post(docAprovado('evt_2', '2026-11-13 10:00:00'), SANDBOX_TOKEN)).status).toBe(200);
+    expect((await post(docAprovado('evt_1', '2026-11-13 10:00:00'), tokenDe(TOKEN, companyA))).status).toBe(401);
+    expect((await post(docAprovado('evt_2', '2026-11-13 10:00:00'), tokenDe(SANDBOX_TOKEN, companyA))).status).toBe(200);
   });
 
   test('sandbox sem o segredo do sandbox → 401 (não cai no de produção)', async () => {
@@ -211,6 +244,7 @@ describe('flag desligada', () => {
   });
 
   test('migration 449 pendente com a flag desligada: 200 do mesmo jeito', async () => {
+    contaCriada(companyA, ACC_A);
     semTabela = true;
     const r = await post(docAprovado('evt_1', '2026-11-13 10:00:00'));
     expect(r.status).toBe(200);
@@ -315,19 +349,20 @@ describe('flag ligada', () => {
     expect(events.evt_1.attempts).toBe(2);
   });
 
-  test('subconta desconhecida: registra sem empresa e não processa', async () => {
+  test('subconta desconhecida: sem como conferir o token dela → 401, nada registrado', async () => {
     const r = await post(statusBody('evt_1', 'ACCOUNT_STATUS_DOCUMENT_APPROVED', '2026-11-13 10:00:00',
-      { documentation: 'APPROVED' }, 'acc-que-nao-existe'));
-    expect(r.status).toBe(200);
-    expect(r.body).toMatchObject({ handled: false, reason: 'unknown_account' });
-    expect(events.evt_1).toMatchObject({ outcome: 'unknown_account', company_id: null, asaas_account_id: 'acc-que-nao-existe' });
+      { documentation: 'APPROVED' }, 'acc-que-nao-existe'), tokenDe(TOKEN, companyA));
+    expect(r.status).toBe(401);
+    expect(Object.keys(events)).toHaveLength(0);
     expect(baas[companyA].saves).toBeUndefined();
+    expect(loggedText()).toContain('subconta_desconhecida');
   });
 
-  test('aviso sem account: registra sem empresa', async () => {
-    const r = await post({ id: 'evt_1', event: 'PAYMENT_RECEIVED', dateCreated: '2026-11-13 10:00:00', payment: { id: 'pay_1' } });
-    expect(r.body.reason).toBe('unknown_account');
-    expect(events.evt_1).toMatchObject({ outcome: 'unknown_account', detail: 'sem_account_id', company_id: null });
+  test('aviso sem account: 401, nada registrado', async () => {
+    const r = await post({ id: 'evt_1', event: 'PAYMENT_RECEIVED', dateCreated: '2026-11-13 10:00:00', payment: { id: 'pay_1' } },
+      tokenDe(TOKEN, companyA));
+    expect(r.status).toBe(401);
+    expect(Object.keys(events)).toHaveLength(0);
   });
 
   test.each(['PAYMENT_CONFIRMED', 'PAYMENT_RECEIVED', 'PAYMENT_REFUNDED', 'PAYMENT_CHARGEBACK_REQUESTED', 'PAYMENT_SPLIT_DONE'])(

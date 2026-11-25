@@ -8,8 +8,10 @@
 //
 // 1. Token primeiro, sempre: header `asaas-access-token` contra o segredo do
 //    ambiente (RECEBE_ASAAS_WEBHOOK_TOKEN, ou RECEBE_ASAAS_SANDBOX_WEBHOOK_TOKEN
-//    com ASAAS_ENV=sandbox). Sem segredo configurado, ou token errado → 401,
-//    nada lido nem gravado. A resposta não diz qual dos dois foi.
+//    com ASAAS_ENV=sandbox), derivado POR SUBCONTA (HMAC com o company_id da
+//    conta do corpo; 25/11). Sem segredo configurado, conta desconhecida ou
+//    token errado → 401, nada gravado (só a leitura da conta para saber qual
+//    token esperar). A resposta não diz qual foi.
 // 2. Depois o serviço (services/recebeWebhookService): flag, idempotência
 //    pelo id do evento, situação da conta, registro dos pagamentos.
 // ============================================================
@@ -19,7 +21,14 @@ const router = require('express').Router();
 const svc = require('../services/recebeWebhookService');
 
 router.post('/', async (req, res) => {
-  const auth = svc.checkToken(req.headers['asaas-access-token']);
+  let auth;
+  try {
+    // Token da SUBCONTA do aviso (account.id do corpo → empresa → HMAC).
+    auth = await svc.checkToken(req.headers['asaas-access-token'], req.body);
+  } catch (e) {
+    console.error('[recebe-webhook] falha ao conferir o aviso:', e && (e.code || e.message));
+    return res.status(500).json({ received: false, code: 'INTERNAL_ERROR' });
+  }
   if (!auth.ok) {
     const grave = auth.reason === 'sem_segredo_configurado' || auth.reason === 'segredo_curto_demais';
     const msg = `[recebe-webhook] recusado (401): ${auth.reason}` +

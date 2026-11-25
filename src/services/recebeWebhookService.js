@@ -14,6 +14,10 @@
 // configurado (ou com menos de 32 caracteres, o mínimo da Asaas para o
 // authToken), a rota RECUSA tudo: nunca aceita aviso sem prova. A comparação
 // é por SHA-256 + timingSafeEqual (não vaza o tamanho). O token nunca é logado.
+// Desde 25/11 o token é POR SUBCONTA: HMAC-SHA256(segredo, company_id)
+// (recebeAviso.tokenDaSubconta). A conta do corpo (account.id) diz qual token
+// esperar; conta desconhecida → 401. Token vazado de uma subconta não forja
+// aviso de outra. O segredo mestre puro não vale como aviso.
 //
 // IDEMPOTÊNCIA. A Asaas entrega "at least once" e o id do evento (evt_...) se
 // repete no reenvio (docs.asaas.com, "Como implementar idempotência em
@@ -34,8 +38,8 @@
 //     PAYMENT_REFUNDED, ...). O efeito no pedido/venda vem no RA-09/RA-10,
 //     pela external_reference gravada.
 //   qualquer outro    registrado como 'ignored'.
-// Subconta desconhecida (account.id sem linha em company_baas_accounts):
-// registra sem empresa e não processa.
+// Subconta desconhecida (account.id sem linha em company_baas_accounts): sem
+// como conferir o token dela, a rota recusa (401) antes de registrar.
 //
 // FLAG RECEBE_NA_AURA_ENABLED desligada: com o token válido, registra
 // ('flag_off') e responde 200 sem processar, para a Asaas não reenviar.
@@ -57,7 +61,7 @@ const { str } = require('./baasShared');
 // o token que a subconta recebeu.
 const {
   TOKEN_ENV, SANDBOX_TOKEN_ENV, MIN_TOKEN_LENGTH, ACCOUNT_STATUS_EVENTS, PAYMENT_EVENTS_OF_INTEREST,
-  secretEnvName,
+  secretEnvName, tokenDaSubconta,
 } = require('./recebeAviso');
 // 'processing' parado há mais que isso = a entrega anterior morreu no meio.
 const STALE_PROCESSING_MINUTES = 5;
@@ -66,15 +70,24 @@ function sha256(v) {
   return nodeCrypto.createHash('sha256').update(String(v)).digest();
 }
 
-// { ok, reason }. reason só vai para o log, nunca para a resposta.
-function checkToken(received) {
+// { ok, reason, companyId? }. reason só vai para o log, nunca para a resposta.
+// Token POR SUBCONTA (25/11): a conta vem do corpo (account.id), a empresa
+// sai de company_baas_accounts e o token esperado é
+// tokenDaSubconta(segredo do ambiente, company_id). Conta desconhecida não
+// tem como ser conferida → recusa. O segredo mestre puro não vale.
+async function checkToken(received, body) {
   const secret = str(process.env[secretEnvName()]);
   if (!secret) return { ok: false, reason: 'sem_segredo_configurado' };
   if (secret.length < MIN_TOKEN_LENGTH) return { ok: false, reason: 'segredo_curto_demais' };
   const got = str(Array.isArray(received) ? received[0] : received);
   if (!got) return { ok: false, reason: 'sem_token' };
-  const ok = nodeCrypto.timingSafeEqual(sha256(got), sha256(secret));
-  return ok ? { ok: true } : { ok: false, reason: 'token_invalido' };
+  const accountId = extract(body).accountId;
+  if (!accountId) return { ok: false, reason: 'sem_conta_no_aviso' };
+  const companyId = await findCompanyByAccountId(accountId);
+  if (!companyId) return { ok: false, reason: 'subconta_desconhecida' };
+  const expected = tokenDaSubconta(secret, companyId);
+  const ok = nodeCrypto.timingSafeEqual(sha256(got), sha256(expected));
+  return ok ? { ok: true, companyId } : { ok: false, reason: 'token_invalido' };
 }
 
 // dateCreated da Asaas vem como "2024-06-12 16:45:03", no horário de

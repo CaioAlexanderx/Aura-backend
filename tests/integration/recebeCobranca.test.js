@@ -223,17 +223,39 @@ describe('flag ligada: serviço', () => {
     expect(calls.some((c) => /pixQrCode/.test(c.path))).toBe(false);
   });
 
-  test.each([1, 30, 49, 49.01])('cartão de R$ %s: cobra com split no piso de R$ 0,01 (sem valor mínimo)', async (v) => {
+  test.each([5, 30, 49, 49.01])('cartão de R$ %s: cobra com split no piso de R$ 0,01', async (v) => {
     const out = await svc.createCharge(companyA, input({ billing_type: 'CREDIT_CARD', value: v }));
     expect(out.aura_fee).toBe(0.01);
     expect(postPayment().body).toMatchObject({ billingType: 'CREDIT_CARD', value: v });
     expect(postPayment().body.split).toEqual([expect.objectContaining({ walletId: WALLET, fixedValue: 0.01 })]);
   });
 
-  test('Pix de R$ 0,20 (2% = 0): split no piso de R$ 0,01', async () => {
-    const out = await svc.createCharge(companyA, input({ value: 0.2 }));
-    expect(out.aura_fee).toBe(0.01);
-    expect(postPayment().body.split[0].fixedValue).toBe(0.01);
+  test('Pix de R$ 5,00 (o mínimo da Asaas): split de R$ 0,10', async () => {
+    const out = await svc.createCharge(companyA, input({ value: 5 }));
+    expect(out.aura_fee).toBe(0.1);
+    expect(postPayment().body.split[0].fixedValue).toBe(0.1);
+  });
+
+  // Mínimo da Asaas (R$ 5,00 por cobrança, central de ajuda): recusa antes de chamar a Asaas.
+  test.each([
+    ['PIX', 4.99], ['PIX', 1], ['PIX', 0.2], ['CREDIT_CARD', 4.99], ['CREDIT_CARD', 1],
+  ])('%s de R$ %s: 422 abaixo do mínimo da Asaas, sem Asaas', async (bt, v) => {
+    await expect(svc.createCharge(companyA, input({ billing_type: bt, value: v })))
+      .rejects.toMatchObject({ status: 422, code: 'RECEBE_VALOR_ABAIXO_DO_MINIMO', message: expect.stringContaining('R$ 5,00') });
+    expect(global.fetch).not.toHaveBeenCalled();
+  });
+
+  test('mínimo numa constante; líquido estimado pela tabela da Asaas', () => {
+    expect(svc.ASAAS_MIN_CHARGE).toBe(5);
+    expect(svc.estimatedNetValue('PIX', 100)).toBe(98.01);
+    expect(svc.estimatedNetValue('CREDIT_CARD', 100)).toBe(96.52);
+    expect(svc.estimatedNetValue('PIX', 5)).toBe(3.01);
+  });
+
+  test('split ≥ líquido estimado: 422 RECEBE_SPLIT_ACIMA_DO_LIQUIDO', () => {
+    expect(svc.checkAsaasLimits('PIX', 5, 3.01)).toMatchObject({ status: 422, code: 'RECEBE_SPLIT_ACIMA_DO_LIQUIDO' });
+    expect(svc.checkAsaasLimits('PIX', 5, 3.00)).toBeNull();
+    expect(svc.checkAsaasLimits('CREDIT_CARD', 5, 0.01)).toBeNull();
   });
 
   test('todas as chamadas usam a chave DA SUBCONTA; a chave e o CPF nunca vão ao log', async () => {

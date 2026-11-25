@@ -46,6 +46,8 @@ const SECRET_KEY = '$aact_SUPER_SECRET_SUBACCOUNT_KEY_123';
 const AVISO_TOKEN = 'whsec_PRODUCAO_aviso_de_teste_0123456789';
 const AVISO_TOKEN_SANDBOX = 'whsec_SANDBOX_aviso_de_teste_9876543210';
 const staffUser = 'e0000000-0000-4000-8000-0000000000f1';
+// Token POR SUBCONTA: HMAC-SHA256(segredo, company_id), hex.
+const tokenDe = (master, cid) => require('crypto').createHmac('sha256', master).update(cid).digest('hex');
 
 // quem é o quê em cada empresa
 const MEMBERS = {
@@ -68,6 +70,10 @@ function fakeQuery(sql, params = []) {
   }
   if (!s.includes('company_baas_accounts')) return Promise.resolve({ rows: [] });
   tableQueries.push({ sql: s, params });
+  if (/WHERE asaas_account_id = \$1/.test(s)) {
+    const row = Object.values(store).find((r) => r.asaas_account_id === params[0]);
+    return Promise.resolve({ rows: row ? [{ company_id: row.company_id }] : [] });
+  }
   if (/^\s*INSERT INTO company_baas_accounts/.test(s)) {
     const [cid, holderType, notifOff, createdBy] = params;
     if (store[cid]) return Promise.resolve({ rows: [] }); // ON CONFLICT DO NOTHING
@@ -241,9 +247,11 @@ describe('Recebe na Aura — flag ligada', () => {
     expect(sent.webhooks).toHaveLength(1);
     expect(sent.birthDate).toBeUndefined();
     // o token do aviso vai só para a Asaas: nunca na resposta, no banco nem no log
-    expect(JSON.stringify(res.body)).not.toContain(AVISO_TOKEN);
-    expect(JSON.stringify(db.query.mock.calls)).not.toContain(AVISO_TOKEN);
-    expect(loggedText()).not.toContain(AVISO_TOKEN);
+    for (const t of [AVISO_TOKEN, tokenDe(AVISO_TOKEN, companyA)]) {
+      expect(JSON.stringify(res.body)).not.toContain(t);
+      expect(JSON.stringify(db.query.mock.calls)).not.toContain(t);
+      expect(loggedText()).not.toContain(t);
+    }
   });
 
   test('GET status depois da criação: sem chave, wallet mascarada', async () => {
@@ -441,10 +449,14 @@ describe('Recebe na Aura — aviso cadastrado na criação da subconta', () => {
       enabled: true,
       interrupted: false,
       apiVersion: 3,
-      authToken: AVISO_TOKEN,
+      authToken: tokenDe(AVISO_TOKEN, companyA),
       sendType: 'NON_SEQUENTIALLY',
     });
+    expect(w.authToken).toMatch(/^[0-9a-f]{64}$/); // dentro de 32–255
+    expect(w.authToken).not.toBe(AVISO_TOKEN);     // nunca o mestre puro
     expect(w.name).toContain('Recebe na Aura');
+    expect(w.name).toContain(`[${aviso.impressaoDoToken(w.authToken)}]`);
+    expect(w.name).not.toContain(w.authToken);
     for (const e of ['PAYMENT_RECEIVED', 'PAYMENT_CONFIRMED', 'PAYMENT_REFUNDED', 'PAYMENT_DELETED',
       'ACCOUNT_STATUS_GENERAL_APPROVAL_APPROVED', 'ACCOUNT_STATUS_DOCUMENT_PENDING', 'ACCOUNT_STATUS_DOCUMENT_REJECTED']) {
       expect(w.events).toContain(e);
@@ -455,9 +467,21 @@ describe('Recebe na Aura — aviso cadastrado na criação da subconta', () => {
     expect(new Set(w.events).size).toBe(w.events.length);
   });
 
-  test('a rota do aviso confere o mesmo token que a subconta recebeu', () => {
+  test('a rota do aviso confere o token DESTA subconta; o de outra e o mestre puro não valem', async () => {
+    global.fetch.mockResolvedValueOnce(asaasAccount(1)).mockResolvedValueOnce(asaasAccount(2));
+    await request(app).post(`${base(companyA)}/onboarding`).set(auth(ownerA)).send(validPJ);
+    await request(app).post(`${base(companyB)}/onboarding`).set(auth(ownerB)).send(validPJ);
     const wh = require('../../src/services/recebeWebhookService');
-    expect(wh.checkToken(AVISO_TOKEN)).toEqual({ ok: true });
+    const corpoA = { id: 'evt_1', event: 'PAYMENT_RECEIVED', account: { id: 'acc_1' } };
+    const tokenA = JSON.parse(global.fetch.mock.calls[0][1].body).webhooks[0].authToken;
+    const tokenB = JSON.parse(global.fetch.mock.calls[1][1].body).webhooks[0].authToken;
+    expect(tokenA).not.toBe(tokenB);
+    await expect(wh.checkToken(tokenA, corpoA)).resolves.toEqual({ ok: true, companyId: companyA });
+    await expect(wh.checkToken(tokenB, corpoA)).resolves.toMatchObject({ ok: false, reason: 'token_invalido' });
+    await expect(wh.checkToken(AVISO_TOKEN, corpoA)).resolves.toMatchObject({ ok: false, reason: 'token_invalido' });
+    await expect(wh.checkToken(tokenA, { account: { id: 'acc_nao_existe' } }))
+      .resolves.toMatchObject({ ok: false, reason: 'subconta_desconhecida' });
+    await expect(wh.checkToken(tokenA, {})).resolves.toMatchObject({ ok: false, reason: 'sem_conta_no_aviso' });
   });
 
   test('URL e e-mail vêm da env quando definidos', async () => {
@@ -478,8 +502,8 @@ describe('Recebe na Aura — aviso cadastrado na criação da subconta', () => {
     const res = await request(app).post(`${base(companyA)}/onboarding`).set(auth(ownerA)).send(validPJ);
     expect(res.status).toBe(201);
     expect(global.fetch.mock.calls[0][0]).toBe('https://sandbox.asaas.com/api/v3/accounts');
-    expect(avisoEnviado()[0].authToken).toBe(AVISO_TOKEN_SANDBOX);
-    expect(global.fetch.mock.calls[0][1].body).not.toContain(AVISO_TOKEN);
+    expect(avisoEnviado()[0].authToken).toBe(tokenDe(AVISO_TOKEN_SANDBOX, companyA));
+    expect(global.fetch.mock.calls[0][1].body).not.toContain(tokenDe(AVISO_TOKEN, companyA));
   });
 
   test('sandbox sem o token de sandbox: 503 (não cai no de produção)', async () => {
@@ -533,6 +557,14 @@ describe('Recebe na Aura — aviso numa subconta já criada (staff)', () => {
     if (method === 'GET' && path === '/webhooks') {
       return Promise.resolve(okJson({ data: hooks.map(({ authToken, ...w }) => ({ ...w, hasAuthToken: !!authToken })) }));
     }
+    const put = path.match(/^\/webhooks\/([^/]+)$/);
+    if (method === 'PUT' && put) {
+      const w = hooks.find((h) => h.id === put[1]);
+      if (!w) return Promise.resolve(errJson(404, 'não encontrado'));
+      Object.assign(w, body);
+      const { authToken, ...semToken } = w;
+      return Promise.resolve(okJson({ ...semToken, hasAuthToken: !!authToken }));
+    }
     if (method === 'POST' && path === '/webhooks') {
       const w = { id: `wh_${hooks.length + 1}`, ...body };
       hooks.push(w);
@@ -566,7 +598,7 @@ describe('Recebe na Aura — aviso numa subconta já criada (staff)', () => {
     });
     const post = calls.find((c) => c.method === 'POST');
     expect(post.path).toBe('/webhooks');
-    expect(post.body).toMatchObject({ url: RECEBE_URL, authToken: AVISO_TOKEN, enabled: true, interrupted: false });
+    expect(post.body).toMatchObject({ url: RECEBE_URL, authToken: tokenDe(AVISO_TOKEN, companyA), enabled: true, interrupted: false });
     expect(post.body.events).toContain('PAYMENT_RECEIVED');
     for (const c of calls) expect(c.key).toBe(SECRET_KEY); // nunca a chave da conta-mãe
 
@@ -577,18 +609,59 @@ describe('Recebe na Aura — aviso numa subconta já criada (staff)', () => {
 
     for (const r of [r1, r2]) {
       expect(JSON.stringify(r.body)).not.toContain(AVISO_TOKEN);
+      expect(JSON.stringify(r.body)).not.toContain(tokenDe(AVISO_TOKEN, companyA));
       expect(JSON.stringify(r.body)).not.toContain(SECRET_KEY);
     }
     expect(loggedText()).not.toContain(AVISO_TOKEN);
     expect(loggedText()).not.toContain(SECRET_KEY);
   });
 
-  test('aviso já existente com a mesma URL (barra no fim) não é recriado', async () => {
+  const avisoMod = require('../../src/services/recebeAviso');
+  const hookCerto = (extra = {}) => {
+    const cfg = avisoMod.buildWebhookConfig(tokenDe(AVISO_TOKEN, companyA));
+    return { id: 'wh_velho', ...cfg, ...extra };
+  };
+
+  test('aviso já cadastrado e certo: already_registered, sem PUT nem POST', async () => {
     subcontaAntiga(companyA);
-    hooks.push({ id: 'wh_velho', url: `${RECEBE_URL}/`, enabled: true, interrupted: true, authToken: 'z'.repeat(40) });
+    hooks.push(hookCerto());
     const out = await svc.registerWebhook(companyA);
-    expect(out).toMatchObject({ registered: false, already_registered: true, webhook: { id: 'wh_velho', interrupted: true } });
-    expect(calls.some((c) => c.method === 'POST')).toBe(false);
+    expect(out).toMatchObject({ registered: false, updated: false, already_registered: true, webhook: { id: 'wh_velho' } });
+    expect(calls.some((c) => c.method === 'POST' || c.method === 'PUT')).toBe(false);
+  });
+
+  test.each([
+    ['desligado', { enabled: false }, 'desligado'],
+    ['fila interrompida', { interrupted: true }, 'fila_interrompida'],
+    ['URL com barra no fim', { url: `${RECEBE_URL}/` }, 'url'],
+    ['sem um evento', { events: ['PAYMENT_RECEIVED'] }, 'eventos'],
+  ])('aviso %s: PUT no MESMO webhook, responde updated', async (_n, extra, motivo) => {
+    subcontaAntiga(companyA);
+    hooks.push(hookCerto(extra));
+    const r = await request(app).post(URL_AVISO).set(auth(staffUser)).send({ company_id: companyA });
+    expect(r.status).toBe(200);
+    expect(r.body).toMatchObject({ registered: false, updated: true, already_registered: false, webhook: { id: 'wh_velho' } });
+    expect(r.body.reasons).toContain(motivo);
+    const put = calls.find((c) => c.method === 'PUT');
+    expect(put.path).toBe('/webhooks/wh_velho');
+    expect(put.body).toMatchObject({ url: RECEBE_URL, enabled: true, interrupted: false, authToken: tokenDe(AVISO_TOKEN, companyA) });
+    expect(hooks).toHaveLength(1);
+    expect(hooks[0]).toMatchObject({ enabled: true, interrupted: false, url: RECEBE_URL });
+    // e a próxima chamada já acha tudo certo
+    const r2 = await request(app).post(URL_AVISO).set(auth(staffUser)).send({ company_id: companyA });
+    expect(r2.body).toMatchObject({ already_registered: true, updated: false });
+  });
+
+  test('segredo rotacionado: o token cadastrado é o antigo → PUT com o token novo', async () => {
+    subcontaAntiga(companyA);
+    const antigo = tokenDe('segredo-antigo-do-recebe-0123456789abcdef', companyA);
+    hooks.push({ id: 'wh_velho', ...avisoMod.buildWebhookConfig(antigo) });
+    const out = await svc.registerWebhook(companyA);
+    expect(out).toMatchObject({ updated: true, reasons: ['token_diferente'] });
+    expect(hooks[0].authToken).toBe(tokenDe(AVISO_TOKEN, companyA));
+    expect(avisoMod.nomeTemImpressao(hooks[0].name, tokenDe(AVISO_TOKEN, companyA))).toBe(true);
+    expect(loggedText()).not.toContain(antigo);
+    expect(loggedText()).not.toContain(tokenDe(AVISO_TOKEN, companyA));
   });
 
   test('listagem falha na Asaas: 502 e não cria (sem saber o que existe, não duplica)', async () => {
