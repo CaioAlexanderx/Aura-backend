@@ -34,9 +34,10 @@
 //     _REJECTED). Gravam os 4 blocos de `accountStatus` pela função do RA-06
 //     (companyBaasService.saveAccountStatus), com a data do evento
 //     (dateCreated): retrato mais velho não sobrescreve um mais novo.
-//   PAYMENT_*         só registrados (PAYMENT_CONFIRMED, PAYMENT_RECEIVED,
-//     PAYMENT_REFUNDED, ...). O efeito no pedido/venda vem no RA-09/RA-10,
-//     pela external_reference gravada.
+//   PAYMENT_*         com externalReference recebe:venda:<id> (Pix do Caixa,
+//     RA-10): recebeVendaPix.aplicarAviso confirma o Pix da venda uma vez
+//     (RECEIVED/CONFIRMED), marca atenção em estorno, e cancela o que foi
+//     apagado na Asaas. Os demais (pedido: RA-09) só registrados.
 //   qualquer outro    registrado como 'ignored'.
 // Subconta desconhecida (account.id sem linha em company_baas_accounts): sem
 // como conferir o token dela, a rota recusa (401) antes de registrar.
@@ -54,6 +55,7 @@
 const nodeCrypto = require('crypto');
 const db = require('../config/database');
 const companyBaas = require('./companyBaasService');
+const recebeVendaPix = require('./recebeVendaPix');
 const { str } = require('./baasShared');
 
 // Segredo, eventos e nomes de env moram em recebeAviso.js (o mesmo módulo
@@ -205,7 +207,11 @@ async function apply(x, companyId) {
     return { outcome: 'registered', detail: r.reason || null };
   }
   if (x.kind === 'payment') {
-    // RA-07: só registro. O efeito no pedido/venda é do RA-09/RA-10.
+    // RA-10: Pix do Caixa. A empresa é a da subconta que mandou o aviso.
+    if (str(x.externalReference).startsWith('recebe:venda:')) {
+      return recebeVendaPix.aplicarAviso(x, companyId);
+    }
+    // Pedido da loja online: efeito no RA-09; aqui só registro.
     return {
       outcome: 'registered',
       detail: [x.paymentStatus && `status=${x.paymentStatus}`, x.externalReference ? 'com_referencia' : 'sem_referencia']

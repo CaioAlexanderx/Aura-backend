@@ -114,6 +114,8 @@ const vendaTiming = require('../services/vendaTiming');
 const vendaRapida = require('../services/vendaRapida');
 // 17/11/2026 (INC-2026-11-17-03): credito da cliente usado na venda.
 const creditoDaCliente = require('../services/creditoDaCliente');
+// 25/11/2026 (RA-10): Pix pelo Recebe na Aura da venda (cancelamento).
+const recebeVendaPix = require('../services/recebeVendaPix');
 
 const fmt = (v) => parseFloat(v || 0).toFixed(2);
 const SP_DATE_NOW = "(NOW() AT TIME ZONE 'America/Sao_Paulo')::date";
@@ -1468,7 +1470,19 @@ router.delete('/sale/:saleId', async (req, res) => {
     // Comandas (368): a comanda que esta venda fechou volta a ficar aberta.
     await comandaSaleHooks.afterSaleCancel(client, { companyId: req.params.id, saleId: req.params.saleId });
     await client.query('COMMIT');
-    res.json({ ok: true, cancelled: req.params.saleId, items_restored: items.filter(i => i.product_id).length, amount_reversed: parseFloat(sale.total_amount) });
+    // 25/11/2026 (RA-10): Pix pelo Recebe da venda. Aguardando → cancelado na
+    // Asaas; já pago → marcado para a lojista (nunca estorna). Flag desligada:
+    // null sem tocar o banco, e a resposta fica a de sempre.
+    let recebePix = null;
+    try {
+      recebePix = await recebeVendaPix.depoisDeCancelarVenda(req.params.id, req.params.saleId, req.user?.id);
+    } catch (e) {
+      console.warn('[pdv] venda cancelada; Pix pelo Recebe nao conferido:', e && (e.code || e.message));
+    }
+    res.json({
+      ok: true, cancelled: req.params.saleId, items_restored: items.filter(i => i.product_id).length, amount_reversed: parseFloat(sale.total_amount),
+      ...(recebePix ? { recebe_pix: recebePix } : {}),
+    });
   } catch (e) {
     await client.query('ROLLBACK');
     res.status(500).json({ error: 'Erro ao cancelar venda' });

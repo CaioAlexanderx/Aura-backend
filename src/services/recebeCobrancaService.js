@@ -183,7 +183,10 @@ function validateInput(input, opts = {}) {
 }
 
 // Carrega a subconta e confere se pode cobrar.
-async function loadApprovedAccount(companyId) {
+// opts.requireApproved = false: só a chave (para cancelar/consultar uma
+// cobrança que já existe, mesmo que a subconta tenha mudado de status).
+async function loadApprovedAccount(companyId, opts = {}) {
+  const requireApproved = opts.requireApproved !== false;
   let row;
   try {
     const { rows } = await db.query(
@@ -198,7 +201,7 @@ async function loadApprovedAccount(companyId) {
     throw e;
   }
   if (!row) throw svcError(404, 'RECEBE_SEM_SUBCONTA', `Esta empresa ainda não ativou o ${RECEBE_NA_AURA_NAME}.`);
-  if (row.status !== 'approved') {
+  if (requireApproved && row.status !== 'approved') {
     throw svcError(409, 'RECEBE_CONTA_NAO_APROVADA',
       `A conta do ${RECEBE_NA_AURA_NAME} desta loja ainda está em análise pela Asaas. ` +
       'Assim que ela for aprovada, as cobranças ficam liberadas. Enquanto isso, dá para seguir recebendo como antes.');
@@ -347,6 +350,55 @@ async function createCharge(companyId, input, opts = {}) {
   return shapePayment(payment, x, auraFee, externalReference, pix, false);
 }
 
+// ── Cobrança que já existe (RA-10, Pix do Caixa) ──
+// Chave da subconta sem exigir 'approved': a cobrança já foi criada e
+// precisa poder ser consultada/cancelada mesmo se o status mudou.
+function assertEnabled() {
+  if (!companyBaas.isEnabled()) {
+    throw svcError(404, 'RECEBE_INDISPONIVEL', `O ${RECEBE_NA_AURA_NAME} ainda não está disponível.`);
+  }
+}
+
+// QR do Pix de novo (o da criação pode ter se perdido). null = indisponível agora.
+async function getPixQrCode(companyId, paymentId) {
+  assertEnabled();
+  const { apiKey } = await loadApprovedAccount(companyId, { requireApproved: false });
+  return fetchPix(apiKey, paymentId);
+}
+
+// Apaga (cancela) a cobrança na Asaas. A Asaas não apaga cobrança paga:
+// nesse caso devolve { cancelled: false, paid: true } para quem chamou
+// confirmar em vez de cancelar. Nunca estorna nada.
+async function cancelCharge(companyId, paymentId) {
+  assertEnabled();
+  const { apiKey } = await loadApprovedAccount(companyId, { requireApproved: false });
+  try {
+    await asaasClient.asaasRequest('DELETE', `/payments/${encodeURIComponent(paymentId)}`, null, apiKey,
+      { timeoutMs: ASAAS_TIMEOUT_MS });
+    return { cancelled: true, paid: false };
+  } catch (e) {
+    const st = e && e.asaasStatus;
+    console.error(`[recebeCobranca] cancelamento da cobrança: Asaas ${st || 'sem resposta'}:`, e && e.message);
+    if (!(st >= 400 && st < 500)) {
+      throw svcError(502, 'RECEBE_ASAAS_INDISPONIVEL', 'Não deu para falar com a Asaas agora. Tente de novo em alguns minutos.');
+    }
+  }
+  // 4xx: confere o porquê (já paga? já apagada? não existe?).
+  let p;
+  try {
+    p = await asaasClient.asaasRequest('GET', `/payments/${encodeURIComponent(paymentId)}`, null, apiKey,
+      { timeoutMs: ASAAS_TIMEOUT_MS });
+  } catch (e) {
+    const st = e && e.asaasStatus;
+    console.error(`[recebeCobranca] conferência depois do cancelamento: Asaas ${st || 'sem resposta'}:`, e && e.message);
+    if (st === 404) return { cancelled: true, paid: false, missing: true }; // não existe lá: nada a pagar
+    throw svcError(502, 'RECEBE_ASAAS_INDISPONIVEL', 'Não deu para falar com a Asaas agora. Tente de novo em alguns minutos.');
+  }
+  if (p && PAID_STATUSES.includes(p.status)) return { cancelled: false, paid: true };
+  if (p && p.deleted) return { cancelled: true, paid: false };
+  throw svcError(422, 'RECEBE_COBRANCA_RECUSADA', 'A Asaas não deixou cancelar esta cobrança agora.');
+}
+
 module.exports = {
   RECEBE_NA_AURA_NAME,
   WALLET_ENV,
@@ -354,7 +406,10 @@ module.exports = {
   BILLING_TYPES,
   ORIGIN_TYPES,
   TEST_ORIGIN_TYPE,
+  PAID_STATUSES,
   createCharge,
+  getPixQrCode,
+  cancelCharge,
   AURA_FEE_FLOOR,
   ASAAS_MIN_CHARGE,
   ASAAS_FEE_ESTIMATE,
