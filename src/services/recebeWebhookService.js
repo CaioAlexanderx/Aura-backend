@@ -52,54 +52,15 @@ const db = require('../config/database');
 const companyBaas = require('./companyBaasService');
 const { str } = require('./baasShared');
 
-const TOKEN_ENV = 'RECEBE_ASAAS_WEBHOOK_TOKEN';
-const SANDBOX_TOKEN_ENV = 'RECEBE_ASAAS_SANDBOX_WEBHOOK_TOKEN';
-// Mínimo da Asaas para o authToken do webhook (32 a 255 caracteres).
-const MIN_TOKEN_LENGTH = 32;
+// Segredo, eventos e nomes de env moram em recebeAviso.js (o mesmo módulo
+// que monta o aviso cadastrado em cada subconta): a rota confere exatamente
+// o token que a subconta recebeu.
+const {
+  TOKEN_ENV, SANDBOX_TOKEN_ENV, MIN_TOKEN_LENGTH, ACCOUNT_STATUS_EVENTS, PAYMENT_EVENTS_OF_INTEREST,
+  secretEnvName,
+} = require('./recebeAviso');
 // 'processing' parado há mais que isso = a entrega anterior morreu no meio.
 const STALE_PROCESSING_MINUTES = 5;
-
-// Os 18 eventos de situação da conta (docs.asaas.com, "Eventos para
-// verificar situação da conta"). Qualquer ACCOUNT_STATUS_* novo também é
-// tratado como evento de conta; a lista serve de referência e de teste.
-const ACCOUNT_STATUS_EVENTS = [
-  'ACCOUNT_STATUS_BANK_ACCOUNT_INFO_APPROVED',
-  'ACCOUNT_STATUS_BANK_ACCOUNT_INFO_AWAITING_APPROVAL',
-  'ACCOUNT_STATUS_BANK_ACCOUNT_INFO_PENDING',
-  'ACCOUNT_STATUS_BANK_ACCOUNT_INFO_REJECTED',
-  'ACCOUNT_STATUS_COMMERCIAL_INFO_APPROVED',
-  'ACCOUNT_STATUS_COMMERCIAL_INFO_AWAITING_APPROVAL',
-  'ACCOUNT_STATUS_COMMERCIAL_INFO_PENDING',
-  'ACCOUNT_STATUS_COMMERCIAL_INFO_REJECTED',
-  'ACCOUNT_STATUS_COMMERCIAL_INFO_EXPIRING_SOON',
-  'ACCOUNT_STATUS_COMMERCIAL_INFO_EXPIRED',
-  'ACCOUNT_STATUS_DOCUMENT_APPROVED',
-  'ACCOUNT_STATUS_DOCUMENT_AWAITING_APPROVAL',
-  'ACCOUNT_STATUS_DOCUMENT_PENDING',
-  'ACCOUNT_STATUS_DOCUMENT_REJECTED',
-  'ACCOUNT_STATUS_GENERAL_APPROVAL_APPROVED',
-  'ACCOUNT_STATUS_GENERAL_APPROVAL_AWAITING_APPROVAL',
-  'ACCOUNT_STATUS_GENERAL_APPROVAL_PENDING',
-  'ACCOUNT_STATUS_GENERAL_APPROVAL_REJECTED',
-];
-
-// Pagamentos que o RA-09/RA-10 vão usar (só registrados por enquanto).
-const PAYMENT_EVENTS_OF_INTEREST = [
-  'PAYMENT_CREATED', 'PAYMENT_CONFIRMED', 'PAYMENT_RECEIVED', 'PAYMENT_OVERDUE',
-  'PAYMENT_DELETED', 'PAYMENT_RESTORED', 'PAYMENT_REFUNDED', 'PAYMENT_PARTIALLY_REFUNDED',
-  'PAYMENT_REFUND_IN_PROGRESS', 'PAYMENT_CHARGEBACK_REQUESTED', 'PAYMENT_CHARGEBACK_DISPUTE',
-  'PAYMENT_AWAITING_CHARGEBACK_REVERSAL', 'PAYMENT_SPLIT_DONE', 'PAYMENT_SPLIT_CANCELLED',
-  'PAYMENT_SPLIT_DIVERGENCE_BLOCK', 'PAYMENT_SPLIT_DIVERGENCE_BLOCK_FINISHED',
-];
-
-function isSandbox() {
-  return str(process.env.ASAAS_ENV).toLowerCase() === 'sandbox';
-}
-
-// Nome da variável que vale no ambiente atual (lida a cada chamada).
-function secretEnvName() {
-  return isSandbox() ? SANDBOX_TOKEN_ENV : TOKEN_ENV;
-}
 
 function sha256(v) {
   return nodeCrypto.createHash('sha256').update(String(v)).digest();

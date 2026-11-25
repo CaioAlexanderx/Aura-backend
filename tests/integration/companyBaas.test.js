@@ -42,6 +42,10 @@ const ownerB = 'e0000000-0000-4000-8000-0000000000b1';
 const sellerA = 'e0000000-0000-4000-8000-0000000000a2';
 
 const SECRET_KEY = '$aact_SUPER_SECRET_SUBACCOUNT_KEY_123';
+// Segredos do aviso (webhook), só teste. 40 caracteres (mínimo da Asaas: 32).
+const AVISO_TOKEN = 'whsec_PRODUCAO_aviso_de_teste_0123456789';
+const AVISO_TOKEN_SANDBOX = 'whsec_SANDBOX_aviso_de_teste_9876543210';
+const staffUser = 'e0000000-0000-4000-8000-0000000000f1';
 
 // quem é o quê em cada empresa
 const MEMBERS = {
@@ -58,6 +62,9 @@ function fakeQuery(sql, params = []) {
     const [cid, uid] = params;
     const role = MEMBERS[cid] && MEMBERS[cid][uid];
     return Promise.resolve({ rows: role ? [{ role }] : [] });
+  }
+  if (/SELECT is_staff FROM users/.test(s)) {
+    return Promise.resolve({ rows: [{ is_staff: params[0] === staffUser }] });
   }
   if (!s.includes('company_baas_accounts')) return Promise.resolve({ rows: [] });
   tableQueries.push({ sql: s, params });
@@ -129,10 +136,16 @@ beforeEach(() => {
   db.query.mockReset();
   db.query.mockImplementation(fakeQuery);
   global.fetch = jest.fn();
+  process.env.RECEBE_ASAAS_WEBHOOK_TOKEN = AVISO_TOKEN;
   logSpies = ['log', 'warn', 'error', 'info'].map((m) => jest.spyOn(console, m));
 });
 afterEach(() => {
   delete process.env.RECEBE_NA_AURA_ENABLED;
+  delete process.env.RECEBE_ASAAS_WEBHOOK_TOKEN;
+  delete process.env.RECEBE_ASAAS_SANDBOX_WEBHOOK_TOKEN;
+  delete process.env.RECEBE_ASAAS_WEBHOOK_URL;
+  delete process.env.RECEBE_ASAAS_WEBHOOK_EMAIL;
+  delete process.env.ASAAS_ENV;
   logSpies.forEach((s) => s.mockRestore());
 });
 
@@ -214,7 +227,7 @@ describe('Recebe na Aura — flag ligada', () => {
     expect(row.customer_notifications_disabled).toBe(true);
     expect(row.created_by).toBe(ownerA);
 
-    // Asaas: POST /accounts com a credencial da conta-mãe, sem webhook
+    // Asaas: POST /accounts com a credencial da conta-mãe, com o aviso
     expect(global.fetch).toHaveBeenCalledTimes(1);
     const [url, opts] = global.fetch.mock.calls[0];
     expect(url).toBe('https://api.asaas.com/v3/accounts');
@@ -225,8 +238,12 @@ describe('Recebe na Aura — flag ligada', () => {
       name: 'Loja da Ana LTDA', cpfCnpj: '12345678000199', companyType: 'LIMITED',
       mobilePhone: '11999998888', postalCode: '01001000',
     });
-    expect(sent.webhooks).toBeUndefined();
+    expect(sent.webhooks).toHaveLength(1);
     expect(sent.birthDate).toBeUndefined();
+    // o token do aviso vai só para a Asaas: nunca na resposta, no banco nem no log
+    expect(JSON.stringify(res.body)).not.toContain(AVISO_TOKEN);
+    expect(JSON.stringify(db.query.mock.calls)).not.toContain(AVISO_TOKEN);
+    expect(loggedText()).not.toContain(AVISO_TOKEN);
   });
 
   test('GET status depois da criação: sem chave, wallet mascarada', async () => {
@@ -402,5 +419,216 @@ describe('Recebe na Aura — isolamento e permissão', () => {
     expect(r1.body.code).toBe('SOMENTE_DONO_OU_ADMIN');
     expect(tableQueries).toHaveLength(0);
     expect(global.fetch).not.toHaveBeenCalled();
+  });
+});
+
+// ── Aviso (webhook) em cada subconta — decisão do Caio de 25/11/2026 ──
+describe('Recebe na Aura — aviso cadastrado na criação da subconta', () => {
+  beforeEach(() => { process.env.RECEBE_NA_AURA_ENABLED = 'true'; });
+
+  const avisoEnviado = () => JSON.parse(global.fetch.mock.calls[0][1].body).webhooks;
+  const aviso = require('../../src/services/recebeAviso');
+
+  test('POST /accounts leva o webhook: URL padrão, token de produção, eventos de pagamento e de conta', async () => {
+    global.fetch.mockResolvedValueOnce(asaasAccount(1));
+    const res = await request(app).post(`${base(companyA)}/onboarding`).set(auth(ownerA)).send(validPJ);
+    expect(res.status).toBe(201);
+
+    const [w] = avisoEnviado();
+    expect(w).toMatchObject({
+      url: 'https://api.getaura.com.br/api/v1/webhooks/asaas-recebe',
+      email: 'contato@getaura.com.br',
+      enabled: true,
+      interrupted: false,
+      apiVersion: 3,
+      authToken: AVISO_TOKEN,
+      sendType: 'NON_SEQUENTIALLY',
+    });
+    expect(w.name).toContain('Recebe na Aura');
+    for (const e of ['PAYMENT_RECEIVED', 'PAYMENT_CONFIRMED', 'PAYMENT_REFUNDED', 'PAYMENT_DELETED',
+      'ACCOUNT_STATUS_GENERAL_APPROVAL_APPROVED', 'ACCOUNT_STATUS_DOCUMENT_PENDING', 'ACCOUNT_STATUS_DOCUMENT_REJECTED']) {
+      expect(w.events).toContain(e);
+    }
+    // os eventos são exatamente os que o recebeWebhookService trata
+    const wh = require('../../src/services/recebeWebhookService');
+    expect([...w.events].sort()).toEqual([...wh.PAYMENT_EVENTS_OF_INTEREST, ...wh.ACCOUNT_STATUS_EVENTS].sort());
+    expect(new Set(w.events).size).toBe(w.events.length);
+  });
+
+  test('a rota do aviso confere o mesmo token que a subconta recebeu', () => {
+    const wh = require('../../src/services/recebeWebhookService');
+    expect(wh.checkToken(AVISO_TOKEN)).toEqual({ ok: true });
+  });
+
+  test('URL e e-mail vêm da env quando definidos', async () => {
+    process.env.RECEBE_ASAAS_WEBHOOK_URL = 'https://api-homolog.exemplo.com.br/api/v1/webhooks/asaas-recebe';
+    process.env.RECEBE_ASAAS_WEBHOOK_EMAIL = 'tecnologia@exemplo.com.br';
+    global.fetch.mockResolvedValueOnce(asaasAccount(1));
+    await request(app).post(`${base(companyA)}/onboarding`).set(auth(ownerA)).send(validPJ);
+    expect(avisoEnviado()[0]).toMatchObject({
+      url: 'https://api-homolog.exemplo.com.br/api/v1/webhooks/asaas-recebe',
+      email: 'tecnologia@exemplo.com.br',
+    });
+  });
+
+  test('sandbox: usa o token de sandbox, nunca o de produção', async () => {
+    process.env.ASAAS_ENV = 'sandbox';
+    process.env.RECEBE_ASAAS_SANDBOX_WEBHOOK_TOKEN = AVISO_TOKEN_SANDBOX;
+    global.fetch.mockResolvedValueOnce(asaasAccount(1));
+    const res = await request(app).post(`${base(companyA)}/onboarding`).set(auth(ownerA)).send(validPJ);
+    expect(res.status).toBe(201);
+    expect(global.fetch.mock.calls[0][0]).toBe('https://sandbox.asaas.com/api/v3/accounts');
+    expect(avisoEnviado()[0].authToken).toBe(AVISO_TOKEN_SANDBOX);
+    expect(global.fetch.mock.calls[0][1].body).not.toContain(AVISO_TOKEN);
+  });
+
+  test('sandbox sem o token de sandbox: 503 (não cai no de produção)', async () => {
+    process.env.ASAAS_ENV = 'sandbox';
+    const res = await request(app).post(`${base(companyA)}/onboarding`).set(auth(ownerA)).send(validPJ);
+    expect(res.status).toBe(503);
+    expect(res.body.code).toBe('RECEBE_AVISO_NAO_CONFIGURADO');
+    expect(global.fetch).not.toHaveBeenCalled();
+  });
+
+  test.each([
+    ['sem token', undefined],
+    ['token vazio', '   '],
+    ['token curto (31)', 'x'.repeat(31)],
+    ['token longo (256)', 'x'.repeat(256)],
+  ])('%s: 503 RECEBE_AVISO_NAO_CONFIGURADO, sem reservar a linha nem chamar a Asaas', async (_n, tok) => {
+    if (tok === undefined) delete process.env.RECEBE_ASAAS_WEBHOOK_TOKEN;
+    else process.env.RECEBE_ASAAS_WEBHOOK_TOKEN = tok;
+    const res = await request(app).post(`${base(companyA)}/onboarding`).set(auth(ownerA)).send(validPJ);
+    expect(res.status).toBe(503);
+    expect(res.body.code).toBe('RECEBE_AVISO_NAO_CONFIGURADO');
+    expect(tableQueries).toHaveLength(0);
+    expect(store).toEqual({});
+    expect(global.fetch).not.toHaveBeenCalled();
+    // o log diz qual variável falta, nunca o valor
+    expect(loggedText()).toContain('RECEBE_ASAAS_WEBHOOK_TOKEN');
+    if (tok && tok.trim()) expect(loggedText()).not.toContain(tok);
+  });
+
+  test('token de exatamente 32 caracteres basta', async () => {
+    process.env.RECEBE_ASAAS_WEBHOOK_TOKEN = 'y'.repeat(32);
+    global.fetch.mockResolvedValueOnce(asaasAccount(1));
+    const res = await request(app).post(`${base(companyA)}/onboarding`).set(auth(ownerA)).send(validPJ);
+    expect(res.status).toBe(201);
+    expect(aviso.resolveSecret()).toMatchObject({ ok: true });
+  });
+});
+
+describe('Recebe na Aura — aviso numa subconta já criada (staff)', () => {
+  const URL_AVISO = '/api/v1/admin/recebe/aviso';
+  const RECEBE_URL = 'https://api.getaura.com.br/api/v1/webhooks/asaas-recebe';
+  let hooks; // webhooks da subconta na Asaas simulada
+  let calls;
+
+  function fakeAsaas(url, opts = {}) {
+    const u = new URL(url);
+    const path = u.pathname.replace(/^\/v3/, '');
+    const method = opts.method || 'GET';
+    const body = opts.body ? JSON.parse(opts.body) : null;
+    calls.push({ method, path, body, key: opts.headers && opts.headers.access_token });
+    if (method === 'GET' && path === '/webhooks') {
+      return Promise.resolve(okJson({ data: hooks.map(({ authToken, ...w }) => ({ ...w, hasAuthToken: !!authToken })) }));
+    }
+    if (method === 'POST' && path === '/webhooks') {
+      const w = { id: `wh_${hooks.length + 1}`, ...body };
+      hooks.push(w);
+      const { authToken, ...semToken } = w;
+      return Promise.resolve(okJson({ ...semToken, hasAuthToken: !!authToken }));
+    }
+    return Promise.resolve(errJson(404, 'rota não simulada'));
+  }
+
+  function subcontaAntiga(cid, extra = {}) {
+    store[cid] = {
+      id: `row-${cid}`, company_id: cid, status: 'approved', asaas_account_id: 'acc_antiga',
+      api_key_enc: baasCrypto.encrypt(SECRET_KEY), ...extra,
+    };
+  }
+
+  beforeEach(() => {
+    process.env.RECEBE_NA_AURA_ENABLED = 'true';
+    hooks = [];
+    calls = [];
+    global.fetch = jest.fn(fakeAsaas);
+  });
+
+  test('cadastra o aviso com a chave DA subconta; 2ª chamada não duplica', async () => {
+    subcontaAntiga(companyA);
+    const r1 = await request(app).post(URL_AVISO).set(auth(staffUser)).send({ company_id: companyA });
+    expect(r1.status).toBe(201);
+    expect(r1.body).toMatchObject({
+      registered: true, already_registered: false,
+      webhook: { id: 'wh_1', url: RECEBE_URL, enabled: true, interrupted: false, has_auth_token: true, send_type: 'NON_SEQUENTIALLY' },
+    });
+    const post = calls.find((c) => c.method === 'POST');
+    expect(post.path).toBe('/webhooks');
+    expect(post.body).toMatchObject({ url: RECEBE_URL, authToken: AVISO_TOKEN, enabled: true, interrupted: false });
+    expect(post.body.events).toContain('PAYMENT_RECEIVED');
+    for (const c of calls) expect(c.key).toBe(SECRET_KEY); // nunca a chave da conta-mãe
+
+    const r2 = await request(app).post(URL_AVISO).set(auth(staffUser)).send({ company_id: companyA });
+    expect(r2.status).toBe(200);
+    expect(r2.body).toMatchObject({ registered: false, already_registered: true, webhook: { id: 'wh_1' } });
+    expect(hooks).toHaveLength(1);
+
+    for (const r of [r1, r2]) {
+      expect(JSON.stringify(r.body)).not.toContain(AVISO_TOKEN);
+      expect(JSON.stringify(r.body)).not.toContain(SECRET_KEY);
+    }
+    expect(loggedText()).not.toContain(AVISO_TOKEN);
+    expect(loggedText()).not.toContain(SECRET_KEY);
+  });
+
+  test('aviso já existente com a mesma URL (barra no fim) não é recriado', async () => {
+    subcontaAntiga(companyA);
+    hooks.push({ id: 'wh_velho', url: `${RECEBE_URL}/`, enabled: true, interrupted: true, authToken: 'z'.repeat(40) });
+    const out = await svc.registerWebhook(companyA);
+    expect(out).toMatchObject({ registered: false, already_registered: true, webhook: { id: 'wh_velho', interrupted: true } });
+    expect(calls.some((c) => c.method === 'POST')).toBe(false);
+  });
+
+  test('listagem falha na Asaas: 502 e não cria (sem saber o que existe, não duplica)', async () => {
+    subcontaAntiga(companyA);
+    global.fetch = jest.fn(() => Promise.resolve(errJson(503, 'fora')));
+    await expect(svc.registerWebhook(companyA)).rejects.toMatchObject({ status: 502, code: 'RECEBE_ASAAS_INDISPONIVEL' });
+    expect(global.fetch).toHaveBeenCalledTimes(1);
+  });
+
+  test('sem token configurado: 503, sem banco nem Asaas', async () => {
+    delete process.env.RECEBE_ASAAS_WEBHOOK_TOKEN;
+    subcontaAntiga(companyA);
+    await expect(svc.registerWebhook(companyA)).rejects.toMatchObject({ status: 503, code: 'RECEBE_AVISO_NAO_CONFIGURADO' });
+    expect(tableQueries).toHaveLength(0);
+    expect(global.fetch).not.toHaveBeenCalled();
+  });
+
+  test('sem subconta: 404; sem chave guardada: 409', async () => {
+    await expect(svc.registerWebhook(companyA)).rejects.toMatchObject({ status: 404, code: 'RECEBE_SEM_SUBCONTA' });
+    subcontaAntiga(companyA, { api_key_enc: null });
+    await expect(svc.registerWebhook(companyA)).rejects.toMatchObject({ status: 409, code: 'RECEBE_EM_CONFERENCIA' });
+    expect(global.fetch).not.toHaveBeenCalled();
+  });
+
+  test('quem não é staff no banco → 404; sem login → 401; flag desligada → 404 sem banco', async () => {
+    subcontaAntiga(companyA);
+    const r1 = await request(app).post(URL_AVISO).set(auth(ownerA)).send({ company_id: companyA });
+    expect(r1.status).toBe(404);
+    const r2 = await request(app).post(URL_AVISO).send({ company_id: companyA });
+    expect(r2.status).toBe(401);
+    delete process.env.RECEBE_NA_AURA_ENABLED;
+    db.query.mockClear();
+    const r3 = await request(app).post(URL_AVISO).set(auth(staffUser)).send({ company_id: companyA });
+    expect(r3.status).toBe(404);
+    expect(db.query).not.toHaveBeenCalled();
+    expect(global.fetch).not.toHaveBeenCalled();
+  });
+
+  test('company_id inválido → 422', async () => {
+    const r = await request(app).post(URL_AVISO).set(auth(staffUser)).send({ company_id: '123' });
+    expect(r.status).toBe(422);
   });
 });

@@ -55,10 +55,16 @@ const WALLET_ENV = 'RECEBE_AURA_WALLET_ID';
 // aqui, e não como percentualValue: na Asaas o percentual incide sobre o
 // netValue, já sem as tarifas (docs.asaas.com, "Split de pagamentos").
 // Mudou a regra? Muda SÓ aqui.
+//
+// PISO (25/11/2026, decisão do Caio, opção B): o split não aceita 0 e o
+// cartão não tem mais valor mínimo. Em qualquer forma, a taxa da Aura é
+// max(regra, R$ 0,01). Ex.: cartão de R$ 49,00 → 1,01% − 0,49 = 0 → R$ 0,01;
+// Pix de R$ 0,20 → 2% = 0 → R$ 0,01.
 const AURA_SPLIT_RULES = Object.freeze({
   PIX: Object.freeze({ percent: 2, minusFixed: 0 }),
   CREDIT_CARD: Object.freeze({ percent: 1.01, minusFixed: 0.49 }),
 });
+const AURA_FEE_FLOOR = 0.01;
 const BILLING_TYPES = Object.keys(AURA_SPLIT_RULES);
 
 // Origens da cobrança. 'teste' só pela rota de staff.
@@ -74,26 +80,13 @@ function toCents(v) {
   return Math.round(Number(v) * 100);
 }
 
-// Taxa da Aura em reais (2 casas). 0 = a regra não dá taxa para esse valor.
+// Taxa da Aura em reais (2 casas), nunca abaixo do piso (R$ 0,01).
+// 0 só para forma de pagamento desconhecida (validateInput recusa antes).
 function auraFeeFor(billingType, value) {
   const rule = AURA_SPLIT_RULES[billingType];
   if (!rule) return 0;
   const cents = Math.round((toCents(value) * rule.percent) / 100) - toCents(rule.minusFixed);
-  return cents > 0 ? cents / 100 : 0;
-}
-
-// Menor valor em que a regra dá ao menos R$ 0,01 de taxa (o split não aceita 0).
-function minValueFor(billingType) {
-  const rule = AURA_SPLIT_RULES[billingType];
-  if (!rule || !rule.minusFixed) return 0.01;
-  let cents = Math.ceil(((toCents(rule.minusFixed) + 1) * 100) / rule.percent);
-  while (auraFeeFor(billingType, (cents - 1) / 100) > 0) cents -= 1;
-  while (auraFeeFor(billingType, cents / 100) <= 0) cents += 1;
-  return cents / 100;
-}
-
-function brl(v) {
-  return `R$ ${Number(v).toFixed(2).replace('.', ',')}`;
+  return Math.max(cents, toCents(AURA_FEE_FLOOR)) / 100;
 }
 
 function todayInBrazil() {
@@ -282,12 +275,8 @@ async function createCharge(companyId, input, opts = {}) {
     throw svcError(503, 'RECEBE_SPLIT_NAO_CONFIGURADO', `O ${RECEBE_NA_AURA_NAME} ainda não está disponível.`);
   }
 
+  // Sempre ≥ R$ 0,01 (piso): nenhuma cobrança sai sem split, em qualquer valor.
   const auraFee = auraFeeFor(x.billingType, x.value);
-  if (auraFee <= 0) {
-    const min = minValueFor(x.billingType);
-    throw svcError(422, 'RECEBE_VALOR_ABAIXO_DO_MINIMO',
-      `No cartão, o ${RECEBE_NA_AURA_NAME} aceita cobranças a partir de ${brl(min)}. Para valores menores, o Pix funciona.`);
-  }
 
   const { apiKey } = await loadApprovedAccount(companyId);
   const externalReference = buildExternalReference(x.origin);
@@ -322,8 +311,8 @@ module.exports = {
   ORIGIN_TYPES,
   TEST_ORIGIN_TYPE,
   createCharge,
+  AURA_FEE_FLOOR,
   auraFeeFor,
-  minValueFor,
   buildExternalReference,
   // exportados p/ teste
   validateInput,

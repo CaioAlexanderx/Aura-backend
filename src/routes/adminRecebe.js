@@ -10,6 +10,10 @@
 //     origem é sempre 'teste' (externalReference recebe:teste:<uuid>), para
 //     nunca se confundir com pedido ou venda de verdade.
 //
+//   POST /admin/recebe/aviso   body: { company_id }
+//     Cadastra o aviso (webhook) do Recebe na Aura numa subconta que nasceu
+//     sem ele, com a chave da subconta. Idempotente (25/11/2026).
+//
 // Não é rota de lojista. Ordem dos portões:
 //   1. flag RECEBE_NA_AURA_ENABLED desligada → 404 para todos, sem login nem banco;
 //   2. requireAuth;
@@ -62,6 +66,19 @@ router.post('/cobranca-teste', async (req, res) => {
   } catch (e) {
     if (e && e.status && e.code) return res.status(e.status).json({ error: e.message, code: e.code });
     console.error('[adminRecebe] cobranca-teste:', e && e.message);
+    return res.status(500).json({ error: 'Erro interno', code: 'INTERNAL_ERROR' });
+  }
+});
+
+// Já cadastrado → 200 com already_registered; cadastrado agora → 201.
+router.post('/aviso', async (req, res) => {
+  const b = req.body || {};
+  try {
+    const out = await companyBaas.registerWebhook(b.company_id);
+    return res.status(out.registered ? 201 : 200).json(out);
+  } catch (e) {
+    if (e && e.status && e.code) return res.status(e.status).json({ error: e.message, code: e.code });
+    console.error('[adminRecebe] aviso:', e && e.message);
     return res.status(500).json({ error: 'Erro interno', code: 'INTERNAL_ERROR' });
   }
 });

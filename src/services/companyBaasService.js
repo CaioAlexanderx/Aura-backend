@@ -41,11 +41,20 @@
 // nunca sobrescreve um mais novo, e o status resumido só avança
 // (shouldApplyStatus, o mesmo do dojô). Sem a coluna (447 pendente) a leitura
 // volta sem os blocos e a gravação responde 503 SCHEMA_PENDING.
+//
+// AVISO (webhook) EM CADA SUBCONTA (25/11/2026, decisão do Caio): a subconta
+// nasce com o webhook do Recebe na Aura (recebeAviso.buildWebhookConfig) no
+// campo `webhooks` de POST /v3/accounts. Sem o segredo do ambiente
+// configurado (ou com menos de 32 caracteres) a subconta NÃO é criada (503
+// RECEBE_AVISO_NAO_CONFIGURADO): subconta sem aviso não confirma pagamento.
+// Subconta criada antes disso: registerWebhook() cadastra o aviso com a chave
+// DA subconta (POST /v3/webhooks), idempotente (antes procura pela URL).
 // ============================================================
 'use strict';
 
 const db = require('../config/database');
 const asaasClient = require('./asaasClient');
+const aviso = require('./recebeAviso');
 const { encrypt, decrypt } = require('./dojoBaasCrypto');
 const {
   svcError, flagOn, str, maskWallet, validateKyc, buildAccountPayload, shouldApplyStatus,
@@ -83,6 +92,16 @@ function isEnabled() {
 
 function indisponivel() {
   return svcError(404, 'RECEBE_INDISPONIVEL', `O ${RECEBE_NA_AURA_NAME} ainda não está disponível.`);
+}
+
+// Segredo do aviso no ambiente atual. Sem ele, nada de subconta nova nem de
+// cadastro de aviso. Nunca loga o token: só o nome da variável.
+function segredoDoAviso() {
+  const r = aviso.resolveSecret();
+  if (r.ok) return r.token;
+  console.error(`[companyBaas] aviso do ${RECEBE_NA_AURA_NAME} sem segredo válido (${r.reason}) — configure ${aviso.secretEnvName()} (32 a 255 caracteres)`);
+  throw svcError(503, 'RECEBE_AVISO_NAO_CONFIGURADO',
+    `O ${RECEBE_NA_AURA_NAME} ainda não está disponível: falta configurar o aviso de pagamentos. A equipe da Aura já foi avisada.`);
 }
 
 function schemaPendente() {
@@ -239,6 +258,8 @@ async function createAccount(companyId, body, opts = {}) {
   const b = body || {};
   const holderType = normalizeHolderType(opts.holderType != null ? opts.holderType : b.holder_type);
   const kyc = validateHolder(b, holderType);
+  // Sem o segredo do aviso, a subconta não nasce (nem a linha é reservada).
+  const avisoToken = segredoDoAviso();
 
   // 1. Reserva a linha da empresa. Quem não reservou não chama a Asaas.
   let reserved;
@@ -262,11 +283,12 @@ async function createAccount(companyId, body, opts = {}) {
     return { created: false, ...shape(await loadRow(companyId)) };
   }
 
-  // 2. Cria a subconta com a credencial da conta-mãe (sem webhook: o
-  // endpoint do varejo é do RA-07; o status se busca com a chave da subconta).
+  // 2. Cria a subconta com a credencial da conta-mãe, já com o aviso
+  // (webhook) do Recebe na Aura cadastrado.
   let created;
   try {
-    created = await asaasClient.asaasRequest('POST', '/accounts', buildAccountPayload(kyc));
+    created = await asaasClient.asaasRequest('POST', '/accounts',
+      buildAccountPayload(kyc, [aviso.buildWebhookConfig(avisoToken)]));
   } catch (e) {
     // Nunca loga apiKey/payload: só a mensagem e o status HTTP.
     console.error(`[companyBaas] falha ao criar subconta Asaas (status ${e && e.asaasStatus ? e.asaasStatus : 'sem resposta'}):`, e && e.message);
@@ -400,6 +422,79 @@ async function refreshStatus(companyId) {
   return shape(await loadRow(companyId));
 }
 
+// ── Aviso (webhook) numa subconta JÁ CRIADA sem ele (rota de staff) ──
+// Idempotente: lista os webhooks DA subconta e, se já houver um com a URL do
+// Recebe na Aura, não cria outro (a Asaas aceita até 10 por conta e um
+// segundo igual entregaria cada aviso duas vezes). Se a listagem falhar, não
+// cria (502): sem saber o que existe, criar poderia duplicar.
+// Nunca loga a chave, o token nem o corpo.
+function shapeWebhook(w) {
+  if (!w) return null;
+  return {
+    id: w.id || null,
+    url: w.url || null,
+    enabled: w.enabled !== false,
+    interrupted: w.interrupted === true,
+    has_auth_token: w.hasAuthToken === true,
+    send_type: w.sendType || null,
+  };
+}
+
+async function registerWebhook(companyId) {
+  if (!isEnabled()) throw indisponivel();
+  if (!UUID_RE.test(str(companyId))) throw svcError(422, 'VALIDATION_ERROR', 'company_id deve ser um UUID');
+  const token = segredoDoAviso();
+
+  let row;
+  try {
+    const { rows } = await db.query(
+      `SELECT status, api_key_enc FROM company_baas_accounts WHERE company_id = $1 LIMIT 1`,
+      [companyId]
+    );
+    row = rows[0] || null;
+  } catch (e) {
+    if (e && e.code === '42P01') throw schemaPendente();
+    throw e;
+  }
+  if (!row) throw svcError(404, 'RECEBE_SEM_SUBCONTA', `Esta empresa ainda não ativou o ${RECEBE_NA_AURA_NAME}.`);
+  if (!row.api_key_enc) {
+    throw svcError(409, 'RECEBE_EM_CONFERENCIA', `A conta do ${RECEBE_NA_AURA_NAME} está em conferência pela equipe da Aura.`);
+  }
+
+  let apiKey;
+  try {
+    apiKey = decrypt(row.api_key_enc);
+  } catch (e) {
+    console.error('[companyBaas] não deu para decifrar a chave da subconta:', e && e.message);
+    throw svcError(500, 'INTERNAL_ERROR', 'Erro interno');
+  }
+
+  const url = aviso.webhookUrl();
+  const call = async (method, path, body, ctx) => {
+    try {
+      return await asaasClient.asaasRequest(method, path, body, apiKey, { timeoutMs: 15000 });
+    } catch (e) {
+      const st = e && e.asaasStatus;
+      console.error(`[companyBaas] aviso: ${ctx} na Asaas falhou (status ${st || 'sem resposta'}):`, e && e.message);
+      if (st >= 400 && st < 500) {
+        throw svcError(422, 'RECEBE_AVISO_RECUSADO', `A Asaas recusou o aviso do ${RECEBE_NA_AURA_NAME}: ${e.message}`);
+      }
+      throw svcError(502, 'RECEBE_ASAAS_INDISPONIVEL', 'Não deu para falar com a Asaas agora. Tente de novo em alguns minutos.');
+    }
+  };
+
+  const listed = await call('GET', '/webhooks?limit=100', null, 'listagem');
+  const list = listed && Array.isArray(listed.data) ? listed.data : [];
+  const existing = list.find((w) => w && str(w.url).replace(/\/+$/, '') === url.replace(/\/+$/, ''));
+  if (existing) {
+    return { registered: false, already_registered: true, webhook: shapeWebhook(existing) };
+  }
+
+  const created = await call('POST', '/webhooks', aviso.buildWebhookConfig(token), 'cadastro');
+  console.log(`[companyBaas] aviso do ${RECEBE_NA_AURA_NAME} cadastrado na subconta da empresa ${companyId}`);
+  return { registered: true, already_registered: false, webhook: shapeWebhook(created || {}) };
+}
+
 module.exports = {
   RECEBE_NA_AURA_NAME,
   FLAG_ENV,
@@ -410,6 +505,7 @@ module.exports = {
   getStatus,
   createAccount,
   refreshStatus,
+  registerWebhook,
   saveAccountStatus,
   buildSubaccountCustomerPayload,
   STATUS_BLOCKS,
