@@ -204,6 +204,10 @@ router.get('/:token', async function(req, res) {
   try {
     // 19/08/2026 — marca do lojista no orçamento: logo, cores e contato
     // vêm do digital_channel_config (mesma fonte da vitrine pública).
+    // 25/11/2026: cada item traz `customization_fields` (id, label e type
+    // dos campos da personalização do produto), para a página mostrar
+    // "Nome: Ana" em vez do id do campo. Aditivo: a página antiga ignora;
+    // item livre ou produto sem config = null.
     const r = await db.query(
       `SELECT q.id, q.token, q.status, q.expires_at,
               q.customer_name, q.subtotal, q.discount, q.total,
@@ -216,7 +220,15 @@ router.get('/:token', async function(req, res) {
                 'description', qi.description,
                 'quantity', qi.quantity,
                 'unit_price', qi.unit_price,
-                'customization', qi.customization
+                'customization', qi.customization,
+                'customization_fields', (
+                  SELECT json_agg(json_build_object(
+                    'id', f->>'id', 'label', f->>'label', 'type', f->>'type'))
+                    FROM products p
+                    CROSS JOIN LATERAL jsonb_array_elements(
+                      CASE WHEN jsonb_typeof(p.customization_config->'fields') = 'array'
+                           THEN p.customization_config->'fields' ELSE '[]'::jsonb END) f
+                   WHERE p.id = qi.product_id AND f->>'id' IS NOT NULL)
               ) ORDER BY qi.sort_order, qi.created_at)
                FROM studio_quote_items qi WHERE qi.quote_id = q.id) AS items
          FROM studio_quotes q
