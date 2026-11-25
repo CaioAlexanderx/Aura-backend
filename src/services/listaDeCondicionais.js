@@ -4,25 +4,32 @@
 // As condicionais de uma loja ou de varias (consolidado multi-CNPJ,
 // GET /me/condicionais). So le: nada aqui grava.
 //
-// Filtros (chips do mockup aprovado em 25/11):
-//   com_cliente  "Com a cliente"  todas as abertas (o padrao da aba)
+// Filtros (chips do mockup aprovado em 25/11; decisao da Nina de 25/11):
+//   em_aberto    todas as abertas (o padrao da aba): com a cliente, vence
+//                hoje, atrasadas e a_cobrar
+//   com_cliente  "Com a cliente"  abertas com peca ainda com a cliente
 //   vence_hoje   "Vence hoje"     abertas, peca com a cliente, due_date = hoje
 //   atrasadas    "Atrasadas"      abertas, peca com a cliente, hoje > due_date
+//   a_cobrar     ("Falta cobrar", rotulo do app) abertas sem peca com a
+//                cliente, mas com peca que "ficou" sem venda. Nao e atrasada.
 //   concluidas   "Concluídas"     encerradas (com ou sem venda)
 //   canceladas                    canceladas
 //   todas                         sem filtro
 // "Hoje" e o dia em Sao Paulo (R11). A situacao de cada linha sai de
 // condicional.derivarSituacao, a mesma do detalhe.
 //
-// Ordem (R11): atrasadas primeiro; depois as abertas pelo prazo mais perto;
-// depois as fechadas, a mais recente primeiro.
+// Ordem (R11): atrasadas primeiro; depois as a_cobrar; depois as outras
+// abertas pelo prazo mais perto; depois as fechadas, a mais recente primeiro.
 //
-// Totalizador (sempre das ABERTAS, qualquer que seja o filtro, para o cartao
-// nao mudar quando a lojista troca o chip): "R$ X em N peças com M clientes"
-// = soma do preco da retirada das pecas fora da loja (com a cliente, ou
-// "ficou" ainda sem venda — o mesmo filtro de comClientes.js), quantas sao, e
-// quantas clientes diferentes (cadastro, ou telefone). No consolidado a
-// cliente que tem condicional em duas lojas conta uma vez (GROUPING SETS).
+// Totalizador "com clientes agora" (sempre das ABERTAS, qualquer que seja o
+// filtro, para o cartao nao mudar quando a lojista troca o chip):
+// "R$ X em N peças com M clientes" = soma do preco da retirada das pecas
+// AINDA COM A CLIENTE (situacao com_cliente; a peca que "ficou" sem venda nao
+// entra, decisao da Nina de 25/11), quantas sao, e quantas clientes
+// diferentes (cadastro, ou telefone). No consolidado a cliente que tem
+// condicional em duas lojas conta uma vez (GROUPING SETS). O que falta
+// cobrar sai a parte, em valor_a_cobrar. O estoque (C3, comClientes.js)
+// continua contando a "ficou" sem venda: a peca saiu da loja.
 //
 // A consulta mora aqui, fora da rota, para o teste travar SQL e parametros
 // sem subir Express.
@@ -33,27 +40,33 @@ const { escaparLike } = require('./filaDePedidos');
 const { PECA_FORA } = require('./comClientes');
 const { derivarSituacao, numeroExibicao } = require('./condicional');
 
-const FILTROS = ['com_cliente', 'vence_hoje', 'atrasadas', 'concluidas', 'canceladas', 'todas'];
+const FILTROS = ['em_aberto', 'com_cliente', 'vence_hoje', 'atrasadas', 'a_cobrar', 'concluidas', 'canceladas', 'todas'];
+const FILTRO_PADRAO = 'em_aberto';
 
-/** 'com_cliente' quando nao veio nada ou veio algo fora da lista. */
+/** 'em_aberto' quando nao veio nada ou veio algo fora da lista. */
 function lerFiltro(raw) {
   const s = String(raw || '').trim().toLowerCase();
   if (s === 'todos' || s === 'all') return 'todas';
   if (s === 'atrasada') return 'atrasadas';
   if (s === 'concluida' || s === 'encerradas') return 'concluidas';
   if (s === 'cancelada') return 'canceladas';
-  return FILTROS.includes(s) ? s : 'com_cliente';
+  if (s === 'abertas') return 'em_aberto';
+  return FILTROS.includes(s) ? s : FILTRO_PADRAO;
 }
 
 // $2 e sempre o "hoje" de SP. r.* vem do LATERAL das pecas.
 const ABERTA = `c.status = 'aberta'`;
 const ATRASADA = `(${ABERTA} AND r.com_cliente > 0 AND c.due_date < $2::date)`;
 const VENCE_HOJE = `(${ABERTA} AND r.com_cliente > 0 AND c.due_date = $2::date)`;
+const COM_CLIENTE = `(${ABERTA} AND r.com_cliente > 0)`;
+const A_COBRAR = `(${ABERTA} AND r.com_cliente = 0)`;
 
 const WHERE_DO_FILTRO = {
-  com_cliente: ABERTA,
+  em_aberto: ABERTA,
+  com_cliente: COM_CLIENTE,
   vence_hoje: VENCE_HOJE,
   atrasadas: ATRASADA,
+  a_cobrar: A_COBRAR,
   concluidas: `c.status = 'encerrada'`,
   canceladas: `c.status = 'cancelada'`,
   todas: null,
@@ -70,6 +83,8 @@ const PECAS_LATERAL = `
            COUNT(*) FILTER (WHERE ${PECA_FORA})::int                         AS fora,
            COALESCE(SUM(i.unit_price), 0)                                    AS valor_total,
            COALESCE(SUM(i.unit_price) FILTER (WHERE ${PECA_FORA}), 0)        AS valor_fora,
+           COALESCE(SUM(i.unit_price) FILTER (WHERE i.situacao = 'com_cliente'), 0) AS valor_com_cliente,
+           COALESCE(SUM(i.unit_price) FILTER (WHERE i.situacao = 'ficou' AND i.sale_id IS NULL), 0) AS valor_a_cobrar,
            (array_agg(i.product_name ORDER BY i.added_at, i.id))[1]          AS primeira_peca
       FROM condicional_itens i
      WHERE i.condicional_id = c.id
@@ -113,13 +128,14 @@ function montarConsultaDaLista({ empresas, filtro, q, limit, offset, hoje }) {
            c.numero, c.status, c.customer_id, c.customer_name, c.customer_phone, c.seller_name,
            c.due_date::text AS due_date, c.notes, c.created_at, c.closed_at, c.cancelled_at,
            r.pecas, r.com_cliente, r.ficou, r.a_cobrar, r.voltou, r.voltou_defeito, r.fora,
-           r.valor_total, r.valor_fora, r.primeira_peca,
+           r.valor_total, r.valor_com_cliente, r.valor_a_cobrar, r.primeira_peca,
            COUNT(*) OVER() AS total_filtrado
       FROM condicionais c
       JOIN companies co ON co.id = c.company_id
       ${PECAS_LATERAL}
      WHERE ${filtros.join(' AND ')}
      ORDER BY ${ATRASADA} DESC,
+              ${A_COBRAR} DESC,
               (${ABERTA}) DESC,
               CASE WHEN ${ABERTA} THEN c.due_date END ASC NULLS LAST,
               COALESCE(c.closed_at, c.cancelled_at, c.created_at) DESC,
@@ -136,16 +152,19 @@ function montarConsultaDaLista({ empresas, filtro, q, limit, offset, hoje }) {
 function montarConsultaDosNumeros({ empresas, hoje }) {
   const sql = `
     SELECT c.company_id,
-           COUNT(*) FILTER (WHERE ${ABERTA})::int                                 AS com_cliente,
+           COUNT(*) FILTER (WHERE ${ABERTA})::int                                 AS em_aberto,
+           COUNT(*) FILTER (WHERE ${COM_CLIENTE})::int                            AS com_cliente,
            COUNT(*) FILTER (WHERE ${VENCE_HOJE})::int                             AS vence_hoje,
            COUNT(*) FILTER (WHERE ${ATRASADA})::int                               AS atrasadas,
+           COUNT(*) FILTER (WHERE ${A_COBRAR})::int                               AS a_cobrar,
            COUNT(*) FILTER (WHERE c.status = 'encerrada')::int                    AS concluidas,
            COUNT(*) FILTER (WHERE c.status = 'cancelada')::int                    AS canceladas,
            COUNT(*)::int                                                          AS todas,
-           COALESCE(SUM(r.valor_fora) FILTER (WHERE ${ABERTA}), 0)                AS valor,
-           COALESCE(SUM(r.fora) FILTER (WHERE ${ABERTA}), 0)::int                 AS pecas,
+           COALESCE(SUM(r.valor_com_cliente) FILTER (WHERE ${ABERTA}), 0)         AS valor,
+           COALESCE(SUM(r.com_cliente) FILTER (WHERE ${ABERTA}), 0)::int          AS pecas,
+           COALESCE(SUM(r.valor_a_cobrar) FILTER (WHERE ${ABERTA}), 0)            AS valor_a_cobrar,
            COUNT(DISTINCT COALESCE(c.customer_id::text, regexp_replace(c.customer_phone, '[^0-9]', '', 'g')))
-             FILTER (WHERE ${ABERTA} AND r.fora > 0)::int                         AS clientes
+             FILTER (WHERE ${ABERTA} AND r.com_cliente > 0)::int                  AS clientes
       FROM condicionais c
       ${PECAS_LATERAL}
      WHERE c.company_id = ANY($1::uuid[])
@@ -175,6 +194,8 @@ function apresentarNumeros(r) {
   totalizador.texto = textoDoTotalizador(totalizador);
   return {
     totalizador,
+    // Pecas que "ficou" sem venda (falta cobrar): fora do totalizador.
+    valor_a_cobrar: round2(Number(n.valor_a_cobrar) || 0),
     counts: Object.fromEntries(FILTROS.map((k) => [k, Number(n[k]) || 0])),
   };
 }
@@ -205,7 +226,8 @@ function apresentarLinha(r, hoje) {
     pecas_a_cobrar: Number(r.a_cobrar) || 0,
     pecas_voltou: (Number(r.voltou) || 0) + (Number(r.voltou_defeito) || 0),
     valor_total: round2(Number(r.valor_total) || 0),
-    valor_com_cliente: round2(Number(r.valor_fora) || 0),
+    valor_com_cliente: round2(Number(r.valor_com_cliente) || 0),
+    valor_a_cobrar: round2(Number(r.valor_a_cobrar) || 0),
     primeira_peca: r.primeira_peca || null,
     created_at: r.created_at,
     closed_at: r.closed_at || null,
@@ -253,6 +275,7 @@ async function listarCondicionais(q, { empresas, filtro, busca, page = 1, limit 
 
 module.exports = {
   FILTROS,
+  FILTRO_PADRAO,
   lerFiltro,
   montarConsultaDaLista,
   montarConsultaDosNumeros,

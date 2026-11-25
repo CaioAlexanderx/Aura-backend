@@ -34,6 +34,19 @@ describe('lerCorpo (R2)', () => {
       .toBe('COND_PECAS_DEMAIS');
   });
 
+  test('uuids em minusculas (chave dos Maps e da repeticao)', () => {
+    const { dados } = c.lerCorpo({
+      customer_id: CLI.toUpperCase(), seller_id: P.toUpperCase(),
+      items: [{ product_id: ` ${P.toUpperCase()} `, variant_id: V.toUpperCase() }],
+    }, { hoje: HOJE });
+    expect(dados.itens).toEqual([{ product_id: P, variant_id: V }]);
+    expect(dados).toMatchObject({ customerId: CLI, sellerId: P });
+  });
+
+  test('aviso de quem vende sem estoque: texto exato', () => {
+    expect(c.AVISO_SEM_ESTOQUE).toBe('Sem unidade livre. Entra mesmo assim porque sua loja vende sem estoque.');
+  });
+
   test('cliente e obrigatoria', () => {
     expect(c.lerCorpo({ items: [{ product_id: P }] }, { hoje: HOJE }).erro).toMatchObject({ status: 422, code: 'COND_CLIENTE_OBRIGATORIO' });
     expect(c.lerCorpo(base({ customer_id: 'abc' }), { hoje: HOJE }).erro).toMatchObject({ status: 404, code: 'CUSTOMER_NOT_FOUND' });
@@ -142,9 +155,11 @@ describe('trava CONDICIONAL_LIBERADA', () => {
 });
 
 describe('lista', () => {
-  test('filtro desconhecido cai em com_cliente', () => {
-    expect(lista.lerFiltro('')).toBe('com_cliente');
-    expect(lista.lerFiltro('xyz')).toBe('com_cliente');
+  test('filtro desconhecido cai em em_aberto (o padrao)', () => {
+    expect(lista.lerFiltro('')).toBe('em_aberto');
+    expect(lista.lerFiltro('xyz')).toBe('em_aberto');
+    expect(lista.lerFiltro('com_cliente')).toBe('com_cliente');
+    expect(lista.lerFiltro('a_cobrar')).toBe('a_cobrar');
     expect(lista.lerFiltro('ATRASADAS')).toBe('atrasadas');
     expect(lista.lerFiltro('todos')).toBe('todas');
   });
@@ -175,7 +190,8 @@ describe('lista', () => {
     expect(lista.textoDoTotalizador({ valor: 89.9, pecas: 1, clientes: 1 })).toBe('R$ 89,90 em 1 peça com 1 cliente');
     expect(lista.apresentarNumeros(null)).toEqual({
       totalizador: { valor: 0, pecas: 0, clientes: 0, texto: 'R$ 0,00 em 0 peças com 0 clientes' },
-      counts: { com_cliente: 0, vence_hoje: 0, atrasadas: 0, concluidas: 0, canceladas: 0, todas: 0 },
+      valor_a_cobrar: 0,
+      counts: { em_aberto: 0, com_cliente: 0, vence_hoje: 0, atrasadas: 0, a_cobrar: 0, concluidas: 0, canceladas: 0, todas: 0 },
     });
   });
 });

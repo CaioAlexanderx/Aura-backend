@@ -322,7 +322,10 @@ describe('livres = estoque − com clientes − reservado (R3, R4)', () => {
   test('"vender sem estoque" ligado: entra com o aviso', async () => {
     const r = await guardar(ID.semEstoque, { customer_id: ID.cliente, items: [{ product_id: ID.zerada }] });
     expect(r.status).toBe(201);
-    expect(r.body.avisos[0]).toMatchObject({ product_id: ID.zerada, estoque: 0, livre: 0 });
+    expect(r.body.avisos[0]).toMatchObject({
+      product_id: ID.zerada, estoque: 0, livre: 0,
+      mensagem: 'Sem unidade livre. Entra mesmo assim porque sua loja vende sem estoque.',
+    });
   });
 });
 
@@ -339,6 +342,31 @@ describe('Idempotency-Key (R5) e concorrencia', () => {
     const outra = await guardar(ID.paralela, { customer_id: ID.cliente, items: [{ product_id: ID.muito }] }, k);
     expect(outra.status).toBe(409);
     expect(outra.body).toMatchObject({ code: 'IDEMPOTENCY_KEY_REUSED', condicional_id: a.body.condicional.id });
+  });
+
+  test('uuid em maiusculas vale e a repeticao reconhece as mesmas pecas', async () => {
+    const k = chave();
+    const corpo = { customer_id: ID.cliente.toUpperCase(), items: [{ product_id: ID.muito.toUpperCase() }] };
+    const a = await guardar(ID.paralela, corpo, k);
+    expect(a.status).toBe(201);
+    expect(a.body.condicional.items[0].product_id).toBe(ID.muito);
+    expect(a.body.condicional.customer_id).toBe(ID.cliente);
+    // Repeticao com o mesmo uuid em minusculas: as mesmas pecas, 200.
+    const b = await guardar(ID.paralela, { customer_id: ID.cliente, items: [{ product_id: ID.muito }] }, k);
+    expect(b.status).toBe(200);
+    expect(b.body.condicional.id).toBe(a.body.condicional.id);
+  });
+
+  test('numero ja usado por fora da sequencia: acerta a sequencia e grava (nunca 500)', async () => {
+    const { rows: [s] } = await q(`SELECT ultimo FROM condicional_sequencias WHERE company_id = $1`, [ID.loja]);
+    // Uma condicional gravada sem passar pela sequencia (importacao, por exemplo).
+    await q(`INSERT INTO condicionais (company_id, numero, customer_name, customer_phone, due_date, status)
+             VALUES ($1, $2, 'Importada', '11900000000', CURRENT_DATE, 'encerrada')`, [ID.loja, s.ultimo + 1]);
+    const r = await guardar(ID.loja, { customer_id: ID.cliente, items: [{ product_id: ID.blusa }] });
+    expect(r.status).toBe(201);
+    expect(r.body.condicional.numero).toBe(s.ultimo + 2);
+    const { rows: [depois] } = await q(`SELECT ultimo FROM condicional_sequencias WHERE company_id = $1`, [ID.loja]);
+    expect(depois.ultimo).toBe(s.ultimo + 2);
   });
 
   test('a mesma chave em paralelo grava uma so', async () => {
@@ -393,7 +421,9 @@ describe('lista, situacao e totalizador (R11)', () => {
     L.hoje = await direta({ numero: 2, nome: 'Duda', telefone: '11911110002', due: dia(0), itens: [{ preco: 80 }] });
     L.atrasada = await direta({ numero: 3, nome: 'Eva', telefone: '11911110003', cliente: ID.cliente, due: dia(-3), itens: [{ preco: 120 }, { preco: 30, sit: 'ficou' }] });
     L.muitoAtrasada = await direta({ numero: 4, nome: 'Fabi', telefone: '11911110004', cliente: ID.cliente, due: dia(-10), itens: [{ preco: 10, nome: 'Lenco Seda' }] });
-    L.aCobrar = await direta({ numero: 5, nome: 'Gabi', telefone: '11911110005', due: dia(-5), itens: [{ preco: 40, sit: 'ficou' }] });
+    // Tudo decidido, peca que ficou sem venda, prazo ainda longe: vem logo
+    // depois das atrasadas mesmo assim.
+    L.aCobrar = await direta({ numero: 5, nome: 'Gabi', telefone: '11911110005', due: dia(4), itens: [{ preco: 40, sit: 'ficou' }] });
     L.concluida = await direta({ numero: 6, nome: 'Helo', telefone: '11911110006', due: dia(-1), status: 'encerrada', itens: [{ preco: 100, sit: 'ficou', venda }] });
     L.cancelada = await direta({ numero: 7, nome: 'Iara', telefone: '11911110007', due: dia(1), status: 'cancelada', itens: [{ preco: 999 }] });
   });
@@ -401,13 +431,13 @@ describe('lista, situacao e totalizador (R11)', () => {
   const listar = (qs = '') => request(app).get(`/companies/${ID.lista}/condicionais${qs}`);
   const ids = (r) => r.body.condicionais.map((c) => c.id);
 
-  test('padrao: as abertas, atrasadas primeiro, depois o prazo mais perto', async () => {
+  test('padrao em_aberto: atrasadas, depois a cobrar, depois o prazo mais perto', async () => {
     const r = await listar();
     expect(r.status).toBe(200);
-    expect(r.body.filtro).toBe('com_cliente');
+    expect(r.body.filtro).toBe('em_aberto');
     expect(ids(r)).toEqual([L.muitoAtrasada, L.atrasada, L.aCobrar, L.hoje, L.emDia]);
     const porId = Object.fromEntries(r.body.condicionais.map((c) => [c.id, c]));
-    expect(porId[L.atrasada]).toMatchObject({ situacao: 'atrasada', parcial: true, dias_de_atraso: 3, numero_exibicao: 'C-0003', pecas: 2, pecas_com_cliente: 1, pecas_a_cobrar: 1, valor_com_cliente: 150 });
+    expect(porId[L.atrasada]).toMatchObject({ situacao: 'atrasada', parcial: true, dias_de_atraso: 3, numero_exibicao: 'C-0003', pecas: 2, pecas_com_cliente: 1, pecas_a_cobrar: 1, valor_com_cliente: 120, valor_a_cobrar: 30 });
     expect(porId[L.hoje].situacao).toBe('vence_hoje');
     expect(porId[L.emDia]).toMatchObject({ situacao: 'com_cliente', parcial: true, valor_com_cliente: 100, pecas_voltou: 1 });
     expect(porId[L.aCobrar]).toMatchObject({ situacao: 'a_cobrar', dias_de_atraso: 0 });
@@ -416,10 +446,14 @@ describe('lista, situacao e totalizador (R11)', () => {
 
   test('totalizador das abertas e contagem dos chips', async () => {
     const r = await listar('?filtro=concluidas');
-    // Fora da loja: 100 + 80 + (120 + 30) + 10 + 40 = 380, em 6 pecas, com 4
-    // clientes (Eva e Fabi sao o mesmo cadastro).
-    expect(r.body.totalizador).toEqual({ valor: 380, pecas: 6, clientes: 4, texto: 'R$ 380,00 em 6 peças com 4 clientes' });
-    expect(r.body.counts).toEqual({ com_cliente: 5, vence_hoje: 1, atrasadas: 2, concluidas: 1, canceladas: 1, todas: 7 });
+    // Ainda com a cliente: 100 + 80 + 120 + 10 = 310, em 4 pecas, com 3
+    // clientes (Eva e Fabi sao o mesmo cadastro). A peca que "ficou" sem venda
+    // (30 da Eva, 40 da Gabi) nao entra: vai em valor_a_cobrar.
+    expect(r.body.totalizador).toEqual({ valor: 310, pecas: 4, clientes: 3, texto: 'R$ 310,00 em 4 peças com 3 clientes' });
+    expect(r.body.valor_a_cobrar).toBe(70);
+    expect(r.body.counts).toEqual({
+      em_aberto: 5, com_cliente: 4, vence_hoje: 1, atrasadas: 2, a_cobrar: 1, concluidas: 1, canceladas: 1, todas: 7,
+    });
     expect(ids(r)).toEqual([L.concluida]);
     expect(r.body.condicionais[0].situacao).toBe('concluida');
   });
@@ -427,12 +461,20 @@ describe('lista, situacao e totalizador (R11)', () => {
   test('filtros e busca', async () => {
     expect(ids(await listar('?filtro=atrasadas'))).toEqual([L.muitoAtrasada, L.atrasada]);
     expect(ids(await listar('?filtro=vence_hoje'))).toEqual([L.hoje]);
+    expect(ids(await listar('?filtro=a_cobrar'))).toEqual([L.aCobrar]);
+    expect(ids(await listar('?filtro=com_cliente'))).toEqual([L.muitoAtrasada, L.atrasada, L.hoje, L.emDia]);
     expect(ids(await listar('?filtro=canceladas'))).toEqual([L.cancelada]);
     expect((await listar('?filtro=todas')).body.pagination.total).toBe(7);
     expect(ids(await listar('?filtro=todas&q=C-0003'))).toEqual([L.atrasada]);
     expect(ids(await listar('?filtro=todas&q=duda'))).toEqual([L.hoje]);
     expect(ids(await listar('?filtro=todas&q=lenco'))).toEqual([L.muitoAtrasada]);
     expect(ids(await listar('?filtro=todas&q=11110007'))).toEqual([L.cancelada]);
+  });
+
+  test('detalhe: valor_a_cobrar e o das pecas que ficaram sem venda', async () => {
+    const d = await request(app).get(`/companies/${ID.lista}/condicionais/${L.atrasada}`);
+    expect(d.body.condicional).toMatchObject({ situacao: 'atrasada', parcial: true });
+    expect(d.body.condicional.resumo).toMatchObject({ com_cliente: 1, ficou: 1, a_cobrar: 1, valor_com_cliente: 120, valor_a_cobrar: 30 });
   });
 
   test('detalhe: preco de hoje ao lado do da retirada; de outra loja, 404', async () => {

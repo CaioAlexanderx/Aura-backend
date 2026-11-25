@@ -22,8 +22,8 @@
 //          409 COND_SEM_SALDO {faltas} | IDEMPOTENCY_KEY_REUSED {condicional_id}
 //              | COND_CONFLITO
 //          503 COND_INDISPONIVEL (base sem a migration 467)
-// GET  /condicionais        → {condicionais, filtro, hoje, totalizador, counts, pagination}
-//   ?filtro=com_cliente|vence_hoje|atrasadas|concluidas|canceladas|todas
+// GET  /condicionais        → {condicionais, filtro, hoje, totalizador, valor_a_cobrar, counts, pagination}
+//   ?filtro=em_aberto (padrao)|com_cliente|vence_hoje|atrasadas|a_cobrar|concluidas|canceladas|todas
 //   &q= (nome, peca, numero "31"/"C-0031" ou telefone) &page= &limit=
 // GET  /condicionais/:cid   → {condicional} com items (preco_hoje ao lado
 //                             do unit_price da retirada) e events

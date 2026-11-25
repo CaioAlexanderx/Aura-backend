@@ -43,6 +43,18 @@
 -- travaria a edicao ou apagaria a referencia. Nome, cor, tamanho e rotulo
 -- ficam copiados na linha (como digital_order_items).
 --
+-- Travas (revisao de 25/11): sales e customers sao tabelas quentes (o Caixa
+-- grava venda a todo momento). Nada aqui pode ficar esperando trava nelas:
+--   - lock_timeout de 5 s no topo: se nao conseguir a trava, a migration
+--     falha em vez de enfileirar o Caixa atras dela (e pode ser repetida);
+--   - sales.condicional_id entra num ALTER sozinho (coluna nula, sem default:
+--     so metadado, instantaneo);
+--   - toda FK que aponta para sales ou customers nasce NOT VALID (nao varre a
+--     tabela) e e validada num comando separado (VALIDATE nao bloqueia
+--     escrita; as colunas novas sao todas NULL, entao e imediato);
+--   - o indice em sales(condicional_id) e CREATE INDEX CONCURRENTLY, FORA de
+--     bloco DO e de transacao (ver o fim do arquivo).
+--
 -- Aditiva e idempotente. Nenhuma linha existente muda.
 -- Caminho de volta (depois de reverter o PR do backend):
 --   ALTER TABLE sales DROP COLUMN IF EXISTS condicional_id;
@@ -50,11 +62,13 @@
 --     condicional_sequencias, condicionais;
 -- ============================================================
 
+SET lock_timeout = '5s';
+
 CREATE TABLE IF NOT EXISTS condicionais (
   id               UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   company_id       UUID NOT NULL REFERENCES companies(id) ON DELETE CASCADE,
   numero           INTEGER NOT NULL,
-  customer_id      UUID REFERENCES customers(id) ON DELETE SET NULL,
+  customer_id      UUID,
   customer_name    TEXT NOT NULL,
   customer_phone   TEXT NOT NULL,
   seller_id        UUID,
@@ -135,7 +149,7 @@ CREATE TABLE IF NOT EXISTS condicional_itens (
   defect_note     TEXT,
   decided_at      TIMESTAMPTZ,
   decided_by      UUID,
-  sale_id         UUID REFERENCES sales(id) ON DELETE SET NULL,
+  sale_id         UUID,
   added_at        TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
@@ -195,20 +209,52 @@ END $$;
 CREATE INDEX IF NOT EXISTS idx_condicional_eventos_condicional
   ON condicional_eventos (condicional_id, created_at);
 
+-- FKs para tabelas quentes: NOT VALID agora, VALIDATE em comando separado.
 DO $$
 BEGIN
-  IF to_regclass('public.sales') IS NOT NULL THEN
-    ALTER TABLE sales ADD COLUMN IF NOT EXISTS condicional_id UUID;
-    BEGIN
-      ALTER TABLE sales
-        ADD CONSTRAINT sales_condicional_id_fkey
-        FOREIGN KEY (condicional_id) REFERENCES condicionais(id) ON DELETE SET NULL;
-    EXCEPTION WHEN duplicate_object THEN NULL;
-    END;
-    COMMENT ON COLUMN sales.condicional_id IS
-      'Condicional (467) cujas pecas esta venda cobrou. NULL = venda comum.';
-    CREATE INDEX IF NOT EXISTS idx_sales_condicional_id
-      ON sales (condicional_id)
-      WHERE condicional_id IS NOT NULL;
-  END IF;
+  ALTER TABLE condicionais
+    ADD CONSTRAINT condicionais_customer_id_fkey
+    FOREIGN KEY (customer_id) REFERENCES customers(id) ON DELETE SET NULL NOT VALID;
+EXCEPTION WHEN duplicate_object THEN NULL;
 END $$;
+ALTER TABLE condicionais VALIDATE CONSTRAINT condicionais_customer_id_fkey;
+
+DO $$
+BEGIN
+  ALTER TABLE condicional_itens
+    ADD CONSTRAINT condicional_itens_sale_id_fkey
+    FOREIGN KEY (sale_id) REFERENCES sales(id) ON DELETE SET NULL NOT VALID;
+EXCEPTION WHEN duplicate_object THEN NULL;
+END $$;
+ALTER TABLE condicional_itens VALIDATE CONSTRAINT condicional_itens_sale_id_fkey;
+
+-- sales.condicional_id: coluna sozinha (nula, sem default: so metadado).
+ALTER TABLE sales ADD COLUMN IF NOT EXISTS condicional_id UUID;
+
+DO $$
+BEGIN
+  ALTER TABLE sales
+    ADD CONSTRAINT sales_condicional_id_fkey
+    FOREIGN KEY (condicional_id) REFERENCES condicionais(id) ON DELETE SET NULL NOT VALID;
+EXCEPTION WHEN duplicate_object THEN NULL;
+END $$;
+ALTER TABLE sales VALIDATE CONSTRAINT sales_condicional_id_fkey;
+
+COMMENT ON COLUMN sales.condicional_id IS
+  'Condicional (467) cujas pecas esta venda cobrou. NULL = venda comum.';
+
+-- ------------------------------------------------------------
+-- FORA DE TRANSACAO. CREATE INDEX CONCURRENTLY nao roda dentro de BEGIN/
+-- COMMIT nem de bloco DO. O CI aplica com `psql -f` (cada comando em
+-- autocommit), entao passa. Aplicando a mao (SQL Editor, apply_migration ou
+-- psql -1, que embrulham o arquivo numa transacao): rode tudo ACIMA desta
+-- linha primeiro e depois ESTE comando sozinho. Se um CONCURRENTLY
+-- interrompido deixar o indice INVALID, o IF NOT EXISTS o pularia: apague
+-- com DROP INDEX CONCURRENTLY IF EXISTS idx_sales_condicional_id e rode de novo.
+-- ------------------------------------------------------------
+-- O CONCURRENTLY nao bloqueia escrita em sales; ele so espera as transacoes
+-- abertas terminarem. Sem lock_timeout aqui, para nao falhar a toa por isso.
+RESET lock_timeout;
+CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_sales_condicional_id
+  ON sales (condicional_id)
+  WHERE condicional_id IS NOT NULL;

@@ -1,10 +1,10 @@
 // ============================================================
 // AURA. — Condicionais na visão consolidada (C2 / R14, 25/11/2026)
 //
-//   GET /me/condicionais?company_id=&filtro=com_cliente&q=&page=1&limit=30
+//   GET /me/condicionais?company_id=&filtro=em_aberto&q=&page=1&limit=30
 //     { condicionais: [<linha de GET /companies/:id/condicionais>, com
 //                      company_id e company_name],
-//       filtro, hoje, totalizador, counts, pagination,
+//       filtro, hoje, totalizador, valor_a_cobrar, counts, pagination,
 //       por_empresa: [{company_id, company_name, totalizador, counts}],
 //       company_count, filtered_company_id }
 //

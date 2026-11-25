@@ -70,6 +70,9 @@ const PRAZO_PADRAO_DIAS = 3;
 const PRAZO_MAX_DIAS = 30;
 const TERMOS_MAX = 3000;
 const INDICE_CHAVE = 'uq_condicionais_company_idem';
+const INDICE_NUMERO = 'uq_condicionais_company_numero';
+// Decisao da Nina (25/11): o aviso da loja que vende sem estoque, texto exato.
+const AVISO_SEM_ESTOQUE = 'Sem unidade livre. Entra mesmo assim porque sua loja vende sem estoque.';
 const KEY_RE = /^[A-Za-z0-9_-]{8,128}$/;
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -175,8 +178,10 @@ function lerCorpo(body, { hoje = hojeSP() } = {}) {
   const itens = [];
   for (let i = 0; i < brutos.length; i++) {
     const it = brutos[i] || {};
-    const pid = it.product_id ? String(it.product_id) : '';
-    const vid = it.variant_id ? String(it.variant_id) : null;
+    // uuid sempre em minusculas: e a chave dos Maps e da comparacao da
+    // repeticao (o banco devolve em minusculas).
+    const pid = it.product_id ? String(it.product_id).trim().toLowerCase() : '';
+    const vid = it.variant_id ? String(it.variant_id).trim().toLowerCase() : null;
     if (!UUID_RE.test(pid)) {
       return { erro: { status: 422, code: 'COND_ITEM_INVALIDO', message: `A peça ${i + 1} não tem um produto cadastrado.` } };
     }
@@ -189,7 +194,7 @@ function lerCorpo(body, { hoje = hojeSP() } = {}) {
     itens.push({ product_id: pid, variant_id: vid });
   }
 
-  const cid = b.customer_id ? String(b.customer_id) : '';
+  const cid = b.customer_id ? String(b.customer_id).trim().toLowerCase() : '';
   if (!cid) {
     return { erro: { status: 422, code: 'COND_CLIENTE_OBRIGATORIO', message: 'Escolha a cliente que vai levar as peças.' } };
   }
@@ -212,8 +217,8 @@ function lerCorpo(body, { hoje = hojeSP() } = {}) {
     dueDate = s;
   }
 
-  const sellerId = b.seller_id ? String(b.seller_id) : null;
-  const employeeId = b.employee_id ? String(b.employee_id) : null;
+  const sellerId = b.seller_id ? String(b.seller_id).trim().toLowerCase() : null;
+  const employeeId = b.employee_id ? String(b.employee_id).trim().toLowerCase() : null;
   if ((sellerId && !UUID_RE.test(sellerId)) || (employeeId && !UUID_RE.test(employeeId))) {
     return { erro: { status: 422, code: 'COND_VENDEDORA', message: 'Vendedora inválida.' } };
   }
@@ -443,7 +448,22 @@ const REPETIDO = Symbol('condicional-repetida');
  * Guarda a condicional. Devolve { status: 201|200, condicional, repetido, avisos }.
  * Lanca erro com .status (4xx) para a rota responder.
  */
-async function guardarCondicional({ companyId, userId, body, chave, hoje = hojeSP(), agora = new Date() }) {
+/**
+ * O numero colidiu (alguem gravou condicional sem passar pela sequencia, ex.:
+ * importacao): a sequencia da loja volta a partir do maior numero gravado.
+ */
+async function ressincronizarNumeracao(q, companyId) {
+  await q.query(
+    `INSERT INTO condicional_sequencias (company_id, ultimo)
+     SELECT $1, COALESCE(MAX(numero), 0) FROM condicionais WHERE company_id = $1
+     ON CONFLICT (company_id) DO UPDATE
+       SET ultimo = GREATEST(condicional_sequencias.ultimo, EXCLUDED.ultimo), updated_at = NOW()`,
+    [companyId]
+  );
+}
+
+async function guardarCondicional(args) {
+  const { companyId, userId, body, chave, hoje = hojeSP(), agora = new Date(), _tentativa = 1 } = args;
   const lido = lerCorpo(body, { hoje });
   if (lido.erro) throw erro(lido.erro.status, lido.erro.message, lido.erro.code);
   const dados = lido.dados;
@@ -466,6 +486,7 @@ async function guardarCondicional({ companyId, userId, body, chave, hoje = hojeS
   const client = await db.connect();
   let condId;
   let repetidoDe = null;
+  let numeroColidiu = false;
   let avisos = [];
   try {
     await client.query('BEGIN');
@@ -485,6 +506,7 @@ async function guardarCondicional({ companyId, userId, body, chave, hoje = hojeS
     if (avisos.length && !semEstoqueLiberado) {
       throw erro(409, `Não dá para levar: ${avisos.map(fraseDaFalta).join(' ')}`, 'COND_SEM_SALDO', { faltas: avisos });
     }
+    avisos = avisos.map((a) => ({ ...a, mensagem: AVISO_SEM_ESTOQUE }));
 
     const { rows: [seq] } = await client.query(
       `INSERT INTO condicional_sequencias (company_id, ultimo) VALUES ($1, 1)
@@ -539,9 +561,18 @@ async function guardarCondicional({ companyId, userId, body, chave, hoje = hojeS
     await client.query('ROLLBACK').catch(() => {});
     if (e && e[REPETIDO]) repetidoDe = e[REPETIDO];
     else if (chave && e && e.code === '23505' && String(e.constraint || '') === INDICE_CHAVE) repetidoDe = 'buscar';
+    else if (e && e.code === '23505' && String(e.constraint || '') === INDICE_NUMERO) numeroColidiu = true;
     else throw e;
   } finally {
     client.release();
+  }
+  if (numeroColidiu) {
+    // Uma nova tentativa, com a sequencia acertada; colidiu de novo, 409 claro.
+    if (_tentativa >= 2) {
+      throw erro(409, 'Não deu para numerar a condicional agora. Toque de novo em Guardar.', 'COND_NUMERO_CONFLITO');
+    }
+    await ressincronizarNumeracao(db, companyId);
+    return guardarCondicional({ ...args, _tentativa: _tentativa + 1 });
   }
   if (repetidoDe === 'buscar') {
     repetidoDe = await buscarPorChave(db, companyId, chave);
@@ -719,6 +750,7 @@ async function lerCondicionalCompleta(q, companyId, condId, { hoje = hojeSP(), a
 
 module.exports = {
   MAX_PECAS,
+  AVISO_SEM_ESTOQUE,
   PRAZO_PADRAO_DIAS,
   PRAZO_MAX_DIAS,
   TERMOS_MAX,
