@@ -14,6 +14,8 @@
 //
 // M2 (30/05/2026): convert auto-cria marco de sinal em studio_payments
 // quando deposit_amount > 0 (fecha o loop orçamento→sinal sem passo manual).
+// p-185 (25/11/2026): aprovar/convert também lança a conta "Pedido a receber"
+// pelo valor cheio e cria o marco do saldo (services/financeiroDoOrcamento.js).
 //
 // 18/08/2026: /send agora é idempotente. Reenviar um quote já em 'sent'
 // preserva o token existente (não rotaciona) — o botão "Enviar ao cliente"
@@ -30,6 +32,8 @@ const frequentes = require('../services/produtosFrequentesDoOrcamento');
 const { inserirPedidoStudio, inserirItemPedidoStudio } = require('../services/studioPedido');
 // 04/11/2026: orçamento que virou pedido avisa o celular.
 const lojaEvents = require('../services/lojaEvents');
+// 25/11/2026 (p-185): aprovar lanca a conta a receber e os marcos do pedido.
+const financeiroDoOrcamento = require('../services/financeiroDoOrcamento');
 
 // ─── helpers ────────────────────────────────────────────────
 
@@ -478,7 +482,8 @@ router.post('/quotes/:qid/send', async function(req, res) {
 // pelo aprovar (a lojista aprova no painel depois da conversa no WhatsApp,
 // orçamento em vídeo 3D, 28/09/2026). Roda dentro da transação de quem chama.
 // M2: auto-cria marco de sinal em studio_payments se deposit_amount > 0.
-async function criarPedidoDoOrcamento(client, { quote, items, cid, notas }) {
+// p-185: e a conta a receber pelo valor cheio e o marco do saldo.
+async function criarPedidoDoOrcamento(client, { quote, items, cid, notas, userId }) {
   // O INSERT (schema real de digital_orders / digital_order_items, order_number,
   // subtotal, 'confirmed') vive em services/studioPedido.js e e compartilhado
   // com a conversao de evento em lote. Antes do #863 ele falhava sempre
@@ -503,20 +508,18 @@ async function criarPedidoDoOrcamento(client, { quote, items, cid, notas }) {
     });
   }
 
-  // M2: Auto-cria marco de sinal quando deposit_amount estava definido.
-  // Fecha o loop orçamento → sinal sem passo manual depois da conversão.
-  // try/catch isolado: não trava a conversão se studio_payments não existir.
-  if (quote.deposit_amount && parseFloat(quote.deposit_amount) > 0) {
-    try {
-      await client.query(
-        `INSERT INTO studio_payments (company_id, order_id, kind, amount, status)
-         VALUES ($1, $2, 'deposit', $3, 'pending')`,
-        [cid, orderId, parseFloat(quote.deposit_amount)]
-      );
-    } catch (payErr) {
-      console.warn('[studio/quotes][payment-auto-create]', payErr.message, payErr.code);
-    }
-  }
+  // p-185 (25/11/2026, D3 do Caio): o pedido aprovado lanca no Financeiro no
+  // formato do pedido guardado no Caixa. Conta "Pedido a receber" pelo valor
+  // cheio + marco do sinal (se houver) + marco do saldo, tudo nesta mesma
+  // transacao (services/financeiroDoOrcamento.js). Substitui o marco do sinal
+  // do M2, que ficava num try/catch: dentro da transacao, um INSERT que falha
+  // aborta tudo, e agora o pedido sem a conta seria dinheiro sem rastro.
+  await financeiroDoOrcamento.lancarAprovacao(client, {
+    companyId: cid,
+    orderId,
+    sinalCombinado: quote.deposit_amount,
+    userId,
+  });
 
   return orderId;
 }
@@ -578,6 +581,7 @@ async function converterOrcamento(req, res, { statusAceitos, msgStatus, exigeIte
     const orderId = await criarPedidoDoOrcamento(client, {
       quote, items, cid,
       notas: notasDoPedido ? notasDoPedido(quote) : undefined,
+      userId: req.user?.id || null,
     });
 
     const updRes = await client.query(

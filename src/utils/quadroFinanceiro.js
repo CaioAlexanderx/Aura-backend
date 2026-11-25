@@ -45,7 +45,8 @@ function eCrediario(tx) {
 // contaria o saldo duas vezes: uma aqui e outra na venda da conclusao.
 function eDoPedido(tx) {
   if (!tx) return false;
-  return /^pedido-(areceber|sinal|devolucao)-/i.test(String(tx.idempotency_key || ''));
+  // p-185: pedido-saldo-<id> (o saldo do orcamento) muda so pelo marco.
+  return /^pedido-(areceber|sinal|saldo|devolucao)-/i.test(String(tx.idempotency_key || ''));
 }
 
 // Cartao que o lojista pode arrastar: lancado a mao ou importado de planilha.

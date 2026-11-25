@@ -292,6 +292,12 @@ describe('ciclo do orçamento sem página pública', () => {
           return { rows: [{ product_id: 'p1', description: 'Caneca 325 ml', quantity: '12', unit_price: '39.90', customization: { texto: 'Mari & Léo' } }] };
         }
         if (/INSERT INTO digital_orders/.test(s)) return { rows: [{ id: 'o1' }] };
+        // p-185: a aprovacao le o pedido criado para lancar a conta a receber.
+        if (/FROM digital_orders WHERE id = \$1 AND company_id = \$2/.test(s)) {
+          return { rows: [{ id: 'o1', order_number: 'ST-1', total: '532.80', promised_date: null }] };
+        }
+        if (/SELECT id FROM transactions WHERE idempotency_key/.test(s)) return { rows: [{ id: 't1' }] };
+        if (/INSERT INTO studio_payments/.test(s)) return { rows: [{ id: 'sp-' + params[2] }] };
         if (/UPDATE studio_quotes/.test(s)) return { rows: [{ ...q, status: 'converted', order_id: 'o1' }] };
         return { rows: [] };
       }),
@@ -323,6 +329,12 @@ describe('ciclo do orçamento sem página pública', () => {
     expect(item.params[5]).toBe(478.8); // 12 x 39,90, subtotal NOT NULL
     expect(JSON.parse(item.params[6])).toEqual({ texto: 'Mari & Léo' });
     expect(chamadas.some((c) => /INSERT INTO studio_payments/.test(c.s))).toBe(true);
+    // p-185: conta "Pedido a receber" pelo valor cheio + marcos do sinal e do saldo
+    const conta = chamadas.find((c) => /INSERT INTO transactions/.test(c.s));
+    expect(conta.s).toMatch(/'Pedido a receber'/);
+    expect(conta.params[1]).toBe(532.8);
+    const marcos = chamadas.filter((c) => /INSERT INTO studio_payments/.test(c.s)).map((c) => [c.params[2], c.params[3]]);
+    expect(marcos).toEqual([['deposit', 266.4], ['balance', 266.4]]);
     // o orçamento é lido já travado, dentro da transação
     const ordem = chamadas.map((c) => c.s);
     expect(ordem[0]).toBe('BEGIN');

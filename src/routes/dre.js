@@ -28,6 +28,9 @@ const DEFAULT_LINE_MAP = {
   // do pedido cancelado da zero. Nunca em Despesas. "Pedido a receber" e
   // pendente (o DRE so le confirmado); mapeado so para nunca cair em Outros.
   'sinal de pedido':    { line: 'receita_bruta',  group: 'Receita Bruta', sign: 1 },
+  // p-185 (25/11/2026): o saldo do pedido de orcamento do Studio, recebido
+  // fora do Caixa. Mesma linha do sinal: sinal + saldo = valor cheio.
+  'saldo de pedido':    { line: 'receita_bruta',  group: 'Receita Bruta', sign: 1 },
   'devolução de sinal': { line: 'receita_bruta',  group: 'Receita Bruta', sign: 1 },
   'devolucao de sinal': { line: 'receita_bruta',  group: 'Receita Bruta', sign: 1 },
   'pedido a receber':   { line: 'receita_bruta',  group: 'Receita Bruta', sign: 1 },

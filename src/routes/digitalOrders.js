@@ -25,6 +25,8 @@ const { devolverEstoqueDoPedido } = require('../services/devolucaoDoEstoqueDoPed
 const lojaEvents = require('../services/lojaEvents');
 // Pagar na entrega com aceite (tq-44, 29/10/2026).
 const aceite = require('../services/aceiteDoPedido');
+// 25/11/2026 (p-185): pedido de orcamento cancelado fecha a conta a receber.
+const financeiroDoOrcamento = require('../services/financeiroDoOrcamento');
 const { AGUARDANDO_ACEITE, fraseDoPagamento, trocoALevar, usaFluxoComAceite } = require('../services/pagarNaEntrega');
 // Aviso a cliente pelo wa.me da lojista, com texto pronto (tq-47).
 const { avisoDoPedido, precisaDevolver } = require('../services/avisoDoPedidoNoWhatsapp');
@@ -269,6 +271,10 @@ router.patch('/:oid/status', requireRole('client', 'analyst', 'admin'), async (r
       // Pagar na entrega ja aceito: o lancamento a receber e estornado.
       await aceite.estornarAReceber(updated[0])
         .catch(err => console.error('[orders] estorno do a receber falhou:', oid, err.message));
+      // Pedido de orcamento (p-185): a conta "Pedido a receber" que ainda
+      // esta pendente e os marcos pendentes vao a 'cancelled'. O sinal que ja
+      // entrou fica (devolver e decisao da lojista). Nunca lanca.
+      await financeiroDoOrcamento.fecharNoCancelamento(db, { companyId: cid, orderId: oid });
       // Cancelar quem ainda esperava aceite e recusar: fica registrado assim.
       if (current === AGUARDANDO_ACEITE) updated[0].cancel_kind = await marcarComoRecusado(oid, updated[0]);
     }

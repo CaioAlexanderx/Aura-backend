@@ -94,6 +94,7 @@ beforeAll(async () => {
 afterAll(async () => {
   if (!pool) return;
   const limpar = [
+    [`DELETE FROM transactions WHERE company_id = ANY($1)`, [[companyId, outraEmpresaId]]],
     [`DELETE FROM studio_payments WHERE company_id = ANY($1)`, [[companyId, outraEmpresaId]]],
     [`DELETE FROM studio_quotes WHERE company_id = ANY($1)`, [[companyId, outraEmpresaId]]],
     [`DELETE FROM digital_order_items WHERE order_id IN (SELECT id FROM digital_orders WHERE company_id = ANY($1))`, [[companyId, outraEmpresaId]]],
@@ -130,10 +131,9 @@ describe('aprovar: o pedido grava de verdade no schema real', () => {
       [o.id]
     );
     expect(itens.map((i) => i.product_name)).toEqual(['Camiseta fixture', 'Caneca fixture'].sort());
-    const { rows: pag } = await pool.query(`SELECT kind, amount, status FROM studio_payments WHERE order_id = $1`, [o.id]);
-    expect(pag).toHaveLength(1);
-    expect(pag[0].kind).toBe('deposit');
-    expect(Number(pag[0].amount)).toBe(50);
+    // p-185: marco do sinal (50) e marco do saldo (50), pendentes.
+    const { rows: pag } = await pool.query(`SELECT kind, amount, status FROM studio_payments WHERE order_id = $1 ORDER BY kind`, [o.id]);
+    expect(pag.map((p) => [p.kind, Number(p.amount), p.status])).toEqual([['balance', 50, 'pending'], ['deposit', 50, 'pending']]);
   });
 
   test('orcamento sem nome nem telefone ainda vira pedido (colunas NOT NULL)', async () => {
@@ -174,8 +174,11 @@ describe('corrida: clique duplo e duas abas criam UM pedido so', () => {
     const [orderId] = [...ids];
     const { rows: itens } = await pool.query(`SELECT COUNT(*)::int AS n FROM digital_order_items WHERE order_id = $1`, [orderId]);
     expect(itens[0].n).toBe(2);
+    // p-185: sinal + saldo, uma vez so; uma conta a receber so.
     const { rows: pag } = await pool.query(`SELECT COUNT(*)::int AS n FROM studio_payments WHERE order_id = $1`, [orderId]);
-    expect(pag[0].n).toBe(1);
+    expect(pag[0].n).toBe(2);
+    const { rows: contas } = await pool.query(`SELECT COUNT(*)::int AS n FROM transactions WHERE idempotency_key = $1`, [`pedido-areceber-${orderId}`]);
+    expect(contas[0].n).toBe(1);
     const { rows: [q] } = await pool.query(`SELECT order_id, status FROM studio_quotes WHERE id = $1`, [qid]);
     expect(q.order_id).toBe(orderId);
     expect(q.status).toBe('converted');
