@@ -79,6 +79,12 @@ const { lerNotaFiscal, notaFiscalOut } = require('../services/notaDoItem');
 // nova e a resposta sai byte a byte igual a de antes.
 const { lerReservasSemFalhar, reservadoDoProduto, reservasPorVariante } = require('../services/reservaDoPedido');
 const { pedidoLiberado } = require('../services/pedidoBalcao');
+// C3 (25/11/2026, migration 467): pecas com clientes (venda condicional),
+// separadas do reservado: a peca saiu da loja. Atras da trava
+// CONDICIONAL_LIBERADA: desligada, nenhuma consulta nova e os campos nao
+// aparecem. Falhou (base sem a 467), 0.
+const { lerComClientesSemFalhar, comClientesDoProduto, comClientesPorVariante } = require('../services/comClientes');
+const { condicionalLiberada } = require('../services/condicional');
 
 // ─── Fase 1 fornecedores (16/09/2026) ────────────────────────
 //
@@ -388,11 +394,27 @@ router.get('/', async (req, res) => {
     // reserva ({} quando nenhuma) — o Caixa avisa no toque da variante sem
     // outra ida ao servidor. Os GET de variantes (um produto e lote, usado
     // pelas etiquetas) nao mudam.
-    if (pedidoLiberado(req)) {
-      const reservas = await lerReservasSemFalhar(db, cid, products.map((p) => p.id), 'products');
+    // As duas leituras (reserva e com clientes) saem juntas, em paralelo.
+    const idsDaPagina = products.map((p) => p.id);
+    const [reservas, fora] = await Promise.all([
+      pedidoLiberado(req) ? lerReservasSemFalhar(db, cid, idsDaPagina, 'products') : null,
+      condicionalLiberada(req) ? lerComClientesSemFalhar(db, cid, idsDaPagina, 'products') : null,
+    ]);
+    if (reservas) {
       for (const p of products) {
         p.reserved_qty = reservadoDoProduto(reservas, p.id);
         p.reserved_by_variant = reservasPorVariante(reservas, p.id);
+      }
+    }
+    // C3: pecas com clientes (condicional aberta, peca com a cliente ou que
+    // "ficou" sem venda). "Livres" = estoque - out_qty - reserved_qty, nunca
+    // negativo (no app). out_by_variant: { <variant_id>: qtd } so com as
+    // variantes que tem peca fora ({} quando nenhuma). Produto compartilhado:
+    // a condicional de qualquer loja do grupo conta no estoque unico.
+    if (fora) {
+      for (const p of products) {
+        p.out_qty = comClientesDoProduto(fora, p.id);
+        p.out_by_variant = comClientesPorVariante(fora, p.id);
       }
     }
 
