@@ -69,6 +69,8 @@ const { resolveSaleLink, extractSaleId } = require('../utils/saleLink');
 const { vendaSemEstoqueLiberada } = require('../utils/vendaSemEstoque');
 // INC-2026-11-18-02: servico (unit 'srv') nunca e barrado nem baixado por saldo.
 const { ehUnidadeServico } = require('../services/notaDoItem');
+// 25/11/2026 (RA-10): Pix pelo Recebe na Aura da venda que ficou sem itens.
+const recebeVendaPix = require('../services/recebeVendaPix');
 
 // Quanto ja foi devolvido/trocado por item da venda (troca_returned_items).
 // Best-effort: em deploy parcial a tabela pode nao existir (42P01) -> tudo 0.
@@ -437,6 +439,8 @@ router.delete('/transactions/:tx_id/sale-items/:item_id', asyncHandler(async (re
   const companyId = req.params.id;
   const txId = req.params.tx_id;
   const itemId = req.params.item_id;
+  let resposta = null;
+  let vendaCancelada = null;
 
   const client = await pool.connect();
   try {
@@ -686,7 +690,7 @@ router.delete('/transactions/:tx_id/sale-items/:item_id', asyncHandler(async (re
     }
 
     await client.query('COMMIT');
-    res.json({
+    resposta = {
       ok: true,
       removed_item: {
         id: itemId,
@@ -702,13 +706,21 @@ router.delete('/transactions/:tx_id/sale-items/:item_id', asyncHandler(async (re
       new_tx_amount: txRemoved ? 0 : Math.max(0, newTxAmount),
       tx_removed: txRemoved,
       sale_cancelled: isLastItem,
-    });
+    };
+    vendaCancelada = isLastItem ? saleId : null;
   } catch (err) {
     await client.query('ROLLBACK');
     throw err;
   } finally {
     client.release();
   }
+  // 25/11/2026 (RA-10): o último item saiu e a venda foi cancelada → o Pix
+  // pelo Recebe dela segue a regra do cancelamento (depois de devolver a
+  // conexão). Flag desligada: null sem banco e a resposta é a de sempre.
+  const recebePix = vendaCancelada
+    ? await recebeVendaPix.depoisDeCancelarVendaSemFalhar(companyId, vendaCancelada, req.user && req.user.id)
+    : null;
+  res.json({ ...resposta, ...(recebePix ? { recebe_pix: recebePix } : {}) });
 }));
 
 // PATCH /transactions/:tx_id/seller

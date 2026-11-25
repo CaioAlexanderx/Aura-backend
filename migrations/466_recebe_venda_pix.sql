@@ -16,9 +16,11 @@
 --   confirmado   aviso de pagamento chegou (uma vez só)
 --   cancelado    a lojista desistiu (cobrança apagada na Asaas) ou a venda
 --                foi cancelada antes do pagamento
+--   expirado     o Pix venceu sem pagamento (PAYMENT_OVERDUE); volta a
+--                aguardando se a Asaas restaurar (PAYMENT_RESTORED)
 --
 -- atencao (para a lojista resolver; a Aura NUNCA move dinheiro):
---   pago_depois_de_cancelar      o Pix caiu depois de a cobrança ser cancelada
+--   pago_depois_de_cancelar      o Pix caiu depois de a cobrança ser cancelada/vencer
 --   pago_com_venda_cancelada     o Pix caiu, mas a venda já estava cancelada
 --   venda_cancelada_com_pix_pago a venda foi cancelada depois do Pix pago
 --   estornado                    a Asaas avisou estorno/contestação
@@ -56,7 +58,7 @@ CREATE TABLE IF NOT EXISTS recebe_venda_pix (
 DO $$ BEGIN
   ALTER TABLE recebe_venda_pix
     ADD CONSTRAINT recebe_venda_pix_status_chk
-    CHECK (status IN ('criando', 'aguardando', 'confirmado', 'cancelado'));
+    CHECK (status IN ('criando', 'aguardando', 'confirmado', 'cancelado', 'expirado'));
 EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 
 DO $$ BEGIN

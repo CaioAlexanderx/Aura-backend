@@ -1396,6 +1396,7 @@ router.get('/employee-ranking', async (req, res) => {
 // ===== DELETE /sale/:saleId =====
 router.delete('/sale/:saleId', async (req, res) => {
   const client = await db.connect();
+  let resposta = null;
   try {
     await client.query('BEGIN');
     const { rows } = await client.query(
@@ -1470,23 +1471,17 @@ router.delete('/sale/:saleId', async (req, res) => {
     // Comandas (368): a comanda que esta venda fechou volta a ficar aberta.
     await comandaSaleHooks.afterSaleCancel(client, { companyId: req.params.id, saleId: req.params.saleId });
     await client.query('COMMIT');
-    // 25/11/2026 (RA-10): Pix pelo Recebe da venda. Aguardando → cancelado na
-    // Asaas; já pago → marcado para a lojista (nunca estorna). Flag desligada:
-    // null sem tocar o banco, e a resposta fica a de sempre.
-    let recebePix = null;
-    try {
-      recebePix = await recebeVendaPix.depoisDeCancelarVenda(req.params.id, req.params.saleId, req.user?.id);
-    } catch (e) {
-      console.warn('[pdv] venda cancelada; Pix pelo Recebe nao conferido:', e && (e.code || e.message));
-    }
-    res.json({
-      ok: true, cancelled: req.params.saleId, items_restored: items.filter(i => i.product_id).length, amount_reversed: parseFloat(sale.total_amount),
-      ...(recebePix ? { recebe_pix: recebePix } : {}),
-    });
+    resposta = { ok: true, cancelled: req.params.saleId, items_restored: items.filter(i => i.product_id).length, amount_reversed: parseFloat(sale.total_amount) };
   } catch (e) {
     await client.query('ROLLBACK');
-    res.status(500).json({ error: 'Erro ao cancelar venda' });
+    return res.status(500).json({ error: 'Erro ao cancelar venda' });
   } finally { client.release(); }
+  // 25/11/2026 (RA-10): Pix pelo Recebe da venda, DEPOIS de devolver a
+  // conexão (a chamada à Asaas não segura o pool). Aguardando → cancelado na
+  // Asaas; já pago → marcado para a lojista (nunca estorna). Flag desligada:
+  // null sem tocar o banco, e a resposta fica a de sempre. Nunca lança.
+  const recebePix = await recebeVendaPix.depoisDeCancelarVendaSemFalhar(req.params.id, req.params.saleId, req.user?.id);
+  res.json({ ...resposta, ...(recebePix ? { recebe_pix: recebePix } : {}) });
 });
 
 // ===== POST /troca =====

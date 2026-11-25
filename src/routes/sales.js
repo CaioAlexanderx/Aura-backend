@@ -90,6 +90,8 @@ const editarVenda = require('../services/editarVenda');
 const { prazoDeCancelamento } = require('../services/nfcePrazoCancelamento');
 const nfceCancelamento = require('../services/nfceCancelamento');
 const { TEXTOS_PRAZO_NFCE } = require('../services/textosPrazoNfce');
+// 25/11/2026 (RA-10): Pix pelo Recebe na Aura da venda cancelada.
+const recebeVendaPix = require('../services/recebeVendaPix');
 
 // Prazo de cancelamento de uma nota autorizada da venda (null nos outros casos).
 function cancelamentoDaNota(r, now) {
@@ -749,6 +751,7 @@ router.post('/:sale_id/cancel', asyncHandler(async (req, res) => {
   // 17/11/2026: so com pedido explicito da lojista (escolha no app).
   const cancelarNota = !!(req.body && (req.body.cancelar_nota === true || req.body.cancelar_nota === 'true'));
   let notaDaVenda = null;
+  let resposta = null;
 
   const client = await pool.connect();
   try {
@@ -981,7 +984,7 @@ router.post('/:sale_id/cancel', asyncHandler(async (req, res) => {
       nota = await notaNoCancelamento(notaDaVenda, { cancelarNota, reason, companyId, userId: req.user && req.user.id });
     }
 
-    res.json({
+    resposta = {
       ok: true,
       sale_id: saleId,
       type: saleRes.rows[0].type,
@@ -1000,7 +1003,7 @@ router.post('/:sale_id/cancel', asyncHandler(async (req, res) => {
       nota: nota,
       devolucao_undo: devolucaoUndo,
       deliveries_cancelled: matconUndo.deliveries_cancelled,
-    });
+    };
   } catch (err) {
     await client.query('ROLLBACK');
     // Recusas com code (o handler global so repassa a mensagem).
@@ -1009,6 +1012,10 @@ router.post('/:sale_id/cancel', asyncHandler(async (req, res) => {
   } finally {
     client.release();
   }
+  // 25/11/2026 (RA-10): Pix pelo Recebe da venda, depois de devolver a
+  // conexão. Flag desligada: null sem banco e a resposta é a de sempre.
+  const recebePix = await recebeVendaPix.depoisDeCancelarVendaSemFalhar(companyId, saleId, req.user && req.user.id);
+  res.json({ ...resposta, ...(recebePix ? { recebe_pix: recebePix } : {}) });
 }));
 
 module.exports = router;

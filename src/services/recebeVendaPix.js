@@ -14,11 +14,30 @@
 // venda (sale_payments.method = 'pix').
 //
 // Quem paga, na Asaas (a cobrança exige nome + CPF/CNPJ):
-//   1. body.customer { name, cpf_cnpj } (ex.: "CPF na nota");
+//   1. body.customer { name, cpf_cnpj } com CPF/CNPJ (ex.: "CPF na nota");
+//      só o nome, sem documento, conta como "sem pagador" e segue a ordem;
 //   2. a cliente da venda, se tiver CPF/CNPJ no cadastro;
-//   3. senão, "Consumidor no Caixa" com o documento do titular da subconta
-//      (kyc_snapshot). É só o registro do pagador na Asaas; quem paga de
-//      verdade é quem lê o QR. Notificação da Asaas sempre desligada.
+//   3. "Consumidor no Caixa" com o documento do titular da subconta
+//      (kyc_snapshot): DESLIGADO por padrão (env
+//      RECEBE_PIX_CONSUMIDOR_NO_CAIXA; o Caio ainda decide, a recomendação é
+//      tirar). Desligado e sem documento → 422 RECEBE_PIX_PEDE_CPF antes da
+//      Asaas, e o app cai no Pix de hoje (a disponibilidade continua true).
+//   Notificação da Asaas sempre desligada.
+//
+// Estados: criando → aguardando → confirmado | cancelado | expirado.
+//   PAYMENT_OVERDUE  aguardando → expirado (não confirma; sai da lista de
+//                    aguardando; dá para gerar outro)
+//   PAYMENT_RESTORED expirado/cancelado → aguardando, se a venda ainda está
+//                    viva e não há outra cobrança viva para ela
+//   Pago depois de expirado: confirma se não houver outra viva; senão atenção.
+//
+// Venda cancelada com o Pix em 'criando': ao terminar a criação, se a venda
+// já estiver cancelada, a cobrança é cancelada na Asaas na hora (nenhum QR
+// vivo). Caminhos que cancelam venda e chamam depoisDeCancelarVenda:
+// DELETE /pdv/sale/:id, POST /sales/:id/cancel e a remoção do último item
+// (DELETE /transactions/:tx/sale-items/:item), sempre DEPOIS de devolver a
+// conexão. A edição da venda (editarVenda) não cancela venda; a troca cria
+// venda nova e não cancela a original.
 //
 // Regras:
 //   - flag RECEBE_NA_AURA_ENABLED desligada: nada aqui toca banco nem Asaas
@@ -49,7 +68,11 @@ const db = require('../config/database');
 const companyBaas = require('./companyBaasService');
 const cobranca = require('./recebeCobrancaService');
 const aviso = require('./recebeAviso');
-const { svcError, str } = require('./baasShared');
+const { svcError, str, flagOn } = require('./baasShared');
+
+// Fallback "Consumidor no Caixa" (documento do titular da subconta como
+// pagador): desligado por padrão. Ligar só com decisão do Caio.
+const CONSUMIDOR_NO_CAIXA_ENV = 'RECEBE_PIX_CONSUMIDOR_NO_CAIXA';
 
 const NOME = companyBaas.RECEBE_NA_AURA_NAME;
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -63,7 +86,7 @@ const EVENTOS_ESTORNO = ['PAYMENT_REFUNDED', 'PAYMENT_PARTIALLY_REFUNDED', 'PAYM
 
 const ATENCAO_TEXTO = {
   pago_depois_de_cancelar:
-    'O Pix desta venda caiu depois de a cobrança ser cancelada. O valor está na conta do Recebe na Aura da loja. ' +
+    'O Pix desta venda caiu depois de a cobrança ser cancelada ou vencer. O valor está na conta do Recebe na Aura da loja. ' +
     'A Aura não devolve nada sozinha: combine com a cliente e, se precisar de ajuda para devolver, fale com a equipe da Aura.',
   pago_com_venda_cancelada:
     'O Pix caiu, mas esta venda já estava cancelada. O valor está na conta do Recebe na Aura da loja. ' +
@@ -195,7 +218,9 @@ async function disponibilidade(companyId) {
 // Quem fica como pagador da cobrança na Asaas (ver cabeçalho).
 async function resolvePagador(companyId, sale, body) {
   const c = (body && body.customer) || null;
-  if (c && (str(c.cpf_cnpj) || str(c.name))) {
+  // Só com documento conta como pagador informado (documento inválido → o
+  // createCharge recusa com 422). Só o nome: segue a ordem.
+  if (c && str(c.cpf_cnpj).replace(/\D/g, '')) {
     return { name: str(c.name) || CONSUMIDOR_NO_CAIXA, cpf_cnpj: str(c.cpf_cnpj) };
   }
   if (sale.customer_id) {
@@ -206,15 +231,15 @@ async function resolvePagador(companyId, sale, body) {
       return { name: str(cli.name) || CONSUMIDOR_NO_CAIXA, cpf_cnpj: doc };
     }
   }
+  const pedeCpf = () => svcError(422, 'RECEBE_PIX_PEDE_CPF', 'Para gerar o Pix, informe o CPF ou CNPJ de quem está pagando.');
+  if (!flagOn(CONSUMIDOR_NO_CAIXA_ENV)) throw pedeCpf();
   const { rows } = await db.query(
     `SELECT kyc_snapshot FROM company_baas_accounts WHERE company_id = $1 LIMIT 1`, [companyId]
   );
   let kyc = rows[0] && rows[0].kyc_snapshot;
   if (typeof kyc === 'string') { try { kyc = JSON.parse(kyc); } catch (_) { kyc = null; } }
   const doc = kyc ? str(kyc.cpf_cnpj).replace(/\D/g, '') : '';
-  if (doc.length !== 11 && doc.length !== 14) {
-    throw svcError(422, 'RECEBE_PIX_PEDE_CPF', 'Para gerar o Pix, informe o CPF ou CNPJ de quem está pagando.');
-  }
+  if (doc.length !== 11 && doc.length !== 14) throw pedeCpf();
   return { name: CONSUMIDOR_NO_CAIXA, cpf_cnpj: doc };
 }
 
@@ -273,6 +298,24 @@ async function criar(companyId, saleId, body, userId) {
   }
 
   const pagador = await resolvePagador(companyId, sale, body);
+
+  // Pix anterior vencido: apaga na Asaas antes de gerar outro (vencido ainda
+  // pode ser pago; dois QRs vivos para a mesma venda, não). Se já foi pago,
+  // vale ele.
+  if (atual && atual.status === 'expirado') {
+    const r = await cobranca.cancelCharge(companyId, atual.asaas_payment_id);
+    if (r.paid) {
+      const conf = await reviver(atual, 'confirmado', 'conferido_ao_gerar_de_novo');
+      if (conf) return { reused: true, ...shape(conf, saleId) };
+    }
+    await q(
+      `UPDATE recebe_venda_pix
+          SET status = 'cancelado', cancelled_at = now(), cancelled_by = $2, updated_at = now()
+        WHERE id = $1 AND status = $3
+        RETURNING ${ROW_COLS}`,
+      [atual.id, UUID_RE.test(str(userId)) ? str(userId) : null, 'expirado']
+    );
+  }
   const externalReference = cobranca.buildExternalReference({ type: 'venda', id: saleId });
 
   // Reserva: só quem reservou chama a Asaas.
@@ -320,6 +363,16 @@ async function criar(companyId, saleId, body, userId) {
     throw e;
   }
   if (!row) throw svcError(409, 'RECEBE_PIX_EM_CRIACAO', 'O Pix desta venda está sendo gerado. Um instante.');
+
+  // A venda foi cancelada enquanto a cobrança nascia (o gancho do
+  // cancelamento viu 'criando' e não tinha o que cancelar): cancela agora,
+  // para nenhum QR ficar vivo.
+  const depois = await loadSale(companyId, saleId);
+  if (depois.status === 'cancelled') {
+    const r = await depoisDeCancelarVenda(companyId, saleId, userId);
+    throw comExtra(svcError(409, 'VENDA_CANCELADA', 'Esta venda foi cancelada. O Pix gerado foi cancelado também.'),
+      { recebe_pix: r || shape(row, saleId) });
+  }
   return { reused: !!out.reused, ...shape(row, saleId, out.pix) };
 }
 
@@ -330,7 +383,9 @@ async function consultar(companyId, saleId) {
   return shape(await loadRow(companyId, saleId), saleId);
 }
 
-async function marcarConfirmado(rowId, eventId) {
+// Confirma uma vez só: só sai de `de` ('aguardando', ou 'expirado' quando o
+// Pix vencido é pago e não há outra cobrança viva para a venda).
+async function marcarConfirmado(rowId, eventId, de = 'aguardando') {
   const { rows } = await q(
     `UPDATE recebe_venda_pix
         SET status = 'confirmado', confirmed_at = now(), confirmed_event_id = $2,
@@ -339,11 +394,42 @@ async function marcarConfirmado(rowId, eventId) {
             atencao_at = CASE WHEN (SELECT s.status FROM sales s WHERE s.id = recebe_venda_pix.sale_id) = 'cancelled'
                               THEN now() ELSE atencao_at END,
             updated_at = now()
-      WHERE id = $1 AND status = 'aguardando'
+      WHERE id = $1 AND status = $3
       RETURNING ${ROW_COLS}`,
-    [rowId, eventId ? String(eventId).slice(0, 200) : null]
+    [rowId, eventId ? String(eventId).slice(0, 200) : null, de]
   );
   return rows[0] || null;
+}
+
+// A venda tem outra cobrança viva além desta linha?
+async function outraViva(row) {
+  const { rows } = await q(
+    `SELECT id FROM recebe_venda_pix
+      WHERE sale_id = $1 AND id <> $2 AND status IN ('criando', 'aguardando', 'confirmado') LIMIT 1`,
+    [row.sale_id, row.id]
+  );
+  return !!rows[0];
+}
+
+// Linha expirada/cancelada volta a valer (pago depois de vencer, ou
+// cobrança restaurada na Asaas). Corrida com outra viva cai no índice único.
+async function reviver(row, para, eventId) {
+  try {
+    if (await outraViva(row)) return null;
+    if (para === 'confirmado') return await marcarConfirmado(row.id, eventId, row.status);
+    const { rows } = await q(
+      `UPDATE recebe_venda_pix
+          SET status = 'aguardando', cancelled_at = NULL, updated_at = now()
+        WHERE id = $1 AND status = $2
+          AND (SELECT s.status FROM sales s WHERE s.id = recebe_venda_pix.sale_id) IS DISTINCT FROM 'cancelled'
+        RETURNING ${ROW_COLS}`,
+      [row.id, row.status]
+    );
+    return rows[0] || null;
+  } catch (e) {
+    if (e && e.code === '23505') return null;
+    throw e;
+  }
 }
 
 async function marcarAtencao(rowId, atencao, onlyStatus) {
@@ -372,18 +458,21 @@ async function cancelar(companyId, saleId, userId) {
   );
   if (row.status === 'confirmado') throw jaPago(row);
 
+  // 'aguardando' ou 'expirado' (Pix vencido ainda pode ser pago: apaga também).
   const r = await cobranca.cancelCharge(companyId, row.asaas_payment_id);
   if (r.paid) {
     // A Asaas diz que já está paga: confirma (consulta autenticada à subconta).
-    const conf = await marcarConfirmado(row.id, 'conferido_no_cancelamento');
+    const conf = row.status === 'aguardando'
+      ? await marcarConfirmado(row.id, 'conferido_no_cancelamento')
+      : await reviver(row, 'confirmado', 'conferido_no_cancelamento');
     throw jaPago(conf || (await loadRow(companyId, saleId)));
   }
   const { rows } = await q(
     `UPDATE recebe_venda_pix
         SET status = 'cancelado', cancelled_at = now(), cancelled_by = $2, updated_at = now()
-      WHERE id = $1 AND status = 'aguardando'
+      WHERE id = $1 AND status = $3
       RETURNING ${ROW_COLS}`,
-    [row.id, UUID_RE.test(str(userId)) ? str(userId) : null]
+    [row.id, UUID_RE.test(str(userId)) ? str(userId) : null, row.status]
   );
   if (rows[0]) return shape(rows[0], saleId);
   // O aviso confirmou no meio do caminho.
@@ -420,6 +509,17 @@ async function depoisDeCancelarVenda(companyId, saleId, userId) {
     // Asaas fora: fica aguardando; se a cliente pagar, o aviso marca atenção.
     console.warn(`[recebeVendaPix] venda cancelada; não deu para cancelar o Pix na Asaas agora (${e && e.code ? e.code : 'erro'})`);
     return shape(row, saleId);
+  }
+}
+
+// Para as rotas que cancelam venda: nunca lança (o cancelamento da venda já
+// foi gravado e a resposta não pode virar erro por causa do Pix).
+async function depoisDeCancelarVendaSemFalhar(companyId, saleId, userId) {
+  try {
+    return await depoisDeCancelarVenda(companyId, saleId, userId);
+  } catch (e) {
+    console.warn('[recebeVendaPix] venda cancelada; Pix pelo Recebe não conferido:', e && (e.code || e.message));
+    return null;
   }
 }
 
@@ -462,11 +562,32 @@ async function aplicarAviso(x, companyId) {
       return { outcome: 'registered', detail: 'ja_confirmado' };
     }
     if (row.status === 'confirmado') return { outcome: 'registered', detail: 'ja_confirmado' };
-    if (row.status === 'cancelado') {
-      const m = await marcarAtencao(row.id, 'pago_depois_de_cancelar', 'cancelado');
+    if (row.status === 'expirado') {
+      // Pix vencido pago: vale para a venda se ela não tem outra cobrança viva.
+      const conf = await reviver(row, 'confirmado', null);
+      if (conf) return { outcome: 'processed', detail: conf.atencao ? `venda_confirmada ${conf.atencao}` : 'venda_confirmada' };
+    }
+    if (row.status === 'cancelado' || row.status === 'expirado') {
+      const m = await marcarAtencao(row.id, 'pago_depois_de_cancelar', row.status);
       return { outcome: m ? 'processed' : 'registered', detail: 'pago_depois_de_cancelar' };
     }
     return { outcome: 'registered', detail: `status=${row.status}` };
+  }
+  if (ev === 'PAYMENT_OVERDUE') {
+    // Pix venceu sem pagamento: sai da lista de aguardando; não confirma nada.
+    const { rows: c } = await q(
+      `UPDATE recebe_venda_pix SET status = 'expirado', updated_at = now()
+        WHERE id = $1 AND status = 'aguardando' RETURNING id`,
+      [row.id]
+    );
+    return { outcome: c[0] ? 'processed' : 'registered', detail: 'pix_vencido' };
+  }
+  if (ev === 'PAYMENT_RESTORED') {
+    if (row.status !== 'expirado' && row.status !== 'cancelado') {
+      return { outcome: 'registered', detail: `restaurado status=${row.status}` };
+    }
+    const r = await reviver(row, 'aguardando', null);
+    return { outcome: r ? 'processed' : 'registered', detail: r ? 'pix_restaurado' : 'restaurado_sem_efeito' };
   }
   if (EVENTOS_ESTORNO.includes(ev)) {
     const m = await marcarAtencao(row.id, 'estornado', 'confirmado');
@@ -507,6 +628,7 @@ module.exports = {
   consultar,
   cancelar,
   depoisDeCancelarVenda,
+  depoisDeCancelarVendaSemFalhar,
   aplicarAviso,
   listar,
   // exportados p/ teste

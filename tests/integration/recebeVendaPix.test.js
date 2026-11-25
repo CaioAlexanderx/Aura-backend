@@ -99,6 +99,23 @@ function fakeQuery(sql, params = []) {
       vpix = vpix.filter((r) => !(r.id === params[0] && r.status === 'criando'));
       return rowsOf([]);
     }
+    if (/WHERE sale_id = \$1 AND id <> \$2/.test(s)) {
+      const r = vpix.find((x) => x.sale_id === params[0] && x.id !== params[1] && ['criando', 'aguardando', 'confirmado'].includes(x.status));
+      return rowsOf(r ? [{ id: r.id }] : []);
+    }
+    if (/SET status = 'aguardando', cancelled_at = NULL/.test(s)) {
+      const [id, de] = params;
+      const r = vpix.find((x) => x.id === id && x.status === de);
+      if (!r || (sales[r.sale_id] && sales[r.sale_id].status === 'cancelled')) return rowsOf([]);
+      Object.assign(r, { status: 'aguardando', cancelled_at: null });
+      return rowsOf([{ ...r }]);
+    }
+    if (/SET status = 'expirado'/.test(s)) {
+      const r = vpix.find((x) => x.id === params[0] && x.status === 'aguardando');
+      if (!r) return rowsOf([]);
+      r.status = 'expirado';
+      return rowsOf([{ id: r.id }]);
+    }
     if (/SET status = 'aguardando'/.test(s)) {
       const [id, pay, fee, payload, exp] = params;
       if (vpix.some((r) => r.asaas_payment_id === pay)) {
@@ -110,8 +127,8 @@ function fakeQuery(sql, params = []) {
       return rowsOf([{ ...r }]);
     }
     if (/SET status = 'confirmado'/.test(s)) {
-      const [id, evId] = params;
-      const r = vpix.find((x) => x.id === id && x.status === 'aguardando');
+      const [id, evId, de] = params;
+      const r = vpix.find((x) => x.id === id && x.status === de);
       if (!r) return rowsOf([]);
       r.status = 'confirmado';
       r.confirmed_at = new Date();
@@ -128,8 +145,8 @@ function fakeQuery(sql, params = []) {
       return rowsOf([{ ...r }]);
     }
     if (/SET status = 'cancelado'/.test(s)) {
-      const [id, by] = params;
-      const r = vpix.find((x) => x.id === id && x.status === 'aguardando');
+      const [id, by, de] = params;
+      const r = vpix.find((x) => x.id === id && x.status === (params.length >= 3 ? de : 'aguardando'));
       if (!r) return rowsOf([]);
       Object.assign(r, { status: 'cancelado', cancelled_at: new Date(), cancelled_by: by || null });
       return rowsOf([{ ...r }]);
@@ -239,7 +256,12 @@ const aviso = (id, event, paymentId, saleId, accId = 'acc_A') => ({
   account: { id: accId },
   payment: { object: 'payment', id: paymentId, status: event === 'PAYMENT_CONFIRMED' ? 'CONFIRMED' : 'RECEIVED', value: 50, externalReference: `recebe:venda:${saleId}` },
 });
-const postAviso = (body) => request(app).post(WEBHOOK).set('asaas-access-token', AVISO_TOKEN).send(body);
+// Token POR SUBCONTA: HMAC-SHA256(segredo, company_id da subconta do corpo).
+const tokenDe = (master, cid) => require('crypto').createHmac('sha256', master).update(cid).digest('hex');
+const postAviso = (body) => {
+  const row = Object.values(baas).find((r) => r.asaas_account_id === body.account.id);
+  return request(app).post(WEBHOOK).set('asaas-access-token', tokenDe(AVISO_TOKEN, row ? row.company_id : 'x')).send(body);
+};
 const pagar = (paymentId) => { const p = asaas.payments.find((x) => x.id === paymentId); p.status = 'RECEIVED'; };
 
 let logSpies;
@@ -257,6 +279,7 @@ afterEach(() => {
   delete process.env.RECEBE_NA_AURA_ENABLED;
   delete process.env.RECEBE_AURA_WALLET_ID;
   delete process.env.RECEBE_ASAAS_WEBHOOK_TOKEN;
+  delete process.env.RECEBE_PIX_CONSUMIDOR_NO_CAIXA;
   logSpies.forEach((sp) => sp.mockRestore());
 });
 const loggedText = () => logSpies.map((sp) => JSON.stringify(sp.mock.calls)).join('\n');
@@ -298,6 +321,7 @@ describe('flag desligada: nada muda', () => {
 describe('flag ligada', () => {
   beforeEach(() => {
     process.env.RECEBE_NA_AURA_ENABLED = 'true';
+    process.env.RECEBE_PIX_CONSUMIDOR_NO_CAIXA = 'true';
     subcontaAprovada(companyA, SUB_KEY_A, 'acc_A');
     subcontaAprovada(companyB, SUB_KEY_B, 'acc_B');
   });
@@ -505,7 +529,7 @@ describe('flag ligada', () => {
       expect(calls).toHaveLength(0);
     });
 
-    test('aviso de outra subconta não confirma a venda da loja A (multi-CNPJ)', async () => {
+    test('aviso de outra subconta (com o token dela) não confirma a venda da loja A (multi-CNPJ)', async () => {
       await gerado();
       const a = await postAviso(aviso('evt_9', 'PAYMENT_RECEIVED', 'pay_1', venda1, 'acc_B'));
       expect(a.status).toBe(200);
@@ -622,8 +646,10 @@ describe('flag ligada', () => {
     });
 
     // DELETE /pdv/sale/:saleId de verdade (transação simulada no client).
+    let ordem;
     function clienteDaTransacao() {
       return {
+        release: jest.fn(() => ordem.push('release')),
         query: jest.fn((sql) => {
           const s = String(sql);
           if (/SELECT id, customer_id, employee_id, total_amount, coupon_id, status/.test(s)) {
@@ -633,18 +659,74 @@ describe('flag ligada', () => {
           if (/UPDATE sales SET status='cancelled'/.test(s)) sales[venda1].status = 'cancelled';
           return rowsOf([]);
         }),
-        release: jest.fn(),
       };
     }
 
-    test('rota: cancelar a venda devolve recebe_pix e cancela o Pix aguardando', async () => {
+    test('rota: cancelar a venda devolve recebe_pix e cancela o Pix aguardando, depois de devolver a conexão', async () => {
       venda(venda1, companyA, 50);
       await request(app).post(pixUrl(companyA, venda1)).set(auth(ownerA));
+      ordem = [];
+      const fetchBase = global.fetch.getMockImplementation();
+      global.fetch.mockImplementation((url, opts = {}) => { ordem.push(`asaas ${opts.method || 'GET'}`); return fetchBase(url, opts); });
       db.connect.mockImplementation(() => clienteDaTransacao());
       const r = await request(app).delete(`${base(companyA)}/sale/${venda1}`).set(auth(ownerA));
       expect(r.status).toBe(200);
       expect(r.body).toMatchObject({ ok: true, cancelled: venda1, recebe_pix: { status: 'cancelado' } });
       expect(asaas.payments[0].deleted).toBe(true);
+      expect(ordem[0]).toBe('release');
+      expect(ordem).toContain('asaas DELETE');
+    });
+
+    test('rota de remover o último item do lançamento (a venda é cancelada): mesmo gancho', async () => {
+      venda(venda1, companyA, 50);
+      await request(app).post(pixUrl(companyA, venda1)).set(auth(ownerA));
+      ordem = [];
+      const item = 'ab000000-0000-4000-8000-0000000000a9';
+      const tx = 'ac000000-0000-4000-8000-0000000000a8';
+      db.connect.mockImplementation(() => ({
+        release: jest.fn(() => ordem.push('release')),
+        query: jest.fn((sql) => {
+          const s = String(sql);
+          if (/FROM transactions WHERE id = \$1 AND company_id = \$2 FOR UPDATE/.test(s)) {
+            return rowsOf([{ id: tx, idempotency_key: `pdv-sale-${venda1}`, amount: '50.00', description: 'Venda PDV' }]);
+          }
+          if (/FROM sale_items si/.test(s) && /FOR UPDATE OF si, s/.test(s)) {
+            return rowsOf([{ id: item, sale_id: venda1, product_id: null, variant_id: null, quantity: '1', total_price: '50.00', product_name_snapshot: 'Camiseta' }]);
+          }
+          if (/COUNT\(\*\)::int AS n/.test(s)) return rowsOf([{ n: 0, new_total: '0' }]);
+          if (/UPDATE sales SET status = 'cancelled'/.test(s)) sales[venda1].status = 'cancelled';
+          return rowsOf([]);
+        }),
+      }));
+      const r = await request(app).delete(`/api/v1/companies/${companyA}/transactions/${tx}/sale-items/${item}`).set(auth(ownerA));
+      expect(r.status).toBe(200);
+      expect(r.body).toMatchObject({ ok: true, sale_cancelled: true, recebe_pix: { status: 'cancelado' } });
+      expect(asaas.payments[0].deleted).toBe(true);
+      expect(ordem[0]).toBe('release');
+    });
+
+    test('rota POST /sales/:id/cancel: mesmo gancho, depois de devolver a conexão', async () => {
+      venda(venda1, companyA, 50);
+      await request(app).post(pixUrl(companyA, venda1)).set(auth(ownerA));
+      ordem = [];
+      const fetchBase = global.fetch.getMockImplementation();
+      global.fetch.mockImplementation((url, opts = {}) => { ordem.push(`asaas ${opts.method || 'GET'}`); return fetchBase(url, opts); });
+      db.connect.mockImplementation(() => ({
+        release: jest.fn(() => ordem.push('release')),
+        query: jest.fn((sql) => {
+          const s = String(sql);
+          if (/FROM sales WHERE id = \$1 AND company_id = \$2 FOR UPDATE/.test(s)) {
+            return rowsOf([{ id: venda1, total_amount: '50.00', status: sales[venda1].status, type: 'sale' }]);
+          }
+          if (/UPDATE sales SET status = 'cancelled'/.test(s)) sales[venda1].status = 'cancelled';
+          return rowsOf([]);
+        }),
+      }));
+      const r = await request(app).post(`/api/v1/companies/${companyA}/sales/${venda1}/cancel`).set(auth(ownerA)).send({});
+      expect(r.status).toBe(200);
+      expect(r.body).toMatchObject({ ok: true, sale_id: venda1, recebe_pix: { status: 'cancelado' } });
+      expect(asaas.payments[0].deleted).toBe(true);
+      expect(ordem[0]).toBe('release');
     });
 
     test('rota com a flag desligada: resposta de sempre, sem recebe_pix', async () => {
@@ -656,6 +738,108 @@ describe('flag ligada', () => {
       expect(r.body).not.toHaveProperty('recebe_pix');
       expect(recebeQueries()).toHaveLength(0);
       expect(global.fetch).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('pagador', () => {
+    test('customer só com nome (sem CPF): conta como sem pagador e segue a ordem', async () => {
+      customers[cliente] = { name: 'Maria', cpf_cnpj: '123.456.789-09' };
+      venda(venda1, companyA, 30, { customer_id: cliente });
+      const r = await request(app).post(pixUrl(companyA, venda1)).set(auth(ownerA)).send({ customer: { name: 'Só o nome' } });
+      expect(r.status).toBe(201);
+      expect(calls.find((c) => c.method === 'POST' && c.path === '/customers').body).toMatchObject({ name: 'Maria', cpfCnpj: CPF_CLI });
+    });
+
+    test('"Consumidor no Caixa" desligado (padrão): sem CPF → 422 RECEBE_PIX_PEDE_CPF sem Asaas; disponível continua true', async () => {
+      delete process.env.RECEBE_PIX_CONSUMIDOR_NO_CAIXA;
+      venda(venda1, companyA, 50);
+      const d = await request(app).get(`${base(companyA)}/recebe-pix/disponivel`).set(auth(ownerA));
+      expect(d.body).toEqual({ disponivel: true, motivo: null });
+      for (const body of [{}, { customer: { name: 'Só o nome' } }]) {
+        const r = await request(app).post(pixUrl(companyA, venda1)).set(auth(ownerA)).send(body);
+        expect(r.status).toBe(422);
+        expect(r.body.code).toBe('RECEBE_PIX_PEDE_CPF');
+      }
+      expect(vpix).toHaveLength(0);
+      expect(global.fetch).not.toHaveBeenCalled();
+      // com o CPF informado, gera
+      const ok = await request(app).post(pixUrl(companyA, venda1)).set(auth(ownerA)).send({ customer: { cpf_cnpj: '529.982.247-25' } });
+      expect(ok.status).toBe(201);
+    });
+  });
+
+  describe('venda cancelada enquanto o Pix nascia', () => {
+    test('ao terminar a criação, cancela a cobrança na Asaas na hora (nenhum QR vivo)', async () => {
+      venda(venda1, companyA, 50);
+      const fetchBase = global.fetch.getMockImplementation();
+      global.fetch.mockImplementation((url, opts = {}) => {
+        if ((opts.method || 'GET') === 'POST' && /\/payments$/.test(new URL(url).pathname)) {
+          // o cancelamento da venda entra enquanto a Asaas cria a cobrança
+          sales[venda1].status = 'cancelled';
+          svc.depoisDeCancelarVenda(companyA, venda1, ownerA); // vê 'criando' e não tem o que cancelar
+        }
+        return fetchBase(url, opts);
+      });
+      const r = await request(app).post(pixUrl(companyA, venda1)).set(auth(ownerA));
+      expect(r.status).toBe(409);
+      expect(r.body.code).toBe('VENDA_CANCELADA');
+      expect(r.body.recebe_pix).toMatchObject({ status: 'cancelado', pix: null });
+      expect(asaas.payments[0].deleted).toBe(true);
+      expect(vpix[0].status).toBe('cancelado');
+    });
+  });
+
+  describe('Pix vencido e restaurado', () => {
+    async function gerado() {
+      venda(venda1, companyA, 50);
+      await request(app).post(pixUrl(companyA, venda1)).set(auth(ownerA));
+    }
+
+    test('PAYMENT_OVERDUE: expirado, não confirma, some da lista de aguardando', async () => {
+      await gerado();
+      const a = await postAviso({ ...aviso('evt_o1', 'PAYMENT_OVERDUE', 'pay_1', venda1) });
+      expect(a.status).toBe(200);
+      expect(vpix[0]).toMatchObject({ status: 'expirado', confirmed_at: null });
+      const g = await request(app).get(pixUrl(companyA, venda1)).set(auth(ownerA));
+      expect(g.body).toMatchObject({ status: 'expirado', pix: null });
+      const lista = await request(app).get(`${base(companyA)}/recebe-pix?situacao=aguardando`).set(auth(ownerA));
+      expect(lista.body.items).toEqual([]);
+    });
+
+    test('PAYMENT_RESTORED com a venda viva: volta a aguardando', async () => {
+      await gerado();
+      await postAviso(aviso('evt_o1', 'PAYMENT_OVERDUE', 'pay_1', venda1));
+      await postAviso(aviso('evt_r1', 'PAYMENT_RESTORED', 'pay_1', venda1));
+      expect(vpix[0].status).toBe('aguardando');
+    });
+
+    test('PAYMENT_RESTORED com a venda cancelada: fica como está', async () => {
+      await gerado();
+      await postAviso(aviso('evt_o1', 'PAYMENT_OVERDUE', 'pay_1', venda1));
+      sales[venda1].status = 'cancelled';
+      await postAviso(aviso('evt_r1', 'PAYMENT_RESTORED', 'pay_1', venda1));
+      expect(vpix[0].status).toBe('expirado');
+    });
+
+    test('Pix vencido pago: confirma (sem outra cobrança viva para a venda)', async () => {
+      await gerado();
+      await postAviso(aviso('evt_o1', 'PAYMENT_OVERDUE', 'pay_1', venda1));
+      await postAviso(aviso('evt_p1', 'PAYMENT_RECEIVED', 'pay_1', venda1));
+      expect(vpix[0]).toMatchObject({ status: 'confirmado', confirmacoes: 1 });
+    });
+
+    test('gerar de novo depois de vencer: apaga o vencido na Asaas e cria outro', async () => {
+      await gerado();
+      await postAviso(aviso('evt_o1', 'PAYMENT_OVERDUE', 'pay_1', venda1));
+      const r = await request(app).post(pixUrl(companyA, venda1)).set(auth(ownerA));
+      expect(r.status).toBe(201);
+      expect(r.body.payment_id).toBe('pay_2');
+      expect(asaas.payments[0].deleted).toBe(true);
+      expect(vpix.map((x) => x.status)).toEqual(['cancelado', 'aguardando']);
+      // o vencido pago depois disso não confirma a venda duas vezes: só atenção
+      await postAviso(aviso('evt_p2', 'PAYMENT_RECEIVED', 'pay_1', venda1));
+      expect(vpix[0]).toMatchObject({ status: 'cancelado', atencao: 'pago_depois_de_cancelar' });
+      expect(vpix[1].status).toBe('aguardando');
     });
   });
 
