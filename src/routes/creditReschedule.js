@@ -23,6 +23,34 @@ const { randomUUID } = require('crypto');
 // 16/09/2026: cliente de outra loja do mesmo dono tambem vale (utils/customerScope.js).
 const { findOwnerScopedCustomer, CUSTOMER_NOT_FOUND_BODY } = require('../utils/customerScope');
 const { computeReschedulePlan, applyReschedule, loadOpenInstallments, sumRemaining, getUnscheduledBalance } = require('../services/credit/reschedule');
+const { validateFirstDueDate, defaultFirstDueDate } = require('../services/credit/terms');
+
+// ─── 1a parcela no passado (24/11/2026) ─────────────────────────────────
+// Renegociacao feita em 23/11 com a 1a parcela em 22/11 (e outra com o ano
+// errado, 2026 no lugar de 2027): o carne nascia vencido, o app mostrava "a
+// conferir" e, 7 dias depois, atraso. Mesma regra e mesmo fuso da venda no
+// Caixa (POST /credit/installments, terms.validateFirstDueDate): "hoje" e o dia
+// em Sao Paulo; hoje vale. So a data no PASSADO e recusada aqui -- data
+// invalida segue o comportamento de antes e a renegociacao nao tem o teto de
+// 90 dias da venda. /manual-entry e a edicao de vencimento de uma parcela NAO
+// passam por aqui (lancamento retroativo e de proposito).
+const FIRST_DUE_DATE_PAST_BODY = {
+  error: 'Essa data já passou. A renegociação precisa começar hoje ou depois.',
+  code:  'FIRST_DUE_DATE_PAST',
+};
+
+function firstDueDateIsPast(raw) {
+  if (!raw) return false;
+  const v = validateFirstDueDate(raw);
+  return !v.ok && v.code === 'FIRST_DUE_DATE_PAST';
+}
+
+// Sem first_due_date: um mes depois de HOJE em Sao Paulo, preso ao fim do mes
+// (31/01 -> 28/02). Nunca cai no passado. Antes o padrao vinha do unify, em UTC
+// (21h-24h em SP ja era "amanha") e com estouro de mes (30/01 -> 02/03).
+function resolveFirstDueDate(raw) {
+  return raw || defaultFirstDueDate();
+}
 
 // Helper canonico (mesmo de creditUnify.js/creditRefund.js).
 async function assertCrediarioEnabled(companyId) {
@@ -169,6 +197,9 @@ router.get('/customers/:cid/accounts/:accountId/reschedule/preview', async (req,
   if (hasTotal && (isNaN(total) || total < 0)) {
     return res.status(400).json({ error: 'total invalido (deve ser >= 0)' });
   }
+  if (firstDueDateIsPast(firstDueDate)) {
+    return res.status(422).json(FIRST_DUE_DATE_PAST_BODY);
+  }
 
   try {
     if (!(await ensureCustomer(companyId, customerId))) {
@@ -191,7 +222,7 @@ router.get('/customers/:cid/accounts/:accountId/reschedule/preview', async (req,
       openRemaining: baseRemaining,
       total,
       installments,
-      firstDueDate,
+      firstDueDate: resolveFirstDueDate(firstDueDate),
       periodUnit:  periodUnit  || period.periodUnit,
       periodCount: periodCount || period.periodCount,
     });
@@ -226,6 +257,9 @@ router.post('/customers/:cid/accounts/:accountId/reschedule', async (req, res) =
   }
   if (hasTotal && (isNaN(total) || total < 0)) {
     return res.status(400).json({ error: 'total invalido (deve ser >= 0)' });
+  }
+  if (firstDueDateIsPast(firstDueDate)) {
+    return res.status(422).json(FIRST_DUE_DATE_PAST_BODY);
   }
 
   try {
@@ -308,7 +342,8 @@ router.post('/customers/:cid/accounts/:accountId/reschedule', async (req, res) =
       accountId,
       total,
       installments,
-      firstDueDate,
+      // A impressao digital acima segue com a data CRUA ('auto' sem data).
+      firstDueDate: resolveFirstDueDate(firstDueDate),
       periodUnit:  periodUnit  || period.periodUnit,
       periodCount: periodCount || period.periodCount,
       createdBy:   req.user?.id || null,
