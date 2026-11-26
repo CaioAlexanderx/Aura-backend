@@ -22,6 +22,8 @@ const router  = express.Router();
 const db      = require('../config/database');
 // 04/11/2026: aceite pelo link avisa a loja no celular e no sino.
 const lojaEvents = require('../services/lojaEvents');
+// B1c (26/11/2026): validade pelo dia, em Sao Paulo.
+const validade = require('../utils/validadeDoOrcamento');
 
 // ─── Matcon ─────────────────────────────────────────────────
 const SP_TODAY = "(NOW() AT TIME ZONE 'America/Sao_Paulo')::date";
@@ -251,7 +253,7 @@ router.get('/:token', async function(req, res) {
     marcarVisualizado(q.id);
 
     // Verificar expiração: se status ainda é 'sent' mas já venceu → retornar 'expired'
-    const expired = q.expires_at && new Date(q.expires_at) < new Date();
+    const expired = validade.vencido(q.expires_at);
     // 361 (28/09/2026): 'closed' é a loja encerrando sem venda. A página
     // pública só conhece os status de sempre; para o cliente, é um
     // orçamento que não vale mais ("peça à loja um novo").
@@ -318,19 +320,26 @@ router.post('/:token/respond', async function(req, res) {
     }
     const q = qRes.rows[0];
 
+    // B1c: orcamento vencido (dia da validade em Sao Paulo anterior a hoje)
+    // nao e aprovado nem recusado pelo link: 409 com codigo proprio. A loja
+    // renova a validade (PATCH /studio/quotes/:qid/validade) e o mesmo link
+    // volta a valer. 'expired' (marcado antes) responde igual.
+    if ((q.status === 'sent' && validade.vencido(q.expires_at)) || q.status === 'expired') {
+      if (q.status === 'sent') {
+        await client.query(
+          `UPDATE studio_quotes SET status = 'expired', updated_at = NOW() WHERE id = $1`,
+          [q.id]
+        );
+        await client.query('COMMIT');
+      } else {
+        await client.query('ROLLBACK');
+      }
+      return res.status(409).json({ error: validade.MSG_VENCIDO_CLIENTE, code: 'ORCAMENTO_VENCIDO' });
+    }
+
     if (q.status !== 'sent') {
       await client.query('ROLLBACK');
       return res.status(409).json({ error: 'Este orçamento já foi respondido' });
-    }
-
-    if (q.expires_at && new Date(q.expires_at) < new Date()) {
-      // Marca expirado e rejeita
-      await client.query(
-        `UPDATE studio_quotes SET status = 'expired', updated_at = NOW() WHERE id = $1`,
-        [q.id]
-      );
-      await client.query('COMMIT');
-      return res.status(410).json({ error: 'Orçamento expirado — peça à loja um novo orçamento' });
     }
 
     const newStatus = action === 'accept' ? 'accepted' : 'rejected';
