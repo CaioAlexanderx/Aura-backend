@@ -281,7 +281,21 @@ router.get('/settings', async (req, res) => {
   }
 });
 
-router.put('/settings', async (req, res) => {
+// Ligar/desligar a Aurinha e mudar o modo de atendimento é do dono ou do
+// admin da empresa. Membro lê e responde conversas, mas não muda isso.
+// companyRole vem do requireCompanyAccess (private.js); equipe Aura
+// (user.role 'admin') chega como 'admin'.
+function soDonoOuAdmin(req, res, next) {
+  if (req.companyRole !== 'owner' && req.companyRole !== 'admin') {
+    return res.status(403).json({
+      error: 'Só o dono ou um admin da empresa pode mudar as configurações da Aurinha',
+      your_role: req.companyRole || null,
+    });
+  }
+  next();
+}
+
+router.put('/settings', soDonoOuAdmin, async (req, res) => {
   const cid = req.params.id;
   const { enabled, approval_mode, extra_instructions } = req.body || {};
   try {

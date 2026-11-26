@@ -217,10 +217,10 @@ router.post('/', async (req, res) => {
         //    a conversa completa — NÃO abre a janela de 24h de atendimento
         //    (isso só acontece quando o CLIENTE manda mensagem) e por isso
         //    usa touchOutboundHuman, nunca touchInbound.
-        //  - history: sincronização do histórico de mensagens do app.
-        //  - smb_app_state_sync: estado do app (contatos, etc).
-        // Os dois últimos ainda não gravam nada — só log da contagem —
-        // porque a tela ainda não tem onde mostrar isso.
+        //  - history: sincronização do histórico de mensagens do app (até 6
+        //    meses). No número da Aura (hub) vira conversa e mensagens do
+        //    hub, sem Aurinha nem resposta; nas lojas, só log da contagem.
+        //  - smb_app_state_sync: estado do app (contatos, etc). Só log.
         if (change.field === 'smb_message_echoes') {
           try {
             const echoes = value.message_echoes || [];
@@ -256,6 +256,14 @@ router.post('/', async (req, res) => {
         if (change.field === 'history') {
           const count = Array.isArray(value.history) ? value.history.length : 0;
           console.log(`[wa webhook] history sync: ${count} itens`);
+          // Hub: grava a conversa antiga como estava (cliente × humano), sem
+          // disparar nada. Já respondemos 200; o teto por chamada está lá.
+          if (hubTenant) {
+            await hubWhatsapp.registrarHistorico(hubTenant, value)
+              .then((r) => console.log('[wa webhook] history hub: %d conversas, %d gravadas, %d repetidas, %d ignoradas, %d fora do teto, %d erros da Meta',
+                r.conversas, r.gravadas, r.duplicadas, r.ignoradas, r.cortadas, r.erros))
+              .catch((e) => console.error('[WA-WEBHOOK] hub history error:', e.message));
+          }
           continue;
         }
 

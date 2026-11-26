@@ -420,6 +420,129 @@ async function registrarEcho(tenant, echo, { agora = new Date() } = {}) {
   }
 }
 
+// ── Histórico da coexistência (change.field 'history') ───────
+// Ao ligar o número em Coexistência, a Meta manda até 6 meses de conversa
+// do app do celular, em pedaços: value.history[] → { metadata, threads[] |
+// errors[] }, e cada thread → { id: wa_id do contato, messages[] }. Cada
+// mensagem tem from (o contato ou o próprio número da empresa), id
+// (wamid), timestamp e o corpo no formato de sempre.
+//
+// Só GRAVA: nada de Aurinha, evento, aviso ou resposta. Não mexe em status
+// nem em aguardando_resposta_desde — fala antiga nunca entra no relógio do
+// plantão. Idempotente pelo wamid (índice único de hub_messages). Datas são
+// as originais da Meta; mensagem sem data é ignorada (gravar com a hora de
+// agora poria uma fala antiga no topo do inbox).
+//
+// Volume: um INSERT por lote (unnest) por conversa e um teto por chamada
+// do webhook — que já respondeu 200 antes de chegar aqui.
+const HISTORICO_LOTE = 200;
+const HISTORICO_MAX_POR_CHAMADA = 5000;
+const HISTORICO_TIPOS_IGNORADOS = new Set(['reaction']);
+
+// Separa o pedaço do webhook em conversas prontas para gravar.
+function conversasDoHistorico(value, { max = HISTORICO_MAX_POR_CHAMADA } = {}) {
+  const out = { conversas: [], ignoradas: 0, cortadas: 0, erros: 0 };
+  const vistos = new Set();
+  let total = 0;
+  const pedacos = Array.isArray(value && value.history) ? value.history : [];
+  for (const pedaco of pedacos) {
+    if (pedaco && Array.isArray(pedaco.errors)) out.erros += pedaco.errors.length;
+    const threads = (pedaco && Array.isArray(pedaco.threads)) ? pedaco.threads : [];
+    for (const thread of threads) {
+      const contato = waOutbox.normalizePhone(thread && thread.id) || (thread && thread.id ? String(thread.id) : null);
+      const msgs = (thread && Array.isArray(thread.messages)) ? thread.messages : [];
+      if (!contato) { out.ignoradas += msgs.length; continue; }
+      const linhas = [];
+      for (const msg of msgs) {
+        if (!msg || !msg.id || vistos.has(msg.id) || HISTORICO_TIPOS_IGNORADOS.has(msg.type)) { out.ignoradas++; continue; }
+        const quando = dataDaMeta(msg.timestamp, null);
+        if (!quando) { out.ignoradas++; continue; }
+        // Do contato = cliente; de qualquer outro número (o da empresa) =
+        // humano — foi alguém da Aura respondendo pelo celular.
+        const de = waOutbox.normalizePhone(msg.from) || (msg.from ? String(msg.from) : null);
+        const para = waOutbox.normalizePhone(msg.to);
+        let author;
+        if (de) author = de === contato ? 'cliente' : 'humano';
+        else if (para === contato) author = 'humano';
+        else { out.ignoradas++; continue; }
+        if (total >= max) { out.cortadas++; continue; }
+        total++;
+        vistos.add(msg.id);
+        linhas.push({
+          wamid: String(msg.id),
+          direction: author === 'cliente' ? 'inbound' : 'outbound',
+          author,
+          content: textoDaMensagem(msg),
+          metadata: JSON.stringify({ source: 'history', type: msg.type || null, history_context: msg.history_context || null }),
+          quando,
+        });
+      }
+      if (linhas.length) out.conversas.push({ contato, linhas });
+    }
+  }
+  return out;
+}
+
+const maisRecente = (ds) => ds.reduce((acc, d) => (!acc || d > acc ? d : acc), null);
+
+async function registrarHistorico(tenant, value, { max = HISTORICO_MAX_POR_CHAMADA, lote = HISTORICO_LOTE } = {}) {
+  const resumo = { conversas: 0, gravadas: 0, duplicadas: 0, ignoradas: 0, cortadas: 0, erros: 0 };
+  const companyId = tenant && tenant.companyId;
+  if (!companyId) return { ok: false, reason: 'SEM_TENANT', ...resumo };
+
+  const { conversas, ignoradas, cortadas, erros } = conversasDoHistorico(value, { max });
+  Object.assign(resumo, { ignoradas, cortadas, erros });
+
+  try {
+    for (const { contato, linhas } of conversas) {
+      const datas = (autor) => linhas.filter((l) => !autor || l.author === autor).map((l) => l.quando);
+      const { rows: convRows } = await db.query(
+        `-- hubwa:hist-conv-upsert
+         INSERT INTO hub_conversations
+           (company_id, channel, external_id, last_inbound_at, last_message_at, ultima_mensagem_humana_em)
+         VALUES ($1, 'whatsapp', $2, $3, $4, $5)
+         ON CONFLICT (company_id, channel, external_id) DO UPDATE SET
+           last_inbound_at = GREATEST(hub_conversations.last_inbound_at, EXCLUDED.last_inbound_at),
+           last_message_at = GREATEST(hub_conversations.last_message_at, EXCLUDED.last_message_at),
+           ultima_mensagem_humana_em = GREATEST(hub_conversations.ultima_mensagem_humana_em, EXCLUDED.ultima_mensagem_humana_em),
+           updated_at = NOW()
+         RETURNING id`,
+        [companyId, contato, maisRecente(datas('cliente')), maisRecente(datas()), maisRecente(datas('humano'))]
+      );
+      const convId = convRows[0] && convRows[0].id;
+      if (!convId) continue;
+      resumo.conversas++;
+
+      for (let i = 0; i < linhas.length; i += lote) {
+        const parte = linhas.slice(i, i + lote);
+        const { rows: ins } = await db.query(
+          `-- hubwa:hist-msg-insert
+           INSERT INTO hub_messages
+             (company_id, conversation_id, channel, direction, author, external_message_id, content, metadata, created_at)
+           SELECT $1, $2, 'whatsapp', d.direction, d.author, d.wamid, d.content, d.metadata::jsonb, d.created_at
+             FROM unnest($3::text[], $4::text[], $5::text[], $6::text[], $7::text[], $8::timestamptz[])
+                  AS d(direction, author, wamid, content, metadata, created_at)
+           ON CONFLICT (company_id, channel, external_message_id)
+             WHERE external_message_id IS NOT NULL DO NOTHING
+           RETURNING id`,
+          [companyId, convId,
+           parte.map((l) => l.direction), parte.map((l) => l.author), parte.map((l) => l.wamid),
+           parte.map((l) => l.content), parte.map((l) => l.metadata), parte.map((l) => l.quando.toISOString())]
+        );
+        resumo.gravadas += ins.length;
+        resumo.duplicadas += parte.length - ins.length;
+      }
+    }
+  } catch (e) {
+    if (isMissingSchema(e)) return { ok: false, reason: 'SCHEMA_PENDENTE', ...resumo };
+    throw e;
+  }
+  if (cortadas) {
+    console.warn('[HUB-WA] histórico: %d mensagens acima do teto de %d por chamada ficaram de fora', cortadas, max);
+  }
+  return { ok: true, ...resumo };
+}
+
 // Humano falou pelo painel (POST /hub/.../reply): mesmo efeito do eco.
 async function marcarRespostaHumana(companyId, conversationId, userId = null) {
   try {
@@ -502,7 +625,7 @@ async function processarPendentes({ agora = new Date(), limit = 50 } = {}) {
 
 module.exports = {
   auraCompanyId, resolveTenant,
-  registrarInbound, registrarEcho, marcarRespostaHumana,
+  registrarInbound, registrarEcho, registrarHistorico, conversasDoHistorico, marcarRespostaHumana,
   responderNoHub, avaliarConversa, processarPendentes,
   TEXTO_FIXO, TEXTO_STUB, MAX_RESPOSTAS_POR_HORA,
 };
