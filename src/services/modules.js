@@ -61,6 +61,12 @@ const MODULE_PLAN_MAP = {
   // rota: /pedidos fica atras da trava PEDIDO_LIBERADO. Tambem e chave de
   // permissao do membro (permissions['vendas.pedidos']), lida por /me/pedidos.
   'vendas.pedidos':       'essencial',
+  // 25/11/2026 (C2) — Venda condicional: a aba Condicionais em Vendas. Chave
+  // propria (espelha o mod do app), mesmo formato e plano de vendas.pedidos
+  // (decisao 2 do Caio: Essencial). Sem gate de rota: /condicionais fica
+  // atras da trava CONDICIONAL_LIBERADA. Tambem e chave de permissao do
+  // membro (permissions['vendas.condicionais']), lida por /me/condicionais.
+  'vendas.condicionais':  'essencial',
 
   // Negócio+
   folha:          'negocio',

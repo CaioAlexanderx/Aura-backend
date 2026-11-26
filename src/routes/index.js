@@ -37,6 +37,8 @@ router.use('/me', require('./meEstoquePorLoja'));
 router.use('/me', require('./meStudio'));
 // 17/11/2026 (B3, p-61c): pedidos guardados no Caixa de todas as lojas (GET /me/pedidos).
 router.use('/me', require('./mePedidos'));
+// 25/11/2026 (C2 / R14): condicionais de todas as lojas (GET /me/condicionais).
+router.use('/me', require('./meCondicionais'));
 // Fase 1 · consentimento (340): GET /me/whatsapp/consent/summary.
 router.use('/me', require('./customerConsent').meRouter);
 

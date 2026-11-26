@@ -18,6 +18,8 @@
 //           card_fee_credit_pct, card_fee_debit_pct, card_fee_pix_pct
 //   NUMBER OU NULL (percentual 0-100): card_price_pct
 //   INTEIRO NA FAIXA: vale_troca_prazo_dias (1-365, padrao 30)
+//                     condicional_prazo_padrao (1-30, padrao 3)
+//   TEXTO OU NULL: warranty_terms (6000), condicional_termos (3000)
 //   STRING (enum) OU NULL: label_size (99x21 | 30x25 | 58mm | 105x21 | 40x25),
 //                          label_design (classico | editorial)
 //   LISTA OU NULL: label_custom_specs (medidas proprias de etiqueta, ate 20)
@@ -132,7 +134,10 @@ const ALLOWED_NULLABLE_STRING_KEYS = {
 
 // 01/10/2026 — Modelo dos termos da Garantia de produto (texto livre). null/''
 // volta ao modelo padrao da Aura (utils/warrantyTerms.js).
-const ALLOWED_TEXT_KEYS = { warranty_terms: 6000 };
+// 25/11/2026 (C1/C2) — Termos da venda condicional (texto livre da loja,
+// copiado para cada condicional ao guardar; services/condicional.js). null/''
+// = a loja nao tem texto e o comprovante nao tem quadro. A Aura nao escreve.
+const ALLOWED_TEXT_KEYS = { warranty_terms: 6000, condicional_termos: 3000 };
 
 const ALLOWED_NUMBER_KEYS = [
   'service_fee_pct',
@@ -177,6 +182,9 @@ const ALLOWED_RANGED_KEYS = {
 // nao numerico e fracao => 400 e nada e gravado. Texto numerico ("30") vale.
 const ALLOWED_STRICT_INT_KEYS = {
   vale_troca_prazo_dias: { min: valeTrocaPrazo.PRAZO_MIN_DIAS, max: valeTrocaPrazo.PRAZO_MAX_DIAS, integer: true },
+  // 25/11/2026 (C1/C2) — prazo padrao da venda condicional, em dias (1-30,
+  // teto da decisao 3 do Caio). Ausente = 3 (services/condicional.js).
+  condicional_prazo_padrao: { min: 1, max: 30, integer: true },
 };
 
 // 15/10/2026 — configuracao de impressao de etiqueta salva na CONTA (pedido
@@ -416,6 +424,10 @@ const DEFAULT_SETTINGS = {
   label_custom_specs:        null,
   label_printer_prefs:       null,
   warranty_terms:            null,
+  // 25/11/2026 (C1/C2) — venda condicional: sem texto de termos (sem quadro)
+  // e devolucao em 3 dias, ate a loja escolher.
+  condicional_termos:        null,
+  condicional_prazo_padrao:  3,
 };
 
 function validateSettings(settings) {
