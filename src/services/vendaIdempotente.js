@@ -37,6 +37,7 @@
 'use strict';
 
 const db = require('../config/database');
+const { urlPublicaDoApp } = require('../utils/urlPublicaDoApp');
 
 const KEY_RE = /^[A-Za-z0-9_-]{8,128}$/;
 const INDICE = 'uq_sales_company_idempotency_key';
@@ -153,7 +154,7 @@ async function responderRepeticao(res, { companyId, key, itens }) {
         card_fee: null,
         receipt_url: `/companies/${companyId}/print/receipt/${venda.id}`,
         track_url: venda.tracker_token
-          ? `${process.env.APP_PUBLIC_URL || ''}/acompanhar/${venda.tracker_token}`
+          ? `${urlPublicaDoApp()}/acompanhar/${venda.tracker_token}`
           : null,
       };
   corpo.idempotent_replay = true;
