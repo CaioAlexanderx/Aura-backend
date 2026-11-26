@@ -86,6 +86,7 @@ const { hasSaleNumberColumn, saleNumberSelect } = require('../utils/saleNumber')
 const { hasSaleHiddenColumn, visibleInListCond } = require('../utils/saleHidden');
 const matconSaleHooks = require('../services/matconSaleHooks');
 const comandaSaleHooks = require('../services/comandaSaleHooks');
+const condicionalVenda = require('../services/condicionalVenda');
 const editarVenda = require('../services/editarVenda');
 const { prazoDeCancelamento } = require('../services/nfcePrazoCancelamento');
 const nfceCancelamento = require('../services/nfceCancelamento');
@@ -974,6 +975,8 @@ router.post('/:sale_id/cancel', asyncHandler(async (req, res) => {
     const matconUndo = await matconSaleHooks.afterSaleCancel(client, { companyId: companyId, saleId: saleId });
     // Comandas (368): a comanda que esta venda fechou volta a ficar aberta.
     await comandaSaleHooks.afterSaleCancel(client, { companyId: companyId, saleId: saleId });
+    // C11: pecas da condicional voltam a 'ficou' sem venda; a condicional reabre.
+    await condicionalVenda.voltarAoCancelar(client, { companyId: companyId, saleId: saleId, userId: req.user && req.user.id ? req.user.id : null });
 
     await client.query('COMMIT');
 

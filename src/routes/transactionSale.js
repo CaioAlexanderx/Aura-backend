@@ -71,6 +71,7 @@ const { vendaSemEstoqueLiberada } = require('../utils/vendaSemEstoque');
 const { ehUnidadeServico } = require('../services/notaDoItem');
 // 25/11/2026 (RA-10): Pix pelo Recebe na Aura da venda que ficou sem itens.
 const recebeVendaPix = require('../services/recebeVendaPix');
+const condicionalVenda = require('../services/condicionalVenda');
 
 // Quanto ja foi devolvido/trocado por item da venda (troca_returned_items).
 // Best-effort: em deploy parcial a tabela pode nao existir (42P01) -> tudo 0.
@@ -635,6 +636,8 @@ router.delete('/transactions/:tx_id/sale-items/:item_id', asyncHandler(async (re
          WHERE id = $1`,
         [saleId]
       );
+      // C11: peça de condicional da venda cancelada volta a 'ficou' sem venda.
+      await condicionalVenda.voltarAoCancelar(client, { companyId, saleId, userId: req.user && req.user.id ? req.user.id : null });
     } else {
       // Atualiza total da venda
       await client.query(
