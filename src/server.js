@@ -145,6 +145,11 @@ function startServer() {
     const { initReactivationAutoJob } = require('./jobs/reactivationAutoJob');
     initReactivationAutoJob();
 
+    // TELA NOVA DO WHATSAPP (26/11/2026): Aniversário, Venda+ e Crediário,
+    // diário 10h BRT. DESLIGADO por padrão (WA_AUTOMATICAS_ENABLED).
+    const { initWaAutomaticasJob } = require('./jobs/waAutomaticasJob');
+    initWaAutomaticasJob();
+
     // AURINHA (312): dispatcher da fila Instagram (ig_outbox) — tick 15s,
     // kill switch IG_DISPATCH_ENABLED=false.
     const { initIgDispatcher } = require('./jobs/igDispatcherJob');
