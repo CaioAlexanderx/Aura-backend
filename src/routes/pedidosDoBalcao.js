@@ -52,6 +52,7 @@ const pedidoBalcao = require('../services/pedidoBalcao');
 const listaDePedidos = require('../services/listaDePedidos');
 const sinalDoPedido = require('../services/sinalDoPedido');
 const cancelarPedido = require('../services/cancelarPedido');
+const { condicionalLiberada } = require('../services/condicional');
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const NAO_ENCONTRADO = { error: 'Pedido não encontrado.', code: 'PEDIDO_NAO_ENCONTRADO' };
@@ -92,6 +93,7 @@ router.post('/', async (req, res) => {
       userId: req.user && req.user.id,
       body: req.body,
       chave: pedidoBalcao.lerChave(req),
+      comCondicional: condicionalLiberada(req),
     });
     if (r.repetido) {
       res.set('Idempotent-Replayed', 'true');

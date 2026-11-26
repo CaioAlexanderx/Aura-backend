@@ -58,6 +58,7 @@ const { findOwnerScopedCustomer } = require('../utils/customerScope');
 const { normalizarTelefone } = require('../utils/telefone');
 const { mesmosItens, INDICE } = require('./pedidoOnlineIdempotente');
 const { lerReservas, reservadoDaVariante } = require('./reservaDoPedido');
+const { lerComClientes, lerParaResolver, comClientesDaVariante } = require('./comClientes');
 const { vendaSemEstoqueLiberada } = require('../utils/vendaSemEstoque');
 // INC-2026-11-18-02: servico (unit 'srv') nunca e barrado por saldo.
 const { ehUnidadeServico } = require('./notaDoItem');
@@ -271,8 +272,32 @@ async function conferirProdutos(client, companyId, itens) {
  * POST /pdv/sale) menos o que ja esta reservado em outros pedidos do balcao
  * abertos do grupo. Peca sob encomenda e item sem cadastro nao sao
  * conferidos. Devolve a lista do que falta ([] = tudo livre).
+ *
+ * C17 (Venda condicional, R3): com a trava da condicional ligada
+ * (comCondicional), livre = estoque - reservado - com clientes - para
+ * resolver, a mesma conta de condicional.js. A peca na casa de uma cliente
+ * (ou voltou com defeito) nao se separa num pedido. Sem a trava nao ha
+ * consulta nova e a resposta e a de sempre.
  */
-async function conferirSaldo(client, companyId, itens) {
+async function foraDaLoja(client, companyId, pids) {
+  const zero = { fora: new Map(), resolver: new Map() };
+  if (!pids.length) return zero;
+  try {
+    // SAVEPOINT: base sem as tabelas (42P01/42703) nao pode abortar a transacao.
+    await client.query('SAVEPOINT pedido_fora_da_loja');
+    const fora = await lerComClientes(client, companyId, pids);
+    const resolver = await lerParaResolver(client, companyId, pids);
+    await client.query('RELEASE SAVEPOINT pedido_fora_da_loja');
+    return { fora, resolver };
+  } catch (e) {
+    console.error('[pedido-balcao] pecas com clientes indisponivel:', e && e.message);
+    await client.query('ROLLBACK TO SAVEPOINT pedido_fora_da_loja').catch(() => {});
+    return zero;
+  }
+}
+
+// (conferirSaldo: a regra esta no comentario acima.)
+async function conferirSaldo(client, companyId, itens, { comCondicional = false } = {}) {
   const linhas = new Map();
   for (const it of itens) {
     if (!it.product_id || it.sobEncomenda || it.servico) continue;
@@ -283,10 +308,15 @@ async function conferirSaldo(client, companyId, itens) {
   }
   if (!linhas.size) return [];
   const reservas = await lerReservas(client, companyId, [...linhas.values()].map((l) => l.it.product_id));
+  const { fora, resolver } = comCondicional
+    ? await foraDaLoja(client, companyId, [...new Set([...linhas.values()].map((l) => l.it.product_id))])
+    : { fora: null, resolver: null };
   const faltas = [];
   for (const { it, quantidade } of linhas.values()) {
     const reservado = reservadoDaVariante(reservas, it.product_id, it.variant_id);
-    const livre = Math.max(0, it.estoque - reservado);
+    const comClientes = fora ? comClientesDaVariante(fora, it.product_id, it.variant_id) : 0;
+    const paraResolver = resolver ? comClientesDaVariante(resolver, it.product_id, it.variant_id) : 0;
+    const livre = Math.max(0, it.estoque - reservado - comClientes - paraResolver);
     if (livre < quantidade) {
       faltas.push({
         product_id: it.product_id,
@@ -295,6 +325,7 @@ async function conferirSaldo(client, companyId, itens) {
         quantidade,
         estoque: it.estoque,
         reservado,
+        ...(comCondicional ? { com_clientes: comClientes, para_resolver: paraResolver } : {}),
         livre,
       });
     }
@@ -304,8 +335,14 @@ async function conferirSaldo(client, companyId, itens) {
 
 function fraseDaFalta(f) {
   const n = (x) => String(x).replace('.', ',');
-  if (f.reservado > 0) {
-    return `"${f.nome}": só ${n(f.livre)} livre${f.livre === 1 ? '' : 's'} (${n(f.reservado)} já separada${f.reservado === 1 ? '' : 's'} em outro pedido).`;
+  // C17: as causas numa frase so. Sem com clientes nem para resolver, o texto
+  // e o de antes.
+  const causas = [];
+  if (f.com_clientes > 0) causas.push(`${n(f.com_clientes)} com clientes`);
+  if (f.reservado > 0) causas.push(`${n(f.reservado)} já separada${f.reservado === 1 ? '' : 's'} em outro pedido`);
+  if (f.para_resolver > 0) causas.push(`${n(f.para_resolver)} para resolver`);
+  if (causas.length) {
+    return `"${f.nome}": só ${n(f.livre)} livre${f.livre === 1 ? '' : 's'} (${causas.join(', ')}).`;
   }
   return `"${f.nome}": só ${n(f.livre)} no estoque.`;
 }
@@ -392,7 +429,7 @@ const REPETIDO = Symbol('pedido-repetido');
  * Guarda o pedido. Devolve { status: 201|200, pedido, repetido }.
  * Lanca erro com .status (4xx) para a rota responder.
  */
-async function guardarPedido({ companyId, userId, body, chave, hoje }) {
+async function guardarPedido({ companyId, userId, body, chave, hoje, comCondicional = false }) {
   const lido = lerCorpo(body, { hoje });
   if (lido.erro) throw erro(lido.erro.status, lido.erro.message, lido.erro.code);
   const dados = lido.dados;
@@ -427,7 +464,7 @@ async function guardarPedido({ companyId, userId, body, chave, hoje }) {
     await conferirProdutos(client, companyId, dados.itens);
     // B2: sem saldo livre, o pedido nao separa (409). Com "vender sem estoque"
     // ligado (allow_sale_without_stock), entra com o aviso.
-    avisos = await conferirSaldo(client, companyId, dados.itens);
+    avisos = await conferirSaldo(client, companyId, dados.itens, { comCondicional });
     if (avisos.length && !(await vendaSemEstoqueLiberada(client, companyId))) {
       throw erro(409, `Não dá para separar: ${avisos.map(fraseDaFalta).join(' ')}`, 'PEDIDO_SEM_SALDO', { faltas: avisos });
     }
@@ -511,6 +548,8 @@ module.exports = {
   lerChave,
   lerCorpo,
   guardarPedido,
+  conferirSaldo,
+  fraseDaFalta,
   lerPedidoCompleto,
   apresentarPedido,
 };

@@ -325,3 +325,42 @@ describe('insumo do Studio no pedido da loja online (trigger 459)', () => {
   });
 });
 
+
+describe('pecas com clientes no pedido (C17, R3)', () => {
+  // Produto e variante proprios (estoque 2): nenhum outro teste reserva deles.
+  let condId;
+  let prod;
+  let vari;
+  beforeEach(async () => {
+    condId = uuid(); prod = uuid(); vari = uuid();
+    await q(`INSERT INTO products (id, company_id, name, price, stock_qty) VALUES ($1, $2, 'Saia Iris', 80, 2)`, [prod, ID.loja]);
+    await q(`INSERT INTO product_variants (id, product_id, sku_suffix, stock_qty) VALUES ($1, $2, 'M', 2)`, [vari, prod]);
+    await q(`INSERT INTO condicionais (id, company_id, numero, customer_name, customer_phone, due_date, status)
+             VALUES ($1, $2, 990001, 'Cliente', '11988887777', CURRENT_DATE + 3, 'aberta')`, [condId, ID.loja]);
+    await q(`INSERT INTO condicional_itens (condicional_id, product_id, variant_id, product_name, unit_price, situacao)
+             VALUES ($1, $2, $3, 'Peca', 10, 'com_cliente')`, [condId, prod, vari]);
+  });
+  afterEach(async () => {
+    await q(`DELETE FROM digital_order_items WHERE product_id = $1`, [prod]);
+    await q(`DELETE FROM condicional_itens WHERE condicional_id = $1`, [condId]);
+    await q(`DELETE FROM condicionais WHERE id = $1`, [condId]);
+    await q(`DELETE FROM product_variants WHERE id = $1`, [vari]);
+    await q(`DELETE FROM products WHERE id = $1`, [prod]);
+  });
+
+  const pedir = (quantity) => ({ items: [{ product_id: prod, variant_id: vari, quantity, unit_price: 80 }] });
+
+  test('com a trava: 2 no estoque, 1 com cliente -> 2 pecas dao 409 com a causa; 1 passa', async () => {
+    const r = await guardar(pedir(2));
+    expect(r.status).toBe(409);
+    expect(r.body.code).toBe('PEDIDO_SEM_SALDO');
+    expect(r.body.error).toContain('só 1 livre (1 com clientes)');
+    expect((await guardar(pedir(1))).status).toBe(201);
+  });
+
+  test('sem a trava: resposta de hoje (a peca com cliente nao pesa)', async () => {
+    process.env.PEDIDO_LIBERADO = 'true';
+    usuario = { id: ID.dono, role: 'client' };
+    expect((await guardar(pedir(2))).status).toBe(201);
+  });
+});
