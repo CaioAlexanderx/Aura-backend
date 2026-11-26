@@ -147,6 +147,7 @@ router.post('/', async (req, res) => {
               language: value.message_template_language,
               status: value.event,                 // APPROVED | REJECTED | PAUSED...
               metaTemplateId: value.message_template_id != null ? String(value.message_template_id) : null,
+              reason: value.reason || null,
             }).catch((e) => console.error('[WA-WEBHOOK] template status error:', e.message));
           }
           continue;

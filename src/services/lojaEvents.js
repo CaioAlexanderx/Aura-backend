@@ -600,6 +600,32 @@ const EVENTS = Object.freeze({
     destinatarios: { chaves: ['financeiro'], incluir: (q) => [q.created_by, q.seller_id] },
     entity: (q) => ({ ref: `orcamento:${q.id}`, label: `Orçamento ${numDoOrcamento(q)}` }),
   },
+  // ── WhatsApp: texto do Editor (tela nova, 26/11/2026) ──────────────
+  // A lojista muda o texto de uma mensagem automática e a Meta aprova ou
+  // recusa horas depois. O resultado chega aqui (waAutomaticas/modelosStore),
+  // uma vez por versão (dedupe pela id da versão).
+  loja_wa_modelo_aprovado: {
+    severity: 'info',
+    defaultOn: true,
+    orderless: true,
+    label: 'Texto do WhatsApp aprovado',
+    hint: 'O WhatsApp aprovou o texto novo de uma mensagem automática.',
+    title: () => 'Seu texto já está valendo',
+    body:  (o) => `Seu texto de "${o.modelo_titulo || 'mensagem'}" já está valendo.`,
+    ctaLabel: 'Ver mensagens',
+    ctaRoute: () => '/whatsapp',
+  },
+  loja_wa_modelo_reprovado: {
+    severity: 'atencao',
+    defaultOn: true,
+    orderless: true,
+    label: 'Texto do WhatsApp não aprovado',
+    hint: 'O WhatsApp não aprovou o texto novo. O texto anterior continua valendo.',
+    title: () => 'O WhatsApp não aprovou seu texto',
+    body:  (o) => `Texto de "${o.modelo_titulo || 'mensagem'}": ${o.motivo || 'não passou na revisão'}. O texto atual continua valendo.`,
+    ctaLabel: 'Ajustar texto',
+    ctaRoute: () => '/whatsapp',
+  },
 });
 
 const TYPES = Object.freeze(Object.keys(EVENTS));
