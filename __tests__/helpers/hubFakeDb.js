@@ -157,6 +157,41 @@ function handler(world) {
       }
       return rows([]);
     }
+    // ── histórico da coexistência ──
+    if (s.includes('-- hubwa:hist-conv-upsert')) {
+      const [companyId, phone, inbound, last, humano] = params;
+      const maior = (a, b) => (!a ? b || null : !b ? a : (b > a ? b : a));
+      let c = world.convs.find((x) => x.external_id === phone && x.channel === 'whatsapp');
+      if (!c) {
+        c = {
+          id: nextId(world, 'conv'), company_id: companyId, channel: 'whatsapp', external_id: phone,
+          customer_name: null, status: 'ia', last_inbound_at: inbound || null, last_message_at: last || null,
+          aguardando_resposta_desde: null, ultima_mensagem_humana_em: humano || null,
+        };
+        world.convs.push(c);
+      } else {
+        c.last_inbound_at = maior(c.last_inbound_at, inbound);
+        c.last_message_at = maior(c.last_message_at, last);
+        c.ultima_mensagem_humana_em = maior(c.ultima_mensagem_humana_em, humano);
+      }
+      return rows([{ id: c.id }]);
+    }
+    if (s.includes('-- hubwa:hist-msg-insert')) {
+      const [companyId, convId, directions, authors, wamids, contents, metadatas, quandos] = params;
+      const out = [];
+      wamids.forEach((wamid, i) => {
+        if (world.messages.some((m) => m.company_id === companyId && m.external_message_id === wamid)) return;
+        const m = {
+          id: nextId(world, 'msg'), company_id: companyId, conversation_id: convId,
+          direction: directions[i], author: authors[i], external_message_id: wamid,
+          content: contents[i], metadata: JSON.parse(metadatas[i]), created_at: new Date(quandos[i]),
+        };
+        world.messages.push(m);
+        out.push({ id: m.id });
+      });
+      return rows(out);
+    }
+
     if (s.includes('-- hubwa:cancela-aurinha')) {
       for (const o of world.outbox) {
         if (o.hub_conversation_id === params[0] && o.status === 'pending' && o.source_type === 'aurinha') {
