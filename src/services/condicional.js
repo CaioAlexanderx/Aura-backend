@@ -686,6 +686,8 @@ function apresentarCondicional(c, itens, eventos, { hoje = hojeSP(), precos = nu
       decided_at: i.decided_at || null,
       decided_by: i.decided_by || null,
       sale_id: i.sale_id || null,
+      // C11: numero (sales.sale_number) da venda que cobrou a peca; null = nao cobrada.
+      venda_numero: i.sale_id && i.venda_numero != null ? Number(i.venda_numero) : null,
       // C9 (468): peca voltou_defeito ja resolvida (C16). null = para resolver.
       resolved_at: i.resolved_at || null,
       added_at: i.added_at,
@@ -743,9 +745,11 @@ async function lerCondicionalCompleta(q, companyId, condId, { hoje = hojeSP(), a
   if (!rows.length) return null;
   const [{ rows: itens }, { rows: eventos }] = await Promise.all([
     q.query(
-      `SELECT id, product_id, variant_id, product_name, variant_label, color_name, size_label,
-              unit_price, situacao, defect_note, decided_at, decided_by, sale_id, added_at, resolved_at
-         FROM condicional_itens WHERE condicional_id = $1 ORDER BY added_at, id`,
+      `SELECT ci.id, ci.product_id, ci.variant_id, ci.product_name, ci.variant_label, ci.color_name, ci.size_label,
+              ci.unit_price, ci.situacao, ci.defect_note, ci.decided_at, ci.decided_by, ci.sale_id, ci.added_at, ci.resolved_at,
+              s.sale_number AS venda_numero
+         FROM condicional_itens ci LEFT JOIN sales s ON s.id = ci.sale_id
+        WHERE ci.condicional_id = $1 ORDER BY ci.added_at, ci.id`,
       [condId]
     ),
     q.query(

@@ -71,6 +71,7 @@ const { vendaSemEstoqueLiberada } = require('../utils/vendaSemEstoque');
 const { ehUnidadeServico } = require('../services/notaDoItem');
 // 25/11/2026 (RA-10): Pix pelo Recebe na Aura da venda que ficou sem itens.
 const recebeVendaPix = require('../services/recebeVendaPix');
+const condicionalVenda = require('../services/condicionalVenda');
 
 // Quanto ja foi devolvido/trocado por item da venda (troca_returned_items).
 // Best-effort: em deploy parcial a tabela pode nao existir (42P01) -> tudo 0.
@@ -479,6 +480,8 @@ router.delete('/transactions/:tx_id/sale-items/:item_id', asyncHandler(async (re
     const itemTotal = parseFloat(item.total_price);
     const itemQty = parseFloat(item.quantity);
     const itemName = item.product_name || item.product_name_snapshot || 'Item';
+    // C11: condicional -> itens ANTES de devolver estoque (a ordem da venda; evita deadlock).
+    const condCtx = await condicionalVenda.travarAoCancelar(client, { companyId, saleId });
 
     // 2b. CREDIARIO: delega ao motor oficial de devolucao.
     //
@@ -635,12 +638,19 @@ router.delete('/transactions/:tx_id/sale-items/:item_id', asyncHandler(async (re
          WHERE id = $1`,
         [saleId]
       );
+      // C11: peça de condicional da venda cancelada volta a 'ficou' sem venda.
+      await condicionalVenda.voltarAoCancelar(client, { companyId, saleId, userId: req.user && req.user.id ? req.user.id : null, ctx: condCtx });
     } else {
       // Atualiza total da venda
       await client.query(
         'UPDATE sales SET total_amount = $1, updated_at = NOW() WHERE id = $2',
         [newTotal, saleId]
       );
+      // C11: a peca da condicional deste item volta a 'ficou' sem venda na hora.
+      await condicionalVenda.soltarPorItemRemovido(client, {
+        companyId, saleId, productId: item.product_id, variantId: item.variant_id,
+        userId: req.user && req.user.id ? req.user.id : null, ctx: condCtx,
+      });
     }
 
     // 6. Ajusta transaction de receita.

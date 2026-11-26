@@ -90,6 +90,48 @@ const PECAS_LATERAL = `
      WHERE i.condicional_id = c.id
   ) r`;
 
+// Ordem das linhas (R11), usada na janela que numera a pagina.
+const ORDEM_DA_LISTA = `${ATRASADA} DESC,
+              ${A_COBRAR} DESC,
+              (${ABERTA}) DESC,
+              CASE WHEN ${ABERTA} THEN c.due_date END ASC NULLS LAST,
+              COALESCE(c.closed_at, c.cancelled_at, c.created_at) DESC,
+              c.numero DESC`;
+
+// C18: so das linhas da PAGINA (a consulta de dentro ja cortou no LIMIT).
+// Primeiras pecas: nas abertas, com a cliente, depois as que ficaram, depois
+// as que voltaram; dentro do grupo, ordem de retirada. Nas fechadas, so a
+// ordem de retirada. Usa idx_condicional_itens_condicional.
+const PRIMEIRAS_PECAS_LATERAL = `
+  LEFT JOIN LATERAL (
+    SELECT COALESCE(json_agg(json_build_object('nome', t.nome, 'cor', t.cor, 'tamanho', t.tamanho)
+                             ORDER BY t.grupo, t.added_at, t.id), '[]'::json) AS primeiras_pecas
+      FROM (
+        SELECT i.id, i.added_at, i.product_name AS nome, i.color_name AS cor, i.size_label AS tamanho,
+               CASE WHEN pg.status <> 'aberta' THEN 0
+                    WHEN i.situacao = 'com_cliente' AND i.sale_id IS NULL THEN 0
+                    WHEN i.situacao = 'ficou' OR i.situacao = 'com_cliente' THEN 1
+                    ELSE 2 END AS grupo
+          FROM condicional_itens i
+         WHERE i.condicional_id = pg.id
+         ORDER BY grupo, i.added_at, i.id
+         LIMIT 2
+      ) t
+  ) pp ON TRUE`;
+
+// Vendas da condicional encerrada: valor somado (nao canceladas) e numero da
+// ultima. Usa o indice parcial idx_sales_condicional_id.
+const VENDAS_LATERAL = `
+  LEFT JOIN LATERAL (
+    SELECT COUNT(*)::int AS vendas,
+           COALESCE(SUM(s.total_amount), 0) AS venda_valor,
+           (array_agg(s.sale_number ORDER BY s.created_at DESC, s.id DESC))[1] AS venda_numero
+      FROM sales s
+     WHERE pg.status = 'encerrada'
+       AND s.condicional_id = pg.id
+       AND s.status != 'cancelled'
+  ) v ON TRUE`;
+
 /**
  * @param {{empresas: string[], filtro?: string, q?: string, limit: number, offset: number, hoje: string}} p
  * @returns {{sql: string, params: any[]}}
@@ -124,23 +166,26 @@ function montarConsultaDaLista({ empresas, filtro, q, limit, offset, hoje }) {
 
   params.push(limit, offset);
   const sql = `
-    SELECT c.id, c.company_id, COALESCE(co.trade_name, co.legal_name) AS company_name,
-           c.numero, c.status, c.customer_id, c.customer_name, c.customer_phone, c.seller_name,
-           c.due_date::text AS due_date, c.notes, c.created_at, c.closed_at, c.cancelled_at,
-           r.pecas, r.com_cliente, r.ficou, r.a_cobrar, r.voltou, r.voltou_defeito, r.fora,
-           r.valor_total, r.valor_com_cliente, r.valor_a_cobrar, r.primeira_peca,
-           COUNT(*) OVER() AS total_filtrado
-      FROM condicionais c
-      JOIN companies co ON co.id = c.company_id
-      ${PECAS_LATERAL}
-     WHERE ${filtros.join(' AND ')}
-     ORDER BY ${ATRASADA} DESC,
-              ${A_COBRAR} DESC,
-              (${ABERTA}) DESC,
-              CASE WHEN ${ABERTA} THEN c.due_date END ASC NULLS LAST,
-              COALESCE(c.closed_at, c.cancelled_at, c.created_at) DESC,
-              c.numero DESC
-     LIMIT $${params.length - 1} OFFSET $${params.length}`;
+    WITH pagina AS (
+      SELECT c.id, c.company_id, COALESCE(co.trade_name, co.legal_name) AS company_name,
+             c.numero, c.status, c.customer_id, c.customer_name, c.customer_phone, c.seller_name,
+             c.due_date::text AS due_date, c.notes, c.created_at, c.closed_at, c.cancelled_at,
+             r.pecas, r.com_cliente, r.ficou, r.a_cobrar, r.voltou, r.voltou_defeito, r.fora,
+             r.valor_total, r.valor_com_cliente, r.valor_a_cobrar, r.primeira_peca,
+             COUNT(*) OVER() AS total_filtrado,
+             ROW_NUMBER() OVER (ORDER BY ${ORDEM_DA_LISTA}) AS ord
+        FROM condicionais c
+        JOIN companies co ON co.id = c.company_id
+        ${PECAS_LATERAL}
+       WHERE ${filtros.join(' AND ')}
+       ORDER BY ${ORDEM_DA_LISTA}
+       LIMIT $${params.length - 1} OFFSET $${params.length}
+    )
+    SELECT pg.*, pp.primeiras_pecas, v.vendas, v.venda_valor, v.venda_numero
+      FROM pagina pg
+      ${PRIMEIRAS_PECAS_LATERAL}
+      ${VENDAS_LATERAL}
+     ORDER BY pg.ord`;
   return { sql, params };
 }
 
@@ -163,6 +208,11 @@ function montarConsultaDosNumeros({ empresas, hoje }) {
            COALESCE(SUM(r.valor_com_cliente) FILTER (WHERE ${ABERTA}), 0)         AS valor,
            COALESCE(SUM(r.com_cliente) FILTER (WHERE ${ABERTA}), 0)::int          AS pecas,
            COALESCE(SUM(r.valor_a_cobrar) FILTER (WHERE ${ABERTA}), 0)            AS valor_a_cobrar,
+           COALESCE(SUM(r.a_cobrar) FILTER (WHERE ${ABERTA}), 0)::int             AS pecas_a_cobrar,
+           COALESCE(SUM(r.valor_com_cliente) FILTER (WHERE ${VENCE_HOJE}), 0)     AS vence_hoje_valor,
+           COALESCE(SUM(r.com_cliente) FILTER (WHERE ${VENCE_HOJE}), 0)::int      AS vence_hoje_pecas,
+           COALESCE(SUM(r.valor_com_cliente) FILTER (WHERE ${ATRASADA}), 0)       AS atrasadas_valor,
+           COALESCE(SUM(r.com_cliente) FILTER (WHERE ${ATRASADA}), 0)::int        AS atrasadas_pecas,
            COUNT(DISTINCT COALESCE(c.customer_id::text, regexp_replace(c.customer_phone, '[^0-9]', '', 'g')))
              FILTER (WHERE ${ABERTA} AND r.com_cliente > 0)::int                  AS clientes
       FROM condicionais c
@@ -200,12 +250,39 @@ function apresentarNumeros(r) {
   };
 }
 
+/**
+ * C18: totais do topo, sobre TODAS as condicionais abertas (independem da
+ * pagina e do filtro). vence_hoje e atrasadas somam as pecas ainda com a
+ * cliente das condicionais naquela situacao; a_cobrar soma as pecas que
+ * "ficou" sem venda de toda condicional aberta.
+ */
+function apresentarTotais(r) {
+  const n = r || {};
+  const par = (v, p) => ({ valor: round2(Number(n[v]) || 0), pecas: Number(n[p]) || 0 });
+  return {
+    vence_hoje: par('vence_hoje_valor', 'vence_hoje_pecas'),
+    atrasadas: par('atrasadas_valor', 'atrasadas_pecas'),
+    a_cobrar: par('valor_a_cobrar', 'pecas_a_cobrar'),
+  };
+}
+
+function lerPrimeiras(v) {
+  let arr = v;
+  if (typeof arr === 'string') { try { arr = JSON.parse(arr); } catch (_) { arr = []; } }
+  return Array.isArray(arr)
+    ? arr.map((p) => ({ nome: p.nome, cor: p.cor || null, tamanho: p.tamanho || null }))
+    : [];
+}
+
 /** Linha do banco -> item da lista. */
 function apresentarLinha(r, hoje) {
   const sit = derivarSituacao({
     status: r.status, due_date: r.due_date, com_cliente: r.com_cliente,
     decididas: (Number(r.pecas) || 0) - (Number(r.com_cliente) || 0),
   }, hoje);
+  const pecas = Number(r.pecas) || 0;
+  const primeiras = lerPrimeiras(r.primeiras_pecas);
+  const temVenda = r.status === 'encerrada' && (Number(r.vendas) || 0) > 0;
   return {
     id: r.id,
     company_id: r.company_id,
@@ -229,6 +306,19 @@ function apresentarLinha(r, hoje) {
     valor_com_cliente: round2(Number(r.valor_com_cliente) || 0),
     valor_a_cobrar: round2(Number(r.valor_a_cobrar) || 0),
     primeira_peca: r.primeira_peca || null,
+    resumo: {
+      com_cliente: Number(r.com_cliente) || 0,
+      voltaram: (Number(r.voltou) || 0) + (Number(r.voltou_defeito) || 0),
+      ficaram: Number(r.ficou) || 0,
+      a_cobrar: Number(r.a_cobrar) || 0,
+      valor_com_cliente: round2(Number(r.valor_com_cliente) || 0),
+      valor_a_cobrar: round2(Number(r.valor_a_cobrar) || 0),
+    },
+    primeiras_pecas: primeiras,
+    outras_pecas: Math.max(0, pecas - primeiras.length),
+    venda: temVenda
+      ? { numero: r.venda_numero == null ? null : Number(r.venda_numero), valor: round2(Number(r.venda_valor) || 0) }
+      : null,
     created_at: r.created_at,
     closed_at: r.closed_at || null,
     cancelled_at: r.cancelled_at || null,
@@ -246,7 +336,7 @@ async function listarCondicionais(q, { empresas, filtro, busca, page = 1, limit 
   const filtroLido = lerFiltro(filtro);
   if (!empresas || !empresas.length) {
     return {
-      condicionais: [], filtro: filtroLido, hoje, ...apresentarNumeros(null),
+      condicionais: [], filtro: filtroLido, hoje, ...apresentarNumeros(null), totais: apresentarTotais(null),
       pagination: { page: pagina, limit: porPagina, total: 0, pages: 0 },
       ...(porEmpresa ? { por_empresa: [] } : {}),
     };
@@ -264,6 +354,7 @@ async function listarCondicionais(q, { empresas, filtro, busca, page = 1, limit 
     filtro: filtroLido,
     hoje,
     ...apresentarNumeros(totalGeral),
+    totais: apresentarTotais(totalGeral),
     pagination: { page: pagina, limit: porPagina, total, pages: Math.ceil(total / porPagina) },
   };
   if (porEmpresa) {
@@ -281,6 +372,7 @@ module.exports = {
   montarConsultaDosNumeros,
   apresentarLinha,
   apresentarNumeros,
+  apresentarTotais,
   textoDoTotalizador,
   listarCondicionais,
 };
