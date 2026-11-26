@@ -365,7 +365,19 @@ async function listEnabledCompanies() {
          SELECT r.company_id FROM credit_collection_rules r
           WHERE r.enabled = true AND r.whatsapp_auto = true
             AND NOT EXISTS (SELECT 1 FROM wa_automaticas w
-                             WHERE w.company_id = r.company_id AND w.automatica = 'crediario_cobrar' AND w.ligada = true)`
+                             WHERE w.company_id = r.company_id AND w.automatica = 'crediario_cobrar' AND w.ligada = true
+                               -- a nova só substitui a antiga se os templates dos pontos ligados estão APROVADOS
+                               AND (COALESCE(w.config->'pontos'->>'antes3', 'false') <> 'true'
+                                    OR EXISTS (SELECT 1 FROM wa_templates t WHERE t.company_id = w.company_id
+                                                AND t.language = 'pt_BR' AND t.status = 'APPROVED' AND t.name = 'aura_cred_antes_pix'))
+                               AND (COALESCE(w.config->'pontos'->>'dia', 'false') <> 'true'
+                                    OR EXISTS (SELECT 1 FROM wa_templates t WHERE t.company_id = w.company_id
+                                                AND t.language = 'pt_BR' AND t.status = 'APPROVED' AND t.name = 'aura_cred_dia_pix'))
+                               AND ((COALESCE(w.config->'pontos'->>'depois1', 'false') <> 'true'
+                                     AND COALESCE(w.config->'pontos'->>'depois7', 'false') <> 'true'
+                                     AND COALESCE(w.config->'pontos'->>'depois15', 'false') <> 'true')
+                                    OR EXISTS (SELECT 1 FROM wa_templates t WHERE t.company_id = w.company_id
+                                                AND t.language = 'pt_BR' AND t.status = 'APPROVED' AND t.name = 'aura_cred_atraso_pix')))`
       );
       return rows.map((r) => r.company_id);
     } catch (e) {

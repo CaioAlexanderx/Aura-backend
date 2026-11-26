@@ -45,9 +45,14 @@ function inst(extra = {}) {
   };
 }
 
-function simular({ parcela = inst(), composto = { pix_copia_cola: BRCODE, total_due: 120, remaining: 120 }, aviso = null } = {}) {
+function simular({ parcela = inst(), composto = { pix_copia_cola: BRCODE, total_due: 120, remaining: 120 }, aviso = null, devedor = true, repetido = false, erroSaldo = false } = {}) {
   db.query.mockReset();
-  db.query.mockImplementation(async (sql) => (/cred:quero-pix-aviso/.test(sql) ? { rows: aviso ? [aviso] : [] } : { rows: [] }));
+  db.query.mockImplementation(async (sql) => {
+    if (/cred:quero-pix-aviso/.test(sql)) return { rows: aviso ? [aviso] : [] };
+    if (/cred:quero-pix-saldo/.test(sql)) { if (erroSaldo) throw new Error('banco'); return { rows: devedor ? [{ '?column?': 1 }] : [] }; }
+    if (/cred:quero-pix-repetido/.test(sql)) return { rows: repetido ? [{ '?column?': 1 }] : [] };
+    return { rows: [] };
+  });
   notice.loadInstallment.mockReset().mockResolvedValue(parcela);
   notice.composeNotice.mockReset().mockResolvedValue(composto);
   waOutbox.enqueue.mockReset().mockResolvedValue({ queued: true, id: 'o1' });
@@ -86,6 +91,32 @@ describe('toque em "Quero o Pix"', () => {
     expect(quero.parcelaDoAviso({ source_type: 'crediario', source_id: PARCELA, dedupe_key: 'x' })).toBe(PARCELA);
     expect(quero.parcelaDoAviso({ dedupe_key: `cred-${PARCELA}-parcela_lembrete` })).toBe(PARCELA);
     expect(quero.parcelaDoAviso(null)).toBeNull();
+  });
+
+  test('atraso com encargos: o valor é o total e a mensagem diz "com os encargos do atraso"', async () => {
+    simular({ composto: { pix_copia_cola: BRCODE, total_due: 131.4, remaining: 120 } });
+    await quero.tratarToque({ companyId: COMPANY, msg: toque(), agora: AGORA });
+    expect(textos()[0]).toMatch(/R\$ 131,40 \(com os encargos do atraso\)/);
+    simular();
+    await quero.tratarToque({ companyId: COMPANY, msg: toque(), agora: AGORA });
+    expect(textos()[0]).not.toMatch(/encargos/);
+  });
+
+  test('9º dígito: o telefone do cliente sem o 9 ainda é o dono do número', async () => {
+    simular({ parcela: inst({ phone: '1199990001' }) });
+    expect(quero.mesmoTelefone('1199990001', '5511999990001')).toBe(true);
+    expect((await quero.tratarToque({ companyId: COMPANY, msg: toque(), agora: AGORA })).resultado).toBe('ENVIADO');
+  });
+
+  test('cadastro com outro número, mas o aviso foi para o número que tocou: vale', async () => {
+    simular({ parcela: inst({ phone: '11888880000' }), aviso: { to_phone: '5511999990001', dedupe_key: `credaviso-${PARCELA}-dia`, created_at: new Date(AGORA - 3600000) } });
+    expect((await quero.tratarToque({ companyId: COMPANY, msg: toque(), agora: AGORA })).resultado).toBe('ENVIADO');
+  });
+
+  test('toque repetido da mesma parcela em 10 minutos: não manda o código de novo', async () => {
+    simular({ repetido: true });
+    expect(await quero.tratarToque({ companyId: COMPANY, msg: toque(), agora: AGORA })).toEqual({ handled: true, resultado: 'REPETIDO' });
+    expect(waOutbox.enqueue).not.toHaveBeenCalled();
   });
 
   test('botão interativo (interactive.button_reply) também vale', async () => {
@@ -129,6 +160,32 @@ describe('casos de borda', () => {
     expect(r.resultado).toBe('FORA_DO_PRAZO');
     expect(notice.composeNotice).not.toHaveBeenCalled();
     expect(textos()[0]).toMatch(/aviso já é antigo/);
+  });
+
+  test('pix_link antigo (endereço falso) nunca vira Pix: sem EMV, é SEM_PIX', async () => {
+    simular({ parcela: inst({ pix_link: 'https://pagar.getaura.com.br/parcela/abc' }), composto: { pix_copia_cola: null, total_due: 120, remaining: 120 } });
+    expect((await quero.tratarToque({ companyId: COMPANY, msg: toque(), agora: AGORA })).resultado).toBe('SEM_PIX');
+    expect(textos().join(' ')).not.toMatch(/pagar\.getaura/);
+  });
+
+  test('quitada na loja (livro-razão sem saldo devedor): responde "já paga" e NÃO manda o código', async () => {
+    simular({ devedor: false });
+    expect((await quero.tratarToque({ companyId: COMPANY, msg: toque(), agora: AGORA })).resultado).toBe('JA_PAGA');
+    expect(notice.composeNotice).not.toHaveBeenCalled();
+    expect(textos().join(' ')).not.toContain(BRCODE);
+  });
+
+  test('não deu para ler o livro-razão: na dúvida, sem código', async () => {
+    simular({ erroSaldo: true });
+    expect((await quero.tratarToque({ companyId: COMPANY, msg: toque(), agora: AGORA })).resultado).toBe('SALDO_NAO_CONFERIDO');
+    expect(notice.composeNotice).not.toHaveBeenCalled();
+  });
+
+  test('parcela renegociada (cancelled) tem texto próprio', async () => {
+    simular({ parcela: inst({ status: 'cancelled' }) });
+    expect((await quero.tratarToque({ companyId: COMPANY, msg: toque(), agora: AGORA })).resultado).toBe('CANCELADA');
+    expect(textos()[0]).toMatch(/renegociada/);
+    expect(textos()[0]).not.toMatch(/já consta como paga/);
   });
 
   test('parcela já paga: avisa e não manda Pix', async () => {

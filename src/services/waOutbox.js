@@ -169,6 +169,7 @@ async function countToday(companyId, { phone = null, sourceType = null } = {}) {
           AND ($2::text IS NULL OR to_phone = $2)
           AND ($3::text IS NULL OR source_type = $3)
           AND status NOT IN ('skipped','failed')
+          AND ($3::text IS NOT NULL OR COALESCE(source_type, '') NOT LIKE 'pix\\_sessao%')
           AND (created_at AT TIME ZONE 'America/Sao_Paulo')::date
             = (NOW() AT TIME ZONE 'America/Sao_Paulo')::date`,
       [companyId, phone, sourceType]
@@ -558,11 +559,16 @@ async function enqueue({
       await avisarSuporteUsoJusto(companyId, usadas, teto);
     }
   }
-  if (status === 'pending' && !isTeste) {
+  // Resposta de sessão ao toque no botão "Quero o Pix" (pix_sessao*): é conversa
+  // aberta pelo cliente, não disparo. Não esbarra nos tetos por contato e do dia
+  // (senão o código do Pix cairia em LIMITE_POR_CONTATO depois do aviso do dia)
+  // e também não conta neles (countToday ignora pix_sessao*).
+  const respostaDePix = kind === 'text' && String(sourceType || '').startsWith('pix_sessao');
+  if (status === 'pending' && !isTeste && !respostaDePix) {
     const n = await countToday(companyId, {});
     if (n >= dailyCap()) { status = 'skipped'; skipReason = 'LIMITE_DIARIO'; }
   }
-  if (status === 'pending' && !isTeste) {
+  if (status === 'pending' && !isTeste && !respostaDePix) {
     const n = await countToday(companyId, { phone });
     if (n >= perPhoneDailyCap()) { status = 'skipped'; skipReason = 'LIMITE_POR_CONTATO'; }
   }
@@ -967,12 +973,14 @@ async function processBatch(limit = 20) {
       WHERE id IN (
         SELECT id FROM wa_outbox
          WHERE status = 'pending' AND next_attempt_at <= NOW()
-         ORDER BY created_at ASC LIMIT $1
+         ORDER BY (CASE WHEN source_type LIKE 'pix\\_sessao%' THEN 0 ELSE 1 END), created_at ASC LIMIT $1
          FOR UPDATE SKIP LOCKED)
       RETURNING *`,
     [limit]
   );
-  const rows = (pegas || []).slice().sort((a, b) => new Date(a.created_at) - new Date(b.created_at));
+  // Respostas de sessão a toque (pix_sessao*) saem primeiro: o cliente espera "na hora".
+  const prioridade = (r) => (String(r.source_type || '').startsWith('pix_sessao') ? 0 : 1);
+  const rows = (pegas || []).slice().sort((a, b) => prioridade(a) - prioridade(b) || new Date(a.created_at) - new Date(b.created_at));
   const out = { picked: rows.length, sent: 0, skipped: 0, retried: 0, failed: 0 };
 
   for (const row of rows) {
