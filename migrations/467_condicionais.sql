@@ -52,8 +52,8 @@
 --   - toda FK que aponta para sales ou customers nasce NOT VALID (nao varre a
 --     tabela) e e validada num comando separado (VALIDATE nao bloqueia
 --     escrita; as colunas novas sao todas NULL, entao e imediato);
---   - o indice em sales(condicional_id) e CREATE INDEX CONCURRENTLY, FORA de
---     bloco DO e de transacao (ver o fim do arquivo).
+--   - o indice em sales(condicional_id) e parcial e comum (o runner aplica o
+--     arquivo numa transacao; CONCURRENTLY nao roda ali). Ver o fim do arquivo.
 --
 -- Aditiva e idempotente. Nenhuma linha existente muda.
 -- Caminho de volta (depois de reverter o PR do backend):
@@ -244,17 +244,15 @@ COMMENT ON COLUMN sales.condicional_id IS
   'Condicional (467) cujas pecas esta venda cobrou. NULL = venda comum.';
 
 -- ------------------------------------------------------------
--- FORA DE TRANSACAO. CREATE INDEX CONCURRENTLY nao roda dentro de BEGIN/
--- COMMIT nem de bloco DO. O CI aplica com `psql -f` (cada comando em
--- autocommit), entao passa. Aplicando a mao (SQL Editor, apply_migration ou
--- psql -1, que embrulham o arquivo numa transacao): rode tudo ACIMA desta
--- linha primeiro e depois ESTE comando sozinho. Se um CONCURRENTLY
--- interrompido deixar o indice INVALID, o IF NOT EXISTS o pularia: apague
--- com DROP INDEX CONCURRENTLY IF EXISTS idx_sales_condicional_id e rode de novo.
+-- Indice de sales(condicional_id). O runner de deploy (scripts/migrate.js)
+-- aplica cada arquivo numa transacao, entao CREATE INDEX CONCURRENTLY nao
+-- roda aqui (26/11: o deploy parou com "cannot run inside a transaction
+-- block"). Indice comum e parcial: a coluna acabou de nascer toda NULL, o
+-- indice sai vazio e a varredura de sales (23,6 mil linhas, 30 MB em
+-- 26/11) leva menos de um segundo. Continua sob o lock_timeout de 5 s.
 -- ------------------------------------------------------------
--- O CONCURRENTLY nao bloqueia escrita em sales; ele so espera as transacoes
--- abertas terminarem. Sem lock_timeout aqui, para nao falhar a toa por isso.
-RESET lock_timeout;
-CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_sales_condicional_id
+CREATE INDEX IF NOT EXISTS idx_sales_condicional_id
   ON sales (condicional_id)
   WHERE condicional_id IS NOT NULL;
+
+RESET lock_timeout;
