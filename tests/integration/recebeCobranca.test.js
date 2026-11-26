@@ -135,16 +135,32 @@ describe('taxa da plataforma (regra única)', () => {
     ['PIX', 10.55, 0.21],
     ['CREDIT_CARD', 200, 1.53],
     ['CREDIT_CARD', 150, 1.03],
-    ['CREDIT_CARD', 49.01, 0.01],
-    ['CREDIT_CARD', 49, 0],
-    ['CREDIT_CARD', 30, 0],
+    ['CREDIT_CARD', 30, 0.01],
   ])('%s de R$ %s → R$ %s para a Aura', (bt, v, fee) => {
     expect(svc.auraFeeFor(bt, v)).toBe(fee);
   });
 
-  test('menor valor com taxa: cartão R$ 49,01; Pix R$ 0,01', () => {
-    expect(svc.minValueFor('CREDIT_CARD')).toBe(49.01);
-    expect(svc.minValueFor('PIX')).toBe(0.01);
+  // Bordas da decisão de 25/11 (opção B): piso de R$ 0,01 nos dois meios.
+  test.each([
+    // valor   cartão  Pix
+    [1.00, 0.01, 0.02],
+    [49.00, 0.01, 0.98],
+    [49.01, 0.01, 0.98],
+    [49.02, 0.01, 0.98],
+    [100.00, 0.52, 2.00],
+  ])('borda R$ %s → cartão R$ %s, Pix R$ %s', (v, cartao, pix) => {
+    expect(svc.auraFeeFor('CREDIT_CARD', v)).toBe(cartao);
+    expect(svc.auraFeeFor('PIX', v)).toBe(pix);
+  });
+
+  test.each([0.01, 0.1, 0.24])('Pix ínfimo de R$ %s: piso de R$ 0,01 (nunca 0)', (v) => {
+    expect(svc.auraFeeFor('PIX', v)).toBe(0.01);
+  });
+
+  test('piso numa constante; forma desconhecida não tem taxa; minValueFor saiu', () => {
+    expect(svc.AURA_FEE_FLOOR).toBe(0.01);
+    expect(svc.auraFeeFor('BOLETO', 100)).toBe(0);
+    expect(svc.minValueFor).toBeUndefined();
   });
 
   test('a regra está numa constante única e congelada', () => {
@@ -207,10 +223,39 @@ describe('flag ligada: serviço', () => {
     expect(calls.some((c) => /pixQrCode/.test(c.path))).toBe(false);
   });
 
-  test('cartão abaixo do mínimo: recusa gentil, sem Asaas (nunca cobra sem split)', async () => {
-    await expect(svc.createCharge(companyA, input({ billing_type: 'CREDIT_CARD', value: 30 })))
-      .rejects.toMatchObject({ status: 422, code: 'RECEBE_VALOR_ABAIXO_DO_MINIMO', message: expect.stringContaining('R$ 49,01') });
+  test.each([5, 30, 49, 49.01])('cartão de R$ %s: cobra com split no piso de R$ 0,01', async (v) => {
+    const out = await svc.createCharge(companyA, input({ billing_type: 'CREDIT_CARD', value: v }));
+    expect(out.aura_fee).toBe(0.01);
+    expect(postPayment().body).toMatchObject({ billingType: 'CREDIT_CARD', value: v });
+    expect(postPayment().body.split).toEqual([expect.objectContaining({ walletId: WALLET, fixedValue: 0.01 })]);
+  });
+
+  test('Pix de R$ 5,00 (o mínimo da Asaas): split de R$ 0,10', async () => {
+    const out = await svc.createCharge(companyA, input({ value: 5 }));
+    expect(out.aura_fee).toBe(0.1);
+    expect(postPayment().body.split[0].fixedValue).toBe(0.1);
+  });
+
+  // Mínimo da Asaas (R$ 5,00 por cobrança, central de ajuda): recusa antes de chamar a Asaas.
+  test.each([
+    ['PIX', 4.99], ['PIX', 1], ['PIX', 0.2], ['CREDIT_CARD', 4.99], ['CREDIT_CARD', 1],
+  ])('%s de R$ %s: 422 abaixo do mínimo da Asaas, sem Asaas', async (bt, v) => {
+    await expect(svc.createCharge(companyA, input({ billing_type: bt, value: v })))
+      .rejects.toMatchObject({ status: 422, code: 'RECEBE_VALOR_ABAIXO_DO_MINIMO', message: expect.stringContaining('R$ 5,00') });
     expect(global.fetch).not.toHaveBeenCalled();
+  });
+
+  test('mínimo numa constante; líquido estimado pela tabela da Asaas', () => {
+    expect(svc.ASAAS_MIN_CHARGE).toBe(5);
+    expect(svc.estimatedNetValue('PIX', 100)).toBe(98.01);
+    expect(svc.estimatedNetValue('CREDIT_CARD', 100)).toBe(96.52);
+    expect(svc.estimatedNetValue('PIX', 5)).toBe(3.01);
+  });
+
+  test('split ≥ líquido estimado: 422 RECEBE_SPLIT_ACIMA_DO_LIQUIDO', () => {
+    expect(svc.checkAsaasLimits('PIX', 5, 3.01)).toMatchObject({ status: 422, code: 'RECEBE_SPLIT_ACIMA_DO_LIQUIDO' });
+    expect(svc.checkAsaasLimits('PIX', 5, 3.00)).toBeNull();
+    expect(svc.checkAsaasLimits('CREDIT_CARD', 5, 0.01)).toBeNull();
   });
 
   test('todas as chamadas usam a chave DA SUBCONTA; a chave e o CPF nunca vão ao log', async () => {

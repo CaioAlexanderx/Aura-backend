@@ -14,6 +14,10 @@
 // configurado (ou com menos de 32 caracteres, o mínimo da Asaas para o
 // authToken), a rota RECUSA tudo: nunca aceita aviso sem prova. A comparação
 // é por SHA-256 + timingSafeEqual (não vaza o tamanho). O token nunca é logado.
+// Desde 25/11 o token é POR SUBCONTA: HMAC-SHA256(segredo, company_id)
+// (recebeAviso.tokenDaSubconta). A conta do corpo (account.id) diz qual token
+// esperar; conta desconhecida → 401. Token vazado de uma subconta não forja
+// aviso de outra. O segredo mestre puro não vale como aviso.
 //
 // IDEMPOTÊNCIA. A Asaas entrega "at least once" e o id do evento (evt_...) se
 // repete no reenvio (docs.asaas.com, "Como implementar idempotência em
@@ -34,8 +38,8 @@
 //     PAYMENT_REFUNDED, ...). O efeito no pedido/venda vem no RA-09/RA-10,
 //     pela external_reference gravada.
 //   qualquer outro    registrado como 'ignored'.
-// Subconta desconhecida (account.id sem linha em company_baas_accounts):
-// registra sem empresa e não processa.
+// Subconta desconhecida (account.id sem linha em company_baas_accounts): sem
+// como conferir o token dela, a rota recusa (401) antes de registrar.
 //
 // FLAG RECEBE_NA_AURA_ENABLED desligada: com o token válido, registra
 // ('flag_off') e responde 200 sem processar, para a Asaas não reenviar.
@@ -52,68 +56,38 @@ const db = require('../config/database');
 const companyBaas = require('./companyBaasService');
 const { str } = require('./baasShared');
 
-const TOKEN_ENV = 'RECEBE_ASAAS_WEBHOOK_TOKEN';
-const SANDBOX_TOKEN_ENV = 'RECEBE_ASAAS_SANDBOX_WEBHOOK_TOKEN';
-// Mínimo da Asaas para o authToken do webhook (32 a 255 caracteres).
-const MIN_TOKEN_LENGTH = 32;
+// Segredo, eventos e nomes de env moram em recebeAviso.js (o mesmo módulo
+// que monta o aviso cadastrado em cada subconta): a rota confere exatamente
+// o token que a subconta recebeu.
+const {
+  TOKEN_ENV, SANDBOX_TOKEN_ENV, MIN_TOKEN_LENGTH, ACCOUNT_STATUS_EVENTS, PAYMENT_EVENTS_OF_INTEREST,
+  secretEnvName, tokenDaSubconta,
+} = require('./recebeAviso');
 // 'processing' parado há mais que isso = a entrega anterior morreu no meio.
 const STALE_PROCESSING_MINUTES = 5;
-
-// Os 18 eventos de situação da conta (docs.asaas.com, "Eventos para
-// verificar situação da conta"). Qualquer ACCOUNT_STATUS_* novo também é
-// tratado como evento de conta; a lista serve de referência e de teste.
-const ACCOUNT_STATUS_EVENTS = [
-  'ACCOUNT_STATUS_BANK_ACCOUNT_INFO_APPROVED',
-  'ACCOUNT_STATUS_BANK_ACCOUNT_INFO_AWAITING_APPROVAL',
-  'ACCOUNT_STATUS_BANK_ACCOUNT_INFO_PENDING',
-  'ACCOUNT_STATUS_BANK_ACCOUNT_INFO_REJECTED',
-  'ACCOUNT_STATUS_COMMERCIAL_INFO_APPROVED',
-  'ACCOUNT_STATUS_COMMERCIAL_INFO_AWAITING_APPROVAL',
-  'ACCOUNT_STATUS_COMMERCIAL_INFO_PENDING',
-  'ACCOUNT_STATUS_COMMERCIAL_INFO_REJECTED',
-  'ACCOUNT_STATUS_COMMERCIAL_INFO_EXPIRING_SOON',
-  'ACCOUNT_STATUS_COMMERCIAL_INFO_EXPIRED',
-  'ACCOUNT_STATUS_DOCUMENT_APPROVED',
-  'ACCOUNT_STATUS_DOCUMENT_AWAITING_APPROVAL',
-  'ACCOUNT_STATUS_DOCUMENT_PENDING',
-  'ACCOUNT_STATUS_DOCUMENT_REJECTED',
-  'ACCOUNT_STATUS_GENERAL_APPROVAL_APPROVED',
-  'ACCOUNT_STATUS_GENERAL_APPROVAL_AWAITING_APPROVAL',
-  'ACCOUNT_STATUS_GENERAL_APPROVAL_PENDING',
-  'ACCOUNT_STATUS_GENERAL_APPROVAL_REJECTED',
-];
-
-// Pagamentos que o RA-09/RA-10 vão usar (só registrados por enquanto).
-const PAYMENT_EVENTS_OF_INTEREST = [
-  'PAYMENT_CREATED', 'PAYMENT_CONFIRMED', 'PAYMENT_RECEIVED', 'PAYMENT_OVERDUE',
-  'PAYMENT_DELETED', 'PAYMENT_RESTORED', 'PAYMENT_REFUNDED', 'PAYMENT_PARTIALLY_REFUNDED',
-  'PAYMENT_REFUND_IN_PROGRESS', 'PAYMENT_CHARGEBACK_REQUESTED', 'PAYMENT_CHARGEBACK_DISPUTE',
-  'PAYMENT_AWAITING_CHARGEBACK_REVERSAL', 'PAYMENT_SPLIT_DONE', 'PAYMENT_SPLIT_CANCELLED',
-  'PAYMENT_SPLIT_DIVERGENCE_BLOCK', 'PAYMENT_SPLIT_DIVERGENCE_BLOCK_FINISHED',
-];
-
-function isSandbox() {
-  return str(process.env.ASAAS_ENV).toLowerCase() === 'sandbox';
-}
-
-// Nome da variável que vale no ambiente atual (lida a cada chamada).
-function secretEnvName() {
-  return isSandbox() ? SANDBOX_TOKEN_ENV : TOKEN_ENV;
-}
 
 function sha256(v) {
   return nodeCrypto.createHash('sha256').update(String(v)).digest();
 }
 
-// { ok, reason }. reason só vai para o log, nunca para a resposta.
-function checkToken(received) {
+// { ok, reason, companyId? }. reason só vai para o log, nunca para a resposta.
+// Token POR SUBCONTA (25/11): a conta vem do corpo (account.id), a empresa
+// sai de company_baas_accounts e o token esperado é
+// tokenDaSubconta(segredo do ambiente, company_id). Conta desconhecida não
+// tem como ser conferida → recusa. O segredo mestre puro não vale.
+async function checkToken(received, body) {
   const secret = str(process.env[secretEnvName()]);
   if (!secret) return { ok: false, reason: 'sem_segredo_configurado' };
   if (secret.length < MIN_TOKEN_LENGTH) return { ok: false, reason: 'segredo_curto_demais' };
   const got = str(Array.isArray(received) ? received[0] : received);
   if (!got) return { ok: false, reason: 'sem_token' };
-  const ok = nodeCrypto.timingSafeEqual(sha256(got), sha256(secret));
-  return ok ? { ok: true } : { ok: false, reason: 'token_invalido' };
+  const accountId = extract(body).accountId;
+  if (!accountId) return { ok: false, reason: 'sem_conta_no_aviso' };
+  const companyId = await findCompanyByAccountId(accountId);
+  if (!companyId) return { ok: false, reason: 'subconta_desconhecida' };
+  const expected = tokenDaSubconta(secret, companyId);
+  const ok = nodeCrypto.timingSafeEqual(sha256(got), sha256(expected));
+  return ok ? { ok: true, companyId } : { ok: false, reason: 'token_invalido' };
 }
 
 // dateCreated da Asaas vem como "2024-06-12 16:45:03", no horário de
