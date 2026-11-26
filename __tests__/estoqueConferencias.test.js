@@ -110,6 +110,17 @@ describe('regra do ajuste', () => {
     expect(svc.calcularDesfazer({ estoqueAtual: 1, diferencaAplicada: 3 })).toEqual({ novo: 0, efetiva: -1 });
   });
 
+  test('esperado: sistema menos com clientes, piso 0 so quando ha peca fora (C14)', () => {
+    expect(svc.esperadoDe(10, 2)).toBe(8);
+    expect(svc.esperadoDe(1, 3)).toBe(0);
+    expect(svc.esperadoDe(10, 0)).toBe(10);
+    expect(svc.esperadoDe(-2, 0)).toBe(-2); // sem peca fora, o numero e o de sempre
+    // contou so o que esta na loja: nao ha falta falsa, e o estoque gravado e fisico + fora
+    const esperado = svc.esperadoDe(10, 2);
+    expect(svc.calcularAjuste({ contado: 8, estoqueNoBipe: esperado, estoqueAtual: 10 })).toEqual({ diferenca: 0, novo: 10, aplicada: 0 });
+    expect(svc.calcularAjuste({ contado: 7, estoqueNoBipe: esperado, estoqueAtual: 10 })).toEqual({ diferenca: -1, novo: 9, aplicada: -1 });
+  });
+
   test('grupo da diferenca', () => {
     expect([-1, 0, 2].map(svc.grupoDaDiferenca)).toEqual(['faltam', 'batem', 'sobram']);
   });
@@ -226,6 +237,61 @@ describe('rotas /estoque/conferencias', () => {
     const conflito = ins.sql.split('DO UPDATE SET')[1];
     expect(conflito).not.toMatch(/estoque_no_bipe|custo_no_bipe/);
     expect(chamadas[chamadas.length - 1].sql).toBe('COMMIT');
+  });
+
+  describe('com clientes (C14)', () => {
+    const ENV = process.env.CONDICIONAL_LIBERADA;
+    afterEach(() => { if (ENV === undefined) delete process.env.CONDICIONAL_LIBERADA; else process.env.CONDICIONAL_LIBERADA = ENV; });
+
+    const respostaDoBipe = (sql) => {
+      if (/FROM stock_counts c/.test(sql)) return { rows: [conferencia({ as_cegas: false })] };
+      if (/FROM products p\s+JOIN companies c/.test(sql)) {
+        return { rows: [{ id: P1, company_id: LOJA, name: 'Blusa', is_active: true, is_group_shared: false, unit: 'un', stock_qty: '9', custo: '12.5', tem_grade: false, mesmo_grupo: true }] };
+      }
+      if (/FROM condicional_itens i/.test(sql)) return { rows: [{ product_id: P1, variant_id: null, qtd: '2' }] };
+      if (/INSERT INTO stock_count_items/.test(sql)) return { rows: [{ id: 'item-1', criado: true }] };
+      if (/FROM stock_count_items i/.test(sql)) {
+        return { rows: [{ id: 'item-1', product_id: P1, variant_id: null, contado: '7', estoque_no_bipe: '7', estoque_atual: '9', nome: 'Blusa', barcode: '789', contado_em: 'x', atualizado_em: 'x' }] };
+      }
+      return null;
+    };
+
+    test('com a trava: o snapshot e o esperado (9 - 2) e a resposta traz com_clientes', async () => {
+      process.env.CONDICIONAL_LIBERADA = 'true';
+      const { chamadas } = clienteFalso(respostaDoBipe);
+      const r = await request(app).put(`${BASE}/${CONT}/itens`).set('Authorization', `Bearer ${token()}`).send({ product_id: P1, quantidade: 7, modo: 'definir' });
+      expect(r.status).toBe(200);
+      const ins = chamadas.find((c) => /INSERT INTO stock_count_items/.test(c.sql));
+      expect(ins.params.slice(0, 7)).toEqual([CONT, LOJA, P1, null, 7, 7, 12.5]);
+      expect(r.body.item).toMatchObject({ estoque_no_bipe: 7, estoque_atual: 7, com_clientes: 2 });
+      // a leitura roda sob SAVEPOINT: erro de SQL nao envenena a transacao
+      const sqls = chamadas.map((c) => c.sql);
+      expect(sqls.indexOf('SAVEPOINT cc_conferencia')).toBeGreaterThan(-1);
+      expect(sqls.indexOf('RELEASE SAVEPOINT cc_conferencia')).toBeGreaterThan(sqls.indexOf('SAVEPOINT cc_conferencia'));
+    });
+
+    test('sem a trava: nenhuma consulta de com clientes e snapshot = sistema', async () => {
+      delete process.env.CONDICIONAL_LIBERADA;
+      const { chamadas } = clienteFalso(respostaDoBipe);
+      const r = await request(app).put(`${BASE}/${CONT}/itens`).set('Authorization', `Bearer ${token()}`).send({ product_id: P1, quantidade: 7, modo: 'definir' });
+      expect(r.status).toBe(200);
+      expect(chamadas.some((c) => /condicional_itens|SAVEPOINT/.test(c.sql))).toBe(false);
+      const ins = chamadas.find((c) => /INSERT INTO stock_count_items/.test(c.sql));
+      expect(ins.params.slice(0, 7)).toEqual([CONT, LOJA, P1, null, 7, 9, 12.5]);
+      expect(r.body.item).not.toHaveProperty('com_clientes');
+    });
+
+    test('a consulta falha (base sem a 467): volta ao sistema, sem derrubar o bipe', async () => {
+      process.env.CONDICIONAL_LIBERADA = 'true';
+      const spy = jest.spyOn(console, 'error').mockImplementation(() => {});
+      const { chamadas } = clienteFalso((sql) => (/FROM condicional_itens i/.test(sql) ? new Error('relation does not exist') : respostaDoBipe(sql)));
+      const r = await request(app).put(`${BASE}/${CONT}/itens`).set('Authorization', `Bearer ${token()}`).send({ product_id: P1, quantidade: 7, modo: 'definir' });
+      spy.mockRestore();
+      expect(r.status).toBe(200);
+      expect(chamadas.some((c) => c.sql === 'ROLLBACK TO SAVEPOINT cc_conferencia')).toBe(true);
+      const ins = chamadas.find((c) => /INSERT INTO stock_count_items/.test(c.sql));
+      expect(ins.params[5]).toBe(9);
+    });
   });
 
   test('GET em rascunho as cegas: nenhum estoque do sistema na resposta', async () => {

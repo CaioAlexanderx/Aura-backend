@@ -37,10 +37,26 @@
 // travam FOR UPDATE (clique duplo: o segundo encontra 'aplicada' e leva
 // 409 JA_APLICADA sem mexer em nada) e as linhas de estoque FOR UPDATE em
 // ordem de id, como a transferencia.
+//
+// COM CLIENTES (C14, condicional): a peca da condicional aberta
+// (condicional_itens 'com_cliente'/'ficou' sem venda) continua no stock_qty
+// mas nao esta na loja. Com a trava CONDICIONAL_LIBERADA (comCondicional):
+//   - o ESPERADO de um item e sistema - com clientes (piso 0 quando ha peca
+//     fora); e ele que vai em estoque_no_bipe e nas diferencas. O fisico
+//     contado + o que esta com clientes = o estoque gravado, porque o ajuste
+//     continua "atual + (contado - estoque_no_bipe)";
+//   - "zerar nao contados" leva o estoque a com clientes (nao a 0): a peca
+//     fora da loja nao some;
+//   - desfazer nao muda: inverte a diferenca_aplicada gravada;
+//   - "para resolver" (voltou_defeito) esta na loja e NAO desconta.
+// Sem a trava nenhuma consulta nova roda e tudo fica como antes. A leitura
+// falha-mansa (base sem a 467 = ninguem tem peca fora), com SAVEPOINT dentro
+// de transacao para um erro de SQL nao envenenar a conferencia.
 // ============================================================
 'use strict';
 
 const { rotuloDaVariante } = require('./transferenciaDeEstoque');
+const { lerComClientes, comClientesDaVariante } = require('./comClientes');
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const QTD_MAX = 1e6;
@@ -88,6 +104,16 @@ function calcularDesfazer({ estoqueAtual, diferencaAplicada }) {
   const atual = arred3(Number(estoqueAtual) || 0);
   const novo = arred3(Math.max(0, atual - Number(diferencaAplicada)));
   return { novo, efetiva: arred3(novo - atual) };
+}
+
+/**
+ * Esperado na loja: sistema menos o que esta com clientes. Sem peca fora o
+ * numero e o do sistema, inclusive negativo (como sempre foi).
+ */
+function esperadoDe(sistema, comClientes) {
+  const s = Number(sistema) || 0;
+  const c = Number(comClientes) || 0;
+  return c > 0 ? arred3(Math.max(0, s - c)) : s;
 }
 
 function grupoDaDiferenca(d) {
@@ -255,6 +281,29 @@ async function contarEscopo(conn, companyId, escopo) {
   return Number((rows[0] && rows[0].n) || 0);
 }
 
+/**
+ * Funcao (linha) -> pecas com clientes, para as linhas dadas. Sem a trava
+ * devolve () => 0 sem consultar nada. `emTransacao`: conn e um client numa
+ * transacao (usa SAVEPOINT); false: conn e o pool.
+ */
+async function foraDasLinhas(conn, companyId, linhas, { comCondicional, emTransacao = false }) {
+  const zero = () => 0;
+  if (!comCondicional) return zero;
+  const pids = [...new Set((linhas || []).map((l) => String(l.product_id)))];
+  if (!pids.length) return zero;
+  let mapa;
+  try {
+    if (emTransacao) await conn.query('SAVEPOINT cc_conferencia');
+    mapa = await lerComClientes(conn, companyId, pids);
+    if (emTransacao) await conn.query('RELEASE SAVEPOINT cc_conferencia');
+  } catch (e) {
+    console.error('[conferencia] pecas com clientes indisponivel:', e && e.message);
+    if (emTransacao) await conn.query('ROLLBACK TO SAVEPOINT cc_conferencia').catch(() => {});
+    return zero;
+  }
+  return (l) => comClientesDaVariante(mapa, l.product_id, l.variant_id || null);
+}
+
 const chaveDaLinha = (pid, vid) => `${String(pid).toLowerCase()}|${vid ? String(vid).toLowerCase() : ''}`;
 
 async function rotulos(conn, linhas) {
@@ -408,7 +457,7 @@ async function transferenciasDaConferencia(conn, countId) {
   }));
 }
 
-function itemOut(l, rotulo, mostrarEstoque) {
+function itemOut(l, rotulo, mostrarEstoque, fora = 0) {
   const out = {
     id: l.id,
     product_id: l.product_id,
@@ -424,7 +473,8 @@ function itemOut(l, rotulo, mostrarEstoque) {
   if (l.diferenca_aplicada !== null && l.diferenca_aplicada !== undefined) out.diferenca_aplicada = Number(l.diferenca_aplicada);
   if (mostrarEstoque) {
     out.estoque_no_bipe = Number(l.estoque_no_bipe);
-    out.estoque_atual = Number(l.estoque_atual);
+    out.estoque_atual = fora > 0 ? esperadoDe(l.estoque_atual, fora) : Number(l.estoque_atual);
+    if (fora > 0) out.com_clientes = fora;
   }
   return out;
 }
@@ -444,13 +494,14 @@ async function compartilhadosDeOutraLoja(conn, companyId) {
   return Number((rows[0] && rows[0].n) || 0);
 }
 
-async function obter(conn, companyId, countId) {
+async function obter(conn, companyId, countId, { comCondicional = false } = {}) {
   const r = await buscarConferencia(conn, companyId, countId);
   if (!r) throw naoAchada();
   const c = conferenciaOut(r);
   const linhas = await itensComProduto(conn, c.id);
   const rotulo = await rotulos(conn, linhas);
   const mostrarEstoque = !(c.as_cegas && c.status === 'rascunho');
+  const foraDe = mostrarEstoque ? await foraDasLinhas(conn, companyId, linhas, { comCondicional }) : () => 0;
   const [escopoTotal, transferencias, compartilhados] = await Promise.all([
     contarEscopo(conn, companyId, c.escopo),
     transferenciasDaConferencia(conn, c.id),
@@ -458,7 +509,7 @@ async function obter(conn, companyId, countId) {
   ]);
   return {
     conferencia: c,
-    itens: linhas.map((l) => itemOut(l, rotulo, mostrarEstoque)),
+    itens: linhas.map((l) => itemOut(l, rotulo, mostrarEstoque, foraDe(l))),
     escopo_total: escopoTotal,
     compartilhados_de_outra_loja: compartilhados,
     transferencias,
@@ -510,13 +561,16 @@ function conferirProduto(p, companyId, variantId) {
   }
 }
 
-async function registrarItem(conn, { companyId, countId, productId, variantId, quantidade, modo }) {
+async function registrarItem(conn, { companyId, countId, productId, variantId, quantidade, modo, comCondicional = false }) {
   const r = await buscarConferencia(conn, companyId, countId, 'FOR SHARE');
   if (!r) throw naoAchada();
   exigirRascunho(r);
   const p = await produtoDaLinha(conn, companyId, productId, variantId);
   conferirProduto(p, companyId, variantId);
-  const estoqueNoBipe = Number(variantId ? p.v_stock : p.stock_qty) || 0;
+  // Esperado no bipe = sistema - com clientes (sem a trava, o sistema).
+  const linhaDoBipe = { product_id: productId, variant_id: variantId };
+  const foraDe = await foraDasLinhas(conn, companyId, [linhaDoBipe], { comCondicional, emTransacao: true });
+  const estoqueNoBipe = esperadoDe(Number(variantId ? p.v_stock : p.stock_qty) || 0, foraDe(linhaDoBipe));
   const primeiro = modo === 'somar' ? Math.max(0, quantidade) : quantidade;
   // Snapshot so no INSERT: no conflito o estoque_no_bipe e o custo ficam.
   const { rows } = await conn.query(
@@ -537,7 +591,7 @@ async function registrarItem(conn, { companyId, countId, productId, variantId, q
   const rotulo = await rotulos(conn, linhas);
   const c = conferenciaOut(r);
   return {
-    item: itemOut(linhas[0], rotulo, !c.as_cegas),
+    item: itemOut(linhas[0], rotulo, !c.as_cegas, !c.as_cegas ? foraDe(linhaDoBipe) : 0),
     primeiro_registro: !!rows[0].criado,
   };
 }
@@ -557,7 +611,7 @@ async function removerItem(conn, { companyId, countId, itemId }) {
 }
 
 // ─── diferencas ──────────────────────────────────────────────
-async function diferencas(conn, companyId, countId) {
+async function diferencas(conn, companyId, countId, { comCondicional = false } = {}) {
   const r = await buscarConferencia(conn, companyId, countId);
   if (!r) throw naoAchada();
   const c = conferenciaOut(r);
@@ -566,8 +620,10 @@ async function diferencas(conn, companyId, countId) {
   const escopo = await linhasDoEscopo(conn, companyId, c.escopo);
   // Nao contado que importa e o que tem estoque (positivo ou negativo):
   // zerado nao muda nada ao "zerar nao contados".
+  const foraDe = await foraDasLinhas(conn, companyId, [...linhas, ...escopo], { comCondicional });
   const naoContadas = c.status === 'rascunho'
-    ? escopo.filter((l) => !contadas.has(chaveDaLinha(l.product_id, l.variant_id)) && Number(l.estoque_atual) !== 0)
+    ? escopo.filter((l) => !contadas.has(chaveDaLinha(l.product_id, l.variant_id))
+      && esperadoDe(l.estoque_atual, foraDe(l)) !== 0)
     : [];
   const rotulo = await rotulos(conn, [...linhas, ...naoContadas]);
 
@@ -594,8 +650,10 @@ async function diferencas(conn, companyId, countId) {
       codigo: codigoDaLinha(l),
       contado: Number(l.contado),
       estoque_no_bipe: Number(l.estoque_no_bipe),
-      estoque_atual: Number(l.estoque_atual),
+      estoque_atual: esperadoDe(l.estoque_atual, foraDe(l)),
+      ...(foraDe(l) > 0 ? { com_clientes: foraDe(l) } : {}),
       diferenca,
+      // O que fica gravado: o sistema de agora (com as pecas fora) + a diferenca.
       estoque_depois: arred3(Math.max(0, Number(l.estoque_atual) + diferenca)),
       custo,
       valor,
@@ -618,7 +676,8 @@ async function diferencas(conn, companyId, countId) {
       nome: l.nome,
       variante: rotulo(l),
       codigo: codigoDaLinha(l),
-      estoque_atual: Number(l.estoque_atual),
+      estoque_atual: esperadoDe(l.estoque_atual, foraDe(l)),
+      ...(foraDe(l) > 0 ? { com_clientes: foraDe(l) } : {}),
       custo: numOuNull(l.custo),
     })),
   };
@@ -691,7 +750,7 @@ const notaDaConferencia = (c) => `Conferência nº ${c.numero}${c.motivo ? ` · 
  * `ignorarItemIds`: itens que a pessoa desmarcou na tela de diferencas
  * (ficam como estao, diferenca_aplicada nula).
  */
-async function aplicar(conn, { companyId, countId, userId, zerarNaoContados = false, ignorarItemIds = [], motivo }) {
+async function aplicar(conn, { companyId, countId, userId, zerarNaoContados = false, ignorarItemIds = [], motivo, comCondicional = false }) {
   const r = await buscarConferencia(conn, companyId, countId, 'FOR UPDATE');
   if (!r) throw naoAchada();
   if (r.status === 'aplicada') {
@@ -736,11 +795,14 @@ async function aplicar(conn, { companyId, countId, userId, zerarNaoContados = fa
     ajustes.push({ item_id: it.id, product_id: it.product_id, variant_id: it.variant_id, efetiva: a.aplicada, custo: numOuNull(it.custo_no_bipe) });
   }
   const zerados = [];
+  const foraZerar = await foraDasLinhas(conn, companyId, naoContadas, { comCondicional, emTransacao: true });
   for (const l of naoContadas) {
     const atual = atualDe(l.product_id, l.variant_id);
-    if (atual === null || atual === 0) continue;
-    const z = calcularZerar(atual);
-    zerados.push({ product_id: l.product_id, variant_id: l.variant_id, atual, efetiva: z.aplicada, custo: numOuNull(l.custo) });
+    // Zerar leva ao que esta com clientes (o esperado na loja vai a 0).
+    const esperado = atual === null ? null : esperadoDe(atual, foraZerar(l));
+    if (atual === null || esperado === 0) continue;
+    const z = calcularAjuste({ contado: 0, estoqueNoBipe: esperado, estoqueAtual: atual });
+    zerados.push({ product_id: l.product_id, variant_id: l.variant_id, atual: esperado, efetiva: z.aplicada, custo: numOuNull(l.custo) });
   }
 
   await somarNoEstoque(conn, companyId, [...ajustes, ...zerados]);
@@ -878,6 +940,7 @@ module.exports = {
   ErroDeConferencia,
   calcularAjuste,
   calcularZerar,
+  esperadoDe,
   calcularDesfazer,
   grupoDaDiferenca,
   lerEscopo,
