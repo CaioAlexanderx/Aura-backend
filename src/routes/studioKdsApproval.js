@@ -38,6 +38,7 @@ const nfseAutomatica   = require('../services/nfseAutomatica');
 const pagamentoDoPedido = require('../services/pagamentoDoPedidoStudio');
 // 25/11/2026 (p-185): o que falta receber do pedido de orcamento.
 const financeiroDoOrcamento = require('../services/financeiroDoOrcamento');
+const tirarDaFila = require('../services/tirarDaFila');
 // QA final 28/09/2026 (LJ-33): pedido cancelado e etapa 'cancelled' tambem
 // na leitura — o cancelamento so mudava `status`, e o quadro lia a etapa.
 const { sqlDaEtapa, etapaDaProducao } = require('../services/cancelamentoDoPedido');
@@ -516,6 +517,14 @@ router.get('/orders', async function(req, res) {
   const onlyWithBalance = with_balance === 'true' || with_balance === '1';
   const withBalance = await hasInstallmentsTable();
   const withPromised = await hasPromisedDate();
+  // C1 (26/11/2026): pedidos tirados da Fila (migration 471) saem da lista;
+  // ?tirados=true lista so os tirados (para devolver). A aba "A receber"
+  // nao filtra: saldo a cobrar nao some porque o item saiu da Fila.
+  const soTirados = req.query.tirados === 'true' || req.query.tirados === '1';
+  const filtraTirados = !onlyWithBalance && (await tirarDaFila.temTabela(db));
+  const filtroDeTirados = (alias) => (filtraTirados
+    ? (soTirados ? tirarDaFila.soOsTirados(alias) : tirarDaFila.semOsTirados(alias))
+    : '');
 
   // ── 1. Tentativa RICA: view completa com subselects (KDS precisa disso) ──
   try {
@@ -526,6 +535,7 @@ router.get('/orders', async function(req, res) {
       where += ` AND ${ETAPA_DO_PEDIDO} = $${params.length}`;
     }
     where += ` AND o.created_at >= NOW() - INTERVAL '${safeDays} days'`;
+    where += filtroDeTirados('o');
     // Aba "A receber": so o que tem saldo em aberto. Sem a tabela de parcelas
     // nao ha o que filtrar -- devolve vazio em vez de listar tudo, que daria a
     // impressao errada de que todo pedido tem saldo.
@@ -648,6 +658,10 @@ ${ITENS_E_APROVACAO_COLS}
       db, cid, orders, (o) => (o.source === 'digital' ? o.digital_order_id : null)
     );
 
+    // C1: fila_recebido / fila_tem_recebimento, para escolher entre "Tirar da
+    // fila" e o cancelamento. Nunca lanca.
+    orders = await tirarDaFila.comRecebimento(db, cid, orders);
+
     return res.json({ orders });
   } catch (errRich) {
     console.error('[studio/orders:GET][rich]', errRich.message, errRich.code, errRich.stack);
@@ -662,6 +676,7 @@ ${ITENS_E_APROVACAO_COLS}
       where += ` AND ${ETAPA_DO_PEDIDO} = $${params.length}`;
     }
     where += ` AND o.created_at >= NOW() - INTERVAL '${safeDays} days'`;
+    where += filtroDeTirados('o');
     params.push(safeLimit);
 
     const r = await db.query(
@@ -706,6 +721,7 @@ ${ITENS_E_APROVACAO_COLS}
       where += ` AND ${sqlDaEtapa('')} = $${params.length}`;
     }
     where += ` AND created_at >= NOW() - INTERVAL '${safeDays} days'`;
+    where += filtroDeTirados('');
     params.push(safeLimit);
 
     const r = await db.query(
@@ -740,6 +756,46 @@ ${ITENS_E_APROVACAO_COLS}
   } catch (errRaw) {
     console.error('[studio/orders:GET][raw]', errRaw.message, errRaw.code, errRaw.stack);
     return res.json({ orders: [], degraded: 'empty', error_hint: errRaw.message });
+  }
+});
+
+// ─── POST /orders/:oid/tirar-da-fila | /devolver-a-fila ───────
+// C1 (26/11/2026): tira o pedido da Fila de producao sem apagar venda nem
+// dinheiro (services/tirarDaFila.js, migration 471). Pedido digital com valor
+// recebido recusa com 409 TEM_RECEBIMENTO: o caminho e o cancelamento.
+function responderErroDaFila(res, tag, err) {
+  if (err && err.status) {
+    const corpo = { error: err.message, code: err.code };
+    if (err.recebido !== undefined) corpo.recebido = err.recebido;
+    return res.status(err.status).json(corpo);
+  }
+  console.error(tag, err.message);
+  return res.status(500).json({ error: 'Erro ao atualizar a fila' });
+}
+
+router.post('/orders/:oid/tirar-da-fila', async function(req, res) {
+  try {
+    const r = await tirarDaFila.tirarDaFila(db, {
+      companyId: req.params.id,
+      orderId: req.params.oid,
+      userId: req.user && req.user.id,
+      motivo: req.body && req.body.motivo,
+    });
+    return res.json(r);
+  } catch (err) {
+    return responderErroDaFila(res, '[studio/orders/tirar-da-fila]', err);
+  }
+});
+
+router.post('/orders/:oid/devolver-a-fila', async function(req, res) {
+  try {
+    const r = await tirarDaFila.devolverAFila(db, {
+      companyId: req.params.id,
+      orderId: req.params.oid,
+    });
+    return res.json(r);
+  } catch (err) {
+    return responderErroDaFila(res, '[studio/orders/devolver-a-fila]', err);
   }
 });
 
