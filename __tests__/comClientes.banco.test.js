@@ -156,11 +156,14 @@ describe('trava CONDICIONAL_LIBERADA', () => {
     for (const id of [ID.vestido, ID.bolsa, ID.liso]) {
       expect(p[id]).not.toHaveProperty('out_qty');
       expect(p[id]).not.toHaveProperty('out_by_variant');
+      expect(p[id]).not.toHaveProperty('resolver_qty');
     }
     const bipe = await request(app).get(`/companies/${ID.matriz}/pdv/scan/${BARRAS_P}`);
     expect(bipe.status).toBe(200);
     expect(bipe.body).not.toHaveProperty('variant_out_qty');
     expect(bipe.body.product).not.toHaveProperty('out_qty');
+    expect(bipe.body).not.toHaveProperty('variant_resolver_qty');
+    expect(bipe.body.product).not.toHaveProperty('resolver_qty');
   });
 
   test('ligada, sem condicional: 0 e {}', async () => {
@@ -226,5 +229,25 @@ describe('com clientes calculado (R3)', () => {
     // Condicional de loja de outro dono nunca entra na conta (nem que cite o id).
     await condicional({ empresa: ID.deFora, itens: [{ p: ID.bolsa }] });
     expect((await listar(ID.matriz))[ID.bolsa].out_qty).toBe(2);
+  });
+
+  test('para resolver (C9): voltou com defeito sem decisao, separado de com clientes', async () => {
+    // Ja existe 1 liso voltou_defeito numa condicional aberta (teste acima).
+    const encerrada = await condicional({ status: 'encerrada', itens: [{ p: ID.vestido, v: ID.varP, sit: 'voltou_defeito' }] });
+    // Nao contam: resolvida (C16), cancelada, e de outro dono.
+    const resolvida = await condicional({ status: 'encerrada', itens: [{ p: ID.vestido, v: ID.varM, sit: 'voltou_defeito' }] });
+    await q(`UPDATE condicional_itens SET resolved_at = NOW() WHERE condicional_id = $1`, [resolvida]);
+    await condicional({ status: 'cancelada', itens: [{ p: ID.vestido, v: ID.varM, sit: 'voltou_defeito' }] });
+    await condicional({ empresa: ID.deFora, status: 'encerrada', itens: [{ p: ID.liso, sit: 'voltou_defeito' }] });
+    expect(encerrada).toBeTruthy();
+
+    const p = await listar(ID.matriz);
+    expect(p[ID.vestido]).toMatchObject({ resolver_qty: 1, resolver_by_variant: { [ID.varP]: 1 }, out_qty: 3 });
+    expect(p[ID.liso]).toMatchObject({ resolver_qty: 1, resolver_by_variant: {}, out_qty: 1, stock_qty: 5 });
+    expect(p[ID.bolsa]).toMatchObject({ resolver_qty: 0, resolver_by_variant: {} });
+
+    const r = await request(app).get(`/companies/${ID.matriz}/pdv/scan/${BARRAS_P}`);
+    expect(r.body.product.resolver_qty).toBe(1);
+    expect(r.body.variant_resolver_qty).toBe(1);
   });
 });

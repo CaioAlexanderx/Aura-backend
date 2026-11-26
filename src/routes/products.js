@@ -83,7 +83,11 @@ const { pedidoLiberado } = require('../services/pedidoBalcao');
 // separadas do reservado: a peca saiu da loja. Atras da trava
 // CONDICIONAL_LIBERADA: desligada, nenhuma consulta nova e os campos nao
 // aparecem. Falhou (base sem a 467), 0.
-const { lerComClientesSemFalhar, comClientesDoProduto, comClientesPorVariante } = require('../services/comClientes');
+// C9 (26/11/2026, migration 468): pecas "para resolver" (voltaram com
+// defeito ou sem etiqueta), na mesma trava: nem livre, nem com clientes.
+const {
+  lerComClientesSemFalhar, lerParaResolverSemFalhar, comClientesDoProduto, comClientesPorVariante,
+} = require('../services/comClientes');
 const { condicionalLiberada } = require('../services/condicional');
 
 // ─── Fase 1 fornecedores (16/09/2026) ────────────────────────
@@ -396,9 +400,11 @@ router.get('/', async (req, res) => {
     // pelas etiquetas) nao mudam.
     // As duas leituras (reserva e com clientes) saem juntas, em paralelo.
     const idsDaPagina = products.map((p) => p.id);
-    const [reservas, fora] = await Promise.all([
+    const comCondicional = condicionalLiberada(req);
+    const [reservas, fora, resolver] = await Promise.all([
       pedidoLiberado(req) ? lerReservasSemFalhar(db, cid, idsDaPagina, 'products') : null,
-      condicionalLiberada(req) ? lerComClientesSemFalhar(db, cid, idsDaPagina, 'products') : null,
+      comCondicional ? lerComClientesSemFalhar(db, cid, idsDaPagina, 'products') : null,
+      comCondicional ? lerParaResolverSemFalhar(db, cid, idsDaPagina, 'products') : null,
     ]);
     if (reservas) {
       for (const p of products) {
@@ -415,6 +421,15 @@ router.get('/', async (req, res) => {
       for (const p of products) {
         p.out_qty = comClientesDoProduto(fora, p.id);
         p.out_by_variant = comClientesPorVariante(fora, p.id);
+      }
+    }
+    // C9: pecas para resolver (voltaram com defeito ou sem etiqueta, ainda
+    // sem decisao). Estao na loja, mas nao sao livres: "Livres" = estoque -
+    // out_qty - reserved_qty - resolver_qty. Mesma forma de out_*.
+    if (resolver) {
+      for (const p of products) {
+        p.resolver_qty = comClientesDoProduto(resolver, p.id);
+        p.resolver_by_variant = comClientesPorVariante(resolver, p.id);
       }
     }
 

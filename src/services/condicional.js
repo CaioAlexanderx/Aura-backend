@@ -13,7 +13,7 @@
 //       da loja (pdv_settings.condicional_prazo_padrao, 1-30, ausente = 3);
 //   R3/R4. cada linha e UMA peca (quantity, se vier, tem de ser 1). So entra
 //       peca livre: livres = estoque − com clientes − reservado (pedido do
-//       balcao, reservaDoPedido.js). Sem livre: 409 COND_SEM_SALDO com o
+//       balcao, reservaDoPedido.js) − para resolver (voltou com defeito, C9). Sem livre: 409 COND_SEM_SALDO com o
 //       numero da condicional que segura a peca. Loja com "vender sem
 //       estoque" ligado (allow_sale_without_stock) entra com o aviso, como o
 //       pedido do balcao (B2);
@@ -163,16 +163,14 @@ function lerChave(req) {
 }
 
 /**
- * Le e confere o corpo, sem banco. Devolve { dados } ou { erro }.
- * Mensagens em portugues, prontas para a tela.
+ * Le as pecas do corpo (guardar e acrescentar, C9): uma peca por linha.
+ * Devolve { itens } ou { erro }.
  */
-function lerCorpo(body, { hoje = hojeSP() } = {}) {
-  const b = body || {};
-  const brutos = b.items;
+function lerItens(brutos, { max = MAX_PECAS } = {}) {
   if (!Array.isArray(brutos) || brutos.length === 0) {
     return { erro: { status: 422, code: 'COND_SEM_PECAS', message: 'Escolha pelo menos uma peça para a condicional.' } };
   }
-  if (brutos.length > MAX_PECAS) {
+  if (brutos.length > max) {
     return { erro: { status: 422, code: 'COND_PECAS_DEMAIS', message: `Uma condicional leva até ${MAX_PECAS} peças.` } };
   }
   const itens = [];
@@ -193,6 +191,18 @@ function lerCorpo(body, { hoje = hojeSP() } = {}) {
     }
     itens.push({ product_id: pid, variant_id: vid });
   }
+  return { itens };
+}
+
+/**
+ * Le e confere o corpo, sem banco. Devolve { dados } ou { erro }.
+ * Mensagens em portugues, prontas para a tela.
+ */
+function lerCorpo(body, { hoje = hojeSP() } = {}) {
+  const b = body || {};
+  const lidos = lerItens(b.items);
+  if (lidos.erro) return lidos;
+  const { itens } = lidos;
 
   const cid = b.customer_id ? String(b.customer_id).trim().toLowerCase() : '';
   if (!cid) {
@@ -347,12 +357,15 @@ async function conferirLivres(client, companyId, itens) {
   }
   const reservas = await lerReservas(client, companyId, pids);
   const fora = await comClientes.lerComClientes(client, companyId, pids);
+  // C9: a peca que voltou com defeito (para resolver) esta na loja, mas nao e livre.
+  const resolver = await comClientes.lerParaResolver(client, companyId, pids);
   const faltas = [];
   for (const { it, pedidas } of linhas.values()) {
     const estoque = it.variant_id ? (estoqueV.get(it.variant_id) || 0) : (estoqueP.get(it.product_id) || 0);
     const reservado = reservadoDaVariante(reservas, it.product_id, it.variant_id);
     const comCliente = comClientes.comClientesDaVariante(fora, it.product_id, it.variant_id);
-    const livre = Math.max(0, estoque - comCliente - reservado);
+    const paraResolver = comClientes.comClientesDaVariante(resolver, it.product_id, it.variant_id);
+    const livre = Math.max(0, estoque - comCliente - reservado - paraResolver);
     if (livre < pedidas) {
       faltas.push({
         product_id: it.product_id,
@@ -362,6 +375,7 @@ async function conferirLivres(client, companyId, itens) {
         estoque,
         com_clientes: comCliente,
         reservado,
+        para_resolver: paraResolver,
         livre,
         condicionais: [],
       });
@@ -396,6 +410,7 @@ function fraseDaFalta(f) {
     return `"${f.nome}": está com cliente na ${nums}.`;
   }
   if (f.reservado > 0) return `"${f.nome}": está separada num pedido.`;
+  if (f.para_resolver > 0) return `"${f.nome}": a unidade que sobrou está em Peças para resolver.`;
   return `"${f.nome}": sem unidade no estoque.`;
 }
 
@@ -670,6 +685,8 @@ function apresentarCondicional(c, itens, eventos, { hoje = hojeSP(), precos = nu
       decided_at: i.decided_at || null,
       decided_by: i.decided_by || null,
       sale_id: i.sale_id || null,
+      // C9 (468): peca voltou_defeito ja resolvida (C16). null = para resolver.
+      resolved_at: i.resolved_at || null,
       added_at: i.added_at,
     };
   });
@@ -726,7 +743,7 @@ async function lerCondicionalCompleta(q, companyId, condId, { hoje = hojeSP(), a
   const [{ rows: itens }, { rows: eventos }] = await Promise.all([
     q.query(
       `SELECT id, product_id, variant_id, product_name, variant_label, color_name, size_label,
-              unit_price, situacao, defect_note, decided_at, decided_by, sale_id, added_at
+              unit_price, situacao, defect_note, decided_at, decided_by, sale_id, added_at, resolved_at
          FROM condicional_itens WHERE condicional_id = $1 ORDER BY added_at, id`,
       [condId]
     ),
@@ -749,6 +766,14 @@ async function lerCondicionalCompleta(q, companyId, condId, { hoje = hojeSP(), a
 }
 
 module.exports = {
+  // C9 (decidir pecas, services/condicionalDecidir.js) usa as mesmas regras.
+  erro,
+  round2,
+  textoLimpo,
+  dataValida,
+  lerItens,
+  conferirPecas,
+  conferirLivres,
   MAX_PECAS,
   AVISO_SEM_ESTOQUE,
   PRAZO_PADRAO_DIAS,

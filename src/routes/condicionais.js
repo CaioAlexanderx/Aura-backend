@@ -28,6 +28,31 @@
 // GET  /condicionais/:cid   → {condicional} com items (preco_hoje ao lado
 //                             do unit_price da retirada) e events
 //
+// ─── Decidir as pecas (C9, 26/11/2026; services/condicionalDecidir.js) ──
+// Todas: Idempotency-Key opcional (cabecalho ou corpo); a repeticao devolve
+// 200 {condicional, idempotent_replay: true}; a mesma chave com outra
+// alteracao: 409 IDEMPOTENCY_KEY_REUSED. Nenhuma cria venda, lancamento ou
+// caixa (R1). Condicional encerrada ou cancelada: 409 COND_FECHADA.
+// PATCH /condicionais/:cid/itens  → 200 {condicional, avisos}
+//   corpo: { items: [{item_id, situacao: 'voltou'|'voltou_defeito'|'ficou'|'com_cliente', defect_note?}] }
+//   erros: 422 COND_SEM_PECAS | COND_PECAS_DEMAIS | COND_ITEM_INVALIDO |
+//              COND_ITEM_REPETIDO | COND_SITUACAO
+//          404 COND_PECA_NAO_ENCONTRADA {item_id}
+//          409 COND_PECA_COBRADA {item_id, sale_id} | COND_PECA_RESOLVIDA {item_id}
+//              | COND_SEM_SALDO {faltas} (peca que tinha voltado sai de novo)
+// PATCH /condicionais/:cid/prazo  → 200 {condicional}
+//   corpo: { due_date: 'YYYY-MM-DD' } de hoje (SP) a hoje + 30
+//   erros: 422 COND_DATA; 409 COND_NADA_COM_ELA (falta so cobrar)
+// POST  /condicionais/:cid/itens  → 201 {condicional, avisos, itens_acrescentados}
+//   corpo: { items: [{product_id, variant_id?}] } (preco do dia, mesmo prazo)
+//   erros: os do guardar para as pecas (422/404) + 409 COND_SEM_SALDO
+//          {faltas} | COND_NADA_COM_ELA; 422 COND_PECAS_DEMAIS (total > 60)
+// POST  /condicionais/:cid/tudo-devolvido → 200 {condicional} (encerrada)
+//   erros: 409 COND_TEM_FICOU (peca "ficou" sem venda: cobrar ou marcar Voltou)
+// POST  /condicionais/:cid/cancelar → 200 {condicional} (cancelada)
+//   corpo: { reason? }
+//   erros: 409 COND_CANCELAR_DECIDIDA (ja tem peca decidida: o caminho e Voltou)
+//
 // Regras do que a condicional faz (e do que NAO faz): cabecalho de
 // services/condicional.js. Trava CONDICIONAL_LIBERADA: desligada, so a
 // equipe Aura usa; para o lojista a rota responde 404 como se nao existisse.
@@ -38,6 +63,7 @@ const router = require('express').Router({ mergeParams: true });
 const db = require('../config/database');
 const condicional = require('../services/condicional');
 const listaDeCondicionais = require('../services/listaDeCondicionais');
+const decidir = require('../services/condicionalDecidir');
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const NAO_ENCONTRADA = { error: 'Condicional não encontrada.', code: 'COND_NAO_ENCONTRADA' };
@@ -49,6 +75,8 @@ function falhar(res, err, contexto, mensagem500) {
       code: err.code,
       ...(err.condicional_id ? { condicional_id: err.condicional_id } : {}),
       ...(err.product_id ? { product_id: err.product_id } : {}),
+      ...(err.item_id ? { item_id: err.item_id } : {}),
+      ...(err.sale_id ? { sale_id: err.sale_id } : {}),
       ...(err.faltas ? { faltas: err.faltas } : {}),
     });
   }
@@ -120,5 +148,42 @@ router.get('/:cid', async (req, res) => {
     return falhar(res, err, 'detalhe', 'Não conseguimos abrir a condicional agora. Tente de novo em instantes.');
   }
 });
+
+// ─── Decidir as pecas (C9) ─────────────────────────────────────
+
+const MSG_ALTERAR = 'Não deu para salvar a condicional agora. Nada foi alterado. Tente de novo em instantes.';
+
+/** Roda a operacao do C9 e responde no formato comum. */
+function decisao(contexto, operacao, { statusNovo = 200 } = {}) {
+  return async (req, res) => {
+    const { id: companyId, cid } = req.params;
+    if (!UUID_RE.test(String(cid))) return res.status(404).json(NAO_ENCONTRADA);
+    try {
+      const r = await operacao({
+        companyId,
+        condId: cid,
+        userId: req.user && req.user.id,
+        body: req.body,
+        chave: condicional.lerChave(req),
+        hoje: condicional.hojeSP(),
+      });
+      res.set('Cache-Control', 'no-store');
+      if (r.repetido) {
+        res.set('Idempotent-Replayed', 'true');
+        return res.status(200).json({ condicional: r.condicional, idempotent_replay: true });
+      }
+      const { condicional: c, repetido, ...extra } = r;
+      return res.status(statusNovo).json({ condicional: c, ...extra });
+    } catch (err) {
+      return falhar(res, err, contexto, MSG_ALTERAR);
+    }
+  };
+}
+
+router.patch('/:cid/itens', decisao('marcar', decidir.marcarPecas));
+router.patch('/:cid/prazo', decisao('prazo', decidir.mudarPrazo));
+router.post('/:cid/itens', decisao('acrescentar', decidir.acrescentarPecas, { statusNovo: 201 }));
+router.post('/:cid/tudo-devolvido', decisao('tudo-devolvido', decidir.tudoDevolvido));
+router.post('/:cid/cancelar', decisao('cancelar', decidir.cancelarCondicional));
 
 module.exports = router;
