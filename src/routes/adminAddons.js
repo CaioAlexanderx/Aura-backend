@@ -18,6 +18,7 @@ const { requireAuth, requireRole } = require('../middleware/auth');
 const asyncHandler = require('../utils/asyncHandler');
 const addons = require('../services/addons');
 const quota = require('../services/marketing/marketingQuota');
+const waSaldoPacotes = require('../services/waSaldoPacotes');
 
 const adminOnly = [requireAuth, requireRole('admin')];
 
@@ -82,13 +83,27 @@ router.post('/clients/:cid/marketing-packs', ...adminOnly, asyncHandler(async (r
   // clique para o mesmo atendimento.
   const activate = b.activate === undefined ? true : (b.activate === true || b.activate === 'true');
 
-  const pack = await quota.createPack(req.params.cid, {
-    qty,
-    priceCents,
+  // Saldo novo (472): `bucket` escolhe o saldo (novidades | avisos | aurinha).
+  // Sem `bucket` e o pacote de novidades de sempre.
+  const bucket = b.bucket === undefined || b.bucket === null || b.bucket === '' ? 'novidades' : String(b.bucket);
+  if (!waSaldoPacotes.pacoteDe(bucket)) {
+    return res.status(422).json({ error: 'bucket deve ser novidades, avisos ou aurinha', code: 'VALIDATION_ERROR' });
+  }
+  // Fora de novidades, qty e preco omitidos valem os do pacote do saldo.
+  const qtyInformada = !(b.qty === undefined || b.qty === null || b.qty === '');
+  const precoInformado = !(b.price_cents === undefined || b.price_cents === null || b.price_cents === '');
+  const dados = {
+    qty: bucket === 'novidades' || qtyInformada ? qty : null,
+    priceCents: bucket === 'novidades' || precoInformado ? priceCents : null,
     status: activate ? 'active' : 'pending',
     source: 'admin',
     createdBy: (req.user && req.user.id) || null,
-  });
+  };
+  const pack = bucket === 'novidades'
+    ? await quota.createPack(req.params.cid, dados)
+    : await waSaldoPacotes.criarPacote(req.params.cid, { ...dados, bucket });
+  // createPack ja nasce ativo: credita no saldo novo (criarPacote ja credita).
+  if (pack && bucket === 'novidades' && pack.status === 'active') await waSaldoPacotes.creditarPacote(pack.id);
   if (!pack) {
     return res.status(503).json({ error: 'Pacotes de mensagens ainda não disponíveis (migration 332 pendente)', code: 'SCHEMA_PENDING' });
   }
