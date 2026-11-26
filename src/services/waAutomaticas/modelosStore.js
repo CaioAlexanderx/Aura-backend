@@ -115,6 +115,7 @@ function montarEstado(modelo, versoes, estadoDoPadrao, agora = Date.now()) {
     texto_padrao: modelo.texto_padrao,
     texto_em_uso: textoEmUso,
     template_em_uso: templateEmUso,
+    botoes: modelo.botoes || [],
     texto_novo: pendente ? pendente.texto : null,
     estado,
     motivo,
@@ -166,22 +167,22 @@ async function credenciais(companyId) {
   }
 }
 
-function montarTemplateMeta({ name, categoria, texto }) {
+function montarTemplateMeta({ name, categoria, texto, botoes = null }) {
   const { corpo, exemplos } = modelosCatalogo.paraCorpoMeta(texto);
   const body = { type: 'BODY', text: corpo };
   if (exemplos.length) body.example = { body_text: [exemplos] };
-  return {
-    name, language: 'pt_BR', category: categoria,
-    components: [body, { type: 'FOOTER', text: modelosCatalogo.RODAPE }],
-  };
+  const components = [body, { type: 'FOOTER', text: modelosCatalogo.RODAPE }];
+  const bt = modelosCatalogo.componenteBotoes({ botoes });
+  if (bt) components.push(bt);
+  return { name, language: 'pt_BR', category: categoria, components };
 }
 
-async function criarNaMeta(companyId, { name, categoria, texto }) {
+async function criarNaMeta(companyId, { name, categoria, texto, botoes = null }) {
   const cred = await credenciais(companyId);
   if (!cred) throw new ErroModelo(409, 'NAO_CONECTADO', 'Conecte o WhatsApp da loja antes de mandar texto para aprovação.');
   const wa = require('../whatsapp');
   try {
-    return await wa.createTemplate(cred.wabaId, cred.token, montarTemplateMeta({ name, categoria, texto }));
+    return await wa.createTemplate(cred.wabaId, cred.token, montarTemplateMeta({ name, categoria, texto, botoes }));
   } catch (e) {
     throw new ErroModelo(502, 'META_RECUSOU',
       'O WhatsApp não aceitou o pedido agora. Tente de novo em alguns minutos.', { detalhe: String(e.message || '').slice(0, 200) });
@@ -249,7 +250,7 @@ async function enviarTextoNovo(companyId, key, texto, { agora = Date.now() } = {
   // 2) Meta. Se recusar, a linha PENDING sai (nada ficou esperando à toa).
   let criado;
   try {
-    criado = await criarNaMeta(companyId, { name, categoria: mod.categoria, texto });
+    criado = await criarNaMeta(companyId, { name, categoria: mod.categoria, texto, botoes: mod.botoes });
   } catch (e) {
     await db.query(
       `-- wa:modelos-desfaz-versao
@@ -312,7 +313,7 @@ async function prepararPadroes(companyId) {
   let criados = 0; let jaExistiam = 0;
   for (const mod of todos) {
     if (existentes.has(mod.template_base)) { jaExistiam++; continue; }
-    const criado = await criarNaMeta(companyId, { name: mod.template_base, categoria: mod.categoria, texto: mod.texto_padrao });
+    const criado = await criarNaMeta(companyId, { name: mod.template_base, categoria: mod.categoria, texto: mod.texto_padrao, botoes: mod.botoes });
     await registrarTemplateLocal(companyId, { name: mod.template_base, categoria: mod.categoria, texto: mod.texto_padrao, criado });
     criados++;
   }

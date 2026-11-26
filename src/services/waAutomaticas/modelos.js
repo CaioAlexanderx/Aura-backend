@@ -40,6 +40,9 @@ const EXEMPLOS = Object.freeze({
 
 const C_ANIV = ['Nome', 'Nome da loja', 'Presente', 'Validade', 'Código'];
 const C_ANIV_SEM = ['Nome', 'Nome da loja'];
+// Botão de resposta rápida dos avisos de parcela (26/11/2026): o toque abre a
+// conversa e a Aura responde com o Pix (services/credit/queroPix).
+const BOTAO_PIX = Object.freeze([Object.freeze({ tipo: 'QUICK_REPLY', texto: 'Quero o Pix' })]);
 const C_CRED = ['Nome', 'Parcela', 'Vencimento', 'Valor', 'Nome da loja', 'Pix da loja', 'Link da loja', 'Total de parcelas'];
 
 function m(key, automatica, titulo, categoria, campos, texto, extra = {}) {
@@ -84,11 +87,14 @@ const MODELOS = Object.freeze([
 
   // ── Crediário ───────────────────────────────────────────────
   m('cred_antes', 'crediario', 'Antes do vencimento', 'UTILITY', C_CRED,
-    'Oi, {Nome}. A parcela {Parcela} do seu crediário na {Nome da loja} vence {Vencimento}: {Valor}. O Pix vai logo abaixo; se preferir, dá para pagar na loja.'),
+    "Oi, {Nome}. A parcela {Parcela} do seu crediário na {Nome da loja} vence {Vencimento}: {Valor}. Toque em 'Quero o Pix' que eu te mando o código. Se preferir, dá para pagar na loja.",
+    { botoes: BOTAO_PIX, template_base: PREFIXO_TEMPLATE + 'cred_antes_pix' }),
   m('cred_dia', 'crediario', 'No dia', 'UTILITY', C_CRED,
-    'Oi, {Nome}. Hoje vence a parcela {Parcela} do crediário na {Nome da loja}, {Valor}. O Pix está abaixo. Se já pagou, me manda o comprovante que eu dou baixa.'),
+    "Oi, {Nome}. Hoje vence a parcela {Parcela} do crediário na {Nome da loja}, {Valor}. Toque em 'Quero o Pix' que eu te mando o código. Se já pagou, me manda o comprovante que eu dou baixa.",
+    { botoes: BOTAO_PIX, template_base: PREFIXO_TEMPLATE + 'cred_dia_pix' }),
   m('cred_atraso', 'crediario', 'Em atraso', 'UTILITY', C_CRED,
-    'Oi, {Nome}. A parcela {Parcela} do seu crediário, de {Valor}, venceu {Vencimento} e ainda está em aberto aqui. Se precisar de uns dias, me fala por aqui que a gente combina.'),
+    "Oi, {Nome}. A parcela {Parcela} do seu crediário, de {Valor}, venceu {Vencimento} e ainda está em aberto aqui. Toque em 'Quero o Pix' que eu te mando o código. Se precisar de uns dias, me fala por aqui que a gente combina.",
+    { botoes: BOTAO_PIX, template_base: PREFIXO_TEMPLATE + 'cred_atraso_pix' }),
   m('cred_oferta', 'crediario', 'Oferta para quem tem limite', 'MARKETING',
     ['Nome', 'Nome da loja', 'Limite livre'],
     'Oi, {Nome}. Chegou novidade aqui na {Nome da loja}, e você tem {Limite livre} livres no crediário. Quer que eu mande fotos do que chegou?'),
@@ -168,6 +174,12 @@ function validar(modelo, texto) {
       trecho ? { correcao: 'TIRAR_OFERTA', trecho } : {});
   }
 
+  if (modelo.botoes && modelo.botoes.length) {
+    const rotulo = modelo.botoes[0].texto;
+    const cita = t.toLowerCase().includes(rotulo.toLowerCase());
+    add('botao', cita, `O texto avisa do botão "${rotulo}".`, `Mantenha no texto a frase que fala do botão "${rotulo}".`);
+  }
+
   const previa = renderizar(t);
   const usado = Math.max(previa.length, t.length);
   add('tamanho', usado <= LIMITE_CARACTERES,
@@ -201,7 +213,14 @@ function componentesDeEnvio(texto, valores) {
   return [{ type: 'body', parameters: params.map((text) => ({ type: 'text', text })) }];
 }
 
+// Componente BUTTONS do template (Meta): QUICK_REPLY de até 25 caracteres.
+function componenteBotoes(modelo) {
+  if (!modelo || !modelo.botoes || !modelo.botoes.length) return null;
+  return { type: 'BUTTONS', buttons: modelo.botoes.map((b) => ({ type: b.tipo, text: b.texto })) };
+}
+
 module.exports = {
+  componenteBotoes,
   LIMITE_CARACTERES, RODAPE, PREFIXO_TEMPLATE, EXEMPLOS, MODELOS,
   obter, listar, tokensDe, renderizar, validar, trechoDeOferta,
   paraCorpoMeta, parametrosNaOrdem, componentesDeEnvio,

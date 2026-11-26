@@ -11,6 +11,7 @@ const { validateWebhookSignature } = require('../utils/webhook');
 const waOutbox = require('../services/waOutbox');
 const customerConsent = require('../services/customerConsent');
 const hubWhatsapp = require('../services/hubWhatsapp');
+const queroPix = require('../services/credit/queroPix');
 
 // Sem fallback hardcoded: o verify token PRECISA vir do ambiente; sem ele, a
 // verificação da Meta falha (403).
@@ -339,6 +340,12 @@ router.post('/', async (req, res) => {
           // e VOLTAR (opt-in) — opt-out sempre vence na fila.
           const touched = await waOutbox.touchInbound(companyId, msg.from, msg.text?.body)
             .catch((e) => { console.error('[WA-WEBHOOK] contact touch error:', e.message); return null; });
+          // Botão "Quero o Pix" dos avisos de parcela (26/11/2026): a conversa acabou
+          // de abrir; a Aura responde com o Pix daquela parcela. Não é resposta de
+          // consentimento: segue direto para a próxima mensagem.
+          const pix = await queroPix.tratarToque({ companyId, msg })
+            .catch((e) => { console.error('[WA-WEBHOOK] quero-pix error:', e.message); return { handled: false }; });
+          if (pix.handled) continue;
           // CRM Fase 1 (340): SAIR/VOLTAR viram EVENTO de consentimento, e
           // "SIM"/"QUERO"/"ACEITO" em resposta a uma mensagem da loja
           // grava o opt-in individual. Clique em botão de template também
