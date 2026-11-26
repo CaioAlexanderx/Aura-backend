@@ -66,6 +66,7 @@ router.use('/companies/:id', privateCompaniesRouter);
 // ── WhatsApp Cloud API por company (FONTE ÚNICA: connect, status,
 // templates, fila, opt). Sem gate de plano — ver whatsappCloud.js.
 router.use('/companies/:id', require('./whatsappCloud'));
+router.use('/companies/:id', require('./whatsappSaldo'));
 
 router.use('/admin', require('./admin'));
 router.use('/admin', require('./adminAccessCodes'));
