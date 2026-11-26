@@ -187,12 +187,18 @@ function paraCorpoMeta(texto) {
   return { corpo, ordem, exemplos: ordem.map((nome) => EXEMPLOS[nome] || 'exemplo') };
 }
 
+function limpaValor(v) {
+  return v === undefined || v === null ? '' : String(v).replace(/\s*[\r\n\t]+\s*/g, ' ').replace(/ {2,}/g, ' ').trim();
+}
+
+// Campos do texto que ficaram sem valor para ESTE cliente. Quem chama
+// pula o envio: nunca mandar o exemplo ("Marta") no lugar do dado real.
+function camposSemValor(texto, valores) {
+  return [...new Set(tokensDe(texto).filter((nome) => !limpaValor(valores[nome])))];
+}
+
 function parametrosNaOrdem(texto, valores) {
-  return tokensDe(texto).map((nome) => {
-    const v = valores[nome];
-    const s = v === undefined || v === null ? '' : String(v).replace(/[\r\n\t]+/g, ' ').replace(/ {2,}/g, ' ').trim();
-    return s || EXEMPLOS[nome] || '-';
-  });
+  return tokensDe(texto).map((nome) => limpaValor(valores[nome]));
 }
 
 function componentesDeEnvio(texto, valores) {
@@ -204,5 +210,5 @@ function componentesDeEnvio(texto, valores) {
 module.exports = {
   LIMITE_CARACTERES, RODAPE, PREFIXO_TEMPLATE, EXEMPLOS, MODELOS,
   obter, listar, tokensDe, renderizar, validar, trechoDeOferta,
-  paraCorpoMeta, parametrosNaOrdem, componentesDeEnvio,
+  paraCorpoMeta, parametrosNaOrdem, componentesDeEnvio, camposSemValor,
 };

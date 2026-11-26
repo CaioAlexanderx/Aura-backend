@@ -355,6 +355,22 @@ async function runForCompany(companyId, { today = null, dryRun = false } = {}) {
 // silencioso em vez de logar erro a cada dia.
 async function listEnabledCompanies() {
   try {
+    // Tela nova do WhatsApp (26/11/2026): quem ligou "Crediário: cobrar" na
+    // automática nova sai desta régua, para não cobrar duas vezes — só com o
+    // job novo ligado (WA_AUTOMATICAS_ENABLED); desligado, a régua antiga segue.
+    try {
+      if (!require('../waAutomaticas/trava').ligada()) throw Object.assign(new Error('trava'), { code: '42P01' });
+      const { rows } = await db.query(
+        `-- cred:auto-companies
+         SELECT r.company_id FROM credit_collection_rules r
+          WHERE r.enabled = true AND r.whatsapp_auto = true
+            AND NOT EXISTS (SELECT 1 FROM wa_automaticas w
+                             WHERE w.company_id = r.company_id AND w.automatica = 'crediario_cobrar' AND w.ligada = true)`
+      );
+      return rows.map((r) => r.company_id);
+    } catch (e) {
+      if (e.code !== '42P01') throw e;
+    }
     const { rows } = await db.query(
       `-- cred:auto-companies
        SELECT company_id FROM credit_collection_rules

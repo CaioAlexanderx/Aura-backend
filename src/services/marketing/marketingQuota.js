@@ -53,7 +53,8 @@ const DEFAULT_UTILITY_CAP = 1500;
 //
 // Placar do dia (13/10/2026): resumo de fim de dia da PRÓPRIA loja para o dono,
 // template UTILITY — conta no uso justo de utilidade, nunca na cota de marketing.
-const MARKETING_SOURCE_TYPES = ['reativacao', 'aniversario', 'campanha', 'otica_revisao'];
+// 26/11/2026 (tela nova do WhatsApp): Venda+ e a oferta do Crediario tambem sao novidade.
+const MARKETING_SOURCE_TYPES = ['reativacao', 'aniversario', 'campanha', 'otica_revisao', 'venda_mais', 'crediario_oferta'];
 const UTILITY_SOURCE_TYPES = ['crediario', 'crediario_manual', 'dojo_mensalidade', 'otica_pronta', 'otica_adaptacao', 'placar_dia'];
 
 function schemaMissing(e) {

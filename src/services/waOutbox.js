@@ -294,7 +294,7 @@ async function markContactMarketingBlocked(companyId, phone, days = 30) {
 // Origens de marketing cujo source_id É o id do cliente (reativação e
 // aniversário gravam String(cliente.id)). Nas outras (otica_revisao usa
 // o id da receita) o despacho só conhece o telefone.
-const CUSTOMER_SOURCE_TYPES = new Set(['reativacao', 'aniversario']);
+const CUSTOMER_SOURCE_TYPES = new Set(['reativacao', 'aniversario', 'venda_mais', 'crediario_oferta']);
 
 function customerIdFromSource(sourceType, sourceId) {
   if (!sourceId || !CUSTOMER_SOURCE_TYPES.has(String(sourceType || ''))) return null;
