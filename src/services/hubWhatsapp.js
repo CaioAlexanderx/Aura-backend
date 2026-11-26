@@ -103,6 +103,10 @@ function dataDaMeta(ts, fallback) {
 function textoDaMensagem(msg) {
   return (msg.text && msg.text.body)
     || msg.caption
+    // Cloud API: a legenda de foto, vídeo e documento mora dentro do objeto do tipo.
+    || (msg.image && msg.image.caption)
+    || (msg.video && msg.video.caption)
+    || (msg.document && msg.document.caption)
     || (msg.button && msg.button.text)
     || (msg.interactive && msg.interactive.button_reply && msg.interactive.button_reply.title)
     || `[${msg.type || 'mensagem'}]`;
@@ -322,20 +326,21 @@ async function registrarInbound(tenant, msg, { nome = null, agora = new Date() }
       `-- hubwa:conv-upsert
        INSERT INTO hub_conversations
          (company_id, channel, external_id, customer_name,
-          last_inbound_at, last_message_at, aguardando_resposta_desde)
-       VALUES ($1, 'whatsapp', $2, $3, $4, $4, $5)
+          last_inbound_at, last_message_at, aguardando_resposta_desde, status)
+       VALUES ($1, 'whatsapp', $2, $3, $4, $4, $5, $6)
        ON CONFLICT (company_id, channel, external_id) DO UPDATE SET
          customer_name = COALESCE(EXCLUDED.customer_name, hub_conversations.customer_name),
          last_inbound_at = GREATEST(COALESCE(hub_conversations.last_inbound_at, EXCLUDED.last_inbound_at), EXCLUDED.last_inbound_at),
          last_message_at = GREATEST(COALESCE(hub_conversations.last_message_at, EXCLUDED.last_message_at), EXCLUDED.last_message_at),
          aguardando_resposta_desde = COALESCE(hub_conversations.aguardando_resposta_desde, EXCLUDED.aguardando_resposta_desde),
-         -- conversa resolvida que recebe mensagem nova reabre para a IA
+         -- conversa resolvida que recebe mensagem nova reabre (para a IA; nas
+         -- lojas, sem Aurinha, para "precisa de você")
          status = CASE WHEN hub_conversations.status = 'resolvida'
-                       THEN 'ia' ELSE hub_conversations.status END,
+                       THEN $6 ELSE hub_conversations.status END,
          updated_at = NOW()
        RETURNING id, company_id, external_id, customer_name, status,
                  last_inbound_at, ultima_mensagem_humana_em, aguardando_resposta_desde`,
-      [companyId, phone, nome || null, quando, velha ? null : quando]
+      [companyId, phone, nome || null, quando, velha ? null : quando, tenant.statusAberto || 'ia']
     );
     const conv = convRows[0];
     if (!conv) return { ok: false, reason: 'SEM_CONVERSA' };
@@ -355,6 +360,13 @@ async function registrarInbound(tenant, msg, { nome = null, agora = new Date() }
     await logEvent(companyId, conv.id, 'mensagem_recebida', {
       canal: 'whatsapp', tipo: msg.type || null, external_message_id: msg.id,
     });
+
+    // Foto e áudio: o webhook só traz o id da mídia. Baixa e guarda para a
+    // thread mostrar (não espera: a Aurinha e o relógio não dependem disso).
+    const hubMidia = require('./hubWhatsappMidia');
+    if (hubMidia.midiaDaMensagem(msg)) {
+      hubMidia.guardarRecebida({ companyId, conversationId: conv.id, msg }).catch(() => {});
+    }
 
     // Resposta que ficou parada esperando template/janela perde o sentido
     // com fala nova: a avaliação abaixo decide o que dizer agora.

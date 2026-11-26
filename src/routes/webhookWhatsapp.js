@@ -18,6 +18,11 @@ const hubWhatsapp = require('../services/hubWhatsapp');
 // o POST é recusado (401). Lidos a cada requisição (INC-2026-10-21-03, tq-101).
 const verifyToken = () => process.env.WA_VERIFY_TOKEN || null;
 const appSecret   = () => process.env.WA_APP_SECRET || null;
+// Tela de Conversas das LOJAS: mensagem recebida (e o eco do celular) também
+// vira conversa no hub, sem Aurinha. Desligado por padrão — só com
+// WA_HUB_LOJAS_LIGADO=1 no ambiente (a tela segue atrás da trava
+// WHATSAPP_OFICIAL_LIBERADO do app; ligar aqui é decisão do Caio).
+const hubLojasLigado = () => process.env.WA_HUB_LOJAS_LIGADO === '1';
 
 // GET /webhooks/whatsapp — Meta webhook verification
 // Meta envia: ?hub.mode=subscribe&hub.verify_token=TOKEN&hub.challenge=XXXX
@@ -237,6 +242,9 @@ router.post('/', async (req, res) => {
               if (hubTenant) {
                 await hubWhatsapp.registrarEcho(hubTenant, echo)
                   .catch((e) => console.error('[WA-WEBHOOK] hub echo error:', e.message));
+              } else if (hubLojasLigado()) {
+                await hubWhatsapp.registrarEcho({ companyId }, echo)
+                  .catch((e) => console.error('[WA-WEBHOOK] hub echo (loja) error:', e.message));
               }
               const toPhone = waOutbox.normalizePhone(echo.to) || echo.to;
               const content = echo.text?.body || echo.caption || `[${echo.type || 'mensagem'}]`;
@@ -351,6 +359,14 @@ router.post('/', async (req, res) => {
             touched,
             isReply: !!(msg.context && msg.context.id) || msg.type === 'button' || msg.type === 'interactive',
           }).catch((e) => console.error('[WA-WEBHOOK] consent error:', e.message));
+          // Tela de Conversas das lojas: grava a conversa e a mensagem (e baixa
+          // a foto/áudio). Sem Aurinha: a conversa fica "precisa de você".
+          if (hubLojasLigado()) {
+            const contato = (value.contacts || []).find((c) => c && c.wa_id === msg.from);
+            await hubWhatsapp.registrarInbound({ companyId, enabled: false, plantao: null, statusAberto: 'precisa_humano' }, msg, {
+              nome: (contato && contato.profile && contato.profile.name) || null,
+            }).catch((e) => console.error('[WA-WEBHOOK] hub inbound (loja) error:', e.message));
+          }
         }
       }
     }

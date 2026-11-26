@@ -20,6 +20,7 @@ const db = require('../config/database');
 const igOutbox = require('../services/igOutbox');
 const waOutbox = require('../services/waOutbox');
 const hubWhatsapp = require('../services/hubWhatsapp');
+const hubMidia = require('../services/hubWhatsappMidia');
 
 const CATEGORIES = ['produto', 'troca', 'entrega', 'pagamento', 'novidades'];
 const STATUSES = ['ia', 'precisa_humano', 'humano', 'resolvida'];
@@ -108,11 +109,15 @@ router.get('/conversations/:convId/messages', async (req, res) => {
 
     const { rows: messages } = conv[0].channel === 'whatsapp'
       ? await db.query(
-        `SELECT id, direction, content, author, created_at, metadata->>'source_type' AS source_type,
-                metadata->>'tipo' AS tipo, metadata->>'image_url' AS image_url
-           FROM hub_messages
-          WHERE conversation_id = $1
-          ORDER BY created_at ASC LIMIT 200`,
+        `-- hub:thread-whatsapp
+         SELECT * FROM (
+           SELECT id, direction, content, author, created_at, metadata->>'source_type' AS source_type,
+                  metadata->>'tipo' AS tipo, metadata->>'image_url' AS image_url,
+                  metadata->'media' AS media
+             FROM hub_messages
+            WHERE conversation_id = $1
+            ORDER BY created_at DESC LIMIT 200
+         ) t ORDER BY created_at ASC`,
         [convId]
       )
       : await db.query(
@@ -130,6 +135,15 @@ router.get('/conversations/:convId/messages', async (req, res) => {
         ORDER BY created_at ASC`,
       [convId]
     );
+    // Foto e áudio guardados no R2 privado: URL assinada de vida curta (1 h).
+    // A chave nunca sai do servidor.
+    for (const m of messages) {
+      if (!Object.prototype.hasOwnProperty.call(m, 'media')) continue;
+      const media = m.media;
+      m.media = media && media.key
+        ? { kind: media.kind, mime: media.mime, url: await hubMidia.urlDaMidia(media.key) }
+        : null;
+    }
     res.json({ conversation: conv[0], messages, pending_approvals: pending });
   } catch (e) {
     if (isMissingSchema(e)) return res.status(409).json({ error: 'Hub ainda não disponível (migration pendente)' });
@@ -242,6 +256,8 @@ router.post('/conversations/:convId/reply', async (req, res) => {
 // Conversa aberta do WhatsApp: produto, orçamento, Pix e link da loja
 // (mensagens de sessão, sem custo).
 router.use(require('./hubSocialRico'));
+// Foto e áudio da conversa aberta (WebM/Opus do Chrome vira OGG/Opus).
+router.use(require('./hubSocialMidia'));
 
 // ── Modo aprovação ──────────────────────────────────────────
 router.post('/outbox/:outboxId/approve', async (req, res) => {
