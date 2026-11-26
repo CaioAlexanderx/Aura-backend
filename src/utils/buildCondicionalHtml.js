@@ -113,10 +113,21 @@ function detalheDaPeca(i) {
   return { cor: null, tam: null, linha: i.variant_label || '' };
 }
 
+function voltou(i) {
+  return !!i && (i.situacao === 'voltou' || i.situacao === 'voltou_defeito');
+}
+
+// Peca devolvida fica na lista (riscada) mas fora da soma e da contagem.
 function totalDasPecas(cond) {
-  const itens = cond.items || [];
+  const itens = (cond.items || []).filter((i) => !voltou(i));
   const cents = itens.reduce((s, i) => s + Math.round((Number(i.unit_price) || 0) * 100), 0);
   return { n: itens.length, valor: cents / 100 };
+}
+
+/** 'Voltou em 27/11' (decided_at, fuso SP) */
+function voltouEm(i) {
+  const p = partes(ymdDe(i.decided_at));
+  return p ? `Voltou em ${p.d}/${p.m}` : 'Voltou';
 }
 
 function enderecoDaLoja(company) {
@@ -133,7 +144,8 @@ function folhaA4(cond, company) {
   const contato = [enderecoDaLoja(company), company.phone].filter(Boolean).join(' · ');
   const linhas = (cond.items || []).map((i) => {
     const d = detalheDaPeca(i);
-    return `<tr><td>${esc(i.product_name)}</td>`
+    const v = voltou(i);
+    return `<tr${v ? ' class="vt"' : ''}><td>${esc(i.product_name)}${v ? `<small>${esc(voltouEm(i))}</small>` : ''}</td>`
       + `<td class="cv">${esc(d.cor || (d.linha || '—'))}</td><td class="cv">${esc(d.tam || '—')}</td>`
       + `<td class="rt">R$ ${brl(i.unit_price)}</td></tr>`;
   }).join('');
@@ -161,8 +173,10 @@ function folhaBobina(cond, company) {
   const termos = termosDe(cond);
   const linhas = (cond.items || []).map((i) => {
     const d = detalheDaPeca(i);
-    return `<div class="ln"><span>${esc(i.product_name)}</span><span>${brl(i.unit_price)}</span></div>`
-      + (d.linha ? `<div>&nbsp;&nbsp;${esc(d.linha)}</div>` : '');
+    const v = voltou(i);
+    return `<div class="ln${v ? ' vt' : ''}"><span>${esc(i.product_name)}</span><span>${brl(i.unit_price)}</span></div>`
+      + (d.linha ? `<div${v ? ' class="vt"' : ''}>&nbsp;&nbsp;${esc(d.linha)}</div>` : '')
+      + (v ? `<div>&nbsp;&nbsp;${esc(voltouEm(i))}</div>` : '');
   }).join('');
   const titulo = foiAtualizada(cond) ? 'COMPROVANTE DE CONDICIONAL (ATUALIZADO)' : 'COMPROVANTE DE CONDICIONAL';
   return `<div class="c bb">${esc(String(nomeDaLoja(company)).toUpperCase())}</div>`
@@ -192,6 +206,8 @@ const CSS_A4 = `
     th { text-align: left; font-size: 10px; text-transform: uppercase; border-bottom: 1px solid #111; padding: 4px 0; }
     td { padding: 5px 0; border-bottom: 1px solid #ddd; vertical-align: top; }
     .rt { text-align: right; } .cv { text-align: left; }
+    tr.vt td { text-decoration: line-through; color: #666; }
+    tr.vt td small { display: block; text-decoration: none; font-size: 10px; }
     .tot { display: flex; justify-content: space-between; font-size: 14px; font-weight: bold; padding: 6px 0; border-bottom: 2px solid #111; margin-bottom: 8px; }
     .tm { border: 1px solid #111; padding: 8px; margin: 10px 0; font-size: 11px; }
     .tm b { display: block; margin-bottom: 4px; }
@@ -205,6 +221,7 @@ const CSS_80 = `
     .c { text-align: center; } .bb { font-weight: bold; }
     hr { border: 0; border-top: 1px dashed #000; margin: 4px 0; }
     .ln { display: flex; justify-content: space-between; gap: 6px; }
+    .vt { text-decoration: line-through; }
     .box { border: 2px solid #000; text-align: center; font-weight: bold; padding: 3px; margin: 4px 0; }
     .sg { margin-top: 28px; border-top: 1px solid #000; padding-top: 2px; text-align: center; }`;
 

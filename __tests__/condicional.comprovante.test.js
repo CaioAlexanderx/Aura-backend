@@ -52,13 +52,13 @@ function condicionalRow(extra = {}) {
   };
 }
 
-function simular({ cond = condicionalRow(), eventos = [], lojaDaCond = LOJA } = {}) {
+function simular({ cond = condicionalRow(), eventos = [], lojaDaCond = LOJA, pecas = itens } = {}) {
   db.query.mockImplementation((sql, params) => {
     const s = String(sql);
     if (/FROM condicionais WHERE/.test(s)) {
       return Promise.resolve({ rows: params[1] === lojaDaCond ? [cond] : [] });
     }
-    if (/FROM condicional_itens/.test(s)) return Promise.resolve({ rows: itens });
+    if (/FROM condicional_itens/.test(s)) return Promise.resolve({ rows: pecas });
     if (/FROM condicional_eventos/.test(s)) return Promise.resolve({ rows: eventos });
     if (/FROM companies/.test(s)) return Promise.resolve({ rows: [EMPRESA] });
     return Promise.resolve({ rows: [] });
@@ -154,6 +154,45 @@ describe('comprovante da condicional — A4', () => {
     simular({ eventos: [{ id: 'e2', tipo: 'peca_acrescentada' }] });
     const r = await request(app).get(`/companies/${LOJA}/print/condicional/${CID}/a4`);
     expect(r.text).toContain('Comprovante de condicional (atualizado)');
+  });
+});
+
+describe('devolucao parcial', () => {
+  // 3 pecas; a blusa voltou (decided_at 27/11 00:30 em SP = 03:30Z) e o brinco voltou com defeito.
+  const parcial = [
+    itens[0],
+    { ...itens[1], situacao: 'voltou', decided_at: new Date('2026-11-27T03:30:00Z') },
+    { ...itens[2], situacao: 'voltou_defeito', decided_at: new Date('2026-11-27T15:00:00Z') },
+  ];
+
+  test('A4: devolvida riscada com a data, fora da soma e da contagem', async () => {
+    simular({ pecas: parcial });
+    const h = (await request(app).get(`/companies/${LOJA}/print/condicional/${CID}/a4`)).text;
+    expect(h).toContain('Total das peças (1)');
+    expect(h).toContain('R$ 189,90</span></div>');
+    expect(h).not.toContain('389,70');
+    expect(h).not.toContain('R$ 319,80');
+    expect(h).toContain('<tr class="vt"><td>Blusa Tricô Nina<small>Voltou em 27/11</small>');
+    expect(h).toContain('<tr class="vt"><td>Brinco Argola Luz<small>Voltou em 27/11</small>');
+    expect(h).toContain('<tr><td>Vestido Midi Lívia</td>');
+  });
+
+  test('bobina: mesma regra', async () => {
+    simular({ pecas: parcial });
+    const h = (await request(app).get(`/companies/${LOJA}/print/condicional/${CID}`)).text;
+    expect(h).toContain('TOTAL DAS PEÇAS (1)</span><span>189,90');
+    expect(h).toContain('<div class="ln vt"><span>Blusa Tricô Nina</span>');
+    expect(h).toContain('Voltou em 27/11');
+    expect(h).not.toContain('389,70');
+  });
+
+  test('com cliente e ficou somam; sem devolucao nada fica riscado', async () => {
+    simular({ pecas: [itens[0], { ...itens[1], situacao: 'ficou' }, itens[2]] });
+    const h = (await request(app).get(`/companies/${LOJA}/print/condicional/${CID}/a4`)).text;
+    expect(h).toContain('Total das peças (3)');
+    expect(h).toContain('R$ 389,70');
+    expect(h).not.toContain('<tr class="vt">');
+    expect(h).not.toContain('Voltou em');
   });
 });
 
