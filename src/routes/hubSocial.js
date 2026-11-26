@@ -20,6 +20,7 @@ const db = require('../config/database');
 const igOutbox = require('../services/igOutbox');
 const waOutbox = require('../services/waOutbox');
 const hubWhatsapp = require('../services/hubWhatsapp');
+const { anexarEtiquetas, UUID_RE } = require('../services/hubEtiquetas');
 
 const CATEGORIES = ['produto', 'troca', 'entrega', 'pagamento', 'novidades'];
 const STATUSES = ['ia', 'precisa_humano', 'humano', 'resolvida'];
@@ -39,7 +40,7 @@ async function logEvent(companyId, conversationId, type, detail, userId) {
 }
 
 // ── GET /hub/conversations ──────────────────────────────────
-// Filtros: ?channel= &status= &category= &limit=
+// Filtros: ?channel= &status= &category= &label= &limit=
 router.get('/conversations', async (req, res) => {
   const cid = req.params.id;
   const { channel, status, category } = req.query;
@@ -50,15 +51,25 @@ router.get('/conversations', async (req, res) => {
     if (channel) { vals.push(channel); where.push(`c.channel = $${vals.length}`); }
     if (status && STATUSES.includes(status)) { vals.push(status); where.push(`c.status = $${vals.length}`); }
     if (category && CATEGORIES.includes(category)) { vals.push(category); where.push(`c.category = $${vals.length}`); }
+    // Etiqueta (migration 474): só conversas que a têm. A etiqueta tem de ser desta loja.
+    const label = req.query.label;
+    if (label && UUID_RE.test(String(label))) {
+      vals.push(label);
+      where.push(`EXISTS (SELECT 1 FROM hub_conversation_labels cl JOIN hub_labels l ON l.id = cl.label_id
+                           WHERE cl.conversation_id = c.id AND cl.label_id = $${vals.length} AND l.company_id = c.company_id)`);
+    }
     vals.push(limit);
 
     const listSql = (preview) => `-- hub:conversations
-       SELECT c.id, c.channel, c.external_id, c.customer_id, c.customer_name,
+       SELECT c.id, c.channel, c.external_id, c.customer_id,
+              -- "É ela": o nome do cadastro vale no lugar do nome do perfil.
+              COALESCE(cu.name, c.customer_name) AS customer_name,
               c.status, c.category, c.handoff_reason, c.last_inbound_at, c.last_message_at,
               ${preview} AS last_message_preview,
               (SELECT COUNT(*)::int FROM ig_outbox o
                 WHERE o.conversation_id = c.id AND o.status = 'pending_approval') AS pending_approvals
          FROM hub_conversations c
+         LEFT JOIN customers cu ON cu.id = c.customer_id AND cu.company_id = c.company_id
         WHERE ${where.join(' AND ')}
         ORDER BY c.last_message_at DESC NULLS LAST
         LIMIT $${vals.length}`;
@@ -86,6 +97,7 @@ router.get('/conversations', async (req, res) => {
         GROUP BY channel, status`,
       [cid]
     );
+    await anexarEtiquetas(rows);
     res.json({ conversations: rows, counts });
   } catch (e) {
     if (isMissingSchema(e)) return res.json({ conversations: [], counts: [], schema_pending: true });
@@ -100,11 +112,16 @@ router.get('/conversations/:convId/messages', async (req, res) => {
   const { convId } = req.params;
   try {
     const { rows: conv } = await db.query(
-      `SELECT id, channel, external_id, customer_name, status, category, handoff_reason, last_inbound_at
-         FROM hub_conversations WHERE id = $1 AND company_id = $2 LIMIT 1`,
+      `SELECT c.id, c.channel, c.external_id, c.customer_id,
+              COALESCE(cu.name, c.customer_name) AS customer_name,
+              c.status, c.category, c.handoff_reason, c.last_inbound_at
+         FROM hub_conversations c
+         LEFT JOIN customers cu ON cu.id = c.customer_id AND cu.company_id = c.company_id
+        WHERE c.id = $1 AND c.company_id = $2 LIMIT 1`,
       [convId, cid]
     );
     if (!conv.length) return res.status(404).json({ error: 'Conversa não encontrada' });
+    await anexarEtiquetas(conv);
 
     const { rows: messages } = conv[0].channel === 'whatsapp'
       ? await db.query(
@@ -237,6 +254,9 @@ router.post('/conversations/:convId/reply', async (req, res) => {
     res.status(500).json({ error: 'Erro ao enviar resposta' });
   }
 });
+
+// Etiquetas das conversas e "É ela" (cadastro de Clientes da conversa).
+router.use(require('./hubSocialEtiquetas'));
 
 // ── Modo aprovação ──────────────────────────────────────────
 router.post('/outbox/:outboxId/approve', async (req, res) => {
