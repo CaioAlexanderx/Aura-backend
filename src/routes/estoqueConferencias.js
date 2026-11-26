@@ -34,6 +34,7 @@
 const router = require('express').Router({ mergeParams: true });
 const db = require('../config/database');
 const svc = require('../services/conferenciaDeEstoque');
+const { condicionalLiberada } = require('../services/condicional');
 const { podeMexer } = require('../services/transferenciaDeEstoque');
 const { ehSoConsulta, podeVerCusto } = require('../middleware/estoqueSoConsulta');
 const { hasConferenciaSchema } = require('../utils/conferenciaSchema');
@@ -185,7 +186,7 @@ router.get('/', async (req, res) => {
 // ─── GET /:countId ───────────────────────────────────────────
 router.get('/:countId', async (req, res) => {
   try {
-    return responder(req, res, 200, await svc.obter(db, cid(req), req.params.countId));
+    return responder(req, res, 200, await svc.obter(db, cid(req), req.params.countId, { comCondicional: condicionalLiberada(req) }));
   } catch (err) { return tratarErro(res, err, 'GET /:countId'); }
 });
 
@@ -194,7 +195,7 @@ router.put('/:countId/itens', async (req, res) => {
   let pedido;
   try { pedido = svc.lerRegistro(req.body); } catch (e) { return tratarErro(res, e, 'PUT itens'); }
   try {
-    const out = await emTransacao((c) => svc.registrarItem(c, { companyId: cid(req), countId: req.params.countId, ...pedido }));
+    const out = await emTransacao((c) => svc.registrarItem(c, { companyId: cid(req), countId: req.params.countId, ...pedido, comCondicional: condicionalLiberada(req) }));
     return responder(req, res, 200, out);
   } catch (err) { return tratarErro(res, err, 'PUT itens'); }
 });
@@ -210,7 +211,7 @@ router.delete('/:countId/itens/:itemId', async (req, res) => {
 // ─── GET /:countId/diferencas ────────────────────────────────
 router.get('/:countId/diferencas', async (req, res) => {
   try {
-    return responder(req, res, 200, await svc.diferencas(db, cid(req), req.params.countId));
+    return responder(req, res, 200, await svc.diferencas(db, cid(req), req.params.countId, { comCondicional: condicionalLiberada(req) }));
   } catch (err) { return tratarErro(res, err, 'GET diferencas'); }
 });
 
@@ -226,6 +227,7 @@ router.post('/:countId/aplicar', async (req, res) => {
       userId: uid(req),
       zerarNaoContados: b.zerar_nao_contados === true,
       ignorarItemIds: ignorar,
+      comCondicional: condicionalLiberada(req),
       motivo: Object.prototype.hasOwnProperty.call(b, 'motivo') ? b.motivo : undefined,
     }));
     return responder(req, res, 200, out);
