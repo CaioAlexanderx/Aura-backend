@@ -11,6 +11,7 @@
 // POST   /studio/quotes/:qid/send             → StudioQuoteCreated {quote_url, wa_me_link}
 // POST   /studio/quotes/:qid/convert          → {order_id, quote} (idempotente)
 // POST   /studio/quotes/:qid/aprovar          → {order_id, quote} (a lojista aprova; vídeo 3D, 28/09/2026)
+// PATCH  /studio/quotes/:qid/validade         → {quote} (renova a validade; 26/11/2026, B1c)
 //
 // M2 (30/05/2026): convert auto-cria marco de sinal em studio_payments
 // quando deposit_amount > 0 (fecha o loop orçamento→sinal sem passo manual).
@@ -32,6 +33,7 @@ const { notasDoPedidoAprovado } = require('../services/orcamentoEmVideo');
 const frequentes = require('../services/produtosFrequentesDoOrcamento');
 const { inserirPedidoStudio, inserirItemPedidoStudio } = require('../services/studioPedido');
 const { garantirClienteDoOrcamento } = require('../services/clienteDoOrcamento');
+const validade = require('../utils/validadeDoOrcamento');
 // 04/11/2026: orçamento que virou pedido avisa o celular.
 const lojaEvents = require('../services/lojaEvents');
 // 25/11/2026 (p-185): aprovar lanca a conta a receber e os marcos do pedido.
@@ -593,6 +595,11 @@ async function converterOrcamento(req, res, { statusAceitos, msgStatus, exigeIte
       await client.query('ROLLBACK'); aberta = false;
       return res.json({ order_id: quote.order_id, quote });
     }
+    // B1c: a loja tambem nao aprova orcamento vencido sem renovar.
+    if (quote.status === 'expired' || (quote.status === 'sent' && validade.vencido(quote.expires_at))) {
+      await client.query('ROLLBACK'); aberta = false;
+      return res.status(409).json({ error: validade.MSG_VENCIDO_LOJA, code: 'ORCAMENTO_VENCIDO' });
+    }
     if (!statusAceitos.includes(quote.status)) {
       await client.query('ROLLBACK'); aberta = false;
       return res.status(400).json({ error: msgStatus(quote.status) });
@@ -670,6 +677,79 @@ router.post('/quotes/:qid/aprovar', function(req, res) {
     tag: '[studio/quotes/:qid/aprovar]',
     msgErro: 'Erro ao aprovar o orçamento',
   });
+});
+
+// ─── PATCH /quotes/:qid/validade ─────────────────────────────
+// B1c (26/11/2026): a loja renova a validade de um orcamento enviado ou
+// vencido, sem reenviar nem mexer em itens e valores. Corpo: { valid_until:
+// 'YYYY-MM-DD' } (vale ate o fim desse dia em Sao Paulo; de hoje a 1 ano) ou
+// { validity_days: n } (n dias a partir de hoje). 'expired' volta a 'sent'
+// (o mesmo link da cliente volta a valer). Escopo por empresa (company_id).
+router.patch('/quotes/:qid/validade', async function(req, res) {
+  const cid = req.params.id;
+  const qid = req.params.qid;
+  const { valid_until, validity_days } = req.body || {};
+
+  const hoje = validade.diaEmSP(new Date());
+  let dia;
+  if (valid_until !== undefined && valid_until !== null && valid_until !== '') {
+    dia = String(valid_until).slice(0, 10);
+    if (!validade.diaExiste(dia)) {
+      return res.status(400).json({ error: 'valid_until deve ser uma data no formato AAAA-MM-DD', code: 'VALIDADE_INVALIDA' });
+    }
+  } else if (validity_days !== undefined && validity_days !== null && validity_days !== '') {
+    const n = parseInt(validity_days, 10);
+    if (!Number.isFinite(n) || n < 0 || n > 365) {
+      return res.status(400).json({ error: 'validity_days deve ser de 0 a 365', code: 'VALIDADE_INVALIDA' });
+    }
+    dia = validade.somarDias(hoje, n);
+  } else {
+    return res.status(400).json({ error: 'Informe valid_until (AAAA-MM-DD) ou validity_days', code: 'VALIDADE_INVALIDA' });
+  }
+  if (dia < hoje) {
+    return res.status(400).json({ error: 'A nova validade não pode ser anterior a hoje', code: 'VALIDADE_NO_PASSADO' });
+  }
+  if (dia > validade.somarDias(hoje, 365)) {
+    return res.status(400).json({ error: 'A nova validade pode ser de até 1 ano', code: 'VALIDADE_INVALIDA' });
+  }
+
+  const client = await db.connect();
+  try {
+    await client.query('BEGIN');
+    const cur = await client.query(
+      `SELECT id, status FROM studio_quotes WHERE id = $1 AND company_id = $2 LIMIT 1 FOR UPDATE`,
+      [qid, cid]
+    );
+    if (!cur.rows.length) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ error: 'Orçamento não encontrado' });
+    }
+    if (!['sent', 'expired'].includes(cur.rows[0].status)) {
+      await client.query('ROLLBACK');
+      return res.status(409).json({
+        error: `Só se renova a validade de orçamento enviado ou vencido. Status atual: '${cur.rows[0].status}'`,
+        code: 'STATUS_NAO_RENOVAVEL',
+      });
+    }
+    const upd = await client.query(
+      `UPDATE studio_quotes
+          SET expires_at    = $1::timestamptz,
+              validity_days = GREATEST(1, $2::int),
+              status        = 'sent',
+              updated_at    = NOW()
+        WHERE id = $3 AND company_id = $4
+        RETURNING *`,
+      [validade.fimDoDiaSP(dia), validade.diasEntre(hoje, dia), qid, cid]
+    );
+    await client.query('COMMIT');
+    return res.json({ quote: upd.rows[0] });
+  } catch (err) {
+    await client.query('ROLLBACK').catch(() => {});
+    console.error('[studio/quotes/:qid/validade]', err.message);
+    return res.status(500).json({ error: 'Erro ao renovar a validade' });
+  } finally {
+    client.release();
+  }
 });
 
 module.exports = router;

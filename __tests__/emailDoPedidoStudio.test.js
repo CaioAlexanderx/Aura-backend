@@ -86,9 +86,23 @@ describe('linkDoPedidoDaVitrine', () => {
     });
   });
 
-  test('sem endereco absoluto do app, sem link (nunca um link relativo no e-mail)', async () => {
+  test('APP_PUBLIC_URL vazia: cai no APP_URL, nunca um link relativo no e-mail', async () => {
     linha.studio_settings = {};
     process.env.APP_PUBLIC_URL = '';
+    const antes = process.env.APP_URL;
+    process.env.APP_URL = 'https://app.exemplo.com.br/';
+    try {
+      expect(await linkDoPedidoDaVitrine(PEDIDO)).toEqual({
+        url: `https://app.exemplo.com.br/acompanhar/${TOKEN}`, rotulo: 'Acompanhar meu pedido',
+      });
+    } finally {
+      if (antes === undefined) delete process.env.APP_URL; else process.env.APP_URL = antes;
+    }
+  });
+
+  test('sem nenhuma variavel e APP_URL em http, sem link (exige https)', async () => {
+    linha.studio_settings = {};
+    process.env.APP_PUBLIC_URL = 'http://inseguro.local';
     expect(await linkDoPedidoDaVitrine(PEDIDO)).toBeNull();
   });
 
