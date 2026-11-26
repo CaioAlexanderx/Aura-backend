@@ -1055,7 +1055,7 @@ async function applyStatusUpdate(companyId, wamid, status, errorText) {
 }
 
 // Webhook: aprovação/rejeição de template (message_template_status_update).
-async function applyTemplateStatus(companyId, { name, language, status, metaTemplateId }) {
+async function applyTemplateStatus(companyId, { name, language, status, metaTemplateId, reason = null }) {
   if (!name || !status) return;
   await db.query(
     `-- wa:template-status
@@ -1067,6 +1067,13 @@ async function applyTemplateStatus(companyId, { name, language, status, metaTemp
        last_status_at = NOW(), updated_at = NOW()`,
     [companyId, name, language || 'pt_BR', status, metaTemplateId || null]
   );
+  // Texto novo da lojista (tela do WhatsApp, 26/11/2026): aprovado vira o
+  // texto em uso e a decisão cai no sino. Nunca derruba o webhook.
+  try {
+    await require('./waAutomaticas/modelosStore').onTemplateStatus(companyId, { name, status, reason });
+  } catch (e) {
+    console.error('[waOutbox] decisão de modelo falhou:', e.message);
+  }
 }
 
 module.exports = {
