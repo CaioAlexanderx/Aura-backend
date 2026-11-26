@@ -238,6 +238,9 @@ router.post('/conversations/:convId/reply', async (req, res) => {
   }
 });
 
+// Conversa fechada do WhatsApp: convites prontos que gastam 1 aviso.
+router.use(require('./hubSocialConvites'));
+
 // ── Modo aprovação ──────────────────────────────────────────
 router.post('/outbox/:outboxId/approve', async (req, res) => {
   const cid = req.params.id;
