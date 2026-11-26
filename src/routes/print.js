@@ -27,6 +27,8 @@
 //   - GET /delivery/:saleId?format=80|58|a4[&autoprint=1]: o papel sozinho.
 //   Endereco: o retrato da venda (sales.delivery_address, migration 435) e,
 //   na venda sem retrato, o cadastro atual do cliente.
+// 25/11/2026 (C8): GET /print/condicional/:cid (bobina 80 mm) e /a4 — comprovante
+//   da venda condicional (utils/buildCondicionalHtml.js).
 // ============================================================
 const creditoDaCliente = require('../services/creditoDaCliente');
 const express = require('express');
@@ -45,6 +47,8 @@ const { buildServiceOrderHtml } = require('../utils/buildServiceOrderHtml');
 const { buildOticaOsHtml } = require('../utils/buildOticaOsHtml');
 // 14/11/2026: nome da cor da variante no cupom (CP2a da revisao de cores).
 const { rotuloDaVariante } = require('../services/nomeDaCor');
+const condicionalService = require('../services/condicional');
+const { buildCondicionalHtml } = require('../utils/buildCondicionalHtml');
 const { buildWarrantyHtml } = require('../utils/buildWarrantyHtml');
 const { buildCarneA4Html, classifyInstallments } = require('../utils/buildCarneA4Html');
 const { purchasesByGroup, NO_ACCOUNT_KEY } = require('../services/credit/carnePurchases');
@@ -1649,5 +1653,42 @@ router.get('/credit/receipts/:transactionId', requireAuth, async (req, res) => {
     res.status(500).json({ error: 'Erro ao gerar recibo de crediario' });
   }
 });
+
+// ============================================================
+// GET /print/condicional/:cid[/a4] — comprovante da condicional (C8, 25/11/2026)
+// Bobina de 80 mm por padrao; /a4 para folha A4. ?autoprint=1 abre ja no
+// dialogo de impressao. Mesma trava das rotas de /condicionais: desligada,
+// 404 para o lojista (staff passa). Escopo: so condicional desta loja.
+// ============================================================
+async function _comprovanteDaCondicional(req, res, format) {
+  try {
+    if (!condicionalService.condicionalLiberada(req)) return res.status(404).json({ error: 'Não encontrado' });
+    const cid = String(req.params.cid || '');
+    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(cid)) {
+      return res.status(404).json({ error: 'Condicional não encontrada.', code: 'COND_NAO_ENCONTRADA' });
+    }
+    const companyId = req.params.id;
+    const [cond, { rows }] = await Promise.all([
+      condicionalService.lerCondicionalCompleta(db, companyId, cid, { comPrecoDeHoje: false }),
+      db.query(
+        `SELECT legal_name, trade_name, cnpj, phone, logo_url,
+                address_street, address_number, address_city, address_state
+           FROM companies WHERE id = $1`, [companyId]
+      ),
+    ]);
+    if (!cond || !rows.length) return res.status(404).json({ error: 'Condicional não encontrada.', code: 'COND_NAO_ENCONTRADA' });
+    res.setHeader('Content-Type', 'text/html; charset=utf-8');
+    res.setHeader('Cache-Control', 'no-store');
+    return res.send(buildCondicionalHtml(cond, rows[0], { format, autoprint: req.query.autoprint === '1' }));
+  } catch (err) {
+    if (err && (err.code === '42703' || err.code === '42P01')) {
+      return res.status(503).json({ error: 'As condicionais ainda não estão disponíveis. Tente de novo em instantes.', code: 'COND_INDISPONIVEL' });
+    }
+    console.error('[print] condicional error:', err && err.message);
+    return res.status(500).json({ error: 'Não deu para gerar o comprovante agora. Tente de novo em instantes.' });
+  }
+}
+router.get('/condicional/:cid', requireAuth, (req, res) => _comprovanteDaCondicional(req, res, '80'));
+router.get('/condicional/:cid/a4', requireAuth, (req, res) => _comprovanteDaCondicional(req, res, 'a4'));
 
 module.exports = router;
