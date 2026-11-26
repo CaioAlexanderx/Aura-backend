@@ -65,6 +65,7 @@ const db = require('../config/database');
 const condicional = require('../services/condicional');
 const listaDeCondicionais = require('../services/listaDeCondicionais');
 const decidir = require('../services/condicionalDecidir');
+const resolver = require('../services/condicionalResolver');
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const NAO_ENCONTRADA = { error: 'Condicional não encontrada.', code: 'COND_NAO_ENCONTRADA' };
@@ -137,6 +138,18 @@ router.get('/', async (req, res) => {
   }
 });
 
+// ─── Pecas para resolver (C16) ─────────────────────────────────
+// Antes de /:cid: "para-resolver" nao e um id.
+router.get('/para-resolver', async (req, res) => {
+  try {
+    const out = await resolver.listarParaResolver(db, { empresas: [req.params.id] });
+    res.set('Cache-Control', 'no-store');
+    return res.json(out);
+  } catch (err) {
+    return falhar(res, err, 'para-resolver', 'Não conseguimos carregar as peças para resolver agora. Tente de novo em instantes.');
+  }
+});
+
 router.get('/:cid', async (req, res) => {
   const { id: companyId, cid } = req.params;
   if (!UUID_RE.test(String(cid))) return res.status(404).json(NAO_ENCONTRADA);
@@ -188,5 +201,33 @@ router.patch('/:cid/prazo', decisao('prazo', decidir.mudarPrazo));
 router.post('/:cid/itens', decisao('acrescentar', decidir.acrescentarPecas, { statusNovo: 201 }));
 router.post('/:cid/tudo-devolvido', decisao('tudo-devolvido', decidir.tudoDevolvido));
 router.post('/:cid/cancelar', decisao('cancelar', decidir.cancelarCondicional));
+
+// Resolver uma peca (C16): {acao: 'voltar_estoque'|'baixa', motivo?, motivo_texto?}
+// → 200 {condicional, item_id, acao, desfazer_ate_s}. Erros: 422 COND_RESOLVER_ACAO |
+// COND_RESOLVER_MOTIVO; 404 COND_PECA_NAO_ENCONTRADA; 409 COND_PECA_NAO_RESOLVER |
+// COND_PECA_JA_RESOLVIDA | IDEMPOTENCY_KEY_REUSED. Desfazer (so voltar_estoque, em
+// poucos segundos, se nada mudou): 409 COND_DESFAZER_EXPIRADO | COND_DESFAZER_BAIXA | COND_DESFAZER_NADA.
+function acaoDaPeca(contexto, operacao) {
+  return async (req, res) => {
+    try {
+      const r = await operacao({
+        companyId: req.params.id,
+        itemId: req.params.itemId,
+        userId: req.user && req.user.id,
+        body: req.body,
+        chave: condicional.lerChave(req),
+        hoje: condicional.hojeSP(),
+      });
+      res.set('Cache-Control', 'no-store');
+      const { repetido, ...resto } = r;
+      if (repetido) res.set('Idempotent-Replayed', 'true');
+      return res.status(200).json({ ...resto, ...(repetido ? { idempotent_replay: true } : {}) });
+    } catch (err) {
+      return falhar(res, err, contexto, MSG_ALTERAR);
+    }
+  };
+}
+router.post('/itens/:itemId/resolver', acaoDaPeca('resolver', resolver.resolverPeca));
+router.post('/itens/:itemId/resolver/desfazer', acaoDaPeca('resolver-desfazer', resolver.desfazerResolucao));
 
 module.exports = router;
