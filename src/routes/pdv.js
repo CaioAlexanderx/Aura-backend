@@ -80,6 +80,9 @@ const { findOwnerScopedCustomer, CUSTOMER_NOT_FOUND_BODY } = require('../utils/c
 const matconSaleHooks = require('../services/matconSaleHooks');
 // 09/10/2026 (migration 368): venda com `comanda_id` fecha a comanda do Caixa.
 const comandaSaleHooks = require('../services/comandaSaleHooks');
+// C11 (26/11/2026): cobrar peças de uma condicional na venda (services/condicionalVenda.js).
+const condicionalVenda = require('../services/condicionalVenda');
+const { condicionalLiberada } = require('../services/condicional');
 // 06/10/2026: chave "vender sem estoque" — ver cabecalho do util.
 const { vendaSemEstoqueLiberada, lerVendaSemEstoque } = require('../utils/vendaSemEstoque');
 const { productVisibilityWhere } = require('../utils/companyGroup');
@@ -314,6 +317,14 @@ async function handleSale(req, res, opts = {}) {
   } = req.body;
   if (!items?.length) return res.status(400).json({ error: 'items obrigatorio' });
 
+  // C11: condicional_id + condicional_item_ids. Ausente = a venda de sempre.
+  // Trava CONDICIONAL_LIBERADA: desligada, o lojista nao sabe que existe.
+  const condPedido = condicionalVenda.lerPedido(req.body);
+  if (condPedido) {
+    if (!condicionalLiberada(req)) return res.status(404).json({ error: 'Não encontrado' });
+    if (condPedido.erro) return res.status(condPedido.erro.status).json({ error: condPedido.erro.message, code: condPedido.erro.code });
+  }
+
   // F2: cliente pode ser resolvido/criado dentro da transacao -- por isso
   // customerId e mutavel, e nao o `customer_id` cru do body.
   let customerId = customer_id || null;
@@ -418,6 +429,12 @@ async function handleSale(req, res, opts = {}) {
         return res.status(caixaCheck.status).json(caixaCheck.body);
       }
     }
+    }
+    // C11: trava a condicional e os itens (nesta ordem) na transacao da venda;
+    // 409 se alguma peca ja foi cobrada. Venda comum: nao toca o banco.
+    let condCtx = null;
+    if (condPedido) {
+      condCtx = await condicionalVenda.travar(client, { companyId: req.params.id, pedido: condPedido, items });
     }
     // F2: resolvido DENTRO da transacao -- se a venda falhar adiante, o
     // cadastro criado aqui volta atras junto. Antes do cupom, que precisa
@@ -1018,6 +1035,11 @@ async function handleSale(req, res, opts = {}) {
       // 392 (tc-04): cobranca parcial — a comanda continua aberta com o resto.
       if (comandaResult.comanda_open) sale.comanda_open = true;
     }
+    // C11: pecas da condicional viram cobradas e a condicional encerra se nao sobrou peca fora.
+    let condResumo = null;
+    if (condCtx) {
+      condResumo = await condicionalVenda.gravar(client, { companyId: req.params.id, userId: req.user?.id || null, sale, ctx: condCtx });
+    }
     timing.etapa('ganchos');
 
     await client.query('COMMIT');
@@ -1111,6 +1133,8 @@ async function handleSale(req, res, opts = {}) {
         : null,
       // Matcon M1: so aparece quando a venda veio de um orcamento.
       ...(matconResult ? { matcon: matconResult } : {}),
+      // C11: so aparece quando a venda cobrou pecas de uma condicional.
+      ...(condResumo ? { condicional: condResumo } : {}),
       // INC-2026-11-17-03: so aparece quando a venda usou credito da cliente.
       ...(creditoUsado > 0 ? {
         credito_cliente: {
@@ -1407,6 +1431,8 @@ router.delete('/sale/:saleId', async (req, res) => {
     if (!rows.length) { await client.query('ROLLBACK'); return res.status(404).json({ error: 'Venda nao encontrada' }); }
     const sale = rows[0];
     if (sale.status === 'cancelled') { await client.query('ROLLBACK'); return res.status(409).json({ error: 'Esta venda ja foi cancelada' }); }
+    // C11: condicional -> itens ANTES do estoque (a ordem da venda; evita deadlock).
+    const condCtx = await condicionalVenda.travarAoCancelar(client, { companyId: req.params.id, saleId: req.params.saleId });
     const { rows: items } = await client.query(
       `SELECT si.product_id, si.variant_id, si.quantity, si.product_name_snapshot,
               COALESCE(p.company_id,$2) AS stock_company_id
@@ -1470,6 +1496,8 @@ router.delete('/sale/:saleId', async (req, res) => {
     await matconSaleHooks.afterSaleCancel(client, { companyId: req.params.id, saleId: req.params.saleId });
     // Comandas (368): a comanda que esta venda fechou volta a ficar aberta.
     await comandaSaleHooks.afterSaleCancel(client, { companyId: req.params.id, saleId: req.params.saleId });
+    // C11: as pecas da condicional voltam a 'ficou' sem venda; a condicional reabre.
+    await condicionalVenda.voltarAoCancelar(client, { companyId: req.params.id, saleId: req.params.saleId, userId: req.user?.id || null, ctx: condCtx });
     await client.query('COMMIT');
     resposta = { ok: true, cancelled: req.params.saleId, items_restored: items.filter(i => i.product_id).length, amount_reversed: parseFloat(sale.total_amount) };
   } catch (e) {
