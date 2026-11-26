@@ -158,7 +158,7 @@ describe('cobrar no Caixa', () => {
     expect(r1.status).toBe(201);
     expect(r1.body.condicional).toMatchObject({ id: cond.id, itens: 2, encerrada: false });
     expect(Number(r1.body.sale.total_amount)).toBeCloseTo(209.9, 2);
-    const itensVenda = r1.body.sale.items.map((i) => Number(i.unit_price)).sort();
+    const itensVenda = r1.body.sale.items.map((i) => Number(i.unit_price)).sort((x, y) => x - y);
     expect(itensVenda).toEqual([89.9, 120]);
     expect(await estoque(ID.a)).toBe(estA - 1);
     expect(await estoque(ID.b)).toBe(estB - 1);
