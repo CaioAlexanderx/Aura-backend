@@ -67,9 +67,12 @@ function notaDaBaixa({ numero, motivo, motivo_texto: texto, defect_note: nota })
 const SQL_LISTA = `
   SELECT i.id AS item_id, i.condicional_id, c.company_id, c.numero, c.customer_name, c.status,
          i.product_id, i.variant_id, i.product_name, i.variant_label, i.color_name, i.size_label,
-         i.defect_note, i.decided_at
+         i.defect_note, i.decided_at,
+         CASE WHEN i.variant_id IS NOT NULL THEN v.stock_qty ELSE p.stock_qty END AS estoque
     FROM condicional_itens i
     JOIN condicionais c ON c.id = i.condicional_id
+    LEFT JOIN products p ON p.id = i.product_id
+    LEFT JOIN product_variants v ON v.id = i.variant_id
    WHERE c.company_id = ANY($1::uuid[])
      AND i.situacao = 'voltou_defeito'
      AND i.resolved_at IS NULL
@@ -97,6 +100,8 @@ async function listarParaResolver(q, { empresas }) {
     size_label: r.size_label || null,
     nota: r.defect_note || null,
     voltou_em: r.decided_at || null,
+    // Estoque de agora da peca (variante, se tiver): a janela da baixa diz "de 4 para 3".
+    estoque: r.estoque === null || r.estoque === undefined ? null : Number(r.estoque),
   }));
   return { pecas, total: pecas.length };
 }

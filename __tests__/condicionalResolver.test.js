@@ -48,11 +48,11 @@ describe('listarParaResolver', () => {
     const q = { query: jest.fn(async () => ({ rows: [{
       item_id: I1, condicional_id: COND, company_id: LOJA, numero: 31, customer_name: 'Marina', status: 'encerrada',
       product_id: P, variant_id: V, product_name: 'Blusa', variant_label: 'Off-white · P', color_name: 'Off-white', size_label: 'P',
-      defect_note: 'Fio puxado', decided_at: '2026-11-25T10:00:00Z',
+      defect_note: 'Fio puxado', decided_at: '2026-11-25T10:00:00Z', estoque: '4',
     }] })) };
     const out = await r.listarParaResolver(q, { empresas: [LOJA] });
     expect(out.total).toBe(1);
-    expect(out.pecas[0]).toMatchObject({ item_id: I1, numero_exibicao: 'C-0031', customer_name: 'Marina', nota: 'Fio puxado', color_name: 'Off-white', size_label: 'P' });
+    expect(out.pecas[0]).toMatchObject({ item_id: I1, numero_exibicao: 'C-0031', customer_name: 'Marina', nota: 'Fio puxado', color_name: 'Off-white', size_label: 'P', estoque: 4 });
     expect(q.query.mock.calls[0][0]).toMatch(/resolved_at IS NULL/);
     const vazio = { query: jest.fn() };
     expect(await r.listarParaResolver(vazio, { empresas: ['x'] })).toEqual({ pecas: [], total: 0 });
