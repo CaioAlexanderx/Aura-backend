@@ -21,11 +21,16 @@ const oferta = catalogo.obter('cred_oferta');
 const checkDe = (r, id) => r.checks.find((c) => c.id === id);
 
 describe('catálogo', () => {
-  test('são 16 modelos, cada um com template_base único e categoria certa', () => {
-    expect(catalogo.MODELOS).toHaveLength(16);
-    expect(new Set(catalogo.MODELOS.map((m) => m.template_base)).size).toBe(16);
+  test('são 15 modelos, cada um com template_base único e categoria certa', () => {
+    expect(catalogo.MODELOS).toHaveLength(15);
+    expect(new Set(catalogo.MODELOS.map((m) => m.template_base)).size).toBe(15);
     const util = catalogo.MODELOS.filter((m) => m.categoria === 'UTILITY').map((m) => m.key);
     expect(util.sort()).toEqual(['cred_antes', 'cred_atraso', 'cred_dia']);
+  });
+
+  test('Aniversário tem um modelo "antes" e nenhum "depois"', () => {
+    expect(catalogo.obter('aniv_antes')).toBeTruthy();
+    expect(catalogo.obter('aniv_depois')).toBeNull();
   });
 
   test('todo texto padrão passa na própria validação', () => {
