@@ -303,9 +303,28 @@ async function enviar({ companyId, conversationId, userId, key, campos }) {
     throw erro('SALDO_INDISPONIVEL', 'Não consegui conferir seus avisos agora. Nada foi enviado.', 503);
   }
 
-  // Um convite por conversa por dia e por modelo: duplo clique não gasta dois avisos.
+  // Teto diário da empresa (o mesmo da fila): o INSERT direto não pode furá-lo.
+  if (typeof waOutbox.countToday === 'function' && typeof waOutbox.dailyCap === 'function') {
+    const hojeN = await waOutbox.countToday(companyId, {});
+    if (hojeN >= waOutbox.dailyCap()) {
+      throw erro('LIMITE_DIARIO', 'A loja chegou ao limite de mensagens de hoje. Nada foi enviado.', 409);
+    }
+  }
+
+  // Um convite por conversa por dia e por modelo: duplo clique não gasta dois
+  // avisos. Convite que FALHOU ou foi pulado (e teve o aviso devolvido) não
+  // conta: nesse caso reenvia com uma chave nova (":r<n>").
   const hoje = new Date().toLocaleDateString('en-CA', { timeZone: 'America/Sao_Paulo' });
-  const dedupeKey = `convite:${conversationId}:${c.key}:${hoje}`;
+  const base = `convite:${conversationId}:${c.key}:${hoje}`;
+  const { rows: anteriores } = await db.query(
+    `-- hubconvite:anteriores
+     SELECT status FROM wa_outbox WHERE company_id = $1 AND dedupe_key LIKE $2`,
+    [companyId, `${base}%`]
+  );
+  if (anteriores.some((r) => !['failed', 'skipped'].includes(r.status))) {
+    throw erro('CONVITE_REPETIDO', 'Este convite já foi enviado hoje para esta conversa.', 409);
+  }
+  const dedupeKey = anteriores.length ? `${base}:r${anteriores.length}` : base;
   const outboxId = crypto.randomUUID();
 
   let client;
@@ -320,7 +339,7 @@ async function enviar({ companyId, conversationId, userId, key, campos }) {
        INSERT INTO wa_outbox
          (id, company_id, to_phone, kind, template_name, template_language, components, text_body,
           status, source_type, source_id, dedupe_key, hub_conversation_id, next_attempt_at)
-       VALUES ($1,$2,$3,'template',$4,$5,$6,$7,'pending','humano',$8,$9,$10,NOW())
+       VALUES ($1,$2,$3,'template',$4,$5,$6,$7,'pending','convite_conversa',$8,$9,$10,NOW())
        ON CONFLICT (dedupe_key) WHERE dedupe_key IS NOT NULL DO NOTHING
        RETURNING id`,
       [outboxId, companyId, phone, c.template, c.idioma, JSON.stringify(components), texto, userId || null, dedupeKey, conversationId]

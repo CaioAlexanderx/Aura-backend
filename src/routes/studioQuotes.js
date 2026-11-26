@@ -500,6 +500,7 @@ async function criarPedidoDoOrcamento(client, { quote, items, cid, notas, userId
     cid,
     customerName: quote.customer_name,
     customerPhone: quote.customer_phone,
+    customerId: quote.customer_id || null,
     total: quote.total,
     depositRequired: quote.deposit_amount,
     notes: notas !== undefined ? notas : (quote.notes || null),

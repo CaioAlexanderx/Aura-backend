@@ -15,7 +15,7 @@ const { baixarEstoqueDoPedido } = require('../src/services/digitalOrderConfirmat
 
 // Banco em memoria so do que a entrega toca.
 function banco({ pedido, itens, estoques }) {
-  const estado = { pedido: { ...pedido }, estoques: { ...estoques }, sqls: [] };
+  const estado = { pedido: { ...pedido }, estoques: { ...estoques }, sqls: [], movimentos: [] };
   const client = {
     query: jest.fn(async (sql, params = []) => {
       const s = String(sql).replace(/\s+/g, ' ').trim();
@@ -32,6 +32,7 @@ function banco({ pedido, itens, estoques }) {
         estado.estoques[pid] = Math.max(0, estado.estoques[pid] - Number(qtd));
         return { rows: [{ id: pid, name: 'Caneca', stock_qty: estado.estoques[pid], stock_min: 0 }] };
       }
+      if (/^INSERT INTO stock_movements/.test(s)) { estado.movimentos.push(params); return { rows: [], rowCount: 1 }; }
       if (/UPDATE digital_orders SET payment_status/.test(s)) {
         if (estado.pedido.payment_status === 'pending') { estado.pedido.payment_status = params[2]; return { rowCount: 1, rows: [] }; }
         return { rowCount: 0, rows: [] };
@@ -75,6 +76,8 @@ describe('entregarPedidoDeOrcamento', () => {
     expect(estado.pedido.delivered_at).toBeTruthy();
     expect(estado.pedido.stock_deducted).toBe(true);
     expect(estado.estoques.p1).toBe(8);
+    // historico do estoque: uma linha 'out' (produto, quantidade, variante, id do pedido, nota)
+    expect(estado.movimentos).toEqual([['p1', 2, null, 'o1', expect.stringMatching(/^Baixa do pedido/)]]);
     expect(estado.pedido.payment_status).toBe('pending'); // entregar nao marca pago
   });
 
@@ -142,10 +145,12 @@ describe('baixarEstoqueDoPedido (o mesmo da confirmacao da loja online)', () => 
     const calls = [];
     const client = { query: jest.fn(async (sql, p) => { calls.push([String(sql).replace(/\s+/g, ' ').trim(), p]); return { rows: [] }; }) };
     const r = await baixarEstoqueDoPedido(client, { id: 'o1', stock_deducted: false },
-      [{ variant_id: 'v1', quantity: 3 }]);
+      [{ product_id: 'p1', variant_id: 'v1', quantity: 3 }]);
     expect(r.baixou).toBe(true);
     expect(calls[0][0]).toMatch(/^UPDATE product_variants SET stock_qty = GREATEST\(0, stock_qty - \$1\)/);
     expect(calls[0][1]).toEqual([3, 'v1']);
+    expect(calls[1][0]).toMatch(/^INSERT INTO stock_movements .* 'out', \$2, \$3, \$4, 'digital_order'/);
+    expect(calls[1][1].slice(0, 4)).toEqual(['p1', 3, 'v1', 'o1']);
     client.query.mockClear();
     expect(await baixarEstoqueDoPedido(client, { id: 'o1', stock_deducted: true }, [{ variant_id: 'v1', quantity: 3 }]))
       .toEqual({ crossedMinimum: [], baixou: false });

@@ -108,7 +108,8 @@ router.get('/conversations/:convId/messages', async (req, res) => {
 
     const { rows: messages } = conv[0].channel === 'whatsapp'
       ? await db.query(
-        `SELECT id, direction, content, author, created_at, metadata->>'source_type' AS source_type
+        `SELECT id, direction, content, author, created_at, metadata->>'source_type' AS source_type,
+                metadata->>'tipo' AS tipo, metadata->>'image_url' AS image_url
            FROM hub_messages
           WHERE conversation_id = $1
           ORDER BY created_at ASC LIMIT 200`,
@@ -240,6 +241,10 @@ router.post('/conversations/:convId/reply', async (req, res) => {
 
 // Conversa fechada do WhatsApp: convites prontos que gastam 1 aviso.
 router.use(require('./hubSocialConvites'));
+
+// Conversa aberta do WhatsApp: produto, orçamento, Pix e link da loja
+// (mensagens de sessão, sem custo).
+router.use(require('./hubSocialRico'));
 
 // ── Modo aprovação ──────────────────────────────────────────
 router.post('/outbox/:outboxId/approve', async (req, res) => {

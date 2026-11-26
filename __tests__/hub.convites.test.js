@@ -21,6 +21,8 @@ jest.mock('../src/services/waOutbox', () => ({
   getContact: jest.fn().mockResolvedValue(null),
   loadPauseReason: jest.fn().mockResolvedValue(null),
   applyTemplateStatus: jest.fn().mockResolvedValue(undefined),
+  countToday: jest.fn().mockResolvedValue(0),
+  dailyCap: jest.fn(() => 200),
 }));
 const mockSaldo = { reservar: jest.fn(), getSaldos: jest.fn() };
 jest.mock('../src/services/waSaldo', () => mockSaldo, { virtual: true });
@@ -51,6 +53,7 @@ let modelos;
 let client;
 let inserts;
 let eventos;
+let anteriores;
 
 beforeEach(() => {
   db.query.mockReset();
@@ -69,6 +72,8 @@ beforeEach(() => {
   modelos = [{ name: 'aura_convite_chegou', status: 'APPROVED' }];
   inserts = [];
   eventos = [];
+  anteriores = [];
+  waOutbox.countToday.mockReset().mockResolvedValue(0);
   client = {
     query: jest.fn(async (sql, params) => {
       const s = String(sql);
@@ -86,6 +91,7 @@ beforeEach(() => {
     const s = String(sql);
     if (s.includes('hubconvite:conv')) return Promise.resolve({ rows: params[1] === COMPANY ? [conversa] : [] });
     if (s.includes('hubconvite:loja')) return Promise.resolve({ rows: [loja] });
+    if (s.includes('hubconvite:anteriores')) return Promise.resolve({ rows: anteriores });
     if (s.includes('hubconvite:modelos')) return Promise.resolve({ rows: modelos });
     if (s.includes('SELECT wa_access_token')) return Promise.resolve({ rows: [{ wa_access_token: 'tok' }] });
     return Promise.resolve({ rows: [] });
@@ -246,13 +252,36 @@ describe('POST convite', () => {
   });
 
   it('duplo clique no mesmo dia: o segundo não entra na fila nem gasta aviso', async () => {
-    expect((await enviar()).status).toBe(200);
-    mockSaldo.reservar.mockClear();
+    anteriores = [{ status: 'pending' }];
     const dois = await enviar();
     expect(dois.status).toBe(409);
     expect(dois.body.code).toBe('CONVITE_REPETIDO');
     expect(mockSaldo.reservar).not.toHaveBeenCalled();
-    expect(eventos).toContain('ROLLBACK');
+    expect(db.connect).not.toHaveBeenCalled();
+  });
+
+  it('convite que falhou e teve o aviso devolvido pode ser reenviado, com chave nova', async () => {
+    anteriores = [{ status: 'failed' }];
+    const res = await enviar();
+    expect(res.status).toBe(200);
+    expect(inserts[0][8]).toMatch(/:r1$/);
+    expect(mockSaldo.reservar.mock.calls[0][1].refKey).toMatch(/:r1$/);
+  });
+
+  it('a origem na fila é convite_conversa (a do SOURCE_BUCKET dos avisos)', async () => {
+    await enviar();
+    expect(eventos.some((e) => e.includes('hubconvite:enfileira'))).toBe(true);
+    const sql = client.query.mock.calls.map((c) => String(c[0])).find((q) => q.includes('hubconvite:enfileira'));
+    expect(sql).toContain("'convite_conversa'");
+  });
+
+  it('teto diário da loja: LIMITE_DIARIO, sem abrir transação nem reservar', async () => {
+    waOutbox.countToday.mockResolvedValue(200);
+    const res = await enviar();
+    expect(res.status).toBe(409);
+    expect(res.body.code).toBe('LIMITE_DIARIO');
+    expect(db.connect).not.toHaveBeenCalled();
+    expect(mockSaldo.reservar).not.toHaveBeenCalled();
   });
 
   it('número em atenção (qualidade) NÃO barra aviso; conta restrita barra', async () => {
