@@ -46,6 +46,9 @@ router.use('/recebe', require('./companyRecebe'));
 router.use('/pdv', semCustoEmConsulta());
 router.use('/pdv', require('./pdv-summary-patch'));
 router.use('/pdv', require('./scanner'));
+// 25/11/2026 (RA-10, migration 466): Pix pelo Recebe na Aura no Caixa, com
+// confirmação pelo aviso da Asaas. Flag RECEBE_NA_AURA_ENABLED desligada → 404.
+router.use('/pdv', require('./pdvRecebePix'));
 router.use('/pdv', require('./pdv'));
 router.use('/', require('./pdvSettings'));
 // 07/10/2026: o cliente (dono/admin) troca a propria frente — PATCH /segment.
