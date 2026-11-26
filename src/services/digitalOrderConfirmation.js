@@ -43,6 +43,7 @@ const db = require('../config/database');
 const { emitForDigitalOrder } = require('./nfceEmissionService');
 const lojaEvents = require('./lojaEvents');
 const { FORMA_NO_FINANCEIRO } = require('./pagarNaEntrega');
+const tirarDaFila = require('./tirarDaFila');
 
 function normalizePhone(phone) {
   return String(phone || '').replace(/\D/g, '');
@@ -119,6 +120,10 @@ async function baixarEstoqueDoPedido(client, order, items) {
  */
 async function aplicarConfirmacao(client, order, { aReceber = false } = {}) {
   const orderId = order.id;
+  // C1: pedido pago volta a Fila. Um pedido tirado antes do Pix ficaria
+  // escondido depois do pagamento e ninguem produziria. Na mesma transacao
+  // (o pedido ja esta travado aqui), na ordem pedido -> marca.
+  await tirarDaFila.devolverNaConfirmacao(client, order);
   const { rows: items } = await client.query(
       `SELECT * FROM digital_order_items WHERE order_id = $1`, [orderId]);
 

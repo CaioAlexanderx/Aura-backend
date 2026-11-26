@@ -48,6 +48,7 @@ const { requireAuth } = require('../middleware/auth');
 const db = require('../config/database');
 const { STUDIO_PLANS } = require('../services/segment');
 const pagamentoDoPedido = require('../services/pagamentoDoPedidoStudio');
+const tirarDaFila = require('../services/tirarDaFila');
 const { comItemEOrigem, NULL_ITEM_E_ORIGEM } = require('../services/itemEOrigemDoPedido');
 const { listaDaProducao: L } = require('./studioKdsApproval');
 const { nomeDaLoja: nomeDaLojaPelaRegra } = require('../utils/nomeDaLoja');
@@ -178,8 +179,13 @@ router.get('/studio/orders', async (req, res) => {
 
   // Filtro comum: o breakdown conta em todas as lojas que entram (para o
   // seletor de loja mostrar quantos tem cada uma); a lista, só nas do filtro.
+  // C1: tirados da Fila saem da lista, do total e do breakdown (?tirados=true: so eles).
+  const soTirados = req.query.tirados === 'true' || req.query.tirados === '1';
+  const fragTirados = (await tirarDaFila.temTabela(db))
+    ? (soTirados ? tirarDaFila.soOsTirados('o') : tirarDaFila.semOsTirados('o'))
+    : '';
   const filtros = (params) => {
-    let w = '';
+    let w = fragTirados;
     if (status) { params.push(status); w += ` AND ${L.ETAPA_DO_PEDIDO} = $${params.length}`; }
     params.push(dias);
     w += ` AND o.created_at >= NOW() - make_interval(days => $${params.length}::int)`;
@@ -268,6 +274,9 @@ ${L.ITENS_E_APROVACAO_COLS}
       ),
     ]);
 
+    // C1: fila_tem_recebimento / fila_recebido, uma chamada por loja da pagina.
+    linhas = await comRecebimentoPorLoja(linhas);
+
     const orders = linhas.map((row) => ({
       ...row,
       company_name: nomeDaLoja.get(String(row.company_id)) || 'Empresa',
@@ -305,6 +314,18 @@ async function comPagamentoPorLoja(linhas) {
     comSelo.forEach((o) => porId.set(`${o.company_id}:${o.source}:${o.id}`, o));
   }
   return linhas.map((o) => porId.get(`${o.company_id}:${o.source}:${o.id}`) || o);
+}
+
+// Recebimento do pedido (C1), uma chamada por loja da pagina. Nunca lanca.
+async function comRecebimentoPorLoja(linhas) {
+  const porId = new Map();
+  for (const cid of [...new Set(linhas.map((o) => String(o.company_id)))]) {
+    const daLoja = linhas.filter((o) => String(o.company_id) === cid);
+    const com = await tirarDaFila.comRecebimento(db, cid, daLoja);
+    com.forEach((o) => porId.set(`${o.company_id}:${o.source}:${o.id}`, o));
+  }
+  return linhas.map((o) => porId.get(`${o.company_id}:${o.source}:${o.id}`)
+    || { ...o, fila_recebido: 0, fila_tem_recebimento: false });
 }
 
 // Item e origem (p-194), uma chamada por loja da página. Só acrescenta
