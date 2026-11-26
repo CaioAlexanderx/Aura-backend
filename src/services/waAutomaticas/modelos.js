@@ -1,5 +1,5 @@
 // ============================================================
-// AURA — WhatsApp: os 16 MODELOS das automáticas (aprovados pelo Caio
+// AURA — WhatsApp: os 15 MODELOS das automáticas (aprovados pelo Caio
 // em 26/11/2026) e a validação do Editor da lojista.
 //
 // Parte PURA (sem banco, sem Meta): catálogo, validação, prévia e a
@@ -64,11 +64,9 @@ const MODELOS = Object.freeze([
     'Parabéns, {Nome}! Aniversário pede roupa nova: {Presente} em qualquer peça da {Nome da loja} até {Validade}. Código {Código} no site, ou seu nome no caixa.'),
   m('aniv_animado_sem', 'aniversario', 'Animado, sem presente', 'MARKETING', C_ANIV_SEM,
     'Parabéns, {Nome}! Um abraço de toda a equipe da {Nome da loja}, e até a próxima visita.'),
-  // Texto de antes/depois NÃO está nos artboards: rascunho do agente B, a confirmar com o Caio.
-  m('aniv_antes', 'aniversario', 'Uma semana antes', 'MARKETING', C_ANIV,
+  // Aprovado pelo Caio em 26/11. Serve para "3 dias antes" e "7 dias antes" (texto genérico).
+  m('aniv_antes', 'aniversario', 'Antes do aniversário', 'MARKETING', C_ANIV,
     'Oi, {Nome}. Seu aniversário está chegando, e a {Nome da loja} já separou um presente para você: {Presente} em qualquer peça até {Validade}. Código {Código} no site, ou seu nome no caixa.'),
-  m('aniv_depois', 'aniversario', '3 dias depois, se não usou', 'MARKETING', C_ANIV,
-    'Oi, {Nome}. Seu presente de aniversário na {Nome da loja} ainda está valendo: {Presente} em qualquer peça até {Validade}. Código {Código} no site, ou seu nome no caixa.'),
 
   // ── Venda+ (2 grupos x com/sem presente) ────────────────────
   m('venda_sumindo_com', 'venda_mais', 'Sumindo (31 a 60 dias), com presente', 'MARKETING',

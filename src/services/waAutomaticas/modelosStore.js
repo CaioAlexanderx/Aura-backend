@@ -267,7 +267,7 @@ async function restaurarPadrao(companyId, key) {
   return obter(companyId, key);
 }
 
-// Cria na Meta os 16 templates padrão que ainda não existem. Idempotente.
+// Cria na Meta os 15 templates padrão que ainda não existem. Idempotente.
 async function prepararPadroes(companyId) {
   const todos = modelosCatalogo.listar();
   const existentes = await carregarEstadosDosPadroes(companyId, todos.map((x) => x.template_base));
