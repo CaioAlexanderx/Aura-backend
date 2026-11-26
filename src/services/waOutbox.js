@@ -1100,7 +1100,7 @@ async function processBatch(limit = 20) {
            ON CONFLICT (company_id, channel, external_message_id)
              WHERE external_message_id IS NOT NULL DO NOTHING`,
           [row.company_id, row.hub_conversation_id,
-           row.source_type === 'humano' ? 'humano' : 'aurinha', wamid,
+           (row.source_type === 'humano' || row.source_type === 'convite_conversa') ? 'humano' : 'aurinha', wamid,
            row.text_body || `[template ${row.template_name}]`,
            JSON.stringify({ outbox_id: row.id, source_type: row.source_type })]
         ).catch(() => {});

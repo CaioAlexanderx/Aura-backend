@@ -270,6 +270,9 @@ router.post('/conversations/:convId/reply', async (req, res) => {
   }
 });
 
+// Conversa fechada do WhatsApp: convites prontos que gastam 1 aviso.
+router.use(require('./hubSocialConvites'));
+
 // Etiquetas das conversas e "É ela" (cadastro de Clientes da conversa).
 router.use(require('./hubSocialEtiquetas'));
 
