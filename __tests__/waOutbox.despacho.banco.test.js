@@ -58,7 +58,10 @@ const usado = async () => (await waSaldo.getSaldos(ID.loja)).saldos.avisos.usado
 beforeAll(async () => {
   pool = new Pool({ connectionString: CONN.replace('?family=4', ''), max: 12 });
   db = require('../src/config/database');
-  db.query.mockImplementation((sql, params) => pool.query(sql, params));
+  // As colunas de credencial (039) ficam fora das migrations do CI: o loadCreds e simulado.
+  db.query.mockImplementation((sql, params) => (String(sql).includes('-- wa:creds')
+    ? Promise.resolve({ rows: [{ wa_phone_number_id: 'pn_teste', wa_access_token: 'token_teste' }] })
+    : pool.query(sql, params)));
   db.connect.mockImplementation(() => pool.connect());
   process.env.WA_SALDO_ATIVO = '1';
   waSaldo = require('../src/services/waSaldo');
@@ -68,8 +71,8 @@ beforeAll(async () => {
   await limpar();
   await q(`INSERT INTO users (id, email, password_hash, full_name) VALUES ($1, $2, 'x', 'Fixture Despacho')`,
     [ID.dono, `fixture-${ID.dono}@example.test`]);
-  await q(`INSERT INTO companies (id, owner_id, legal_name, trade_name, plan, wa_phone_number_id, wa_access_token)
-           VALUES ($1, $2, 'Despacho Loja', 'Despacho Loja', 'negocio', 'pn_teste', 'token_teste')`, [ID.loja, ID.dono]);
+  await q(`INSERT INTO companies (id, owner_id, legal_name, trade_name, plan)
+           VALUES ($1, $2, 'Despacho Loja', 'Despacho Loja', 'negocio')`, [ID.loja, ID.dono]);
   await q(`INSERT INTO wa_templates (company_id, name, language, status) VALUES ($1, 'parcela_lembrete', 'pt_BR', 'APPROVED')`, [ID.loja]);
 });
 

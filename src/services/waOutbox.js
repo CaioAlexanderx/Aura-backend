@@ -1151,7 +1151,7 @@ async function processBatch(limit = 20) {
       } else {
         const backoffMin = Math.min(Math.pow(2, attempts), 60);
         await db.query(
-          `UPDATE wa_outbox SET status = 'pending', attempts = $1, last_error = $2,
+          `UPDATE wa_outbox SET attempts = $1, last_error = $2, status = 'pending',
                   next_attempt_at = NOW() + ($3 || ' minutes')::interval, updated_at = NOW()
             WHERE id = $4`,
           [attempts, msg, String(backoffMin), row.id]
