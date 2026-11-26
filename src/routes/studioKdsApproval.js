@@ -38,6 +38,7 @@ const nfseAutomatica   = require('../services/nfseAutomatica');
 const pagamentoDoPedido = require('../services/pagamentoDoPedidoStudio');
 // 25/11/2026 (p-185): o que falta receber do pedido de orcamento.
 const financeiroDoOrcamento = require('../services/financeiroDoOrcamento');
+const entregaDoPedidoDeOrcamento = require('../services/entregaDoPedidoDeOrcamento');
 // QA final 28/09/2026 (LJ-33): pedido cancelado e etapa 'cancelled' tambem
 // na leitura — o cancelamento so mudava `status`, e o quadro lia a etapa.
 const { sqlDaEtapa, etapaDaProducao } = require('../services/cancelamentoDoPedido');
@@ -940,6 +941,14 @@ router.patch('/orders/:oid/production-status', async function(req, res) {
 
     let updated;
     if (head.source === 'digital') {
+      // B1b: entregar pedido de orcamento grava delivered_at e baixa o
+      // estoque (idempotente por stock_deducted). Antes da etapa: se falhar,
+      // a etapa nao muda. Nao marca pago: quem quita e o recebimento.
+      if (status === 'delivered') {
+        await entregaDoPedidoDeOrcamento.entregarPedidoDeOrcamento(db, {
+          companyId: req.params.id, orderId: head.digital_order_id,
+        });
+      }
       const r = await db.query(
         `UPDATE digital_orders
             SET studio_production_status = $1, updated_at = NOW()
