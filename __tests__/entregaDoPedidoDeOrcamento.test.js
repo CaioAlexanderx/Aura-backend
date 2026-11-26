@@ -49,11 +49,11 @@ const ITENS = [{ order_id: 'o1', product_id: 'p1', variant_id: null, quantity: 2
 beforeEach(() => { jest.clearAllMocks(); fin.marcoLancaNoFinanceiro.mockResolvedValue(true); });
 
 describe('quitarSeRecebeuTudo', () => {
-  test('recebido igual ao total: pending vira confirmed (o valor da loja online)', async () => {
+  test('recebido igual ao total: pending vira paid (o valor que o banco aceita)', async () => {
     const { estado, client } = banco({ pedido: PEDIDO, itens: ITENS, estoques: {} });
-    expect(PAGO).toBe('confirmed');
+    expect(PAGO).toBe('paid');
     expect(await quitarSeRecebeuTudo(client, { companyId: 'c1', orderId: 'o1', total: 100, recebido: 100 })).toBe(true);
-    expect(estado.pedido.payment_status).toBe('confirmed');
+    expect(estado.pedido.payment_status).toBe('paid');
   });
   test('recebido menor que o total (so o sinal): nao marca', async () => {
     const { estado, client } = banco({ pedido: PEDIDO, itens: ITENS, estoques: {} });

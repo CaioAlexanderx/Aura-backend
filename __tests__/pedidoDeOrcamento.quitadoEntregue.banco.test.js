@@ -5,7 +5,7 @@
 // Cenario: orcamento de 2 canecas a R$ 50 (total 100), sinal 30, saldo 70, com
 // estoque 10.
 //   - sinal pago: payment_status segue 'pending' (falta o saldo);
-//   - saldo pago: payment_status vira 'confirmed' (o valor que a loja online
+//   - saldo pago: payment_status vira 'paid' (o valor que o enum do banco aceita; a loja online
 //     grava ao confirmar o Pix); o Financeiro nao muda;
 //   - entregar (PATCH production-status 'delivered'): delivered_at gravado e
 //     estoque 10 -> 8, stock_deducted TRUE;
@@ -141,7 +141,7 @@ const financeiro = async (oid) => (await q(
     ORDER BY idempotency_key`, [`pedido-%${oid}`, oid])).rows.map((r) => [r.idempotency_key.slice(0, 13), r.status, Number(r.amount)]);
 
 describe('quitar', () => {
-  test('so o sinal: payment_status segue pending; sinal + saldo: vira confirmed e o Financeiro nao muda', async () => {
+  test('so o sinal: payment_status segue pending; sinal + saldo: vira paid e o Financeiro nao muda', async () => {
     const ped = await novoPedido();
     expect((await pedido(ped.oid)).payment_status).toBe('pending');
 
@@ -150,7 +150,7 @@ describe('quitar', () => {
     const aposSinal = await financeiro(ped.oid);
 
     expect((await pagar(ped.saldo)).status).toBe(200);
-    expect((await pedido(ped.oid)).payment_status).toBe('confirmed');
+    expect((await pedido(ped.oid)).payment_status).toBe('paid');
     // so entrou o saldo e a conta foi quitada; nada de valor mudou no sinal
     const aposSaldo = await financeiro(ped.oid);
     expect(aposSaldo.filter((l) => l[0] === 'pedido-sinal-')).toEqual(aposSinal.filter((l) => l[0] === 'pedido-sinal-'));
@@ -172,7 +172,7 @@ describe('entregar', () => {
     await pagar(ped.sinal); await pagar(ped.saldo);
     expect((await entregar(ped)).status).toBe(200);
     const o = await pedido(ped.oid);
-    expect(o).toMatchObject({ payment_status: 'confirmed', stock_deducted: true, studio_production_status: 'delivered' });
+    expect(o).toMatchObject({ payment_status: 'paid', stock_deducted: true, studio_production_status: 'delivered' });
     expect(o.delivered_at).toBeTruthy();
     expect(await estoque(ped.produto)).toBe(8);
   });
@@ -203,7 +203,7 @@ describe('entregar', () => {
     expect(await estoque(ped.produto)).toBe(8);
     // receber o saldo depois quita, sem baixar de novo
     await pagar(ped.saldo);
-    expect((await pedido(ped.oid)).payment_status).toBe('confirmed');
+    expect((await pedido(ped.oid)).payment_status).toBe('paid');
     expect(await estoque(ped.produto)).toBe(8);
   });
 

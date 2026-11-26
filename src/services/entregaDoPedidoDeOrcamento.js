@@ -7,10 +7,10 @@
 // stock_deducted false: a peca entregue nao baixava do estoque.
 //
 //   QUITAR   quando o recebido (marcos studio_payments 'paid') alcanca o
-//            total do pedido, payment_status vira 'confirmed' (o MESMO valor
-//            que a loja grava ao confirmar o Pix, routes/digitalOrders.js
-//            approve-payment; 'paid' e 'received' tambem contam como pago no
-//            codigo, mas 'confirmed' e o que a loja escreve). Nao mexe em
+//            total do pedido, payment_status vira 'paid'. E o valor que o
+//            banco montado pelas migrations aceita (enum pending|paid|failed|
+//            refunded); em producao a coluna e TEXT e o codigo trata 'paid' e
+//            'confirmed' (o que o Pix da loja grava) como pago. Nao mexe em
 //            valores nem em lancamentos: o Financeiro continua como esta.
 //   ENTREGAR grava delivered_at (uma vez) e baixa o estoque pela MESMA
 //            funcao da confirmacao da loja online (baixarEstoqueDoPedido),
@@ -31,7 +31,7 @@ const { baixarEstoqueDoPedido, avisarDepoisDaConfirmacao } = require('./digitalO
 const round2 = (n) => Math.round((Number(n) + Number.EPSILON) * 100) / 100;
 
 // Valor que a confirmacao do Pix da loja grava em payment_status.
-const PAGO = 'confirmed';
+const PAGO = 'paid';
 
 /**
  * Dentro da transacao do recebimento (pedido ja travado): se o que entrou
