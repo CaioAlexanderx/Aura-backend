@@ -35,6 +35,7 @@ function banco({ tabela = true, head, digital, tirados = new Set() }) {
     if (/FROM digital_orders o WHERE o.id = \$1 AND o.company_id = \$2/.test(s)) {
       return { rows: digital && params[1] === CID ? [digital] : [] };
     }
+    if (/FOR UPDATE/.test(s)) return { rows: [{ id: params[0] }] };
     if (/^INSERT INTO studio_fila_tirados/.test(s)) {
       if (tirados.has(params[0])) return { rows: [] };
       tirados.add(params[0]);
@@ -47,7 +48,9 @@ function banco({ tabela = true, head, digital, tirados = new Set() }) {
     }
     return { rows: [] };
   });
-  return { calls, tirados };
+  const client = { query: (sql, params) => db.query(sql, params), release: jest.fn() };
+  db.connect.mockResolvedValue(client);
+  return { calls, tirados, client };
 }
 
 const ORC_SEM_PAGAMENTO = { total: '100', payment_status: 'pending', marcos_pagos: '0' };
@@ -177,5 +180,80 @@ describe('comRecebimento (campos da listagem)', () => {
     db.query.mockRejectedValue(new Error('boom'));
     const out = await svc.comRecebimento(db, CID, [{ id: 'd1', source: 'digital', digital_order_id: 'd1' }]);
     expect(out).toEqual([{ id: 'd1', source: 'digital', digital_order_id: 'd1', fila_recebido: 0, fila_tem_recebimento: false }]);
+  });
+});
+
+describe('C1 revisao: lock do pedido e pedido pago volta a Fila', () => {
+  test('digital: BEGIN, pedido FOR UPDATE, confere o recebimento, so entao grava a marca (pedido -> marca), COMMIT', async () => {
+    const { calls, client } = banco({ head: DIGITAL, digital: ORC_SEM_PAGAMENTO });
+    const r = await request(app).post(`/companies/${CID}/studio/orders/${OID}/tirar-da-fila`).send({});
+    expect(r.status).toBe(200);
+    const ordem = calls.map(([s]) => s).filter((s) => /^(BEGIN|COMMIT|ROLLBACK)|FOR UPDATE|FROM digital_orders o WHERE|^INSERT INTO studio_fila_tirados/.test(s))
+      .map((s) => s.split(' ').slice(0, 2).join(' '));
+    expect(ordem).toEqual(['BEGIN', 'SELECT id', 'SELECT o.total::numeric', 'INSERT INTO', 'COMMIT']);
+    expect(client.release).toHaveBeenCalled();
+  });
+
+  test('TEM_RECEBIMENTO desfaz a transacao e libera a conexao', async () => {
+    const { calls, client } = banco({ head: DIGITAL, digital: { total: '100', payment_status: 'pending', marcos_pagos: '30' } });
+    await request(app).post(`/companies/${CID}/studio/orders/${OID}/tirar-da-fila`).send({});
+    expect(calls.map(([s]) => s)).toContain('ROLLBACK');
+    expect(calls.map(([s]) => s)).not.toContain('COMMIT');
+    expect(client.release).toHaveBeenCalled();
+  });
+
+  test('devolverNaConfirmacao: apaga a marca da empresa do pedido; sem a tabela nao faz nada', async () => {
+    const calls = [];
+    const client = { query: jest.fn(async (sql, p) => {
+      const s = String(sql).replace(/\s+/g, ' ').trim();
+      calls.push([s, p]);
+      if (/to_regclass/.test(s)) return { rows: [{ t: 'studio_fila_tirados' }] };
+      return { rowCount: 1, rows: [] };
+    }) };
+    expect(await svc.devolverNaConfirmacao(client, { id: OID, company_id: CID })).toBe(true);
+    expect(calls.find(([s]) => /^DELETE FROM studio_fila_tirados/.test(s))[1]).toEqual([OID, CID]);
+
+    svc._zerarCache();
+    const sem = { query: jest.fn(async () => ({ rows: [{ t: null }] })) };
+    expect(await svc.devolverNaConfirmacao(sem, { id: OID, company_id: CID })).toBe(false);
+    expect(sem.query).toHaveBeenCalledTimes(1);
+  });
+
+  test('aplicarConfirmacao (confirmacao do pagamento) devolve o pedido a Fila na mesma transacao', async () => {
+    jest.resetModules();
+    jest.doMock('../src/services/nfceEmissionService', () => ({ emitForDigitalOrder: jest.fn() }));
+    jest.doMock('../src/services/lojaEvents', () => ({ emit: jest.fn() }));
+    const conf = require('../src/services/digitalOrderConfirmation');
+    const calls = [];
+    const client = { query: jest.fn(async (sql) => {
+      const s = String(sql).replace(/\s+/g, ' ').trim();
+      calls.push(s);
+      if (/to_regclass/.test(s)) return { rows: [{ t: 'studio_fila_tirados' }] };
+      if (/INSERT INTO transactions/.test(s)) return { rows: [{ id: 't1' }] };
+      return { rows: [], rowCount: 0 };
+    }) };
+    await conf.aplicarConfirmacao(client, { id: OID, company_id: CID, stock_deducted: true, customer_id: 'cl', transaction_id: 't0' });
+    const del = calls.findIndex((s) => /^DELETE FROM studio_fila_tirados/.test(s));
+    expect(del).toBeGreaterThan(-1);
+    jest.dontMock('../src/services/nfceEmissionService');
+    jest.dontMock('../src/services/lojaEvents');
+  });
+});
+
+describe('C1 revisao: fallback RAW qualifica a empresa', () => {
+  test('o filtro do RAW usa digital_orders.company_id / digital_orders.id', async () => {
+    const sqls = [];
+    db.query.mockImplementation(async (sql) => {
+      const s = String(sql);
+      if (/to_regclass\('public.studio_fila_tirados'\)/.test(s)) return { rows: [{ t: 'x' }] };
+      if (/to_regclass/.test(s)) return { rows: [{ t: null }] };
+      if (/information_schema.columns/.test(s)) return { rows: [] };
+      if (/FROM studio_orders o/.test(s)) throw new Error('forca o fallback');
+      if (/FROM digital_orders\s+WHERE/.test(s)) sqls.push(s);
+      return { rows: [] };
+    });
+    jest.spyOn(console, 'error').mockImplementation(() => {});
+    await request(app).get(`/companies/${CID}/studio/orders`);
+    expect(sqls[0]).toMatch(/ft\.company_id = digital_orders\.company_id AND ft\.order_id = digital_orders\.id/);
   });
 });

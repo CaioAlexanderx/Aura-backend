@@ -22,7 +22,7 @@
 --   DROP TABLE IF EXISTS studio_fila_tirados;
 -- ============================================================
 
-SET lock_timeout = '5s';
+SET LOCAL lock_timeout = '5s';
 
 CREATE TABLE IF NOT EXISTS studio_fila_tirados (
   order_id    UUID        NOT NULL PRIMARY KEY,

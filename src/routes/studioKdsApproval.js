@@ -721,7 +721,7 @@ ${ITENS_E_APROVACAO_COLS}
       where += ` AND ${sqlDaEtapa('')} = $${params.length}`;
     }
     where += ` AND created_at >= NOW() - INTERVAL '${safeDays} days'`;
-    where += filtroDeTirados('');
+    where += filtroDeTirados('digital_orders');
     params.push(safeLimit);
 
     const r = await db.query(

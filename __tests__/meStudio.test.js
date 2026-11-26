@@ -206,3 +206,22 @@ describe('pedidos: item e origem (p-194)', () => {
     expect(res.body.degraded).toBeUndefined();
   });
 });
+
+describe('C1 (tirar da fila) na Fila consolidada', () => {
+  test('lista, total e breakdown excluem os tirados; ?tirados=true so eles; e vem fila_tem_recebimento', async () => {
+    const sqls = simularBanco([loja('a'), loja('b')]);
+    const res = await request(app).get('/me/studio/orders');
+    expect(res.status).toBe(200);
+    const comOrders = sqls.filter((s) => /FROM studio_orders o/.test(s.sql) && /studio_fila_tirados/.test(s.sql));
+    // lista, contagem e breakdown
+    expect(comOrders).toHaveLength(3);
+    comOrders.forEach((s) => expect(s.sql).toMatch(/NOT EXISTS \(SELECT 1 FROM studio_fila_tirados ft WHERE ft\.company_id = o\.company_id AND ft\.order_id = o\.id\)/));
+    expect(res.body.orders[0]).toMatchObject({ fila_tem_recebimento: false, fila_recebido: 0 });
+
+    const sqls2 = simularBanco([loja('a')]);
+    await request(app).get('/me/studio/orders?tirados=true');
+    const so = sqls2.filter((s) => /FROM studio_orders o/.test(s.sql));
+    expect(so.length).toBeGreaterThan(0);
+    so.forEach((s) => expect(s.sql).toMatch(/AND EXISTS \(SELECT 1 FROM studio_fila_tirados/));
+  });
+});

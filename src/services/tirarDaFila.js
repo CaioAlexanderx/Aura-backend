@@ -91,35 +91,73 @@ async function exigirTabela(q) {
 
 /**
  * Tira o pedido da Fila. Idempotente: tirar de novo devolve ja_estava = true.
+ * Pedido digital: a conferencia do recebimento e o INSERT da marca rodam com o
+ * pedido travado (FOR UPDATE), na ordem pedido -> marca, a mesma da confirmacao
+ * do pagamento (que apaga a marca): um Pix confirmado no meio nao deixa o
+ * pedido pago escondido.
  * @returns {Promise<{ok: true, order_id: string, tirado_em: any, ja_estava: boolean}>}
  */
 async function tirarDaFila(q, { companyId, orderId, userId, motivo }) {
   await exigirTabela(q);
   const head = await acharNaFila(q, companyId, orderId);
-  if (head.source === 'digital') {
-    const recebido = await recebidoDoPedidoDigital(q, companyId, head.digital_order_id);
-    if (recebido > 0) {
-      throw erro(409, 'TEM_RECEBIMENTO',
-        'Este pedido já tem valor recebido. Para tirá-lo da fila, cancele o pedido.',
-        { recebido });
-    }
-  }
   const texto = motivo == null ? '' : String(motivo).trim().slice(0, 200);
-  const ins = await q.query(
-    `INSERT INTO studio_fila_tirados (order_id, company_id, tirado_por, motivo)
-     VALUES ($1, $2, $3, $4)
-     ON CONFLICT (order_id) DO NOTHING
-     RETURNING tirado_em`,
-    [orderId, companyId, userId || null, texto || null]
-  );
-  if (ins.rows.length) {
-    return { ok: true, order_id: orderId, tirado_em: ins.rows[0].tirado_em, ja_estava: false };
+  const digital = head.source === 'digital';
+  const c = digital ? await q.connect() : q;
+  try {
+    if (digital) {
+      await c.query('BEGIN');
+      await c.query(
+        `SELECT id FROM digital_orders WHERE id = $1 AND company_id = $2 FOR UPDATE`,
+        [head.digital_order_id, companyId]
+      );
+      const recebido = await recebidoDoPedidoDigital(c, companyId, head.digital_order_id);
+      if (recebido > 0) {
+        await c.query('ROLLBACK');
+        throw erro(409, 'TEM_RECEBIMENTO',
+          'Este pedido já tem valor recebido. Para tirá-lo da fila, cancele o pedido.',
+          { recebido });
+      }
+    }
+    const ins = await c.query(
+      `INSERT INTO studio_fila_tirados (order_id, company_id, tirado_por, motivo)
+       VALUES ($1, $2, $3, $4)
+       ON CONFLICT (order_id) DO NOTHING
+       RETURNING tirado_em`,
+      [orderId, companyId, userId || null, texto || null]
+    );
+    let r;
+    if (ins.rows.length) {
+      r = { ok: true, order_id: orderId, tirado_em: ins.rows[0].tirado_em, ja_estava: false };
+    } else {
+      const { rows } = await c.query(
+        `SELECT tirado_em FROM studio_fila_tirados WHERE order_id = $1 AND company_id = $2`,
+        [orderId, companyId]
+      );
+      r = { ok: true, order_id: orderId, tirado_em: rows[0] ? rows[0].tirado_em : null, ja_estava: true };
+    }
+    if (digital) await c.query('COMMIT');
+    return r;
+  } catch (e) {
+    if (digital && !e.status) await c.query('ROLLBACK').catch(() => {});
+    throw e;
+  } finally {
+    if (digital) c.release();
   }
-  const { rows } = await q.query(
-    `SELECT tirado_em FROM studio_fila_tirados WHERE order_id = $1 AND company_id = $2`,
-    [orderId, companyId]
+}
+
+/**
+ * Pagamento confirmado: o pedido volta a Fila. Dentro da transacao de quem
+ * confirma, com o pedido ja travado. Sem a migration 471, nao faz nada (e nao
+ * aborta a transacao). Nunca lanca por causa da tabela ausente.
+ */
+async function devolverNaConfirmacao(client, order) {
+  if (!order || !order.id || !order.company_id) return false;
+  if (!(await temTabela(client))) return false;
+  const r = await client.query(
+    `DELETE FROM studio_fila_tirados WHERE order_id = $1 AND company_id = $2`,
+    [order.id, order.company_id]
   );
-  return { ok: true, order_id: orderId, tirado_em: rows[0] ? rows[0].tirado_em : null, ja_estava: true };
+  return (r.rowCount || 0) > 0;
 }
 
 /**
@@ -174,5 +212,5 @@ async function comRecebimento(q, companyId, orders) {
 
 module.exports = {
   temTabela, semOsTirados, soOsTirados, recebidoDoPedidoDigital,
-  tirarDaFila, devolverAFila, comRecebimento, _zerarCache,
+  tirarDaFila, devolverAFila, devolverNaConfirmacao, comRecebimento, _zerarCache,
 };

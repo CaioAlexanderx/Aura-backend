@@ -60,6 +60,7 @@
 'use strict';
 
 const sinalDoPedido = require('./sinalDoPedido');
+const tirarDaFila = require('./tirarDaFila');
 
 const round2 = (n) => Math.round((Number(n) + Number.EPSILON) * 100) / 100;
 const brl = (n) => `R$ ${round2(n).toFixed(2).replace('.', ',')}`;
@@ -281,6 +282,9 @@ async function receberMarco(db, { companyId, paymentId, body, chave, userId }) {
         );
       }
     }
+
+    // C1: recebeu dinheiro, volta a Fila (pedido travado acima; pedido -> marca).
+    await tirarDaFila.devolverNaConfirmacao(client, { id: pedido.id, company_id: companyId });
 
     // A entrada e o abatimento da conta pelo que ela diz que falta.
     const taxa = await sinalDoPedido.lancarEntradaEBaixar(client, {
