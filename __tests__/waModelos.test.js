@@ -96,12 +96,36 @@ function versao(over) {
     criado_em: new Date('2026-11-01T12:00:00Z'), decidido_em: null, ...over,
   };
 }
+// Trava por (loja, modelo): quem pega a conexão espera a anterior soltar,
+// como o pg_advisory_xact_lock faria.
+let _fila = Promise.resolve();
+function simularConexao() {
+  db.connect = jest.fn(async () => {
+    let soltar;
+    const minha = new Promise((r) => { soltar = r; });
+    const espera = _fila;
+    _fila = _fila.then(() => minha);
+    await espera;
+    return { query: (...a) => db.query(...a), release: soltar };
+  });
+}
+
 function simular({ versoes = [], padrao = 'APPROVED' } = {}) {
   db.query.mockReset();
+  simularConexao();
   db.query.mockImplementation(async (sql, params) => {
     if (/wa:modelos-versoes/.test(sql)) return { rows: versoes };
     if (/wa:modelos-padroes/.test(sql)) return { rows: padrao ? [{ name: 'aura_cred_antes', status: padrao }] : [] };
     if (/wa:modelos-cred/.test(sql)) return { rows: [{ wa_waba_id: 'W1', wa_access_token: 'tok' }] };
+    if (/wa:modelos-nova-versao/.test(sql)) {
+      versoes.push(versao({ id: 'v-' + params[2], versao: params[2], texto: params[3], template_name: params[4], estado: 'PENDING', criado_em: new Date(AGORA) }));
+      return { rows: [] };
+    }
+    if (/wa:modelos-desfaz-versao/.test(sql)) {
+      const i = versoes.findIndex((x) => x.versao === params[2] && x.estado === 'PENDING');
+      if (i >= 0) versoes.splice(i, 1);
+      return { rows: [] };
+    }
     if (/wa:modelos-decisao/.test(sql)) {
       const v = versoes.find((x) => x.template_name === params[1] && x.estado === 'PENDING');
       if (v) { v.estado = params[2]; v.motivo = params[3]; }
@@ -182,6 +206,52 @@ describe('enviar texto novo', () => {
     expect(tpl.components[0].example.body_text[0]).toHaveLength(4);
     const insert = db.query.mock.calls.find((c) => /wa:modelos-nova-versao/.test(c[0]));
     expect(insert[1]).toEqual([COMPANY, 'cred_antes', 2, bom, 'aura_cred_antes_v2']);
+  });
+
+  test('a Meta já responde APPROVED na criação: a versão é promovida, não fica PENDING', async () => {
+    const vs = [];
+    simular({ versoes: vs });
+    wa.createTemplate.mockResolvedValue({ id: '5', status: 'APPROVED' });
+    await store.enviarTextoNovo(COMPANY, 'cred_antes', bom, { agora: AGORA });
+    expect(vs).toHaveLength(1);
+    expect(vs[0].estado).toBe('APPROVED');
+    expect((await store.resolverParaEnvio(COMPANY, 'cred_antes')).templateName).toBe('aura_cred_antes_v1');
+  });
+
+  test('webhook que chega antes do retorno da Meta encontra a versão PENDING', async () => {
+    const vs = [];
+    simular({ versoes: vs });
+    wa.createTemplate.mockImplementation(async () => {
+      // o webhook responde enquanto a chamada à Meta ainda não voltou
+      await store.onTemplateStatus(COMPANY, { name: 'aura_cred_antes_v1', status: 'APPROVED' });
+      return { id: '6', status: 'PENDING' };
+    });
+    await store.enviarTextoNovo(COMPANY, 'cred_antes', bom, { agora: AGORA });
+    expect(vs[0].estado).toBe('APPROVED');
+  });
+
+  test('dois PUT ao mesmo tempo: um cria, o outro leva 409 e a Meta é chamada uma vez só', async () => {
+    simular({ versoes: [] });
+    wa.createTemplate.mockReset().mockResolvedValue({ id: '7', status: 'PENDING' });
+    const r = await Promise.allSettled([
+      store.enviarTextoNovo(COMPANY, 'cred_antes', bom, { agora: AGORA }),
+      store.enviarTextoNovo(COMPANY, 'cred_antes', bom, { agora: AGORA }),
+    ]);
+    expect(r.filter((x) => x.status === 'fulfilled')).toHaveLength(1);
+    const falha = r.find((x) => x.status === 'rejected');
+    expect(falha.reason).toMatchObject({ status: 409, code: 'EM_APROVACAO' });
+    expect(wa.createTemplate).toHaveBeenCalledTimes(1);
+  });
+
+  test('a Meta recusa o pedido: a linha PENDING é desfeita e a lojista pode tentar de novo', async () => {
+    const vs = [];
+    simular({ versoes: vs });
+    wa.createTemplate.mockReset().mockRejectedValueOnce(new Error('meta fora'));
+    await expect(store.enviarTextoNovo(COMPANY, 'cred_antes', bom, { agora: AGORA }))
+      .rejects.toMatchObject({ status: 502, code: 'META_RECUSOU' });
+    expect(vs).toHaveLength(0);
+    wa.createTemplate.mockResolvedValue({ id: '8', status: 'PENDING' });
+    await expect(store.enviarTextoNovo(COMPANY, 'cred_antes', bom, { agora: AGORA })).resolves.toMatchObject({ versao: 1 });
   });
 
   test('texto inválido é recusado no servidor e nada vai à Meta', async () => {

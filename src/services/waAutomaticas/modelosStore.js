@@ -215,32 +215,70 @@ async function enviarTextoNovo(companyId, key, texto, { agora = Date.now() } = {
       (v.checks.find((c) => !c.ok) || {}).texto || 'O texto não passou nas regras do WhatsApp.', { checks: v.checks });
   }
 
-  const versoes = await carregarVersoes(companyId, [key]);
-  if (versoes.some((x) => x.estado === 'PENDING')) {
-    throw new ErroModelo(409, 'EM_APROVACAO',
-      'Já existe um texto desse modelo esperando a aprovação do WhatsApp. Espere a resposta para mandar outro.');
-  }
-  const lim = limiteDeEdicao(versoes, agora);
-  if (!lim.pode) {
-    const quando = new Date(lim.proxima_em).toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo', day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' });
-    throw new ErroModelo(429, lim.codigo,
-      lim.codigo === 'EDICAO_LIMITE_24H'
-        ? `O WhatsApp só deixa mudar o texto de uma mensagem uma vez por dia. Você poderá mudar de novo em ${quando}.`
-        : `O WhatsApp só deixa mudar o texto de uma mensagem 10 vezes por mês. Você poderá mudar de novo em ${quando}.`,
-      { proxima_em: lim.proxima_em });
-  }
+  // 1) Sob trava por (loja, modelo): confere, escolhe a versão e GRAVA a linha
+  //    PENDING antes de falar com a Meta. Assim (a) dois PUT ao mesmo tempo não
+  //    calculam a mesma versão — o segundo espera e leva 409 EM_APROVACAO — e
+  //    (b) uma resposta APPROVED imediata ou um webhook que chegue antes do
+  //    retorno da Meta já encontram a versão para promover.
+  const { versao, name } = await comTravaDoModelo(companyId, key, async (client) => {
+    const versoes = await carregarVersoes(companyId, [key]);
+    if (versoes.some((x) => x.estado === 'PENDING')) {
+      throw new ErroModelo(409, 'EM_APROVACAO',
+        'Já existe um texto desse modelo esperando a aprovação do WhatsApp. Espere a resposta para mandar outro.');
+    }
+    const lim = limiteDeEdicao(versoes, agora);
+    if (!lim.pode) {
+      const quando = new Date(lim.proxima_em).toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo', day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' });
+      throw new ErroModelo(429, lim.codigo,
+        lim.codigo === 'EDICAO_LIMITE_24H'
+          ? `O WhatsApp só deixa mudar o texto de uma mensagem uma vez por dia. Você poderá mudar de novo em ${quando}.`
+          : `O WhatsApp só deixa mudar o texto de uma mensagem 10 vezes por mês. Você poderá mudar de novo em ${quando}.`,
+        { proxima_em: lim.proxima_em });
+    }
+    const proxima = versoes.reduce((mx, x) => Math.max(mx, x.versao), 0) + 1;
+    const nome = `${mod.template_base}_v${proxima}`;
+    await client.query(
+      `-- wa:modelos-nova-versao
+       INSERT INTO wa_modelo_versoes (company_id, modelo, versao, texto, template_name, estado)
+       VALUES ($1,$2,$3,$4,$5,'PENDING')`,
+      [companyId, key, proxima, texto, nome]
+    );
+    return { versao: proxima, name: nome };
+  });
 
-  const versao = versoes.reduce((mx, x) => Math.max(mx, x.versao), 0) + 1;
-  const name = `${mod.template_base}_v${versao}`;
-  const criado = await criarNaMeta(companyId, { name, categoria: mod.categoria, texto });
+  // 2) Meta. Se recusar, a linha PENDING sai (nada ficou esperando à toa).
+  let criado;
+  try {
+    criado = await criarNaMeta(companyId, { name, categoria: mod.categoria, texto });
+  } catch (e) {
+    await db.query(
+      `-- wa:modelos-desfaz-versao
+       DELETE FROM wa_modelo_versoes WHERE company_id = $1 AND modelo = $2 AND versao = $3 AND estado = 'PENDING'`,
+      [companyId, key, versao]
+    );
+    throw e;
+  }
+  // 3) Registro local: o applyTemplateStatus promove a versão se a Meta já
+  //    respondeu APPROVED/REJECTED (a linha PENDING já existe).
   await registrarTemplateLocal(companyId, { name, categoria: mod.categoria, texto, criado });
-  await db.query(
-    `-- wa:modelos-nova-versao
-     INSERT INTO wa_modelo_versoes (company_id, modelo, versao, texto, template_name, estado)
-     VALUES ($1,$2,$3,$4,$5,'PENDING')`,
-    [companyId, key, versao, texto, name]
-  );
   return { versao, modelo: await obter(companyId, key) };
+}
+
+async function comTravaDoModelo(companyId, key, fn) {
+  const client = await db.connect();
+  try {
+    await client.query('BEGIN');
+    await client.query("SET LOCAL lock_timeout = '5s'");
+    await client.query('SELECT pg_advisory_xact_lock(hashtextextended($1, 0))', [`wa_modelo:${companyId}:${key}`]);
+    const r = await fn(client);
+    await client.query('COMMIT');
+    return r;
+  } catch (e) {
+    try { await client.query('ROLLBACK'); } catch (_) { /* conexão já caiu */ }
+    throw e;
+  } finally {
+    client.release();
+  }
 }
 
 // "Voltar ao texto da Aura": linha PADRAO vence as anteriores; pendente
