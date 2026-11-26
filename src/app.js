@@ -101,8 +101,11 @@ app.use('/api/v1/storefront', function(req, res, next) {
 for (const prefixo of ['/api/v1/aprovacao', '/api/v1/acompanhar']) {
   app.use(prefixo, function(req, res, next) {
     res.setHeader('Access-Control-Allow-Origin', '*');
+    // Authorization so passa no preflight: a lojista que abre o proprio link
+    // com sessao da Aura (o app manda o token) nao pode ser barrada. A rota
+    // nao le nem exige o token; a credencial e o token da URL.
     res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
-    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, X-Request-ID');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Request-ID');
     res.setHeader('Access-Control-Max-Age', '600');
     if (req.method === 'OPTIONS') return res.sendStatus(204);
     next();

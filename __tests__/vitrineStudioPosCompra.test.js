@@ -673,7 +673,7 @@ describe('CORS aberto para /aprovacao e /acompanhar', () => {
     // O preflight do POST de resposta (JSON) precisa do POST e do Content-Type.
     const bloco = fonte.slice(aberto, fonte.indexOf('\n}\n', aberto));
     expect(bloco).toContain("'GET, POST, OPTIONS'");
-    expect(bloco).toContain("'Content-Type, X-Request-ID'");
+    expect(bloco).toContain("'Content-Type, Authorization, X-Request-ID'");
     expect(bloco).not.toMatch(/Allow-Credentials/);
   });
 });
