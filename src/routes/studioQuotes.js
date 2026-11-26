@@ -31,6 +31,7 @@ const db      = require('../config/database');
 const { notasDoPedidoAprovado } = require('../services/orcamentoEmVideo');
 const frequentes = require('../services/produtosFrequentesDoOrcamento');
 const { inserirPedidoStudio, inserirItemPedidoStudio } = require('../services/studioPedido');
+const { garantirClienteDoOrcamento } = require('../services/clienteDoOrcamento');
 // 04/11/2026: orçamento que virou pedido avisa o celular.
 const lojaEvents = require('../services/lojaEvents');
 // 25/11/2026 (p-185): aprovar lanca a conta a receber e os marcos do pedido.
@@ -457,6 +458,10 @@ router.post('/quotes/:qid/send', async function(req, res) {
       [token, String(vDays), qid, cid]
     );
     const updated = updRes.rows[0];
+    // C4: quem recebe o orcamento vira cliente (nome + WhatsApp digitados,
+    // sem customer_id), na empresa do orcamento e sem duplicar pelo telefone.
+    const cli = await garantirClienteDoOrcamento(db, updated);
+    if (cli.customer_id) updated.customer_id = cli.customer_id;
 
     const appUrl = process.env.APP_URL || 'https://app.getaura.com.br';
     const quoteUrl = `${appUrl}/orcamento/${token}`;
