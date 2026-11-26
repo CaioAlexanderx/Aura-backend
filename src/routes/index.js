@@ -66,6 +66,7 @@ router.use('/companies/:id', privateCompaniesRouter);
 // ── WhatsApp Cloud API por company (FONTE ÚNICA: connect, status,
 // templates, fila, opt). Sem gate de plano — ver whatsappCloud.js.
 router.use('/companies/:id', require('./whatsappCloud'));
+router.use('/companies/:id', require('./whatsappSaldo'));
 // Tela nova do WhatsApp (26/11/2026): modelos editáveis das automáticas.
 router.use('/companies/:id', require('./waModelos'));
 

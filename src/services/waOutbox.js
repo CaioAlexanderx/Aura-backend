@@ -16,9 +16,11 @@
 // ============================================================
 'use strict';
 
+const crypto = require('crypto');
 const db = require('../config/database');
 const wa = require('./whatsapp');
 const quota = require('./marketing/marketingQuota');
+const waSaldo = require('./waSaldo');
 
 const MAX_ATTEMPTS = 5;
 const WINDOW_MS = 24 * 3600 * 1000;
@@ -328,7 +330,8 @@ async function marketingSkipReason(companyId, phone, { customerId = null } = {})
   // ninguém compra. Os dois devolvem LIMITE_MARKETING porque a UI
   // traduz uma lista fechada de motivos; o número que diferencia os
   // dois está no /whatsapp/status.usage.marketing.
-  if ((await quota.remainingThisMonth(companyId)) <= 0) return 'LIMITE_MARKETING';
+  // Com o saldo novo ligado (WA_SALDO_ATIVO), quem decide e o waSaldo.reservar.
+  if (!waSaldo.ativo() && (await quota.remainingThisMonth(companyId)) <= 0) return 'LIMITE_MARKETING';
   const hoje = await countMarketing(companyId, { todayOnly: true });
   if (hoje >= marketingDailyCap()) return 'LIMITE_MARKETING';
   return null;
@@ -498,7 +501,7 @@ async function enqueue({
   companyId, toPhone, kind = 'template',
   templateName = null, templateLanguage = 'pt_BR', components = null,
   textBody = null, sourceType = null, sourceId = null, dedupeKey = null,
-  customerId = null,
+  customerId = null, saldoBucket = null,
 }) {
   const phone = normalizePhone(toPhone);
   if (!phone) return { queued: false, reason: 'TELEFONE_INVALIDO' };
@@ -570,6 +573,32 @@ async function enqueue({
     if (n >= TEST_DAILY_CAP) { status = 'skipped'; skipReason = 'LIMITE_DIARIO'; }
   }
 
+  // ── Saldo (migration 472): a reserva e o INSERT na MESMA transacao.
+  // Template pago de uma origem com saldo; texto em janela aberta e teste
+  // nao gastam. Sem saldo, grava 'skipped' com o motivo (SALDO_ESGOTADO...).
+  const bucket = saldoBucket || (kind === 'template' ? waSaldo.bucketDaOrigem(sourceType) : null);
+  let saldoInfo = null;
+  if (status === 'pending' && bucket && !isTeste && waSaldo.ativo()) {
+    const comp = components ? JSON.stringify(components) : null;
+    const r = await inserirReservando({
+      companyId, bucket,
+      sql: `-- wa:outbox-enqueue-saldo
+       INSERT INTO wa_outbox
+         (id, company_id, to_phone, kind, template_name, template_language, components,
+          text_body, status, skip_reason, source_type, source_id, dedupe_key)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'pending',NULL,$9,$10,$11)
+       ON CONFLICT (dedupe_key) WHERE dedupe_key IS NOT NULL DO NOTHING
+       RETURNING id, status`,
+      params: (id) => [id, companyId, phone, kind, templateName, templateLanguage, comp, textBody,
+        sourceType, sourceId, dedupeKey],
+    });
+    if (r.rows) {
+      if (!r.rows.length) return { queued: false, reason: 'DUPLICADO' };
+      return { queued: true, id: r.rows[0].id, status: 'pending', reason: null, saldo: r.reserva };
+    }
+    status = 'skipped'; skipReason = r.recusa.code; saldoInfo = r.recusa;
+  }
+
   const { rows } = await db.query(
     `-- wa:outbox-enqueue
      INSERT INTO wa_outbox
@@ -583,7 +612,43 @@ async function enqueue({
      status, skipReason, sourceType, sourceId, dedupeKey]
   );
   if (!rows.length) return { queued: false, reason: 'DUPLICADO' };
-  return { queued: status === 'pending', id: rows[0].id, status, reason: skipReason };
+  const out = { queued: status === 'pending', id: rows[0].id, status, reason: skipReason };
+  if (saldoInfo) out.saldo = saldoInfo;
+  return out;
+}
+
+// INSERT na wa_outbox + reserva do saldo na MESMA transacao. `params(id)`
+// devolve os parametros do `sql`, onde $1 e o id (uuid) da linha. Se a
+// reserva recusar (ou na duvida), nada e inserido: devolve { recusa }.
+// Se o INSERT nao devolver linha (dedupe_key repetida), faz ROLLBACK e a
+// reserva some junto: quem foi duplicado nao gasta saldo.
+async function inserirReservando({ companyId, bucket, sql, params }) {
+  const outboxId = crypto.randomUUID();
+  let client;
+  try {
+    client = await db.connect();
+    await client.query('BEGIN');
+    await client.query("SET LOCAL lock_timeout = '3s'");
+  } catch (e) {
+    if (client) { try { await client.query('ROLLBACK'); } catch (_) { /* ja caiu */ } client.release(); }
+    console.error('[waOutbox] sem transacao para reservar saldo (bloqueia):', e.code || '', e.message);
+    return { recusa: { ok: false, code: 'SALDO_INDISPONIVEL', motivo: e.code || 'ERRO' } };
+  }
+  try {
+    const reserva = await waSaldo.reservar(client, {
+      companyId, bucket, refKey: `outbox:${outboxId}`, outboxId,
+    });
+    if (!reserva.ok) { await client.query('ROLLBACK'); return { recusa: reserva }; }
+    const { rows } = await client.query(sql, params(outboxId));
+    if (!rows.length) { await client.query('ROLLBACK'); return { rows: [], reserva: null }; }
+    await client.query('COMMIT');
+    return { rows, reserva };
+  } catch (e) {
+    try { await client.query('ROLLBACK'); } catch (_) { /* ja caiu */ }
+    throw e;
+  } finally {
+    client.release();
+  }
 }
 
 // ── Origem HUB (375) ────────────────────────────────────────
@@ -609,7 +674,7 @@ function windowOpenAt(lastInboundAt) {
 async function enqueueHub({
   companyId, conversationId, toPhone, textBody,
   sourceType = 'aurinha', sourceId = null, dedupeKey = null,
-  lastInboundAt = null, template = null,
+  lastInboundAt = null, template = null, saldoBucket = null,
 }) {
   const phone = normalizePhone(toPhone);
   if (!phone) return { queued: false, reason: 'TELEFONE_INVALIDO' };
@@ -653,6 +718,36 @@ async function enqueueHub({
     }
   }
 
+  // Saldo (472): template fora da janela de 24h e um AVISO (convite de
+  // conversa fechada). Texto na janela aberta e gratis e nao reserva.
+  const bucketHub = saldoBucket || (kind === 'template' ? 'avisos' : null);
+  let saldoInfo = null;
+  if (status === 'pending' && !held && bucketHub && waSaldo.ativo()) {
+    try {
+      const r = await inserirReservando({
+        companyId, bucket: bucketHub,
+        sql: `-- wa:outbox-enqueue-hub-saldo
+         INSERT INTO wa_outbox
+           (id, company_id, to_phone, kind, template_name, template_language,
+            text_body, status, skip_reason, source_type, source_id, dedupe_key,
+            hub_conversation_id, next_attempt_at)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,'pending',NULL,$8,$9,$10,$11,NOW())
+         ON CONFLICT (dedupe_key) WHERE dedupe_key IS NOT NULL DO NOTHING
+         RETURNING id, status`,
+        params: (id) => [id, companyId, phone, kind, templateName, templateLanguage, textBody,
+          sourceType, sourceId, dedupeKey, conversationId],
+      });
+      if (r.rows) {
+        if (!r.rows.length) return { queued: false, reason: 'DUPLICADO' };
+        return { queued: true, id: r.rows[0].id, status: 'pending', reason: null, held: false, saldo: r.reserva };
+      }
+      status = 'skipped'; skipReason = r.recusa.code; saldoInfo = r.recusa;
+    } catch (e) {
+      if (e.code === '42703') return { queued: false, reason: 'SCHEMA_PENDENTE' };
+      throw e;
+    }
+  }
+
   try {
     const { rows } = await db.query(
       `-- wa:outbox-enqueue-hub
@@ -668,7 +763,9 @@ async function enqueueHub({
        status, skipReason, sourceType, sourceId, dedupeKey, conversationId, held]
     );
     if (!rows.length) return { queued: false, reason: 'DUPLICADO' };
-    return { queued: status === 'pending' && !held, id: rows[0].id, status, reason: skipReason, held };
+    const out = { queued: status === 'pending' && !held, id: rows[0].id, status, reason: skipReason, held };
+    if (saldoInfo) out.saldo = saldoInfo;
+    return out;
   } catch (e) {
     // 375 pendente: sem a coluna não há "origem hub" — nada é gravado.
     if (e.code === '42703') return { queued: false, reason: 'SCHEMA_PENDENTE' };
@@ -850,6 +947,11 @@ async function markRow(id, fields) {
   for (const [k, v] of Object.entries(fields)) { sets.push(`${k} = $${i++}`); vals.push(v); }
   vals.push(id);
   await db.query(`UPDATE wa_outbox SET ${sets.join(', ')}, updated_at = NOW() WHERE id = $${i}`, vals);
+  // Saldo (472): o que nao saiu nao gasta. Falhou de vez ou foi pulado no
+  // despacho -> devolve a mensagem reservada (idempotente; no-op sem reserva).
+  if (fields.status === 'failed' || fields.status === 'skipped') {
+    await waSaldo.devolver({ outboxId: id });
+  }
 }
 
 // Processa até `limit` itens pendentes vencidos. Chamado pelo
@@ -1045,13 +1147,18 @@ async function applyStatusUpdate(companyId, wamid, status, errorText) {
   if (!wamid) return;
   const allowed = ['sent', 'delivered', 'read', 'failed'];
   if (!allowed.includes(status)) return;
-  await db.query(
+  const r = await db.query(
     `-- wa:outbox-status
      UPDATE wa_outbox SET status = $1, last_error = COALESCE($2, last_error), updated_at = NOW()
       WHERE wa_message_id = $3 AND company_id = $4
-        AND status IN ('sent','delivered')`,
+        AND status IN ('sent','delivered')
+      RETURNING id`,
     [status, errorText || null, wamid, companyId]
   );
+  // A Meta recusou depois de aceitar: nao entregou, nao gasta saldo (472).
+  if (status === 'failed' && r && Array.isArray(r.rows)) {
+    for (const row of r.rows) await waSaldo.devolver({ outboxId: row.id });
+  }
 }
 
 // Webhook: aprovação/rejeição de template (message_template_status_update).
@@ -1079,7 +1186,7 @@ async function applyTemplateStatus(companyId, { name, language, status, metaTemp
 module.exports = {
   normalizePhone, touchInbound, touchOutboundHuman, windowOpen, getContact, decryptToken,
   isTokenError, markTokenInvalid, clearTokenInvalid, connectionState,
-  enqueue, enqueueHub, processBatch, simulate, applyStatusUpdate, applyTemplateStatus,
+  enqueue, enqueueHub, inserirReservando, processBatch, simulate, applyStatusUpdate, applyTemplateStatus,
   windowOpenAt,
   // Guardas de custo (Fase 2) — expostas para o GET /whatsapp/preview e
   // para os testes de guarda.

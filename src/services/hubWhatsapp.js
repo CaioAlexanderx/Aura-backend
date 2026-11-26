@@ -31,6 +31,7 @@
 const db = require('../config/database');
 const waOutbox = require('./waOutbox');
 const plantao = require('./plantao');
+const waSaldoAurinha = require('./waSaldoAurinha');
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const WINDOW_MS = 24 * 3600 * 1000;
@@ -240,14 +241,27 @@ async function avaliarConversa(conv, { companyId, plantao: config = null }, { ag
   );
   if (!claim.length) return { respondeu: false, motivo: 'JA_RESPONDIDA' };
 
+  // Saldo da Aurinha (472): cada conversa nova atendida gasta 1. Sem saldo
+  // ela nao responde e a conversa fica com a lojista (a mensagem ja esta
+  // gravada na caixa). A pendencia nao volta: nao ha o que reavaliar.
+  const cobranca = await waSaldoAurinha.atender({ companyId, conversationId: conv.id, agora });
+  if (!cobranca.ok) {
+    await waSaldoAurinha.passarParaLojista(conv.id);
+    return { respondeu: false, motivo: 'AURINHA_SEM_SALDO', codigo: cobranca.code };
+  }
+
   let texto;
   try {
     texto = await responderNoHub(conv, { agora, config });
   } catch (e) {
+    await waSaldoAurinha.devolver(companyId, cobranca);
     await restaurarPendencia(conv.id, conv.aguardando_resposta_desde);
     throw e;
   }
-  if (texto == null) return { respondeu: false, motivo: 'SEM_RESPOSTA' };
+  if (texto == null) {
+    await waSaldoAurinha.devolver(companyId, cobranca);
+    return { respondeu: false, motivo: 'SEM_RESPOSTA' };
+  }
 
   const base = conv.last_inbound_at ? new Date(conv.last_inbound_at).getTime() : 0;
   let enq;
@@ -263,10 +277,12 @@ async function avaliarConversa(conv, { companyId, plantao: config = null }, { ag
       template: cfg.template,
     });
   } catch (e) {
+    await waSaldoAurinha.devolver(companyId, cobranca);
     await restaurarPendencia(conv.id, conv.aguardando_resposta_desde);
     throw e;
   }
   if (enq.reason === 'SCHEMA_PENDENTE') {
+    await waSaldoAurinha.devolver(companyId, cobranca);
     await restaurarPendencia(conv.id, conv.aguardando_resposta_desde);
     return { respondeu: false, motivo: 'SCHEMA_PENDENTE' };
   }
