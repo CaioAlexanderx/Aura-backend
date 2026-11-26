@@ -25,9 +25,9 @@ const PARTES = Object.freeze(['aniversario', 'venda_mais', 'crediario']);
 const DIVISAO_PADRAO = Object.freeze({ aniversario: 4, venda_mais: 4, crediario: 2 });
 // Origem gravada na wa_outbox por parte (é daí que sai o "usadas" do mês).
 const ORIGEM_DA_PARTE = Object.freeze({ aniversario: 'aniversario', venda_mais: 'venda_mais', crediario: 'crediario_oferta' });
-// Aniversário: quantos dias do aniversário cada passo cai. "Antes" são 8
-// dias (não 7) para clarear a janela de 7 dias entre novidades do mesmo cliente.
-const DESLOCAMENTO_PASSO = Object.freeze({ antes: 8, dia: 0, depois: -3 });
+// Aniversário: UMA mensagem por aniversário; a lojista escolhe quando (decisão do
+// Caio, 26/11). Valor = quantos dias ANTES do aniversário a mensagem sai.
+const QUANDO = Object.freeze({ no_dia: 0, '3_dias_antes': 3, '7_dias_antes': 7 });
 const DESLOCAMENTO_COBRANCA = Object.freeze({ antes3: 3, dia: 0, depois1: -1, depois7: -7, depois15: -15 });
 
 class ErroAuto extends Error {
@@ -43,7 +43,7 @@ function schemaMissing(e) { return !!e && (e.code === '42P01' || e.code === '427
 function configPadrao(key) {
   switch (key) {
     case 'aniversario':
-      return { tom: 'carinhoso', presente: { tipo: 'percent', valor: 10 }, passos: { antes: false, dia: true, depois: false } };
+      return { tom: 'carinhoso', presente: { tipo: 'percent', valor: 10 }, quando: 'no_dia' };
     case 'venda_mais':
       return { segmento: 'sumindo', presente: { tipo: 'fixed', valor: 20 }, automatico: false };
     case 'crediario_cobrar':
@@ -76,12 +76,10 @@ function normalizarConfig(key, atual, parcial) {
   if (key === 'aniversario') {
     if (!['carinhoso', 'direto', 'animado'].includes(novo.tom)) throw invalida('tom', 'Escolha um jeito de falar: carinhoso, direto ou animado.');
     novo.presente = normalizarPresente(novo.presente === undefined ? null : novo.presente, 'presente');
-    const passos = { ...base.passos, ...((parcial && parcial.passos) || {}) };
-    for (const k of ['antes', 'dia', 'depois']) passos[k] = passos[k] === true;
-    if (!passos.antes && !passos.dia && !passos.depois) throw invalida('passos', 'Escolha pelo menos um momento para mandar.');
-    // Antes e depois levam o presente; sem presente só há o parabéns do dia.
-    if (!novo.presente && (passos.antes || passos.depois)) throw invalida('passos', 'Sem presente, só o parabéns do dia faz sentido.');
-    novo.passos = passos;
+    if (!Object.prototype.hasOwnProperty.call(QUANDO, novo.quando)) throw invalida('quando', 'Escolha quando mandar: no dia, 3 dias antes ou 7 dias antes.');
+    // O texto de "antes" fala do presente: sem presente só há o parabéns do dia.
+    if (!novo.presente && novo.quando !== 'no_dia') throw invalida('quando', 'Sem presente, só o parabéns do dia faz sentido.');
+    delete novo.passos;
   } else if (key === 'venda_mais') {
     if (!Object.prototype.hasOwnProperty.call(publico.SEGMENTOS_VENDA_MAIS, novo.segmento)) throw invalida('segmento', 'Escolha "sumindo" ou "sumiu".');
     novo.presente = normalizarPresente(novo.presente === undefined ? null : novo.presente, 'presente');
@@ -104,12 +102,8 @@ function normalizarConfig(key, atual, parcial) {
 function modelosDaConfig(key, config) {
   const c = config || configPadrao(key);
   if (key === 'aniversario') {
-    const sufixo = c.presente ? 'com' : 'sem';
-    const out = [];
-    if (c.passos.dia) out.push(`aniv_${c.tom}_${sufixo}`);
-    if (c.presente && c.passos.antes) out.push('aniv_antes');
-    if (c.presente && c.passos.depois) out.push('aniv_depois');
-    return out;
+    if (c.quando && c.quando !== 'no_dia' && c.presente) return ['aniv_antes'];
+    return [`aniv_${c.tom}_${c.presente ? 'com' : 'sem'}`];
   }
   if (key === 'venda_mais') return [`venda_${c.segmento}_${c.presente ? 'com' : 'sem'}`];
   if (key === 'crediario_vender') return ['cred_oferta'];
@@ -307,7 +301,7 @@ async function ligar(companyId, key, body = {}) {
 }
 
 module.exports = {
-  KEYS, USA, PARTE, PARTES, DIVISAO_PADRAO, ORIGEM_DA_PARTE, DESLOCAMENTO_PASSO, DESLOCAMENTO_COBRANCA,
+  KEYS, USA, PARTE, PARTES, DIVISAO_PADRAO, ORIGEM_DA_PARTE, QUANDO, DESLOCAMENTO_COBRANCA,
   ErroAuto, configPadrao, normalizarConfig, modelosDaConfig,
   lerLinhas, lerDivisao, usadasNoMes, saldoDeNovidades, livresDaParte, blocoNovidades,
   listar, definirDivisao, ligar,

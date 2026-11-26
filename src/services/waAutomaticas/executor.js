@@ -46,9 +46,8 @@ function textoDeVencimento(dueIso, hojeIso) {
 }
 
 // ── modelo escolhido para cada automática ───────────────────
-function modeloDoAniversario(config, passo) {
-  if (passo === 'antes') return 'aniv_antes';
-  if (passo === 'depois') return 'aniv_depois';
+function modeloDoAniversario(config) {
+  if (config.presente && config.quando && config.quando !== 'no_dia') return 'aniv_antes';
   return `aniv_${config.tom}_${config.presente ? 'com' : 'sem'}`;
 }
 
@@ -109,7 +108,7 @@ async function previa(companyId, key, { segmento = null, hoje = publico.hojeBRT(
   const periodo = publico.mesDe(hoje);
 
   if (key === 'aniversario') {
-    const per = Math.max(1, ['antes', 'dia', 'depois'].filter((p) => config.passos[p]).length);
+    const per = 1;
     const cands = await publico.candidatosAniversario(companyId, Number(periodo.slice(5, 7)));
     const { elegiveis, fora } = await publico.classificarDoBanco(companyId, cands);
     const pessoas = Math.floor(livres / per);
@@ -269,43 +268,28 @@ async function rodarCrediarioVender(companyId, config, hoje, loja) {
   });
 }
 
-// Aniversário: cada passo olha o aniversário de hoje + deslocamento. Quem
-// entra é quem está entre os que CABEM no mês (quem mais compra primeiro),
-// não quem faz aniversário primeiro.
+// Aniversário: UMA mensagem por aniversário, no dia que a lojista escolheu
+// (no dia, 3 ou 7 dias antes). Entra quem está entre os que CABEM no mês
+// (quem mais compra primeiro), não quem faz aniversário primeiro.
 async function rodarAniversario(companyId, config, hoje, loja) {
-  const total = { enfileiradas: 0, guardadas: 0, puladas: {}, parou_por: null };
-  const passos = ['antes', 'dia', 'depois'].filter((p) => config.passos[p] && (p === 'dia' || config.presente));
-  const per = Math.max(1, passos.length);
   const divisao = await auto.lerDivisao(companyId);
-  const pessoasNoMes = Math.floor(divisao.aniversario / per);
-  for (const passo of passos) {
-    const alvo = publico.somarDias(hoje, auto.DESLOCAMENTO_PASSO[passo]);
-    const cands = await publico.candidatosAniversario(companyId, Number(alvo.slice(5, 7)));
-    const { elegiveis } = await publico.classificarDoBanco(companyId, cands);
-    const noMes = publico.ordenar(elegiveis).slice(0, pessoasNoMes);
-    let lote = noMes.filter((c) => Number(c.dia) === Number(alvo.slice(8, 10)));
-    if (passo === 'depois') {
-      const mantidos = [];
-      for (const c of lote) { if (!cupomUsado(await cupomVigenteDoAniversario(companyId, c.id))) mantidos.push(c); }
-      lote = mantidos;
-    }
-    const r = await enviarLoteDeNovidade({
-      companyId, key: 'aniversario', lote, config, hoje, sourceType: 'aniversario', kindCupom: 'aniversario', exigeCupom: !!config.presente,
-      modeloDe: () => modeloDoAniversario(config, passo),
-      dedupe: (c) => `aniv-${c.id}-${alvo.slice(0, 4)}-${passo}`,
-      valoresDe: async (c, cupom) => ({
-        ...(await valoresBase(companyId, loja)),
-        'Nome': primeiroNome(c.name),
-        'Presente': descreverPresente(config.presente),
-        'Validade': cupom ? mkt.formatDateBR(cupom.expires_at) : '',
-        'Código': cupom ? cupom.code : '',
-      }),
-    });
-    total.enfileiradas += r.enfileiradas; total.guardadas += r.guardadas;
-    for (const [k, v] of Object.entries(r.puladas)) total.puladas[k] = (total.puladas[k] || 0) + v;
-    if (r.parou_por) { total.parou_por = r.parou_por; break; }
-  }
-  return total;
+  const alvo = publico.somarDias(hoje, auto.QUANDO[config.quando || 'no_dia']);
+  const cands = await publico.candidatosAniversario(companyId, Number(alvo.slice(5, 7)));
+  const { elegiveis } = await publico.classificarDoBanco(companyId, cands);
+  const noMes = publico.ordenar(elegiveis).slice(0, divisao.aniversario);
+  const lote = noMes.filter((c) => Number(c.dia) === Number(alvo.slice(8, 10)));
+  return enviarLoteDeNovidade({
+    companyId, key: 'aniversario', lote, config, hoje, sourceType: 'aniversario', kindCupom: 'aniversario', exigeCupom: !!config.presente,
+    modeloDe: () => modeloDoAniversario(config),
+    dedupe: (c) => `aniv-${c.id}-${alvo.slice(0, 4)}`,
+    valoresDe: async (c, cupom) => ({
+      ...(await valoresBase(companyId, loja)),
+      'Nome': primeiroNome(c.name),
+      'Presente': descreverPresente(config.presente),
+      'Validade': cupom ? mkt.formatDateBR(cupom.expires_at) : '',
+      'Código': cupom ? cupom.code : '',
+    }),
+  });
 }
 
 // Cobrança: AVISOS. Sem corte por quem mais compra (a data é do dia) e sem

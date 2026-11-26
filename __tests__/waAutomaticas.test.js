@@ -193,16 +193,17 @@ describe('ligar e o aceite de novidades', () => {
 
   test('config inválida: presente zerado, passo vazio, antes sem presente', () => {
     expect(() => auto.normalizarConfig('venda_mais', null, { presente: { tipo: 'percent', valor: 0 } })).toThrow(/maior que zero/);
-    expect(() => auto.normalizarConfig('aniversario', null, { passos: { antes: false, dia: false, depois: false } })).toThrow(/pelo menos um/);
-    expect(() => auto.normalizarConfig('aniversario', null, { presente: null, passos: { antes: true, dia: true, depois: false } })).toThrow(/Sem presente/);
+    expect(() => auto.normalizarConfig('aniversario', null, { quando: 'depois' })).toThrow(/no dia, 3 dias antes ou 7/);
+    expect(() => auto.normalizarConfig('aniversario', null, { presente: null, quando: '3_dias_antes' })).toThrow(/Sem presente/);
+    expect(auto.normalizarConfig('aniversario', null, null).quando).toBe('no_dia');
     expect(() => auto.normalizarConfig('crediario_vender', null, { dia_do_mes: 31 })).toThrow(/entre 1 e 28/);
     expect(auto.normalizarConfig('venda_mais', null, { segmento: 'sumiu' }).segmento).toBe('sumiu');
   });
 
   test('modelosDaConfig escolhe os templates certos', () => {
-    expect(auto.modelosDaConfig('aniversario', { tom: 'direto', presente: null, passos: { dia: true } })).toEqual(['aniv_direto_sem']);
-    expect(auto.modelosDaConfig('aniversario', { tom: 'animado', presente: { tipo: 'percent', valor: 10 }, passos: { antes: true, dia: true, depois: true } }))
-      .toEqual(['aniv_animado_com', 'aniv_antes', 'aniv_depois']);
+    expect(auto.modelosDaConfig('aniversario', { tom: 'direto', presente: null, quando: 'no_dia' })).toEqual(['aniv_direto_sem']);
+    expect(auto.modelosDaConfig('aniversario', { tom: 'animado', presente: { tipo: 'percent', valor: 10 }, quando: 'no_dia' })).toEqual(['aniv_animado_com']);
+    expect(auto.modelosDaConfig('aniversario', { tom: 'animado', presente: { tipo: 'percent', valor: 10 }, quando: '7_dias_antes' })).toEqual(['aniv_antes']);
     expect(auto.modelosDaConfig('venda_mais', { segmento: 'sumiu', presente: null })).toEqual(['venda_sumiu_sem']);
     expect(auto.modelosDaConfig('crediario_cobrar', { pontos: { antes3: true, dia: false, depois7: true } })).toEqual(['cred_antes', 'cred_atraso']);
   });
@@ -341,5 +342,43 @@ describe('cobrança e datas', () => {
   test('o job nasce desligado (trava)', () => {
     delete process.env.WA_AUTOMATICAS_ENABLED;
     expect(job.habilitado()).toBe(false);
+  });
+});
+
+describe('Aniversário: uma mensagem, a lojista escolhe quando', () => {
+  function simularAniv(quando, hojeAniv) {
+    db.query.mockReset();
+    waOutbox.enqueue.mockReset().mockResolvedValue({ queued: true, id: 'o1' });
+    waOutbox.simulate.mockReset().mockResolvedValue({ ok: true });
+    mkt.createCoupon.mockReset().mockResolvedValue({ id: 'cup', code: 'ANIV-X', expires_at: '2026-12-31' });
+    modelosStore.resolverParaEnvio.mockReset().mockImplementation(async (c, key) => ({
+      templateName: 'aura_' + key, language: 'pt_BR', pronto: true,
+      texto: 'Oi, {Nome}. Aniversario na {Nome da loja}: {Presente} ate {Validade}, codigo {Código}.',
+    }));
+    db.query.mockImplementation(async (sql) => {
+      if (/wa:auto-linhas/.test(sql)) return { rows: [{ automatica: 'aniversario', ligada: true, config: { tom: 'carinhoso', presente: { tipo: 'percent', valor: 10 }, quando } }] };
+      if (/wa:auto-divisao\b/.test(sql)) return { rows: [{ aniversario: 4, venda_mais: 4, crediario: 2 }] };
+      if (/wa:publico-aniversario/.test(sql)) return { rows: [cli(1, { dia: hojeAniv }), cli(2, { dia: hojeAniv + 1 })] };
+      return { rows: [] };
+    });
+  }
+
+  test.each([
+    ['no_dia', 10, 'aura_aniv_carinhoso_com'],
+    ['3_dias_antes', 13, 'aura_aniv_antes'],
+    ['7_dias_antes', 17, 'aura_aniv_antes'],
+  ])('%s: sai uma vez, no dia certo, com o modelo certo', async (quando, diaDoAniversario, modelo) => {
+    simularAniv(quando, diaDoAniversario);
+    const r = await executor.rodar(COMPANY, 'aniversario', { hoje: '2026-12-10' });
+    expect(r.enfileiradas).toBe(1);
+    const args = waOutbox.enqueue.mock.calls[0][0];
+    expect(args.customerId).toBe('c1');
+    expect(args.templateName).toBe(modelo);
+    expect(args.dedupeKey).toBe('aniv-c1-2026');
+  });
+
+  test('fora do dia escolhido ninguém sai', async () => {
+    simularAniv('3_dias_antes', 20);
+    expect((await executor.rodar(COMPANY, 'aniversario', { hoje: '2026-12-10' })).enfileiradas).toBe(0);
   });
 });
