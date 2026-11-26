@@ -1431,6 +1431,8 @@ router.delete('/sale/:saleId', async (req, res) => {
     if (!rows.length) { await client.query('ROLLBACK'); return res.status(404).json({ error: 'Venda nao encontrada' }); }
     const sale = rows[0];
     if (sale.status === 'cancelled') { await client.query('ROLLBACK'); return res.status(409).json({ error: 'Esta venda ja foi cancelada' }); }
+    // C11: condicional -> itens ANTES do estoque (a ordem da venda; evita deadlock).
+    const condCtx = await condicionalVenda.travarAoCancelar(client, { companyId: req.params.id, saleId: req.params.saleId });
     const { rows: items } = await client.query(
       `SELECT si.product_id, si.variant_id, si.quantity, si.product_name_snapshot,
               COALESCE(p.company_id,$2) AS stock_company_id
@@ -1495,7 +1497,7 @@ router.delete('/sale/:saleId', async (req, res) => {
     // Comandas (368): a comanda que esta venda fechou volta a ficar aberta.
     await comandaSaleHooks.afterSaleCancel(client, { companyId: req.params.id, saleId: req.params.saleId });
     // C11: as pecas da condicional voltam a 'ficou' sem venda; a condicional reabre.
-    await condicionalVenda.voltarAoCancelar(client, { companyId: req.params.id, saleId: req.params.saleId, userId: req.user?.id || null });
+    await condicionalVenda.voltarAoCancelar(client, { companyId: req.params.id, saleId: req.params.saleId, userId: req.user?.id || null, ctx: condCtx });
     await client.query('COMMIT');
     resposta = { ok: true, cancelled: req.params.saleId, items_restored: items.filter(i => i.product_id).length, amount_reversed: parseFloat(sale.total_amount) };
   } catch (e) {

@@ -810,6 +810,8 @@ router.post('/:sale_id/cancel', asyncHandler(async (req, res) => {
       }
     }
 
+    // C11: condicional -> itens ANTES do estoque (a ordem da venda; evita deadlock).
+    const condCtx = await condicionalVenda.travarAoCancelar(client, { companyId: companyId, saleId: saleId });
     // Repoe estoque dos itens da venda (na troca = itens NOVOS levados)
     const itemsRes = await client.query(
       'SELECT si.product_id, si.variant_id, si.quantity FROM sale_items si WHERE si.sale_id = $1',
@@ -976,7 +978,7 @@ router.post('/:sale_id/cancel', asyncHandler(async (req, res) => {
     // Comandas (368): a comanda que esta venda fechou volta a ficar aberta.
     await comandaSaleHooks.afterSaleCancel(client, { companyId: companyId, saleId: saleId });
     // C11: pecas da condicional voltam a 'ficou' sem venda; a condicional reabre.
-    await condicionalVenda.voltarAoCancelar(client, { companyId: companyId, saleId: saleId, userId: req.user && req.user.id ? req.user.id : null });
+    await condicionalVenda.voltarAoCancelar(client, { companyId: companyId, saleId: saleId, userId: req.user && req.user.id ? req.user.id : null, ctx: condCtx });
 
     await client.query('COMMIT');
 

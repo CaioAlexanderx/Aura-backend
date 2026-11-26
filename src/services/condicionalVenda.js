@@ -35,8 +35,15 @@
 // que cancela ao remover o ultimo item): voltarAoCancelar() solta o sale_id
 // das pecas (continuam 'ficou', fora da loja, "Falta cobrar") e, se a
 // condicional estava encerrada, reabre (evento 'reaberta'). Evento
-// 'venda_cancelada' por peca (migration 469). Remover so um item de uma
-// venda de varios NAO solta a peca: ela segue cobrada.
+// 'venda_cancelada' por peca (migration 469).
+// Remover UM item de uma venda de varios (transactionSale): a peca daquele
+// produto+variante volta a 'ficou' sem sale_id na hora (soltarPorItemRemovido),
+// e o cancelamento depois so solta as que ainda apontam para a venda.
+// Nao solta (documentado): trocas e a devolucao do crediario (refund.js), que
+// mantem o sale_item na venda e so se desfazem antes de cancelar a venda; e o
+// caminho de remocao de item de venda no crediario (idem, vai por refund.js).
+// Ordem das travas no cancelamento: condicional -> itens -> estoque, igual a
+// venda (travarAoCancelar antes do laco que devolve estoque).
 //
 // Nada entra em Financeiro/caixa antes da venda (R1/R9): so isto, na venda.
 // ============================================================
@@ -175,11 +182,21 @@ async function gravar(client, { companyId, userId, sale, ctx }) {
   return { id: cond.id, numero: Number(cond.numero), itens: ids.length, encerrada };
 }
 
+// ─── Cancelar a venda / tirar item da venda ───────────────────
+//
+// Ordem das travas, igual a da venda: condicional -> itens -> estoque.
+// Quem cancela chama travarAoCancelar() ANTES do laco que devolve estoque
+// (products/product_variants) e passa o contexto adiante; sem isso o cancelar
+// travaria o estoque e depois a condicional, e a venda (condicional primeiro,
+// estoque depois) faria deadlock com ele.
+
+const mesmoId = (a, b) => String(a || '').toLowerCase() === String(b || '').toLowerCase();
+
 /**
- * Venda cancelada: as pecas dela voltam a 'ficou' sem sale_id e a condicional
- * reabre se estava encerrada. Venda comum: uma consulta e nada mais.
+ * Trava a condicional (e depois os itens) da venda. null = venda comum
+ * (uma consulta so). Devolve o contexto para soltarPecas().
  */
-async function voltarAoCancelar(client, { companyId, saleId, userId }) {
+async function travarAoCancelar(client, { companyId, saleId }) {
   const { rows: ligados } = await client.query(
     `SELECT DISTINCT ci.condicional_id FROM condicional_itens ci
        JOIN condicionais c ON c.id = ci.condicional_id
@@ -193,30 +210,39 @@ async function voltarAoCancelar(client, { companyId, saleId, userId }) {
   );
   if (!cond) return null;
   const { rows: itens } = await client.query(
-    `SELECT id, sale_id FROM condicional_itens WHERE condicional_id = $1 ORDER BY id FOR UPDATE`, [condId]
+    `SELECT id, product_id, variant_id, sale_id FROM condicional_itens
+      WHERE condicional_id = $1 ORDER BY id FOR UPDATE`, [condId]
   );
-  const soltos = itens.filter((i) => String(i.sale_id) === String(saleId));
-  if (!soltos.length) return null;
+  return { cond, itens };
+}
+
+/** Solta as pecas escolhidas (sale_id NULL, continuam 'ficou') e reabre a encerrada. */
+async function soltarPecas(client, { companyId, saleId, userId, ctx, soltos, motivo }) {
+  if (!ctx || !soltos.length) return null;
+  const condId = ctx.cond.id;
   await client.query(
-    `UPDATE condicional_itens SET sale_id = NULL WHERE condicional_id = $1 AND sale_id = $2`, [condId, saleId]
+    `UPDATE condicional_itens SET sale_id = NULL WHERE condicional_id = $1 AND sale_id = $2 AND id = ANY($3::uuid[])`,
+    [condId, saleId, soltos.map((i) => i.id)]
   );
   for (const it of soltos) {
     await client.query(
       `INSERT INTO condicional_eventos (condicional_id, company_id, tipo, item_id, dados, user_id, created_at)
        VALUES ($1, $2, 'venda_cancelada', $3, $4::jsonb, $5, clock_timestamp())`,
-      [condId, companyId, it.id, JSON.stringify({ op: 'cancelar_venda', sale_id: saleId }), userId || null]
+      [condId, companyId, it.id, JSON.stringify({ op: motivo, sale_id: saleId }), userId || null]
     );
+    it.sale_id = null; // o contexto fica em dia para uma segunda chamada
   }
   let reabriu = false;
-  if (cond.status === 'encerrada') {
+  if (ctx.cond.status === 'encerrada') {
     await client.query(
       `UPDATE condicionais SET status = 'aberta', closed_at = NULL, updated_at = NOW() WHERE id = $1`, [condId]
     );
     await client.query(
       `INSERT INTO condicional_eventos (condicional_id, company_id, tipo, dados, user_id, created_at)
        VALUES ($1, $2, 'reaberta', $3::jsonb, $4, clock_timestamp())`,
-      [condId, companyId, JSON.stringify({ op: 'cancelar_venda', motivo: 'venda_cancelada', sale_id: saleId }), userId || null]
+      [condId, companyId, JSON.stringify({ op: motivo, motivo: 'venda_cancelada', sale_id: saleId }), userId || null]
     );
+    ctx.cond.status = 'aberta';
     reabriu = true;
   } else {
     await client.query(`UPDATE condicionais SET updated_at = NOW() WHERE id = $1`, [condId]);
@@ -224,4 +250,43 @@ async function voltarAoCancelar(client, { companyId, saleId, userId }) {
   return { condicional_id: condId, pecas: soltos.length, reabriu };
 }
 
-module.exports = { lerPedido, travar, gravar, voltarAoCancelar, carrinhoConfere };
+/**
+ * Venda cancelada: as pecas que ainda apontam para ela voltam a 'ficou' sem
+ * sale_id e a condicional reabre se estava encerrada. As ja soltas (item
+ * removido antes) tem sale_id NULL e nao entram de novo. `ctx` vem de
+ * travarAoCancelar(); sem ele, trava aqui.
+ */
+async function voltarAoCancelar(client, { companyId, saleId, userId, ctx }) {
+  const c = ctx === undefined ? await travarAoCancelar(client, { companyId, saleId }) : ctx;
+  if (!c) return null;
+  const soltos = c.itens.filter((i) => mesmoId(i.sale_id, saleId));
+  return soltarPecas(client, { companyId, saleId, userId, ctx: c, soltos, motivo: 'cancelar_venda' });
+}
+
+/**
+ * Item tirado da venda (transactionSale, remocao parcial), DEPOIS de
+ * sale_items ja refletir a remocao: para cada produto+variante, a venda nao
+ * pode ter mais pecas cobradas do que unidades em sale_items. A sobra volta a
+ * 'ficou' sem sale_id na hora, evento 'venda_cancelada'; a condicional
+ * encerrada reabre.
+ */
+async function soltarPorItemRemovido(client, { companyId, saleId, productId, variantId, userId, ctx }) {
+  const c = ctx === undefined ? await travarAoCancelar(client, { companyId, saleId }) : ctx;
+  if (!c || !productId) return null;
+  const mesmaChave = (i) => mesmoId(i.product_id, productId) && mesmoId(i.variant_id, variantId);
+  const amarradas = c.itens.filter((i) => mesmoId(i.sale_id, saleId) && mesmaChave(i));
+  if (!amarradas.length) return null;
+  const { rows: [r] } = await client.query(
+    `SELECT COALESCE(SUM(quantity), 0) AS qtd FROM sale_items
+      WHERE sale_id = $1 AND product_id = $2 AND variant_id IS NOT DISTINCT FROM $3`,
+    [saleId, productId, variantId || null]
+  );
+  const sobram = Math.max(0, Math.floor(Number(r.qtd)));
+  const soltos = amarradas.slice(sobram === 0 ? 0 : sobram);
+  return soltarPecas(client, { companyId, saleId, userId, ctx: c, soltos, motivo: 'item_removido' });
+}
+
+module.exports = {
+  lerPedido, travar, gravar, carrinhoConfere,
+  travarAoCancelar, voltarAoCancelar, soltarPorItemRemovido,
+};

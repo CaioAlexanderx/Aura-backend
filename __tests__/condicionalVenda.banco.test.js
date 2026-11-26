@@ -84,6 +84,9 @@ beforeAll(async () => {
   app.use((req, _res, next) => { req.user = usuario; next(); });
   app.use('/companies/:id/pdv', require('../src/routes/pdv'));
   app.use('/companies/:id/condicionais', require('../src/routes/condicionais'));
+  app.use('/companies/:id', require('../src/routes/transactionSale'));
+  // eslint-disable-next-line no-unused-vars
+  app.use((err, _req, res, _next) => res.status(err.statusCode || err.status || 500).json({ error: err.message }));
 });
 
 beforeEach(() => { usuario = STAFF(); delete process.env.CONDICIONAL_LIBERADA; });
@@ -295,6 +298,45 @@ describe('cancelar a venda', () => {
     const itens = await lerItens(cond.id);
     expect(itens.find((i) => i.id === cond.itens[0].id)).toMatchObject({ situacao: 'ficou', sale_id: null });
     expect(itens.find((i) => i.id === cond.itens[1].id)).toMatchObject({ situacao: 'com_cliente', sale_id: null });
+    expect((await lerCond(cond.id)).status).toBe('aberta');
+  });
+});
+
+describe('remover item da venda (transactionSale)', () => {
+  const removerItem = async (saleId, productId) => {
+    const { rows: [tx] } = await q(`SELECT id FROM transactions WHERE idempotency_key = $1 AND company_id = $2`, ['pdv-sale-' + saleId, ID.loja]);
+    const { rows: [it] } = await q(`SELECT id FROM sale_items WHERE sale_id = $1 AND product_id = $2`, [saleId, productId]);
+    return request(app).delete(`/companies/${ID.loja}/transactions/${tx.id}/sale-items/${it.id}`);
+  };
+
+  test('remover A: a peca A volta a ficou sem venda na hora, a condicional reabre; depois cancelar a venda solta so B (sem evento duplicado de A)', async () => {
+    const cond = await nova([[ID.a, 120], [ID.b, 90]]);
+    const r = await vender(cond, cond.itens);
+    expect(r.status).toBe(201);
+    expect((await lerCond(cond.id)).status).toBe('encerrada');
+
+    const rem = await removerItem(r.body.sale.id, ID.a);
+    expect(rem.status).toBe(200);
+    let itens = await lerItens(cond.id);
+    expect(itens.find((i) => i.id === cond.itens[0].id)).toMatchObject({ situacao: 'ficou', sale_id: null });
+    expect(itens.find((i) => i.id === cond.itens[1].id)).toMatchObject({ situacao: 'ficou', sale_id: r.body.sale.id });
+    expect((await lerCond(cond.id)).status).toBe('aberta');
+    expect((await eventos(cond.id)).filter((t) => t === 'venda_cancelada')).toHaveLength(1);
+
+    const del = await request(app).delete(`/companies/${ID.loja}/pdv/sale/${r.body.sale.id}`);
+    expect(del.status).toBe(200);
+    itens = await lerItens(cond.id);
+    for (const it of itens) expect(it).toMatchObject({ situacao: 'ficou', sale_id: null });
+    expect((await eventos(cond.id)).filter((t) => t === 'venda_cancelada')).toHaveLength(2);
+    expect((await lerCond(cond.id)).status).toBe('aberta');
+  });
+
+  test('remover o ultimo item cancela a venda e solta a peca restante', async () => {
+    const cond = await nova([[ID.a, 120]]);
+    const r = await vender(cond, cond.itens);
+    const rem = await removerItem(r.body.sale.id, ID.a);
+    expect(rem.status).toBe(200);
+    expect((await lerItens(cond.id))[0]).toMatchObject({ situacao: 'ficou', sale_id: null });
     expect((await lerCond(cond.id)).status).toBe('aberta');
   });
 });

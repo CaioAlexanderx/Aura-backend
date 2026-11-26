@@ -142,7 +142,7 @@ describe('voltarAoCancelar', () => {
     const client = fakeClient([
       [/SELECT DISTINCT/, [{ condicional_id: COND }]],
       [/SELECT id, status FROM condicionais/, [{ id: COND, status: 'encerrada' }]],
-      [/SELECT id, sale_id FROM condicional_itens/, [{ id: I1, sale_id: VENDA }, { id: I2, sale_id: VENDA }]],
+      [/SELECT id, product_id, variant_id, sale_id FROM condicional_itens/, [{ id: I1, sale_id: VENDA }, { id: I2, sale_id: VENDA }]],
     ]);
     const r = await v.voltarAoCancelar(client, { companyId: LOJA, saleId: VENDA, userId: 'u' });
     expect(r).toEqual({ condicional_id: COND, pecas: 2, reabriu: true });
@@ -155,9 +155,59 @@ describe('voltarAoCancelar', () => {
     const client = fakeClient([
       [/SELECT DISTINCT/, [{ condicional_id: COND }]],
       [/SELECT id, status FROM condicionais/, [{ id: COND, status: 'aberta' }]],
-      [/SELECT id, sale_id FROM condicional_itens/, [{ id: I1, sale_id: VENDA }]],
+      [/SELECT id, product_id, variant_id, sale_id FROM condicional_itens/, [{ id: I1, sale_id: VENDA }]],
     ]);
     expect((await v.voltarAoCancelar(client, { companyId: LOJA, saleId: VENDA })).reabriu).toBe(false);
+  });
+});
+
+describe('travas e item removido', () => {
+  const ligado = (itens, status = 'encerrada', soma = 1) => fakeClient([
+    [/SELECT DISTINCT/, [{ condicional_id: COND }]],
+    [/SELECT id, status FROM condicionais/, [{ id: COND, status }]],
+    [/SELECT id, product_id, variant_id, sale_id FROM condicional_itens/, itens],
+    [/SUM\(quantity\)/, [{ qtd: soma }]],
+  ]);
+  const par = () => [
+    { id: I1, product_id: P1, variant_id: null, sale_id: VENDA },
+    { id: I2, product_id: P2, variant_id: null, sale_id: VENDA },
+  ];
+
+  test('travarAoCancelar: condicional e depois itens, FOR UPDATE; venda comum = uma consulta', async () => {
+    const client = ligado(par());
+    const ctx = await v.travarAoCancelar(client, { companyId: LOJA, saleId: VENDA });
+    expect(ctx.itens).toHaveLength(2);
+    expect(client.chamadas[1].sql).toMatch(/FROM condicionais .* FOR UPDATE$/);
+    expect(client.chamadas[2].sql).toMatch(/FROM condicional_itens .* ORDER BY id FOR UPDATE$/);
+    const comum = fakeClient([]);
+    expect(await v.travarAoCancelar(comum, { companyId: LOJA, saleId: VENDA })).toBeNull();
+    expect(comum.chamadas).toHaveLength(1);
+  });
+
+  test('item removido: solta so a peca daquele produto, reabre e registra o evento', async () => {
+    const client = ligado(par(), 'encerrada', 0);
+    const r = await v.soltarPorItemRemovido(client, { companyId: LOJA, saleId: VENDA, productId: P1, variantId: null, userId: 'u' });
+    expect(r).toEqual({ condicional_id: COND, pecas: 1, reabriu: true });
+    const up = client.chamadas.find((x) => /SET sale_id = NULL/.test(x.sql));
+    expect(up.params[2]).toEqual([I1]);
+    expect(client.chamadas.filter((x) => /'venda_cancelada'/.test(x.sql))).toHaveLength(1);
+  });
+
+  test('item removido com outra unidade ainda na venda: nada solta', async () => {
+    const client = ligado(par(), 'aberta', 1);
+    expect(await v.soltarPorItemRemovido(client, { companyId: LOJA, saleId: VENDA, productId: P1, variantId: null })).toBeNull();
+    expect(client.chamadas.some((x) => /SET sale_id = NULL/.test(x.sql))).toBe(false);
+  });
+
+  test('remover A e depois cancelar: o cancelamento solta so B (A nao ganha evento de novo); uuid em maiuscula conta', async () => {
+    const client = ligado(par(), 'encerrada', 0);
+    const ctx = await v.travarAoCancelar(client, { companyId: LOJA, saleId: VENDA });
+    await v.soltarPorItemRemovido(client, { companyId: LOJA, saleId: VENDA, productId: P1, variantId: null, ctx });
+    const r = await v.voltarAoCancelar(client, { companyId: LOJA, saleId: VENDA.toUpperCase(), userId: null, ctx });
+    expect(r).toEqual({ condicional_id: COND, pecas: 1, reabriu: false });
+    const ups = client.chamadas.filter((x) => /SET sale_id = NULL/.test(x.sql));
+    expect(ups.map((u) => u.params[2])).toEqual([[I1], [I2]]);
+    expect(client.chamadas.filter((x) => /'venda_cancelada'/.test(x.sql))).toHaveLength(2);
   });
 });
 
