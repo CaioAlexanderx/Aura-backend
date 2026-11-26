@@ -21,8 +21,10 @@ const db = require('../config/database');
 const executor = require('../services/waAutomaticas/executor');
 const publico = require('../services/waAutomaticas/publico');
 
+const trava = require('../services/waAutomaticas/trava');
+
 function habilitado() {
-  return ['1', 'true', 'sim', 'on'].includes(String(process.env.WA_AUTOMATICAS_ENABLED || '').trim().toLowerCase());
+  return trava.ligada();
 }
 
 function devidaHoje(linha, hoje) {

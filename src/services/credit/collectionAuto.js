@@ -356,8 +356,10 @@ async function runForCompany(companyId, { today = null, dryRun = false } = {}) {
 async function listEnabledCompanies() {
   try {
     // Tela nova do WhatsApp (26/11/2026): quem ligou "Crediário: cobrar" na
-    // automática nova sai desta régua, para não cobrar duas vezes.
+    // automática nova sai desta régua, para não cobrar duas vezes — só com o
+    // job novo ligado (WA_AUTOMATICAS_ENABLED); desligado, a régua antiga segue.
     try {
+      if (!require('../waAutomaticas/trava').ligada()) throw Object.assign(new Error('trava'), { code: '42P01' });
       const { rows } = await db.query(
         `-- cred:auto-companies
          SELECT r.company_id FROM credit_collection_rules r

@@ -337,6 +337,32 @@ async function pixDaLoja(companyId) {
   return v;
 }
 
+// Trava de novidades por loja: lê "quanto cabe na parte" e enfileira dentro da
+// MESMA trava, para dois envios ao mesmo tempo (dois cliques, clique + job)
+// não passarem da parte. É um lock próprio, em outra chave que o do saldo
+// (wa_saldo:...): o enqueue usa outra conexão e pega o lock do saldo, então
+// segurar o MESMO lock aqui travaria o próprio envio. O saldo em si segue
+// protegido pelo waSaldo.reservar.
+async function comTravaDeNovidades(companyId, fn) {
+  const client = await db.connect();
+  try {
+    await client.query('BEGIN');
+    await client.query("SET LOCAL lock_timeout = '20s'");
+    await client.query('SELECT pg_advisory_xact_lock(hashtextextended($1, 0))', [`wa_novidades_partes:${companyId}`]);
+    const r = await fn();
+    await client.query('COMMIT');
+    return r;
+  } catch (e) {
+    try { await client.query('ROLLBACK'); } catch (_) { /* conexão já caiu */ }
+    if (e && e.code === '55P03') {
+      throw new auto.ErroAuto(409, 'ENVIO_EM_ANDAMENTO', 'Já há um envio desta loja em andamento. Espere terminar e tente de novo.');
+    }
+    throw e;
+  } finally {
+    client.release();
+  }
+}
+
 /**
  * Roda UMA automática de UMA loja. `lista` do cliente nunca entra: o corte
  * é refeito aqui, no servidor.
@@ -349,10 +375,11 @@ async function rodar(companyId, key, { hoje = publico.hojeBRT(), segmento = null
   const config = auto.normalizarConfig(key, linha && linha.config, segmento ? { segmento } : null);
   const loja = await mkt.loadStoreName(companyId);
   let out;
-  if (key === 'aniversario') out = await rodarAniversario(companyId, config, hoje, loja);
-  else if (key === 'venda_mais') out = await rodarVendaMais(companyId, config, hoje, loja);
-  else if (key === 'crediario_vender') out = await rodarCrediarioVender(companyId, config, hoje, loja);
-  else out = await rodarCobranca(companyId, config, hoje, loja);
+  if (key === 'crediario_cobrar') out = await rodarCobranca(companyId, config, hoje, loja);
+  else {
+    const rodador = { aniversario: rodarAniversario, venda_mais: rodarVendaMais, crediario_vender: rodarCrediarioVender }[key];
+    out = await comTravaDeNovidades(companyId, () => rodador(companyId, config, hoje, loja));
+  }
   await db.query(
     `-- wa:auto-rodada
      UPDATE wa_automaticas SET ultima_rodada_em = NOW() WHERE company_id = $1 AND automatica = $2`,

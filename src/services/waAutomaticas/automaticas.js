@@ -17,6 +17,7 @@ const db = require('../../config/database');
 const mkt = require('../marketing/marketingCommon');
 const modelosStore = require('./modelosStore');
 const publico = require('./publico');
+const trava = require('./trava');
 
 const KEYS = Object.freeze(['aniversario', 'venda_mais', 'crediario_cobrar', 'crediario_vender']);
 const USA = Object.freeze({ aniversario: 'novidades', venda_mais: 'novidades', crediario_vender: 'novidades', crediario_cobrar: 'avisos' });
@@ -262,6 +263,11 @@ async function ligar(companyId, key, body = {}) {
   const ligada = body.ligada === undefined ? !!(atual && atual.ligada) : body.ligada === true;
 
   if (ligada) {
+    // Trava: com o job desligado nada roda, e ligar aqui tiraria a loja dos jobs antigos.
+    if (!trava.ligada()) {
+      throw new ErroAuto(409, 'AUTOMATICAS_DESLIGADAS',
+        'As mensagens automáticas novas ainda não foram liberadas para a sua loja. Os envios de hoje continuam como estão.');
+    }
     // Primeira automática de novidade: pergunta o aceite dos clientes uma vez.
     if (USA[key] === 'novidades') {
       const settings = await mkt.loadMarketingSettings(companyId);

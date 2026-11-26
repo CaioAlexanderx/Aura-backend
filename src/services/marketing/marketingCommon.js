@@ -405,16 +405,21 @@ async function listCompaniesWithAuto(column) {
   try {
     // Tela nova do WhatsApp (26/11/2026): a loja que ligou a automática
     // nova (Aniversário / Venda+) sai do job antigo, para não mandar duas
-    // vezes. 42P01 (473 pendente) cai na consulta de sempre.
+    // vezes — SÓ com o job novo ligado (WA_AUTOMATICAS_ENABLED); desligado,
+    // ninguém sai e o job antigo segue. Venda+ só tira a reativação antiga
+    // quando roda sozinho (config.automatico). 42P01 (473 pendente) cai na
+    // consulta de sempre.
     const NOVA = { wa_birthday_auto: 'aniversario', wa_reactivation_auto: 'venda_mais' }[column];
     let rows;
     try {
+      if (!require('../waAutomaticas/trava').ligada()) throw Object.assign(new Error('trava'), { code: '42P01' });
       ({ rows } = await db.query(
         `-- mkt:auto-companies
          SELECT c.id FROM companies c
           WHERE c.${column} = true AND c.wa_marketing_consent_at IS NOT NULL
             AND NOT EXISTS (SELECT 1 FROM wa_automaticas w
-                             WHERE w.company_id = c.id AND w.automatica = $1 AND w.ligada = true)`,
+                             WHERE w.company_id = c.id AND w.automatica = $1 AND w.ligada = true
+                               AND (w.automatica <> 'venda_mais' OR w.config->>'automatico' = 'true'))`,
         [NOVA]
       ));
     } catch (e) {

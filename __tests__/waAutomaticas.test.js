@@ -153,6 +153,9 @@ describe('divisão das novidades', () => {
 });
 
 describe('ligar e o aceite de novidades', () => {
+  beforeEach(() => { process.env.WA_AUTOMATICAS_ENABLED = 'true'; });
+  afterEach(() => { delete process.env.WA_AUTOMATICAS_ENABLED; });
+
   function simularLigar({ aceite = null, modelos = [] } = {}) {
     db.query.mockReset();
     mkt.setMarketingConsent.mockReset().mockResolvedValue(true);
@@ -169,6 +172,34 @@ describe('ligar e o aceite de novidades', () => {
     await auto.ligar(COMPANY, 'aniversario', { ligada: true, aceite_novidades: true });
     expect(mkt.setMarketingConsent).toHaveBeenCalledWith(COMPANY, true);
     expect(db.query.mock.calls.some((c) => /wa:auto-set/.test(c[0]) && c[1][2] === true)).toBe(true);
+  });
+
+  test('com o job novo desligado (trava) não liga nada: 409 AUTOMATICAS_DESLIGADAS e nada é gravado', async () => {
+    delete process.env.WA_AUTOMATICAS_ENABLED;
+    simularLigar({ aceite: 'x' });
+    for (const key of auto.KEYS) {
+      await expect(auto.ligar(COMPANY, key, { ligada: true, aceite_novidades: true }))
+        .rejects.toMatchObject({ status: 409, code: 'AUTOMATICAS_DESLIGADAS' });
+    }
+    expect(db.query.mock.calls.some((c) => /wa:auto-set/.test(c[0]))).toBe(false);
+    // desligar continua livre
+    await expect(auto.ligar(COMPANY, 'aniversario', { ligada: false })).resolves.toBeDefined();
+  });
+
+  test('jobs antigos só saem da frente quando o job novo está ligado', async () => {
+    const mkt2 = jest.requireActual('../src/services/marketing/marketingCommon');
+    const collection = require('../src/services/credit/collectionAuto');
+    for (const [ligado, esperaExclusao] of [[false, false], [true, true]]) {
+      if (ligado) process.env.WA_AUTOMATICAS_ENABLED = 'true'; else delete process.env.WA_AUTOMATICAS_ENABLED;
+      db.query.mockReset();
+      db.query.mockResolvedValue({ rows: [] });
+      await mkt2.listCompaniesWithAuto('wa_birthday_auto');
+      await collection.runAll().catch(() => {});
+      const sqls = db.query.mock.calls.map((c) => c[0]).filter((q) => /mkt:auto-companies|cred:auto-companies/.test(q));
+      expect(sqls.length).toBeGreaterThan(0);
+      expect(sqls.some((q) => /wa_automaticas/.test(q))).toBe(esperaExclusao);
+    }
+    delete process.env.WA_AUTOMATICAS_ENABLED;
   });
 
   test('com o aceite já gravado não pergunta de novo', async () => {
@@ -210,8 +241,22 @@ describe('ligar e o aceite de novidades', () => {
 });
 
 // ── envio ────────────────────────────────────────────────────
+let _fila = Promise.resolve();
+function simularConexao() {
+  db.connect = jest.fn(async () => {
+    let soltar;
+    const minha = new Promise((r) => { soltar = r; });
+    const espera = _fila;
+    _fila = _fila.then(() => minha);
+    await espera;
+    return { query: jest.fn().mockResolvedValue({ rows: [] }), release: soltar };
+  });
+}
+
 function prepararEnvio({ candidatos, vendaParte = 4, usadasVenda = 0, recentes = [], optouts = [] }) {
   db.query.mockReset();
+  simularConexao();
+  let enfileiradas = 0;
   waOutbox.enqueue.mockReset(); waOutbox.simulate.mockReset();
   mkt.createCoupon.mockReset().mockResolvedValue({ id: 'cup1', code: 'VOLTA-X', expires_at: '2026-12-15' });
   mkt.logMarketing.mockReset();
@@ -221,13 +266,13 @@ function prepararEnvio({ candidatos, vendaParte = 4, usadasVenda = 0, recentes =
   });
   waOutbox.simulate.mockResolvedValue({ ok: true });
   let seq = 0;
-  waOutbox.enqueue.mockImplementation(async () => ({ queued: true, id: `o${++seq}` }));
+  waOutbox.enqueue.mockImplementation(async () => { enfileiradas++; return { queued: true, id: `o${++seq}` }; });
   db.query.mockImplementation(async (sql) => {
     if (/wa:auto-linhas/.test(sql)) {
       return { rows: [{ automatica: 'venda_mais', ligada: true, config: { segmento: 'sumindo', presente: { tipo: 'fixed', valor: 20 }, automatico: false } }] };
     }
     if (/wa:auto-divisao\b/.test(sql)) return { rows: [{ aniversario: 4, venda_mais: vendaParte, crediario: 2 }] };
-    if (/wa:auto-usadas/.test(sql)) return { rows: usadasVenda ? [{ source_type: 'venda_mais', n: usadasVenda }] : [] };
+    if (/wa:auto-usadas/.test(sql)) return { rows: usadasVenda + enfileiradas ? [{ source_type: 'venda_mais', n: usadasVenda + enfileiradas }] : [] };
     if (/wa:publico-venda-mais/.test(sql)) return { rows: candidatos };
     if (/wa:publico-recentes/.test(sql)) return { rows: recentes.map((to_phone) => ({ to_phone })) };
     if (/wa:publico-optouts/.test(sql)) return { rows: optouts.map((phone) => ({ phone })) };
@@ -296,6 +341,17 @@ describe('envio da automática (Venda+)', () => {
     prepararEnvio({ candidatos, vendaParte: 100 });
     const r = await executor.rodar(COMPANY, 'venda_mais', { hoje: '2026-12-01' });
     expect(r.enfileiradas).toBe(50);
+  });
+
+  test('dois envios ao mesmo tempo nunca passam da parte (4): o segundo lê o que o primeiro já usou', async () => {
+    const candidatos = Array.from({ length: 10 }, (_, i) => cli(i, { dias_sem_comprar: 40 }));
+    prepararEnvio({ candidatos });
+    const [a, b] = await Promise.all([
+      executor.rodar(COMPANY, 'venda_mais', { hoje: '2026-12-01' }),
+      executor.rodar(COMPANY, 'venda_mais', { hoje: '2026-12-01' }),
+    ]);
+    expect(a.enfileiradas + b.enfileiradas).toBe(4);
+    expect(waOutbox.enqueue).toHaveBeenCalledTimes(4);
   });
 
   test('modelo padrão ainda não aprovado: para tudo, sem cupom gasto na fila', async () => {
