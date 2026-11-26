@@ -50,6 +50,62 @@ function normalizePhone(phone) {
 }
 
 /**
+ * Passo 2: a baixa de estoque do pedido, com o pedido JA travado (FOR UPDATE)
+ * na transacao de quem chama. Idempotente: so baixa quando
+ * stock_deducted NAO e verdadeiro, e grava o marcador junto. Variante baixa
+ * product_variants; sem variante, products (GREATEST(0, ...)).
+ * E o caminho unico da baixa: a confirmacao da loja online e a entrega do
+ * pedido de orcamento (entregaDoPedidoDeOrcamento.js) passam por aqui.
+ *
+ * @param {object} client  client do pool dentro de uma transacao
+ * @param {object} order   linha de digital_orders lida com FOR UPDATE
+ * @param {object[]} [items] linhas de digital_order_items (le se nao vier)
+ * @returns {Promise<{crossedMinimum: object[], baixou: boolean}>}
+ */
+async function baixarEstoqueDoPedido(client, order, items) {
+  const crossedMinimum = [];
+  if (order.stock_deducted) return { crossedMinimum, baixou: false };
+  if (!items) {
+    ({ rows: items } = await client.query(
+      `SELECT * FROM digital_order_items WHERE order_id = $1`, [order.id]));
+  }
+  const orderId = order.id;
+  for (const item of items) {
+    if (item.variant_id) {
+      // Variante: deduz product_variants.stock_qty
+      await client.query(
+        `UPDATE product_variants
+            SET stock_qty = GREATEST(0, stock_qty - $1)
+          WHERE id = $2`,
+        [item.quantity, item.variant_id]
+      );
+    } else if (item.product_id) {
+      // Produto sem variante: deduz products.stock_qty
+      const { rows: after } = await client.query(
+        `UPDATE products
+            SET stock_qty = GREATEST(0, stock_qty - $1),
+                updated_at = NOW()
+          WHERE id = $2
+      RETURNING id, name, stock_qty, stock_min`,
+        [item.quantity, item.product_id]
+      );
+      const p = after[0];
+      if (p && Number(p.stock_min) > 0 &&
+          Number(p.stock_qty) <= Number(p.stock_min) &&
+          Number(p.stock_qty) + Number(item.quantity) > Number(p.stock_min)) {
+        crossedMinimum.push(p);
+      }
+    }
+  }
+  await client.query(
+    `UPDATE digital_orders SET stock_deducted = TRUE WHERE id = $1`,
+    [orderId]
+  );
+
+  return { crossedMinimum, baixou: true };
+}
+
+/**
  * Os passos 2 a 5 (baixa, cliente, lancamento, NFC-e) com o pedido JA
  * travado (FOR UPDATE) dentro da transacao de quem chama. Nao faz BEGIN
  * nem COMMIT. Idempotente: cada passo confere o seu marcador.
@@ -74,40 +130,7 @@ async function aplicarConfirmacao(client, order, { aReceber = false } = {}) {
     // ── 2. BAIXA DE ESTOQUE (idempotente via stock_deducted flag) ──
     // crossedMinimum: produtos que ATRAVESSARAM o estoque minimo nesta venda.
     // Enviado ao sino depois do COMMIT (ver cabecalho).
-    const crossedMinimum = [];
-    if (!order.stock_deducted) {
-      for (const item of items) {
-        if (item.variant_id) {
-          // Variante: deduz product_variants.stock_qty
-          await client.query(
-            `UPDATE product_variants
-                SET stock_qty = GREATEST(0, stock_qty - $1)
-              WHERE id = $2`,
-            [item.quantity, item.variant_id]
-          );
-        } else if (item.product_id) {
-          // Produto sem variante: deduz products.stock_qty
-          const { rows: after } = await client.query(
-            `UPDATE products
-                SET stock_qty = GREATEST(0, stock_qty - $1),
-                    updated_at = NOW()
-              WHERE id = $2
-          RETURNING id, name, stock_qty, stock_min`,
-            [item.quantity, item.product_id]
-          );
-          const p = after[0];
-          if (p && Number(p.stock_min) > 0 &&
-              Number(p.stock_qty) <= Number(p.stock_min) &&
-              Number(p.stock_qty) + Number(item.quantity) > Number(p.stock_min)) {
-            crossedMinimum.push(p);
-          }
-        }
-      }
-      await client.query(
-        `UPDATE digital_orders SET stock_deducted = TRUE WHERE id = $1`,
-        [orderId]
-      );
-    }
+    const { crossedMinimum } = await baixarEstoqueDoPedido(client, order, items);
 
     // ── 3. MATCH/CRIA CLIENTE (por phone normalizado) ──────────
     let clienteNovo = false;
@@ -317,4 +340,4 @@ async function onOrderConfirmed(orderId) {
   }
 }
 
-module.exports = { onOrderConfirmed, aplicarConfirmacao, avisarDepoisDaConfirmacao };
+module.exports = { onOrderConfirmed, aplicarConfirmacao, avisarDepoisDaConfirmacao, baixarEstoqueDoPedido };

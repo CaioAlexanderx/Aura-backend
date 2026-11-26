@@ -292,6 +292,11 @@ async function receberMarco(db, { companyId, paymentId, body, chave, userId }) {
       nota: NOTA[tipo], semTaxa: forma === 'pix', abater: true,
       chaveId: tipo === 'saldo' ? marco.id : pedido.id,
     });
+    // B1b: o que entrou alcancou o total? Entao o pedido fica pago.
+    // (require tardio: entregaDoPedidoDeOrcamento requer este modulo)
+    await require('./entregaDoPedidoDeOrcamento').quitarSeRecebeuTudo(client, {
+      companyId, orderId: pedido.id, total, recebido: pagoAntes + valor,
+    });
     await client.query('COMMIT');
     return {
       repetido: false,

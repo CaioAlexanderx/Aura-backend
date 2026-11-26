@@ -34,6 +34,7 @@
 // ============================================================
 const router = require('express').Router({ mergeParams: true });
 const db     = require('../config/database');
+const { urlPublicaDoApp } = require('../utils/urlPublicaDoApp');
 const {
   assertOticaEnabled, erroOticaDesligada, carregarOticaSettings, OTICA_DEFAULTS, waParam, primeiroNome,
 } = require('./otica');
@@ -384,7 +385,7 @@ async function nomeDaLoja(cid) {
 
 async function avisarOculosProntos(os, cid) {
   const track_url = os.tracker_token
-    ? `${process.env.APP_PUBLIC_URL || ''}/acompanhar/${os.tracker_token}`
+    ? `${urlPublicaDoApp()}/acompanhar/${os.tracker_token}`
     : null;
   const loja = await nomeDaLoja(cid);
   const nome = primeiroNome(os.customer_name);

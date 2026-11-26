@@ -66,6 +66,7 @@
 // ============================================================
 const router      = require('express').Router({ mergeParams: true });
 const db          = require('../config/database');
+const { urlPublicaDoApp } = require('../utils/urlPublicaDoApp');
 const trocaV2     = require('../services/trocaV2');
 const { resolveManualDiscount } = require('../services/descontoManual');
 const { buscarPedidosParaTroca, juntarComPedidos } = require('../services/trocaPedidoOnline');
@@ -1129,7 +1130,7 @@ async function handleSale(req, res, opts = {}) {
       // gerado por DEFAULT no banco (migration 286), entao ja chega aqui
       // sem consulta extra. null enquanto a migration nao rodou.
       track_url: sale.tracker_token
-        ? `${process.env.APP_PUBLIC_URL || ''}/acompanhar/${sale.tracker_token}`
+        ? `${urlPublicaDoApp()}/acompanhar/${sale.tracker_token}`
         : null,
       // Matcon M1: so aparece quando a venda veio de um orcamento.
       ...(matconResult ? { matcon: matconResult } : {}),

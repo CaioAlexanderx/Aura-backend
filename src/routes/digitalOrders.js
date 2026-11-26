@@ -27,6 +27,7 @@ const lojaEvents = require('../services/lojaEvents');
 const aceite = require('../services/aceiteDoPedido');
 // 25/11/2026 (p-185): pedido de orcamento cancelado fecha a conta a receber.
 const financeiroDoOrcamento = require('../services/financeiroDoOrcamento');
+const entregaDoPedidoDeOrcamento = require('../services/entregaDoPedidoDeOrcamento');
 const { AGUARDANDO_ACEITE, fraseDoPagamento, trocoALevar, usaFluxoComAceite } = require('../services/pagarNaEntrega');
 // Aviso a cliente pelo wa.me da lojista, com texto pronto (tq-47).
 const { avisoDoPedido, precisaDevolver } = require('../services/avisoDoPedidoNoWhatsapp');
@@ -302,6 +303,12 @@ router.patch('/:oid/status', requireRole('client', 'analyst', 'admin'), async (r
       // na transacao do status, acima. O sinal que ja entrou fica.)
       // Cancelar quem ainda esperava aceite e recusar: fica registrado assim.
       if (current === AGUARDANDO_ACEITE) updated[0].cancel_kind = await marcarComoRecusado(oid, updated[0]);
+    }
+    // B1b: pedido de orcamento entregue por aqui tambem baixa o estoque
+    // (idempotente por stock_deducted; delivered_at ja foi gravado acima).
+    if (status === 'delivered') {
+      await entregaDoPedidoDeOrcamento.entregarPedidoDeOrcamento(db, { companyId: cid, orderId: oid })
+        .catch(err => console.warn('[orders] ATENCAO: pedido entregue mas a baixa de estoque do pedido de orcamento FALHOU (stock_deducted segue false, entregar de novo tenta de novo):', 'company=' + cid, 'pedido=' + oid, err.message));
     }
     // Entregue: o pagar na entrega foi recebido na porta. Quita o a receber.
     if (status === 'delivered') {

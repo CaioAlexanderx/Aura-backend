@@ -23,6 +23,7 @@ const {
   sendOwnerNewOrderEmail,
 } = require('./mailer');
 const { vitrineV2Ligada } = require('./vitrineV2');
+const { urlPublicaDoApp } = require('../utils/urlPublicaDoApp');
 
 /**
  * O link do pedido para o e-mail de confirmacao da cliente do Studio
@@ -64,7 +65,7 @@ async function linkDoPedidoDaVitrine(order) {
       const { urlDaLoja } = require('./storefrontBuilder');
       return { url: `${urlDaLoja(r)}/pedido/${r.public_token}`, rotulo: 'Ver meu pedido' };
     }
-    const app = process.env.APP_PUBLIC_URL || '';
+    const app = urlPublicaDoApp();
     if (!/^https:\/\//.test(app)) return null;
     return { url: `${app}/acompanhar/${r.public_token}`, rotulo: 'Acompanhar meu pedido' };
   } catch (err) {
