@@ -244,6 +244,19 @@ describe('histórico — volume', () => {
     const r = await hubWhatsapp.registrarHistorico({ companyId: AURA }, body.entry[0].changes[0].value);
     expect(r).toMatchObject({ ok: false, reason: 'SCHEMA_PENDENTE' });
   });
+
+  it('banco sem companies.wa_phone_number_id (42703): o hub da Aura grava mesmo assim', async () => {
+    db.query.mockImplementation((sql, params) => {
+      if (/FROM companies WHERE wa_phone_number_id=\$1/.test(String(sql))) {
+        const e = new Error('column "wa_phone_number_id" does not exist'); e.code = '42703';
+        return Promise.reject(e);
+      }
+      return handler(world)(sql, params);
+    });
+    await postar(bodyHistorico([{ id: MARINA, messages: [msg('wamid.S1', MARINA, '2026-06-02T13:00:00Z', 'oi')] }]));
+    expect(world.messages).toHaveLength(1);
+    expect(world.messages[0]).toMatchObject({ author: 'cliente', external_message_id: 'wamid.S1' });
+  });
 });
 
 // ── (5) fora do hub ─────────────────────────────────────────

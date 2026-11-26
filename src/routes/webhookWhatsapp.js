@@ -95,13 +95,20 @@ router.post('/', async (req, res) => {
         const phoneNumberId = value.metadata?.phone_number_id;
 
         // Find company by phone_number_id
+        // companies.wa_phone_number_id vem da src/migrations/039, fora do
+        // diretório oficial: num banco sem ela (CI) o 42703 abortava o
+        // webhook inteiro antes do hub da Aura, que não depende dessa coluna.
         let companyId = null;
         if (phoneNumberId) {
-          const { rows } = await db.query(
-            'SELECT id FROM companies WHERE wa_phone_number_id=$1 LIMIT 1',
-            [phoneNumberId]
-          );
-          if (rows.length) companyId = rows[0].id;
+          try {
+            const { rows } = await db.query(
+              'SELECT id FROM companies WHERE wa_phone_number_id=$1 LIMIT 1',
+              [phoneNumberId]
+            );
+            if (rows.length) companyId = rows[0].id;
+          } catch (e) {
+            if (e.code !== '42703' && e.code !== '42P01') throw e;
+          }
         }
 
         // ── Aurinha de plantão (375): o número da própria Aura cai no hub.
