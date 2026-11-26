@@ -198,6 +198,8 @@ describe('ligar e o aceite de novidades', () => {
       const sqls = db.query.mock.calls.map((c) => c[0]).filter((q) => /mkt:auto-companies|cred:auto-companies/.test(q));
       expect(sqls.length).toBeGreaterThan(0);
       expect(sqls.some((q) => /wa_automaticas/.test(q))).toBe(esperaExclusao);
+      // a régua antiga só sai se o template NOVO do ponto ligado está aprovado
+      expect(sqls.some((q) => /wa_automaticas/.test(q) && /APPROVED/.test(q) && /aura_cred_antes_pix/.test(q))).toBe(ligado && sqls.some((q) => /cred:auto-companies/.test(q)));
     }
     delete process.env.WA_AUTOMATICAS_ENABLED;
   });
@@ -374,6 +376,24 @@ describe('envio da automática (Venda+)', () => {
     prepararEnvio({ candidatos: [cli(1, { dias_sem_comprar: 40 })] });
     await executor.rodar(COMPANY, 'venda_mais', { hoje: '2026-12-01' });
     expect(waOutbox.enqueue.mock.calls[0][0].dedupeKey).toBe('vmais-c1-2026-12');
+  });
+});
+
+describe('cobrança: template novo não aprovado', () => {
+  test('sem template aprovado a automática não manda nada (a régua antiga segue cobrindo)', async () => {
+    prepararEnvio({ candidatos: [] });
+    db.query.mockImplementation(async (sql) => {
+      if (/wa:auto-linhas/.test(sql)) return { rows: [{ automatica: 'crediario_cobrar', ligada: true, config: { pontos: { antes3: true, dia: true, depois1: true } } }] };
+      if (/wa:publico-crediario-cobrar/.test(sql)) {
+        return { rows: [{ id: 'i1', customer_id: 'c1', installment_number: 1, total_installments: 3, valor: '50', due_iso: '2026-12-01', name: 'Ana', phone: '11999990001', deslocamento: 0 }] };
+      }
+      return { rows: [] };
+    });
+    modelosStore.resolverParaEnvio.mockResolvedValue({ templateName: 'aura_cred_dia_pix', pronto: false, texto: 'Oi, {Nome}.' });
+    const r = await executor.rodar(COMPANY, 'crediario_cobrar', { hoje: '2026-12-01' });
+    expect(r.enfileiradas).toBe(0);
+    expect(r.parou_por).toBe('MODELO_NAO_APROVADO');
+    expect(waOutbox.enqueue).not.toHaveBeenCalled();
   });
 });
 

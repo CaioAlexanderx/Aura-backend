@@ -92,7 +92,7 @@ describe('validação do Editor', () => {
 function versao(over) {
   return {
     id: 'v-' + over.versao, modelo: 'cred_antes', texto: 'Oi, {Nome}. Texto {Valor} aqui.',
-    template_name: 'aura_cred_antes_v' + over.versao, estado: 'APPROVED', motivo: null,
+    template_name: 'aura_cred_antes_pix_v' + over.versao, estado: 'APPROVED', motivo: null,
     criado_em: new Date('2026-11-01T12:00:00Z'), decidido_em: null, ...over,
   };
 }
@@ -115,7 +115,7 @@ function simular({ versoes = [], padrao = 'APPROVED' } = {}) {
   simularConexao();
   db.query.mockImplementation(async (sql, params) => {
     if (/wa:modelos-versoes/.test(sql)) return { rows: versoes };
-    if (/wa:modelos-padroes/.test(sql)) return { rows: padrao ? [{ name: 'aura_cred_antes', status: padrao }] : [] };
+    if (/wa:modelos-padroes/.test(sql)) return { rows: padrao ? [{ name: 'aura_cred_antes_pix', status: padrao }] : [] };
     if (/wa:modelos-cred/.test(sql)) return { rows: [{ wa_waba_id: 'W1', wa_access_token: 'tok' }] };
     if (/wa:modelos-nova-versao/.test(sql)) {
       versoes.push(versao({ id: 'v-' + params[2], versao: params[2], texto: params[3], template_name: params[4], estado: 'PENDING', criado_em: new Date(AGORA) }));
@@ -149,30 +149,30 @@ describe('texto novo só vale depois de aprovado', () => {
     expect(item.texto_novo).toMatch(/NOVO/);
     expect(item.texto_em_uso).toMatch(/aprovado/);
     const envio = await store.resolverParaEnvio(COMPANY, 'cred_antes');
-    expect(envio.templateName).toBe('aura_cred_antes_v1');
+    expect(envio.templateName).toBe('aura_cred_antes_pix_v1');
     expect(envio.texto).not.toMatch(/NOVO/);
   });
 
   test('sem versão aprovada vale o padrão da Aura', async () => {
     simular({ versoes: [versao({ versao: 1, estado: 'PENDING' })] });
     const envio = await store.resolverParaEnvio(COMPANY, 'cred_antes');
-    expect(envio.templateName).toBe('aura_cred_antes');
+    expect(envio.templateName).toBe('aura_cred_antes_pix');
     expect(envio.texto).toBe(antes.texto_padrao);
   });
 
   test('aprovou: passa a valer e avisa no sino; recusou: o anterior segue e avisa com o motivo', async () => {
-    simular({ versoes: [versao({ versao: 1, estado: 'PENDING', template_name: 'aura_cred_antes_v1' })] });
-    await store.onTemplateStatus(COMPANY, { name: 'aura_cred_antes_v1', status: 'APPROVED' });
+    simular({ versoes: [versao({ versao: 1, estado: 'PENDING', template_name: 'aura_cred_antes_pix_v1' })] });
+    await store.onTemplateStatus(COMPANY, { name: 'aura_cred_antes_pix_v1', status: 'APPROVED' });
     expect(lojaEvents.emitLojaEvent).toHaveBeenCalledWith(
       'loja_wa_modelo_aprovado',
       expect.objectContaining({ company_id: COMPANY, modelo_titulo: 'Antes do vencimento' }),
       { dedupeSuffix: 'v-1' }
     );
-    expect((await store.resolverParaEnvio(COMPANY, 'cred_antes')).templateName).toBe('aura_cred_antes_v1');
+    expect((await store.resolverParaEnvio(COMPANY, 'cred_antes')).templateName).toBe('aura_cred_antes_pix_v1');
 
     lojaEvents.emitLojaEvent.mockClear();
-    simular({ versoes: [versao({ versao: 1, estado: 'PENDING', template_name: 'aura_cred_antes_v1' })] });
-    await store.onTemplateStatus(COMPANY, { name: 'aura_cred_antes_v1', status: 'REJECTED', reason: 'TAG_CONTENT_MISMATCH' });
+    simular({ versoes: [versao({ versao: 1, estado: 'PENDING', template_name: 'aura_cred_antes_pix_v1' })] });
+    await store.onTemplateStatus(COMPANY, { name: 'aura_cred_antes_pix_v1', status: 'REJECTED', reason: 'TAG_CONTENT_MISMATCH' });
     expect(lojaEvents.emitLojaEvent).toHaveBeenCalledWith(
       'loja_wa_modelo_reprovado',
       expect.objectContaining({ motivo: expect.stringMatching(/propaganda/) }),
@@ -192,7 +192,7 @@ describe('texto novo só vale depois de aprovado', () => {
 });
 
 describe('enviar texto novo', () => {
-  const bom = 'Oi, {Nome}. A parcela {Parcela} vence {Vencimento}: {Valor}. Qualquer coisa, me fala.';
+  const bom = "Oi, {Nome}. A parcela {Parcela} vence {Vencimento}: {Valor}. Toque em 'Quero o Pix' que eu te mando o código. Qualquer coisa, me fala.";
 
   test('cria template NOVO e versionado na Meta, sem tocar no atual', async () => {
     simular({ versoes: [versao({ versao: 1, estado: 'APPROVED', criado_em: new Date('2026-10-01T00:00:00Z') })] });
@@ -201,11 +201,12 @@ describe('enviar texto novo', () => {
     expect(r.versao).toBe(2);
     const [waba, , tpl] = wa.createTemplate.mock.calls[0];
     expect(waba).toBe('W1');
-    expect(tpl).toMatchObject({ name: 'aura_cred_antes_v2', category: 'UTILITY', language: 'pt_BR' });
-    expect(tpl.components[0].text).toBe('Oi, {{1}}. A parcela {{2}} vence {{3}}: {{4}}. Qualquer coisa, me fala.');
+    expect(tpl).toMatchObject({ name: 'aura_cred_antes_pix_v2', category: 'UTILITY', language: 'pt_BR' });
+    expect(tpl.components[0].text).toBe("Oi, {{1}}. A parcela {{2}} vence {{3}}: {{4}}. Toque em 'Quero o Pix' que eu te mando o código. Qualquer coisa, me fala.");
+    expect(tpl.components.find((c) => c.type === 'BUTTONS')).toEqual({ type: 'BUTTONS', buttons: [{ type: 'QUICK_REPLY', text: 'Quero o Pix' }] });
     expect(tpl.components[0].example.body_text[0]).toHaveLength(4);
     const insert = db.query.mock.calls.find((c) => /wa:modelos-nova-versao/.test(c[0]));
-    expect(insert[1]).toEqual([COMPANY, 'cred_antes', 2, bom, 'aura_cred_antes_v2']);
+    expect(insert[1]).toEqual([COMPANY, 'cred_antes', 2, bom, 'aura_cred_antes_pix_v2']);
   });
 
   test('a Meta já responde APPROVED na criação: a versão é promovida, não fica PENDING', async () => {
@@ -215,7 +216,7 @@ describe('enviar texto novo', () => {
     await store.enviarTextoNovo(COMPANY, 'cred_antes', bom, { agora: AGORA });
     expect(vs).toHaveLength(1);
     expect(vs[0].estado).toBe('APPROVED');
-    expect((await store.resolverParaEnvio(COMPANY, 'cred_antes')).templateName).toBe('aura_cred_antes_v1');
+    expect((await store.resolverParaEnvio(COMPANY, 'cred_antes')).templateName).toBe('aura_cred_antes_pix_v1');
   });
 
   test('webhook que chega antes do retorno da Meta encontra a versão PENDING', async () => {
@@ -223,7 +224,7 @@ describe('enviar texto novo', () => {
     simular({ versoes: vs });
     wa.createTemplate.mockImplementation(async () => {
       // o webhook responde enquanto a chamada à Meta ainda não voltou
-      await store.onTemplateStatus(COMPANY, { name: 'aura_cred_antes_v1', status: 'APPROVED' });
+      await store.onTemplateStatus(COMPANY, { name: 'aura_cred_antes_pix_v1', status: 'APPROVED' });
       return { id: '6', status: 'PENDING' };
     });
     await store.enviarTextoNovo(COMPANY, 'cred_antes', bom, { agora: AGORA });
@@ -308,15 +309,15 @@ describe('restaurar', () => {
     const sqls = db.query.mock.calls.map((c) => c[0]);
     expect(sqls.some((s) => /wa:modelos-restaurar-supera/.test(s))).toBe(true);
     const ins = db.query.mock.calls.find((c) => /wa:modelos-restaurar\n/.test(c[0]));
-    expect(ins[1]).toEqual([COMPANY, 'cred_antes', 3, 'aura_cred_antes']);
+    expect(ins[1]).toEqual([COMPANY, 'cred_antes', 3, 'aura_cred_antes_pix']);
   });
 
   test('versão PADRAO mais nova que a aprovada manda o envio de volta ao padrão', () => {
     const item = store.montarEstado(antes, [
       versao({ versao: 1, estado: 'APPROVED' }),
-      versao({ versao: 2, estado: 'PADRAO', texto: null, template_name: 'aura_cred_antes' }),
+      versao({ versao: 2, estado: 'PADRAO', texto: null, template_name: 'aura_cred_antes_pix' }),
     ], 'APPROVED');
-    expect(item.template_em_uso).toBe('aura_cred_antes');
+    expect(item.template_em_uso).toBe('aura_cred_antes_pix');
     expect(item.texto_em_uso).toBe(antes.texto_padrao);
   });
 });
