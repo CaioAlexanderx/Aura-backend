@@ -22,6 +22,14 @@
 // do grupo da loja que pergunta (utils/companyGroup.js): loja de outro dono
 // nunca entra na conta.
 //
+// "Para resolver" (C9, migration 468): a peca que voltou com defeito ou sem
+// etiqueta ('voltou_defeito', resolved_at NULL) esta na loja, mas NAO e
+// livre e NAO conta em com clientes. Numero SEPARADO (resolver_qty), lido
+// de qualquer condicional nao cancelada do grupo (a condicional encerra e a
+// peca continua para resolver ate o C16 decidir):
+//
+//   livres = estoque − com clientes − reservado − para resolver
+//
 // Trava de lancamento: CONDICIONAL_LIBERADA (services/condicional.js). Com
 // ela desligada, GET /products e o bipe nem consultam (resposta identica a de
 // antes, sem os campos novos).
@@ -33,8 +41,13 @@ const { reservadoDoProduto, reservadoDaVariante, reservasPorVariante } = require
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
-/** A peca esta fora da loja (com a cliente ou "ficou" sem cobrar). Alias i. */
-const PECA_FORA = `(i.situacao = 'com_cliente' OR (i.situacao = 'ficou' AND i.sale_id IS NULL))`;
+/**
+ * A peca esta fora da loja (com a cliente ou "ficou" sem cobrar). Alias i.
+ * Peca com sale_id (cobrada) NUNCA conta, em situacao nenhuma (revisao do
+ * C9). A primeira parte do AND e o predicado do indice parcial
+ * idx_condicional_itens_fora (467): o planejador continua provando o indice.
+ */
+const PECA_FORA = `((i.situacao = 'com_cliente' OR (i.situacao = 'ficou' AND i.sale_id IS NULL)) AND i.sale_id IS NULL)`;
 
 /**
  * SQL das pecas com clientes por (produto, variante). Parametros: $1 empresa
@@ -67,20 +80,29 @@ const SQL_QUEM_SEGURA = `
      AND ${companyGroupWhere('$1', 'c.')}
    ORDER BY c.due_date, c.numero`;
 
+/**
+ * SQL das pecas para resolver por (produto, variante). Parametros: $1 empresa
+ * que pergunta, $2 uuid[] dos produtos. O indice parcial
+ * idx_condicional_itens_resolver (468) cobre o filtro da peca.
+ */
+const SQL_PARA_RESOLVER = `
+  SELECT i.product_id, i.variant_id, COUNT(*)::numeric AS qtd
+    FROM condicional_itens i
+    JOIN condicionais c ON c.id = i.condicional_id
+   WHERE i.product_id = ANY($2::uuid[])
+     AND i.situacao = 'voltou_defeito'
+     AND i.resolved_at IS NULL
+     AND c.status <> 'cancelada'
+     AND ${companyGroupWhere('$1', 'c.')}
+   GROUP BY i.product_id, i.variant_id`;
+
 function soUuids(productIds) {
   return [...new Set((productIds || []).filter(Boolean).map(String))].filter((id) => UUID_RE.test(id));
 }
 
-/**
- * Pecas com clientes dos produtos pedidos. Mesmo formato da reserva:
- * Map produto -> { total, semVariante, porVariante: Map }.
- * `q` e o pool ou o client da transacao. Lanca o erro do banco.
- */
-async function lerComClientes(q, companyId, productIds, { ignorarCondicional = null } = {}) {
-  const ids = soUuids(productIds);
+/** Linhas (product_id, variant_id, qtd) -> Map produto -> { total, semVariante, porVariante: Map }. */
+function mapaDasLinhas(rows) {
   const mapa = new Map();
-  if (!ids.length) return mapa;
-  const { rows } = await q.query(SQL_COM_CLIENTES, [companyId, ids, ignorarCondicional]);
   for (const r of rows || []) {
     const pid = String(r.product_id);
     const qtd = Number(r.qtd) || 0;
@@ -91,6 +113,39 @@ async function lerComClientes(q, companyId, productIds, { ignorarCondicional = n
     else m.semVariante += qtd;
   }
   return mapa;
+}
+
+/**
+ * Pecas com clientes dos produtos pedidos. Mesmo formato da reserva:
+ * Map produto -> { total, semVariante, porVariante: Map }.
+ * `q` e o pool ou o client da transacao. Lanca o erro do banco.
+ */
+async function lerComClientes(q, companyId, productIds, { ignorarCondicional = null } = {}) {
+  const ids = soUuids(productIds);
+  if (!ids.length) return new Map();
+  const { rows } = await q.query(SQL_COM_CLIENTES, [companyId, ids, ignorarCondicional]);
+  return mapaDasLinhas(rows);
+}
+
+/**
+ * Pecas para resolver dos produtos pedidos (C9). Mesmo formato de mapa de
+ * lerComClientes. Lanca o erro do banco (base sem a 468: 42703).
+ */
+async function lerParaResolver(q, companyId, productIds) {
+  const ids = soUuids(productIds);
+  if (!ids.length) return new Map();
+  const { rows } = await q.query(SQL_PARA_RESOLVER, [companyId, ids]);
+  return mapaDasLinhas(rows);
+}
+
+/** Igual a lerParaResolver, mas nunca lanca: falhou, todo mundo tem 0. */
+async function lerParaResolverSemFalhar(q, companyId, productIds, contexto = 'para-resolver') {
+  try {
+    return await lerParaResolver(q, companyId, productIds);
+  } catch (e) {
+    console.error(`[${contexto}] pecas para resolver indisponivel:`, e && e.message);
+    return new Map();
+  }
 }
 
 /** Igual a lerComClientes, mas nunca lanca: falhou (base sem a 467), todo mundo tem 0. */
@@ -115,8 +170,11 @@ module.exports = {
   PECA_FORA,
   SQL_COM_CLIENTES,
   SQL_QUEM_SEGURA,
+  SQL_PARA_RESOLVER,
   lerComClientes,
   lerComClientesSemFalhar,
+  lerParaResolver,
+  lerParaResolverSemFalhar,
   lerQuemSegura,
   // Mesmo formato de mapa da reserva: os leitores sao os mesmos.
   comClientesDoProduto: reservadoDoProduto,

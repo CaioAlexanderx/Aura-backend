@@ -32,7 +32,12 @@ const { pedidoLiberado } = require('../services/pedidoBalcao');
 // variante foi bipada. Nunca trava: o Caixa avisa ("Ver a condicional").
 // Atras da trava CONDICIONAL_LIBERADA: desligada, nenhuma consulta nova e
 // os campos nao aparecem (resposta igual a de antes). Falhou, 0.
-const { lerComClientesSemFalhar, comClientesDoProduto, comClientesDaVariante } = require('../services/comClientes');
+// C9 (26/11/2026, migration 468): pecas "para resolver" (voltaram com defeito
+// ou sem etiqueta) na mesma trava: resolver_qty no produto e nas variantes,
+// variant_resolver_qty na variante bipada. Nem livre, nem com clientes.
+const {
+  lerComClientesSemFalhar, lerParaResolverSemFalhar, comClientesDoProduto, comClientesDaVariante,
+} = require('../services/comClientes');
 const { condicionalLiberada } = require('../services/condicional');
 
 /** Reservas dos produtos do bipe, ou null quando o Pedido nao esta liberado. */
@@ -47,17 +52,33 @@ function foraDoBipe(req, companyId, ids) {
   return lerComClientesSemFalhar(db, companyId, ids, 'scanner');
 }
 
-/** Reserva e pecas com clientes, numa ida so (em paralelo). */
-function marcasDoBipe(req, companyId, ids) {
-  return Promise.all([reservasDoBipe(req, companyId, ids), foraDoBipe(req, companyId, ids)]);
+/** Pecas para resolver dos produtos do bipe, ou null quando a Condicional nao esta liberada. */
+function resolverDoBipe(req, companyId, ids) {
+  if (!condicionalLiberada(req)) return Promise.resolve(null);
+  return lerParaResolverSemFalhar(db, companyId, ids, 'scanner');
 }
 
-/** Poe out_qty no produto (e nas variantes dele). Sem o mapa (null), nada muda. */
-function comFora(produto, fora) {
+/** Reserva, pecas com clientes e para resolver, numa ida so (em paralelo). */
+function marcasDoBipe(req, companyId, ids) {
+  return Promise.all([
+    reservasDoBipe(req, companyId, ids), foraDoBipe(req, companyId, ids), resolverDoBipe(req, companyId, ids),
+  ]);
+}
+
+/**
+ * Poe out_qty (e resolver_qty) no produto e nas variantes dele. Sem o mapa
+ * (null), nada muda.
+ */
+function comFora(produto, fora, resolver = null) {
   if (!produto || !fora) return produto;
   produto.out_qty = comClientesDoProduto(fora, produto.id);
+  if (resolver) produto.resolver_qty = comClientesDoProduto(resolver, produto.id);
   if (Array.isArray(produto.variants)) {
-    produto.variants = produto.variants.map((v) => ({ ...v, out_qty: comClientesDaVariante(fora, produto.id, v.id) }));
+    produto.variants = produto.variants.map((v) => ({
+      ...v,
+      out_qty: comClientesDaVariante(fora, produto.id, v.id),
+      ...(resolver ? { resolver_qty: comClientesDaVariante(resolver, produto.id, v.id) } : {}),
+    }));
   }
   return produto;
 }
@@ -167,8 +188,8 @@ router.get('/scan/:code', requireAuth, async (req, res) => {
       [company_id, alts]
     )));
     if (rows.length) {
-      const [reservas, fora] = await marcasDoBipe(req, company_id, [rows[0].id]);
-      return res.json({ match: 'exact', source: 'barcode', product: comFora(comReservas(comPromo(rows[0], agora), reservas), fora) });
+      const [reservas, fora, resolver] = await marcasDoBipe(req, company_id, [rows[0].id]);
+      return res.json({ match: 'exact', source: 'barcode', product: comFora(comReservas(comPromo(rows[0], agora), reservas), fora, resolver) });
     }
 
     // 2. Match por barcode de variante
@@ -190,13 +211,14 @@ router.get('/scan/:code', requireAuth, async (req, res) => {
         price_override: linha.price_override,
         promo_price: variant_promo_price, promo_starts_at: variant_promo_starts_at, promo_ends_at: variant_promo_ends_at,
       }, linha, agora);
-      const [reservas, fora] = await marcasDoBipe(req, company_id, [linha.id]);
+      const [reservas, fora, resolver] = await marcasDoBipe(req, company_id, [linha.id]);
       return res.json({
         match: 'exact', source: 'variant_barcode',
-        product: comFora(comReservas(comPromo(linha, agora), reservas), fora),
+        product: comFora(comReservas(comPromo(linha, agora), reservas), fora, resolver),
         variant_id: linha.variant_id,
         ...(reservas ? { variant_reserved_qty: reservadoDaVariante(reservas, linha.id, linha.variant_id) } : {}),
         ...(fora ? { variant_out_qty: comClientesDaVariante(fora, linha.id, linha.variant_id) } : {}),
+        ...(resolver ? { variant_resolver_qty: comClientesDaVariante(resolver, linha.id, linha.variant_id) } : {}),
         effective_price: linha.price_override || linha.price,
         // 427: o preco que vale agora PARA A VARIANTE bipada (o do produto
         // esta em product.preco_efetivo).
@@ -214,8 +236,8 @@ router.get('/scan/:code', requireAuth, async (req, res) => {
       [company_id, cleanCode]
     ))));
     if (rows.length) {
-      const [reservas, fora] = await marcasDoBipe(req, company_id, [rows[0].id]);
-      return res.json({ match: 'exact', source: 'sku', product: comFora(comReservas(comPromo(rows[0], agora), reservas), fora) });
+      const [reservas, fora, resolver] = await marcasDoBipe(req, company_id, [rows[0].id]);
+      return res.json({ match: 'exact', source: 'sku', product: comFora(comReservas(comPromo(rows[0], agora), reservas), fora, resolver) });
     }
 
     // 4. Busca textual por nome/SKU (retorna até 8 sugestões)
@@ -228,11 +250,11 @@ router.get('/scan/:code', requireAuth, async (req, res) => {
       [company_id, `%${cleanCode}%`]
     ))));
     if (rows.length) {
-      const [reservas, fora] = await marcasDoBipe(req, company_id, rows.map((r) => r.id));
+      const [reservas, fora, resolver] = await marcasDoBipe(req, company_id, rows.map((r) => r.id));
       return res.status(207).json({
         match: 'partial',
         message: 'Nenhum código exato encontrado. Sugestões:',
-        suggestions: rows.map((r) => comFora(comReservas(comPromo(r, agora), reservas), fora)),
+        suggestions: rows.map((r) => comFora(comReservas(comPromo(r, agora), reservas), fora, resolver)),
       });
     }
 
@@ -258,8 +280,8 @@ router.post('/scan/batch', requireAuth, async (req, res) => {
       [req.params.id, codes]
     )));
     const agora = new Date();
-    const [reservas, fora] = await marcasDoBipe(req, req.params.id, linhas.map((r) => r.id));
-    const rows = linhas.map((r) => comFora(comReservas(comPromo(r, agora), reservas), fora));
+    const [reservas, fora, resolver] = await marcasDoBipe(req, req.params.id, linhas.map((r) => r.id));
+    const rows = linhas.map((r) => comFora(comReservas(comPromo(r, agora), reservas), fora, resolver));
     // Mesmo código na loja e num compartilhado do grupo: o da loja ganha.
     const byCode = {};
     const guardar = (code, p) => {

@@ -75,7 +75,7 @@ const WHERE_DO_FILTRO = {
 const PECAS_LATERAL = `
   CROSS JOIN LATERAL (
     SELECT COUNT(*)::int                                                     AS pecas,
-           COUNT(*) FILTER (WHERE i.situacao = 'com_cliente')::int           AS com_cliente,
+           COUNT(*) FILTER (WHERE i.situacao = 'com_cliente' AND i.sale_id IS NULL)::int AS com_cliente,
            COUNT(*) FILTER (WHERE i.situacao = 'ficou')::int                 AS ficou,
            COUNT(*) FILTER (WHERE i.situacao = 'ficou' AND i.sale_id IS NULL)::int AS a_cobrar,
            COUNT(*) FILTER (WHERE i.situacao = 'voltou')::int                AS voltou,
@@ -83,7 +83,7 @@ const PECAS_LATERAL = `
            COUNT(*) FILTER (WHERE ${PECA_FORA})::int                         AS fora,
            COALESCE(SUM(i.unit_price), 0)                                    AS valor_total,
            COALESCE(SUM(i.unit_price) FILTER (WHERE ${PECA_FORA}), 0)        AS valor_fora,
-           COALESCE(SUM(i.unit_price) FILTER (WHERE i.situacao = 'com_cliente'), 0) AS valor_com_cliente,
+           COALESCE(SUM(i.unit_price) FILTER (WHERE i.situacao = 'com_cliente' AND i.sale_id IS NULL), 0) AS valor_com_cliente,
            COALESCE(SUM(i.unit_price) FILTER (WHERE i.situacao = 'ficou' AND i.sale_id IS NULL), 0) AS valor_a_cobrar,
            (array_agg(i.product_name ORDER BY i.added_at, i.id))[1]          AS primeira_peca
       FROM condicional_itens i
