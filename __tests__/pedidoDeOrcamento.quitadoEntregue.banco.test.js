@@ -119,7 +119,7 @@ async function novoPedido({ empresa = ID.loja, estoque = 10 } = {}) {
   return {
     oid, produto: p.id, empresa,
     sinal: m.find((x) => x.kind === 'deposit').id,
-    saldo: m.find((x) => x.kind === 'balance').id,
+    saldo: (m.find((x) => x.kind === 'balance') || {}).id,
   };
 }
 
