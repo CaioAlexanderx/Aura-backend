@@ -38,6 +38,7 @@ const { generatePix } = require('../src/services/pixService');
 const { createMpPixPayment, createMpPreference } = require('../src/services/mpService');
 const { calculateShippingQuote } = require('../src/services/shippingQuote');
 const { limparCache } = require('../src/services/lojaDeTeste');
+const { urlPublicaDoApp } = require('../src/utils/urlPublicaDoApp');
 
 const CID = 'c0000000-0000-0000-0000-000000000001';
 const TOKEN = 'a3f1c2d4e5b6978812ab34cd56ef7890';
@@ -548,7 +549,7 @@ describe('B2 · GET /studio/pedido/:token', () => {
       ],
       prazo_dias_uteis: 3,
       revisoes: { max_included: 2, extra_price: 10, policy_text: null, ilimitadas: false },
-      acompanhar_url: `/acompanhar/${TOKEN}`,
+      acompanhar_url: `${urlPublicaDoApp()}/acompanhar/${TOKEN}`,
       loja: { nome: 'Sheid Mania', whatsapp: '5512996145447' },
     });
   });
