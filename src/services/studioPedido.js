@@ -33,6 +33,7 @@ async function inserirPedidoStudio(client, {
   depositRequired = null,
   notes = null,
   bulkEventId = null, // rastreabilidade do evento em lote
+  customerId = null,  // cadastro do cliente (orcamento enviado ja tem); null = sem vinculo
 }) {
   const valor = parseFloat(total) || 0;
   const r = await client.query(
@@ -40,9 +41,10 @@ async function inserirPedidoStudio(client, {
        (company_id, order_number, vertical, status, studio_production_status,
         customer_name, customer_phone,
         subtotal, total, deposit_required, deposit_paid,
-        notes, confirmed_at, studio_bulk_event_id)
+        notes, confirmed_at, studio_bulk_event_id, customer_id)
      VALUES ($1, next_digital_order_number($1), 'studio', 'confirmed', 'pending_art',
-             COALESCE($2, 'Cliente'), COALESCE($3, ''), $4, $4, $5, false, $6, NOW(), $7)
+             COALESCE($2, 'Cliente'), COALESCE($3, ''), $4, $4, $5, false, $6, NOW(), $7,
+             (SELECT c.id FROM customers c WHERE c.id = $8 AND c.company_id = $1))
      RETURNING id`,
     [
       cid,
@@ -52,6 +54,7 @@ async function inserirPedidoStudio(client, {
       depositRequired != null ? parseFloat(depositRequired) : null,
       notes,
       bulkEventId,
+      customerId || null,
     ]
   );
   return r.rows[0].id;
