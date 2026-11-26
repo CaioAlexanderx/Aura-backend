@@ -19,7 +19,8 @@ router.post('/conversations/:convId/midia', async (req, res) => {
   const { kind, mime, data, caption } = req.body || {};
   if (kind !== 'foto' && kind !== 'audio') return res.status(400).json({ error: 'kind inválido (foto, audio)' });
   if (typeof data !== 'string' || !data) return res.status(400).json({ error: 'data (base64) obrigatório' });
-  const buffer = Buffer.from(data.replace(/^data:[^;]+;base64,/, ''), 'base64');
+  // Aceita base64 puro ou data URL (o tipo pode trazer ";codecs=opus").
+  const buffer = Buffer.from(data.replace(/^data:[^,]*;base64,/, ''), 'base64');
   try {
     const r = await midia.enviarMidia({
       companyId: req.params.id, conversationId: req.params.convId,

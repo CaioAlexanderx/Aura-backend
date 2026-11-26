@@ -164,6 +164,13 @@ describe('enviar áudio', () => {
     expect(inseridas[0][3]).toBe('[audio]');
   });
 
+  it('aceita data URL com ";codecs=opus" no tipo (é assim que o FileReader do Chrome devolve)', async () => {
+    const url = `data:audio/webm;codecs=opus;base64,${b64(criarWebm(pacotes))}`;
+    const res = await midia({ kind: 'audio', mime: 'audio/webm;codecs=opus', data: url });
+    expect(res.status).toBe(200);
+    expect(uploads[0].buffer.toString('ascii', 0, 4)).toBe('OggS');
+  });
+
   it('OGG que já vem pronto passa direto, sem mexer nos bytes', async () => {
     const ogg = Buffer.concat([Buffer.from('OggS'), Buffer.alloc(60, 7)]);
     const res = await midia({ kind: 'audio', mime: 'audio/ogg', data: b64(ogg) });
