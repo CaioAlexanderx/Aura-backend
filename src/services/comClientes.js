@@ -41,8 +41,13 @@ const { reservadoDoProduto, reservadoDaVariante, reservasPorVariante } = require
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
-/** A peca esta fora da loja (com a cliente ou "ficou" sem cobrar). Alias i. */
-const PECA_FORA = `(i.situacao = 'com_cliente' OR (i.situacao = 'ficou' AND i.sale_id IS NULL))`;
+/**
+ * A peca esta fora da loja (com a cliente ou "ficou" sem cobrar). Alias i.
+ * Peca com sale_id (cobrada) NUNCA conta, em situacao nenhuma (revisao do
+ * C9). A primeira parte do AND e o predicado do indice parcial
+ * idx_condicional_itens_fora (467): o planejador continua provando o indice.
+ */
+const PECA_FORA = `((i.situacao = 'com_cliente' OR (i.situacao = 'ficou' AND i.sale_id IS NULL)) AND i.sale_id IS NULL)`;
 
 /**
  * SQL das pecas com clientes por (produto, variante). Parametros: $1 empresa

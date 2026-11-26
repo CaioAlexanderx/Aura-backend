@@ -49,7 +49,7 @@ jest.setTimeout(60000);
 const ID = {
   dono: uuid(), loja: uuid(), semEstoque: uuid(), cliente: uuid(),
   saia: uuid(), blusa: uuid(), cinto: uuid(), bolsa: uuid(), unica: uuid(), defeito: uuid(),
-  lenco: uuid(), meia: uuid(), zerada: uuid(), vestido: uuid(), varM: uuid(),
+  lenco: uuid(), meia: uuid(), zerada: uuid(), vestido: uuid(), varM: uuid(), dupla: uuid(), vendida: uuid(),
 };
 const EMPRESAS = [ID.loja, ID.semEstoque];
 const HOJE = hojeSP();
@@ -106,6 +106,8 @@ beforeAll(async () => {
   await produto(ID.defeito, ID.loja, 'Calça Única', 150, 1);
   await produto(ID.lenco, ID.loja, 'Lenço', 30, 5);
   await produto(ID.meia, ID.loja, 'Meia', 10, 50);
+  await produto(ID.dupla, ID.loja, 'Top Duplo', 70, 2);
+  await produto(ID.vendida, ID.loja, 'Brinco', 25, 1);
   await produto(ID.zerada, ID.semEstoque, 'Peça sem saldo', 30, 0);
   await produto(ID.vestido, ID.loja, 'Vestido', 199.9, 0);
   await q(`INSERT INTO product_variants (id, product_id, sku_suffix, stock_qty, color_name, is_active) VALUES ($1, $2, 'AZ-M', 1, 'Azul', true)`,
@@ -444,6 +446,8 @@ describe('Acrescentar peca', () => {
     expect(rep.status).toBe(200);
     expect(rep.body.idempotent_replay).toBe(true);
     expect(rep.body.condicional.items).toHaveLength(2);
+    expect(rep.body.itens_acrescentados).toEqual((a.status === 201 ? a : b).body.itens_acrescentados);
+    expect(rep.body.avisos).toEqual([]);
     const outra = await post(c, '/itens', { items: [{ product_id: ID.lenco }] }, k);
     expect(outra.status).toBe(409);
     expect(outra.body.code).toBe('IDEMPOTENCY_KEY_REUSED');
@@ -490,6 +494,86 @@ describe('Concorrencia', () => {
     expect(rs.map((r) => r.status).sort()).toEqual([200, 409]);
     const { rows } = await q(`SELECT COUNT(*)::int AS n FROM condicional_eventos WHERE condicional_id = $1 AND tipo = 'encerrada'`, [c.id]);
     expect(rows[0].n).toBe(1);
+  });
+});
+
+describe('revisao do C9', () => {
+  test('peca com sale_id nunca conta como com a cliente (com_cliente cobrada fora do contrato)', async () => {
+    const c = await guardar(ID.loja, [{ product_id: ID.saia }, { product_id: ID.blusa }]);
+    const venda = uuid();
+    await q(`INSERT INTO sales (id, company_id, total_amount, condicional_id) VALUES ($1, $2, 120, $3)`, [venda, ID.loja, c.id]);
+    await q(`UPDATE condicional_itens SET sale_id = $2 WHERE id = $1`, [peca(c, ID.saia).id, venda]);
+    expect((await produtos())[ID.saia].out_qty).toBe(0);
+    const lista = await request(app).get(`/companies/${ID.loja}/condicionais?filtro=todas&limit=100`);
+    expect(lista.body.condicionais.find((x) => x.id === c.id).pecas_com_cliente).toBe(1);
+    const r = await post(c, '/tudo-devolvido');
+    expect(r.status).toBe(200);
+    expect(r.body.condicional).toMatchObject({ status: 'encerrada' });
+    expect(peca(r.body.condicional, ID.saia)).toMatchObject({ situacao: 'com_cliente', sale_id: venda });
+    expect(peca(r.body.condicional, ID.blusa).situacao).toBe('voltou');
+    expect(r.body.condicional.resumo.com_cliente).toBe(0);
+    await q(`UPDATE condicional_itens SET sale_id = NULL WHERE id = $1`, [peca(c, ID.saia).id]);
+    await q(`DELETE FROM sales WHERE id = $1`, [venda]);
+    await q(`UPDATE condicional_itens SET situacao = 'voltou' WHERE id = $1`, [peca(c, ID.saia).id]);
+  });
+
+  test('voltou -> voltou_defeito confere o livre: a unidade vendida no Caixa da 409', async () => {
+    const c = await guardar(ID.loja, [{ product_id: ID.vendida }, { product_id: ID.meia }]);
+    await marcar(c, [{ item_id: peca(c, ID.vendida).id, situacao: 'voltou' }]);
+    // A unidade que voltou foi vendida no Caixa (baixa no estoque).
+    await q(`UPDATE products SET stock_qty = 0 WHERE id = $1`, [ID.vendida]);
+    const r = await marcar(c, [{ item_id: peca(c, ID.vendida).id, situacao: 'voltou_defeito' }]);
+    await q(`UPDATE products SET stock_qty = 1 WHERE id = $1`, [ID.vendida]);
+    expect(r.status).toBe(409);
+    expect(r.body.code).toBe('COND_SEM_SALDO');
+    expect(r.body.error).toMatch(/^Não dá para levar: "Brinco": sem unidade no estoque\.$/);
+    // Com a unidade de volta, passa.
+    const ok = await marcar(c, [{ item_id: peca(c, ID.vendida).id, situacao: 'voltou_defeito' }]);
+    expect(ok.status).toBe(200);
+    expect((await produtos())[ID.vendida]).toMatchObject({ resolver_qty: 1, out_qty: 0 });
+    await q(`UPDATE condicional_itens SET resolved_at = NOW() WHERE id = $1`, [peca(c, ID.vendida).id]);
+    await post(c, '/tudo-devolvido');
+  });
+
+  test('livre sobre o estado final: uma volta e outra sai da mesma variante no mesmo PATCH', async () => {
+    const a = await guardar(ID.loja, [{ product_id: ID.dupla }, { product_id: ID.dupla }, { product_id: ID.meia }]);
+    const [p1, p2] = a.items.filter((i) => i.product_id === ID.dupla);
+    await marcar(a, [{ item_id: p1.id, situacao: 'voltou' }]);
+    const b = await guardar(ID.loja, [{ product_id: ID.dupla }]);
+    // Livre agora 0: p1 sai sozinha = 409; p1 sai e p2 volta juntas = 0 liquido.
+    const sozinha = await marcar(a, [{ item_id: p1.id, situacao: 'ficou' }]);
+    expect(sozinha.status).toBe(409);
+    expect(sozinha.body.code).toBe('COND_SEM_SALDO');
+    const juntas = await marcar(a, [{ item_id: p1.id, situacao: 'ficou' }, { item_id: p2.id, situacao: 'voltou' }]);
+    expect(juntas.status).toBe(200);
+    expect((await produtos())[ID.dupla].out_qty).toBe(2);
+    await marcar(a, [{ item_id: p1.id, situacao: 'voltou' }, { item_id: peca(a, ID.meia).id, situacao: 'voltou' }]);
+    await post(b, '/tudo-devolvido');
+  });
+
+  test('repeticao do POST /itens devolve a mesma resposta (avisos e itens_acrescentados)', async () => {
+    const c = await guardar(ID.semEstoque, [{ product_id: ID.zerada }]);
+    const k = chave();
+    const primeira = await post(c, '/itens', { items: [{ product_id: ID.zerada }] }, k, ID.semEstoque);
+    expect(primeira.status).toBe(201);
+    expect(primeira.body.avisos).toHaveLength(1);
+    const rep = await post(c, '/itens', { items: [{ product_id: ID.zerada }] }, k, ID.semEstoque);
+    expect(rep.status).toBe(200);
+    expect(rep.body.idempotent_replay).toBe(true);
+    expect(rep.body.itens_acrescentados).toEqual(primeira.body.itens_acrescentados);
+    expect(rep.body.avisos).toEqual(primeira.body.avisos);
+    expect(rep.body.condicional.items).toHaveLength(2);
+    // As outras rotas: a repeticao traz os mesmos campos da primeira.
+    const k2 = chave();
+    const marcarNaOutra = () => request(app).patch(url(c, '/itens', ID.semEstoque)).set('Idempotency-Key', k2)
+      .send({ items: [{ item_id: primeira.body.itens_acrescentados[0], situacao: 'voltou' }] });
+    const m1 = await marcarNaOutra();
+    expect(m1.status).toBe(200);
+    const m2 = await marcarNaOutra();
+    expect(m2.status).toBe(200);
+    expect(m2.body.idempotent_replay).toBe(true);
+    expect(m2.body.avisos).toEqual(m1.body.avisos);
+    await post(c, '/tudo-devolvido', {}, null, ID.semEstoque);
   });
 });
 

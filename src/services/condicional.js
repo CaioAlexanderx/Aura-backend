@@ -649,7 +649,8 @@ function resumoDosItens(itens) {
     const preco = Number(i.unit_price) || 0;
     r.pecas += 1;
     r.valor_total += preco;
-    if (i.situacao === 'com_cliente') { r.com_cliente += 1; r.valor_com_cliente += preco; }
+    // Peca cobrada (sale_id) nunca conta como com a cliente (revisao do C9).
+    if (i.situacao === 'com_cliente' && !i.sale_id) { r.com_cliente += 1; r.valor_com_cliente += preco; }
     if (i.situacao === 'ficou') {
       r.ficou += 1;
       if (!i.sale_id) { r.a_cobrar += 1; r.valor_a_cobrar += preco; }

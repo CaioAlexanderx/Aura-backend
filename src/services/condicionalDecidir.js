@@ -16,9 +16,15 @@
 //       'voltou_defeito' tambem sai de "com clientes", mas NAO volta a livre:
 //       fica "para resolver" (resolved_at NULL, migration 468) ate o C16.
 //       'ficou' continua fora da loja (conta em out_qty) ate virar venda.
-//   Peca com sale_id (ja cobrada) nao muda: 409. Peca resolvida (C16) nao
-//   muda: 409. Peca que tinha voltado ('voltou') e sai de novo
-//   (com_cliente/ficou) passa pela conta do livre, como ao guardar.
+//   Peca com sale_id (ja cobrada) nao muda: 409, e NUNCA conta como com a
+//   cliente, em situacao nenhuma (FORA aqui, PECA_FORA em comClientes.js,
+//   resumo e lista). Peca resolvida (C16) nao muda: 409.
+//   Livre: a peca 'voltou' e a unica que esta livre na loja. Sair de 'voltou'
+//   para com_cliente, ficou OU voltou_defeito consome uma unidade livre e
+//   passa pela conta do livre, como ao guardar (a unidade pode ter sido
+//   vendida no Caixa enquanto isso: 409 COND_SEM_SALDO). A conta e feita
+//   sobre o estado FINAL do pedido: por (produto, variante), saidas menos
+//   voltas do mesmo PATCH; so o saldo positivo precisa de unidade livre.
 //   Encerramento: a condicional aberta encerra quando nenhuma peca esta
 //   com_cliente e nenhuma 'ficou' sem venda (com venda ou nao). Com 'ficou'
 //   sem venda e nada com ela, segue aberta: situacao derivada a_cobrar
@@ -33,11 +39,26 @@
 // tomadas DEPOIS da trava da condicional.
 //
 // Idempotencia: Idempotency-Key (cabecalho ou corpo) gravada nos eventos da
-// operacao (dados.idempotency_key, dados.op, dados.assinatura). A repeticao
-// com a mesma chave, depois da trava da condicional, acha o evento e devolve
-// a condicional como esta (200, idempotent_replay); a mesma chave com outra
+// operacao (dados.idempotency_key, dados.op, dados.assinatura). O primeiro
+// evento da operacao guarda tambem dados.resposta (o que a primeira resposta
+// trouxe alem da condicional: avisos, itens_acrescentados). A repeticao com a
+// mesma chave, depois da trava da condicional, acha o evento e devolve a
+// MESMA resposta (a condicional como esta agora + dados.resposta; 200 com
+// idempotent_replay, como o guardar do C2); a mesma chave com outra
 // operacao ou outro corpo: 409 IDEMPOTENCY_KEY_REUSED. Operacao que nao
 // mudou nada nao grava evento (repetir tambem nao muda nada).
+//
+// ─── Contrato para o C11 (cobrar no Caixa, POST /pdv/sale) ───────
+// Na MESMA transacao da venda:
+//   1. SELECT … FROM condicionais WHERE id = $1 FOR UPDATE, e so depois
+//      SELECT … FROM condicional_itens WHERE condicional_id = $1 … FOR UPDATE
+//      (esta ordem, a mesma daqui: ordem trocada = deadlock com o C9);
+//   2. recusar (409) peca com sale_id ou fora de com_cliente/ficou;
+//   3. gravar a peca cobrada com situacao = 'ficou' JUNTO com o sale_id
+//      (nunca sale_id em peca com_cliente), decided_at/decided_by;
+//   4. encerrar a condicional pela mesma regra de podeEncerrar (nenhuma peca
+//      fora: com_cliente ou ficou, ambas sem sale_id) com o evento
+//      'encerrada' {motivo: 'venda', com_venda: true}, e o evento 'venda'.
 // ============================================================
 'use strict';
 
@@ -54,7 +75,14 @@ const MOTIVO_MAX = 300;
 // Marcacoes num pedido so: o detalhe salva todas as pecas de uma vez.
 const MAX_MARCACOES = 200;
 
-const FORA = (sit, saleId) => sit === 'com_cliente' || (sit === 'ficou' && !saleId);
+/** A peca esta fora da loja (com a cliente ou ficou sem cobrar). Cobrada nunca. */
+const FORA = (sit, saleId) => !saleId && (sit === 'com_cliente' || sit === 'ficou');
+/**
+ * A peca ocupa uma unidade que nao e livre (fora da loja ou para resolver).
+ * So 'voltou' esta livre; a cobrada (sale_id) ja saiu do estoque pela venda.
+ */
+const OCUPA = (sit, saleId) => !saleId && sit !== 'voltou';
+const chaveDaVariante = (i) => `${i.product_id}|${i.variant_id || ''}`;
 
 function nomeDaPeca(i) {
   return `"${i.product_name}${i.variant_label ? ` (${i.variant_label})` : ''}"`;
@@ -169,9 +197,10 @@ async function naCondicional({ companyId, condId, chave, op, assinatura, userId,
 
     if (chave) {
       const { rows: [ja] } = await client.query(
-        `SELECT dados->>'op' AS op, dados->>'assinatura' AS assinatura
+        `SELECT dados->>'op' AS op, dados->>'assinatura' AS assinatura, dados->'resposta' AS resposta
            FROM condicional_eventos
           WHERE condicional_id = $1 AND dados->>'idempotency_key' = $2
+          ORDER BY (dados ? 'resposta') DESC, created_at, id
           LIMIT 1`,
         [condId, chave]
       );
@@ -179,7 +208,7 @@ async function naCondicional({ companyId, condId, chave, op, assinatura, userId,
         if (ja.op !== op || (assinatura && ja.assinatura !== assinatura)) {
           throw erro(409, 'Esta tentativa já foi usada para outra alteração nesta condicional. Abra a condicional de novo e repita.', 'IDEMPOTENCY_KEY_REUSED', { condicional_id: condId });
         }
-        throw Object.assign(new Error('repetida'), { [REPETIDA]: true });
+        throw Object.assign(new Error('repetida'), { [REPETIDA]: ja.resposta || {} });
       }
     }
 
@@ -191,21 +220,10 @@ async function naCondicional({ companyId, condId, chave, op, assinatura, userId,
       [condId]
     );
 
-    let houveEvento = false;
-    const evento = async (tipo, itemId, dados) => {
-      houveEvento = true;
-      await client.query(
-        // clock_timestamp (e nao NOW, que e o mesmo em toda a transacao): o
-        // historico sai na ordem em que aconteceu (voltou antes de encerrada).
-        `INSERT INTO condicional_eventos (condicional_id, company_id, tipo, item_id, dados, user_id, created_at)
-         VALUES ($1, $2, $3, $4, $5::jsonb, $6, clock_timestamp())`,
-        [condId, companyId, tipo, itemId || null, JSON.stringify({
-          ...(dados || {}),
-          op,
-          ...(chave ? { idempotency_key: chave, ...(assinatura ? { assinatura } : {}) } : {}),
-        }), userId || null]
-      );
-    };
+    // Eventos ficam na fila e sao gravados no fim (na ordem), para o primeiro
+    // levar a resposta da operacao (repeticao pela chave).
+    const fila = [];
+    const evento = async (tipo, itemId, dados) => { fila.push({ tipo, itemId, dados }); };
 
     const r = (await fazer({ client, cond, itens, evento, userId, hoje, agora })) || {};
     extra = r.extra || {};
@@ -221,19 +239,34 @@ async function naCondicional({ companyId, condId, chave, op, assinatura, userId,
       await evento('encerrada', null, { motivo: r.motivoEncerrar || 'pecas_decididas', com_venda: vendidas > 0 });
       encerrou = true;
     }
-    if (houveEvento && !encerrou) {
+    if (fila.length && !encerrou) {
       await client.query(`UPDATE condicionais SET updated_at = NOW() WHERE id = $1`, [condId]);
+    }
+    for (let n = 0; n < fila.length; n++) {
+      const ev = fila[n];
+      await client.query(
+        // clock_timestamp (e nao NOW, que e o mesmo em toda a transacao): o
+        // historico sai na ordem em que aconteceu (voltou antes de encerrada).
+        `INSERT INTO condicional_eventos (condicional_id, company_id, tipo, item_id, dados, user_id, created_at)
+         VALUES ($1, $2, $3, $4, $5::jsonb, $6, clock_timestamp())`,
+        [condId, companyId, ev.tipo, ev.itemId || null, JSON.stringify({
+          ...(ev.dados || {}),
+          op,
+          ...(chave ? { idempotency_key: chave, ...(assinatura ? { assinatura } : {}) } : {}),
+          ...(chave && n === 0 ? { resposta: extra } : {}),
+        }), userId || null]
+      );
     }
     await client.query('COMMIT');
   } catch (e) {
     await client.query('ROLLBACK').catch(() => {});
-    if (e && e[REPETIDA]) repetido = true;
+    if (e && e[REPETIDA]) { repetido = true; extra = e[REPETIDA]; }
     else throw e;
   } finally {
     client.release();
   }
   const condicional = await c.lerCondicionalCompleta(db, companyId, condId, { hoje, agora });
-  return { condicional, repetido, ...(repetido ? {} : extra) };
+  return { condicional, repetido, ...extra };
 }
 
 /** Travas por produto (as mesmas do guardar), em ordem fixa. */
@@ -269,6 +302,37 @@ async function conferirSaida(client, companyId, pecas) {
 
 // ─── Operacoes ────────────────────────────────────────────────
 
+/**
+ * Unidades livres que o PATCH consome, pelo estado FINAL: por (produto,
+ * variante), pecas que passam a ocupar (saem de 'voltou') menos as que
+ * deixam de ocupar (voltam para 'voltou'). So o saldo positivo vai para a
+ * conta do livre: uma peca que volta e outra da mesma variante que sai no
+ * mesmo pedido se compensam. Devolve a lista no formato de conferirLivres.
+ */
+function saidasLiquidas(mudancas) {
+  const porVariante = new Map();
+  for (const { it, m } of mudancas) {
+    const delta = (OCUPA(m.situacao, null) ? 1 : 0) - (OCUPA(it.situacao, null) ? 1 : 0);
+    if (!delta) continue;
+    const k = chaveDaVariante(it);
+    const l = porVariante.get(k) || { it, saldo: 0 };
+    l.saldo += delta;
+    porVariante.set(k, l);
+  }
+  const pecas = [];
+  for (const { it, saldo } of porVariante.values()) {
+    for (let n = 0; n < saldo; n++) {
+      pecas.push({
+        product_id: String(it.product_id),
+        variant_id: it.variant_id ? String(it.variant_id) : null,
+        nome: it.product_name,
+        variant_label: it.variant_label,
+      });
+    }
+  }
+  return pecas;
+}
+
 /** Marcar pecas. Devolve { condicional, repetido, avisos }. */
 async function marcarPecas({ companyId, condId, userId, body, chave, hoje, agora }) {
   const lido = lerMarcacoes(body);
@@ -292,11 +356,7 @@ async function marcarPecas({ companyId, condId, userId, body, chave, hoje, agora
       if (it.situacao === m.situacao && (m.situacao !== 'voltou_defeito' || mesmaNota)) continue;
       mudancas.push({ it, m });
     }
-    // Peca que tinha voltado e sai de novo: precisa de unidade livre.
-    const saindo = mudancas
-      .filter(({ it, m }) => it.situacao === 'voltou' && FORA(m.situacao, null))
-      .map(({ it }) => ({ product_id: String(it.product_id), variant_id: it.variant_id ? String(it.variant_id) : null, nome: it.product_name, variant_label: it.variant_label }));
-    const avisos = await conferirSaida(client, companyId, saindo);
+    const avisos = await conferirSaida(client, companyId, saidasLiquidas(mudancas));
 
     for (const { it, m } of mudancas) {
       const decidida = m.situacao !== 'com_cliente';
@@ -327,7 +387,7 @@ async function mudarPrazo({ companyId, condId, userId, body, chave, hoje = c.hoj
   const { dueDate } = lido;
   return naCondicional({ companyId, condId, chave, op: 'prazo', assinatura: assinar([dueDate]), userId, hoje, agora }, async ({ client, cond, itens, evento }) => {
     if (cond.status !== 'aberta') throw erroFechada(cond);
-    if (!itens.some((i) => i.situacao === 'com_cliente')) {
+    if (!itens.some((i) => i.situacao === 'com_cliente' && !i.sale_id)) {
       throw erro(409, 'Nada mais está com a cliente, então não há prazo para mudar. Falta só cobrar no Caixa.', 'COND_NADA_COM_ELA');
     }
     if (cond.due_date === dueDate) return { motivoEncerrar: false };
@@ -348,7 +408,7 @@ async function acrescentarPecas({ companyId, condId, userId, body, chave, hoje, 
   if (UUID_RE.test(String(condId || ''))) await c.conferirPecas(db, companyId, novas, agora);
   return naCondicional({ companyId, condId, chave, op: 'acrescentar', assinatura, userId, hoje, agora }, async ({ client, cond, itens, evento }) => {
     if (cond.status !== 'aberta') throw erroFechada(cond);
-    if (!itens.some((i) => i.situacao === 'com_cliente')) {
+    if (!itens.some((i) => i.situacao === 'com_cliente' && !i.sale_id)) {
       throw erro(409, 'Nada mais está com a cliente nesta condicional. Para levar outra peça, comece uma condicional nova.', 'COND_NADA_COM_ELA');
     }
     if (itens.length + novas.length > c.MAX_PECAS) {
@@ -395,7 +455,7 @@ async function tudoDevolvido({ companyId, condId, userId, chave, hoje, agora }) 
         `${aCobrar.map(nomeDaPeca).join(', ')} ficou com a cliente e ainda não foi cobrada. Cobre no Caixa ou marque como Voltou antes.`,
         'COND_TEM_FICOU');
     }
-    const comEla = itens.filter((i) => i.situacao === 'com_cliente');
+    const comEla = itens.filter((i) => i.situacao === 'com_cliente' && !i.sale_id);
     if (comEla.length) {
       await client.query(
         `UPDATE condicional_itens SET situacao = 'voltou', defect_note = NULL, decided_at = NOW(), decided_by = $2
@@ -430,6 +490,7 @@ async function cancelarCondicional({ companyId, condId, userId, body, chave, hoj
 
 module.exports = {
   SITUACOES,
+  saidasLiquidas,
   MAX_MARCACOES,
   lerMarcacoes,
   lerPrazo,

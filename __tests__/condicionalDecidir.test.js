@@ -314,6 +314,77 @@ describe('prazo, tudo devolvido e cancelar', () => {
   });
 });
 
+describe('revisao do C9', () => {
+  const P2 = 'bbbbbbbb-0000-0000-0000-000000000002';
+  const mud = (de, para, pid = P, vid = null) => ({ it: item(I1, de, { product_id: pid, variant_id: vid }), m: { situacao: para } });
+
+  test('peca cobrada nunca conta como com a cliente: encerra, resumo e gates', async () => {
+    expect(d.podeEncerrar([{ situacao: 'com_cliente', sale_id: VENDA }, { situacao: 'voltou' }])).toBe(true);
+    expect(c.resumoDosItens([{ situacao: 'com_cliente', sale_id: VENDA, unit_price: 10 }])).toMatchObject({ com_cliente: 0, valor_com_cliente: 0 });
+    expect(require('../src/services/comClientes').PECA_FORA).toMatch(/AND i\.sale_id IS NULL\)$/);
+
+    usar(clientFalso({ cond: aberta, itens: [item(I1, 'com_cliente', { sale_id: VENDA }), item(I2, 'ficou')] }));
+    await expect(d.mudarPrazo({ companyId: LOJA, condId: COND, body: { due_date: HOJE }, hoje: HOJE }))
+      .rejects.toMatchObject({ code: 'COND_NADA_COM_ELA' });
+    usar(clientFalso({ cond: aberta, itens: [item(I1, 'com_cliente', { sale_id: VENDA })] }));
+    await expect(d.acrescentarPecas({ companyId: LOJA, condId: 'nao-e-uuid', body: { items: [{ product_id: P }] }, hoje: HOJE }))
+      .rejects.toMatchObject({ code: 'COND_NAO_ENCONTRADA' });
+
+    const client = clientFalso({ cond: aberta, itens: [item(I1, 'com_cliente', { sale_id: VENDA }), item(I2, 'com_cliente')] });
+    usar(client);
+    await d.tudoDevolvido({ companyId: LOJA, condId: COND, hoje: HOJE });
+    const up = client.chamadas.find((x) => /UPDATE condicional_itens SET situacao = 'voltou'/.test(x.sql));
+    expect(up.params[0]).toEqual([I2]);
+    expect(eventos(client)).toEqual(['voltou', 'encerrada']);
+  });
+
+  test('saidas liquidas: voltou -> defeito consome; volta e saida da mesma variante se compensam', () => {
+    expect(d.saidasLiquidas([mud('voltou', 'voltou_defeito')])).toHaveLength(1);
+    expect(d.saidasLiquidas([mud('voltou', 'ficou'), mud('com_cliente', 'voltou')])).toEqual([]);
+    expect(d.saidasLiquidas([mud('voltou', 'com_cliente'), mud('voltou', 'ficou')])).toHaveLength(2);
+    // Variantes diferentes nao se compensam.
+    expect(d.saidasLiquidas([mud('voltou', 'ficou', P, null), mud('com_cliente', 'voltou', P2, null)])).toEqual([
+      { product_id: P, variant_id: null, nome: 'Saia', variant_label: null },
+    ]);
+    // Entre estados que ocupam (fora e para resolver): nada a conferir.
+    expect(d.saidasLiquidas([mud('com_cliente', 'voltou_defeito'), mud('voltou_defeito', 'ficou')])).toEqual([]);
+  });
+
+  test('voltou -> voltou_defeito passa pela conta do livre (vendida no Caixa: 409)', async () => {
+    usar(clientFalso({ cond: aberta, itens: [item(I1, 'voltou'), item(I2, 'com_cliente')] }));
+    livres.mockResolvedValue([{ product_id: P, variant_id: null, nome: 'Saia', condicionais: [], reservado: 0, para_resolver: 0 }]);
+    await expect(d.marcarPecas({ companyId: LOJA, condId: COND, body: { items: [{ item_id: I1, situacao: 'voltou_defeito' }] }, hoje: HOJE }))
+      .rejects.toMatchObject({ status: 409, code: 'COND_SEM_SALDO' });
+  });
+
+  test('a repeticao devolve a mesma resposta da primeira (gravada no primeiro evento)', async () => {
+    const primeira = clientFalso({ cond: aberta, itens: [item(I1, 'voltou'), item(I2, 'com_cliente')] });
+    usar(primeira);
+    const aviso = { product_id: P, variant_id: null, nome: 'Saia', condicionais: [], reservado: 0, para_resolver: 0 };
+    livres.mockResolvedValue([aviso]);
+    jest.spyOn(primeira, 'query');
+    primeira.query.mockImplementation(async (sql) => {
+      primeira.chamadas.push({ sql });
+      if (/FROM condicionais WHERE id/.test(sql)) return { rows: [{ ...aberta }] };
+      if (/FROM condicional_itens WHERE condicional_id/.test(sql)) return { rows: [item(I1, 'voltou'), item(I2, 'com_cliente')] };
+      if (/SELECT pdv_settings/.test(sql)) return { rows: [{ pdv_settings: { allow_sale_without_stock: true } }] };
+      return { rows: [] };
+    });
+    const r1 = await d.marcarPecas({ companyId: LOJA, condId: COND, body: { items: [{ item_id: I1, situacao: 'ficou' }] }, chave: 'chave-abcdefgh', hoje: HOJE });
+    expect(r1.avisos).toHaveLength(1);
+    const evs = primeira.query.mock.calls.filter(([sql]) => /INSERT INTO condicional_eventos/.test(sql));
+    const dados = JSON.parse(evs[0][1][4]);
+    expect(dados.resposta).toEqual({ avisos: r1.avisos });
+    // So o primeiro evento leva a resposta.
+    expect(evs.slice(1).every(([, p]) => !('resposta' in JSON.parse(p[4])))).toBe(true);
+
+    usar(clientFalso({ cond: aberta, itens: [item(I1, 'ficou'), item(I2, 'com_cliente')], ja: { op: 'marcar', assinatura: dados.assinatura, resposta: dados.resposta } }));
+    const r2 = await d.marcarPecas({ companyId: LOJA, condId: COND, body: { items: [{ item_id: I1, situacao: 'ficou' }] }, chave: 'chave-abcdefgh', hoje: HOJE });
+    expect(r2.repetido).toBe(true);
+    expect(r2.avisos).toEqual(r1.avisos);
+  });
+});
+
 describe('livre desconta as pecas para resolver', () => {
   test('frase da falta quando a unidade esta em Pecas para resolver', () => {
     expect(c.fraseDaFalta({ nome: 'Saia', condicionais: [], reservado: 0, para_resolver: 1 }))

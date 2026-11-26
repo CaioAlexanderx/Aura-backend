@@ -187,6 +187,8 @@ describe('com clientes calculado (R3)', () => {
     await condicional({ itens: [{ p: ID.vestido, v: ID.varM }, { p: ID.vestido, v: ID.varM, sit: 'ficou' }] });
     // Nao contam: voltou, voltou com defeito, ficou ja cobrada, encerrada, cancelada.
     await condicional({ itens: [{ p: ID.vestido, v: ID.varP, sit: 'voltou' }, { p: ID.liso, sit: 'voltou_defeito' }, { p: ID.liso, sit: 'ficou', venda }] });
+    // Peca cobrada nunca conta, nem com_cliente (fora do contrato do C11).
+    await condicional({ itens: [{ p: ID.liso, sit: 'com_cliente', venda }] });
     await condicional({ status: 'encerrada', itens: [{ p: ID.vestido, v: ID.varP }] });
     await condicional({ status: 'cancelada', itens: [{ p: ID.liso }] });
 

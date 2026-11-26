@@ -30,7 +30,8 @@
 //
 // ─── Decidir as pecas (C9, 26/11/2026; services/condicionalDecidir.js) ──
 // Todas: Idempotency-Key opcional (cabecalho ou corpo); a repeticao devolve
-// 200 {condicional, idempotent_replay: true}; a mesma chave com outra
+// a mesma resposta da primeira (avisos, itens_acrescentados) com 200 e
+// idempotent_replay: true; a mesma chave com outra
 // alteracao: 409 IDEMPOTENCY_KEY_REUSED. Nenhuma cria venda, lancamento ou
 // caixa (R1). Condicional encerrada ou cancelada: 409 COND_FECHADA.
 // PATCH /condicionais/:cid/itens  → 200 {condicional, avisos}
@@ -168,11 +169,13 @@ function decisao(contexto, operacao, { statusNovo = 200 } = {}) {
         hoje: condicional.hojeSP(),
       });
       res.set('Cache-Control', 'no-store');
-      if (r.repetido) {
-        res.set('Idempotent-Replayed', 'true');
-        return res.status(200).json({ condicional: r.condicional, idempotent_replay: true });
-      }
       const { condicional: c, repetido, ...extra } = r;
+      if (repetido) {
+        // A mesma resposta da primeira (avisos, itens_acrescentados vem do
+        // evento da operacao) + a condicional como esta agora.
+        res.set('Idempotent-Replayed', 'true');
+        return res.status(200).json({ condicional: c, ...extra, idempotent_replay: true });
+      }
       return res.status(statusNovo).json({ condicional: c, ...extra });
     } catch (err) {
       return falhar(res, err, contexto, MSG_ALTERAR);
