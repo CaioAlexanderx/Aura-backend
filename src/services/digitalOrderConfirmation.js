@@ -50,6 +50,23 @@ function normalizePhone(phone) {
 }
 
 /**
+ * Historico do estoque: uma linha 'out' em stock_movements por item baixado,
+ * no mesmo formato da venda do Caixa (reference_type identifica o pedido).
+ * Antes (ate 26/11/2026) a baixa do pedido da loja online e da entrega do
+ * orcamento mexia no estoque sem deixar rastro no historico.
+ */
+async function registrarMovimentoDaBaixa(client, order, item, productId) {
+  if (!productId) return;
+  await client.query(
+    `INSERT INTO stock_movements (product_id, company_id, type, quantity, variant_id, reference_id, reference_type, notes)
+     SELECT p.id, p.company_id, 'out', $2, $3, $4, 'digital_order', $5
+       FROM products p WHERE p.id = $1`,
+    [productId, item.quantity, item.variant_id || null, order.id,
+      `Baixa do pedido ${order.order_number || ''}`.trim()]
+  );
+}
+
+/**
  * Passo 2: a baixa de estoque do pedido, com o pedido JA travado (FOR UPDATE)
  * na transacao de quem chama. Idempotente: so baixa quando
  * stock_deducted NAO e verdadeiro, e grava o marcador junto. Variante baixa
@@ -73,12 +90,14 @@ async function baixarEstoqueDoPedido(client, order, items) {
   for (const item of items) {
     if (item.variant_id) {
       // Variante: deduz product_variants.stock_qty
-      await client.query(
+      const { rows: vr } = await client.query(
         `UPDATE product_variants
             SET stock_qty = GREATEST(0, stock_qty - $1)
-          WHERE id = $2`,
+          WHERE id = $2
+      RETURNING product_id`,
         [item.quantity, item.variant_id]
       );
+      await registrarMovimentoDaBaixa(client, order, item, (vr[0] && vr[0].product_id) || item.product_id);
     } else if (item.product_id) {
       // Produto sem variante: deduz products.stock_qty
       const { rows: after } = await client.query(
@@ -90,6 +109,7 @@ async function baixarEstoqueDoPedido(client, order, items) {
         [item.quantity, item.product_id]
       );
       const p = after[0];
+      if (p) await registrarMovimentoDaBaixa(client, order, item, item.product_id);
       if (p && Number(p.stock_min) > 0 &&
           Number(p.stock_qty) <= Number(p.stock_min) &&
           Number(p.stock_qty) + Number(item.quantity) > Number(p.stock_min)) {

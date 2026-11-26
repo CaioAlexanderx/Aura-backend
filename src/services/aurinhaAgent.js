@@ -36,6 +36,7 @@ function precoDaAurinha(row, campos) {
 }
 const { buildSystemPrompt, CATEGORIES } = require('./aurinhaPrompt');
 const igOutbox = require('./igOutbox');
+const waSaldoAurinha = require('./waSaldoAurinha');
 
 // Modelo da Aurinha — override por env ou por hub_agent_settings.model.
 // Piloto roda Sonnet 5 (decisão 30/08: se apertar em algum caso, o teste
@@ -368,6 +369,7 @@ async function responderSuporte({ companyId, conversa, agora = new Date() }) {
 // ── Entrada principal — chamada pelo webhook após persistir o inbound ─
 // Nunca lança: falha vira evento 'erro' + log.
 async function handleInbound(companyId, conversationId) {
+  let cobranca = null;
   try {
     const settings = await loadSettings(companyId);
     if (!settings || !settings.enabled) return { handled: false, reason: 'DESATIVADA' };
@@ -381,6 +383,14 @@ async function handleInbound(companyId, conversationId) {
     if (!conv) return { handled: false, reason: 'CONVERSA_INEXISTENTE' };
     if (conv.status !== 'ia') return { handled: false, reason: 'CONVERSA_NAO_IA' };
 
+    // Saldo da Aurinha (472): cada conversa nova atendida gasta 1. Sem saldo
+    // ela nao responde; a mensagem ja esta na caixa e a conversa fica com a lojista.
+    cobranca = await waSaldoAurinha.atender({ companyId, conversationId });
+    if (!cobranca.ok) {
+      await waSaldoAurinha.passarParaLojista(conversationId);
+      return { handled: false, reason: 'AURINHA_SEM_SALDO', code: cobranca.code };
+    }
+
     const { rows: compRows } = await db.query(
       `SELECT trade_name, legal_name FROM companies WHERE id = $1 LIMIT 1`,
       [companyId]
@@ -389,7 +399,10 @@ async function handleInbound(companyId, conversationId) {
     const channelConfig = await loadChannelConfig(companyId);
     const system = buildSystemPrompt({ company, channelConfig, settings });
     const messages = await loadHistory(conversationId);
-    if (!messages.length) return { handled: false, reason: 'SEM_INBOUND' };
+    if (!messages.length) {
+      await waSaldoAurinha.devolver(companyId, cobranca);
+      return { handled: false, reason: 'SEM_INBOUND' };
+    }
 
     const model = settings.model || AURINHA_MODEL;
     let escalada = null;
@@ -470,8 +483,12 @@ async function handleInbound(companyId, conversationId) {
       });
     }
 
+    // Atendeu sem dizer nada (so escalou/anotou): nao cobra a conversa.
+    if (!(parsed.resposta && parsed.resposta.trim())) await waSaldoAurinha.devolver(companyId, cobranca);
+
     return { handled: true, escalada: !!querEscalar, categoria };
   } catch (err) {
+    await waSaldoAurinha.devolver(companyId, cobranca);
     console.error('[AURINHA] handleInbound error:', err.message);
     await logEvent(companyId, conversationId, 'erro', { message: String(err.message).slice(0, 500) });
     return { handled: false, reason: 'ERRO', error: err.message };
