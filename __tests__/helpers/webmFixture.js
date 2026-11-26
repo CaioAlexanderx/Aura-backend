@@ -35,17 +35,19 @@ function simpleBlock(pacote, tempo = 0) {
   return el(0xa3, Buffer.concat([Buffer.from([0x81, (tempo >> 8) & 0xff, tempo & 0xff, 0x80]), pacote]));
 }
 
-function criarWebm(pacotes, { canais = 1, codec = 'A_OPUS', head = opusHead(1) } = {}) {
+function criarWebm(pacotes, { canais = 1, codec = 'A_OPUS', head = opusHead(1), canaisVazio = false, trilhaIntrusa = null } = {}) {
   const ebml = el(0x1a45dfa3, el(0x4282, Buffer.from('webm')));
   const info = el(0x1549a966, el(0x2ad7b1, Buffer.from([0x0f, 0x42, 0x40])));
   const entrada = el(0xae, Buffer.concat([
     el(0xd7, uint(1)), el(0x83, uint(2)), el(0x86, Buffer.from(codec)),
     ...(head ? [el(0x63a2, head)] : []),
-    el(0xe1, Buffer.concat([el(0xb5, Buffer.alloc(4)), el(0x9f, uint(canais))])),
+    el(0xe1, Buffer.concat([el(0xb5, Buffer.alloc(4)), el(0x9f, canaisVazio ? Buffer.alloc(0) : uint(canais))])),
   ]));
-  const trilhas = el(0x1654ae6b, entrada);
+  const outra = el(0xae, Buffer.concat([el(0xd7, uint(2)), el(0x83, uint(1)), el(0x86, Buffer.from('V_VP8'))]));
+  const trilhas = el(0x1654ae6b, trilhaIntrusa ? Buffer.concat([entrada, outra]) : entrada);
+  const intruso = trilhaIntrusa ? [el(0xa3, Buffer.concat([Buffer.from([0x82, 0, 0, 0x80]), trilhaIntrusa]))] : [];
   const cluster1 = elDesconhecido(0x1f43b675, Buffer.concat([
-    el(0xe7, uint(0)), ...pacotes.slice(0, Math.ceil(pacotes.length / 2)).map((p, i) => simpleBlock(p, i * 20)),
+    el(0xe7, uint(0)), ...intruso, ...pacotes.slice(0, Math.ceil(pacotes.length / 2)).map((p, i) => simpleBlock(p, i * 20)),
   ]));
   const cluster2 = elDesconhecido(0x1f43b675, Buffer.concat([
     el(0xe7, uint(0)), ...pacotes.slice(Math.ceil(pacotes.length / 2)).map((p, i) => simpleBlock(p, i * 20)),

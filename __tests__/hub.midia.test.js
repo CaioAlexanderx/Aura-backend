@@ -243,6 +243,22 @@ describe('receber', () => {
     expect(JSON.parse(json).media).toMatchObject({ kind: 'audio', mime: 'audio/ogg', media_id: 'MEDIA-RECEBIDA' });
   });
 
+  it('as chamadas à Meta têm timeout (signal)', async () => {
+    await hubMidia.guardarRecebida({ companyId: COMPANY, conversationId: CONV, msg: msgAudio });
+    expect(global.fetch.mock.calls.length).toBeGreaterThanOrEqual(2);
+    global.fetch.mock.calls.forEach(([, opts]) => expect(opts.signal).toBeDefined());
+  });
+
+  it('a URL assinada é a mesma entre leituras da mesma meia hora (a thread relê a cada 10 s)', async () => {
+    const a = await hubMidia.urlDaMidia('wa/c/v/a.ogg');
+    const b = await hubMidia.urlDaMidia('wa/c/v/a.ogg');
+    expect(a).toBe(b);
+    const [, segundos, inicio] = r2.urlAssinada.mock.calls[r2.urlAssinada.mock.calls.length - 1];
+    expect(segundos).toBe(3600);
+    expect(inicio.getTime() % (30 * 60 * 1000)).toBe(0);
+    expect(Date.now() - inicio.getTime()).toBeLessThan(30 * 60 * 1000 + 1000);
+  });
+
   it('sem bucket privado não baixa nada (e não derruba o webhook)', async () => {
     r2.disponivel.mockReturnValue(false);
     const r = await hubMidia.guardarRecebida({ companyId: COMPANY, conversationId: CONV, msg: msgAudio });

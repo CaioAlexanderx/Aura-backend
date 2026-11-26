@@ -222,7 +222,6 @@ const MAX_SEGMENTOS_POR_PAGINA = 255;
 function escreverOgg({ pacotes, head, canais }) {
   const serial = 0x41555241; // "AURA"
   const cabecalho = opusHead(head, canais);
-  const preSkip = cabecalho.readUInt16LE(10);
   const paginas = [
     pagina({ tipo: 0x02, granule: 0, serial, seq: 0, pacotes: [cabecalho] }),
     pagina({ tipo: 0x00, granule: 0, serial, seq: 1, pacotes: [opusTags()] }),

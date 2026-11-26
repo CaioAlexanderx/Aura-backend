@@ -89,9 +89,9 @@ describe('webmParaOgg', () => {
     paginas.slice(0, -1).forEach((p) => expect(p.tipo & 0x04).toBe(0));
   });
 
-  it('granule position = pre-skip + amostras de 48 kHz', () => {
+  it('granule position começa em 0 e soma as amostras de 48 kHz (RFC 7845)', () => {
     const paginas = lerOgg(webmParaOgg(webm));
-    expect(paginas[paginas.length - 1].granule).toBe(312 + 7 * 960);
+    expect(paginas[paginas.length - 1].granule).toBe(7 * 960);
   });
 
   it('muitos pacotes viram várias páginas, cada uma com granule crescente', () => {
@@ -101,7 +101,7 @@ describe('webmParaOgg', () => {
     expect(audio.length).toBeGreaterThan(1);
     expect(audio.flatMap((p) => p.pacotes)).toHaveLength(130);
     for (let i = 1; i < audio.length; i++) expect(audio[i].granule).toBeGreaterThan(audio[i - 1].granule);
-    expect(audio[audio.length - 1].granule).toBe(312 + 130 * 960);
+    expect(audio[audio.length - 1].granule).toBe(130 * 960);
   });
 
   it('pacote de 255 bytes (múltiplo do lacing) volta inteiro', () => {
@@ -133,6 +133,22 @@ describe('webmParaOgg', () => {
     const r = lerWebm(cortado);
     expect(r.pacotes.length).toBeGreaterThan(0);
     expect(r.pacotes.length).toBeLessThan(7);
+  });
+});
+
+describe('webm com defeitos', () => {
+  const { opusHead } = require('./helpers/webmFixture');
+  it('Channels de tamanho 0 vira AUDIO_INVALIDO (415 no envio), não erro interno', () => {
+    const webm = criarWebm([pacote(1, 30)], { canaisVazio: true });
+    try { webmParaOgg(webm); throw new Error('deveria falhar'); } catch (e) { expect(e.code).toBe('AUDIO_INVALIDO'); }
+  });
+
+  it('ignora blocos de outra trilha (só a trilha Opus entra)', () => {
+    const webm = criarWebm([pacote(1, 30), pacote(2, 30)], { trilhaIntrusa: pacote(9, 50) });
+    const r = lerWebm(webm);
+    expect(r.pacotes).toHaveLength(2);
+    expect(r.pacotes.some((p) => p[1] === 9)).toBe(false);
+    expect(opusHead).toBeDefined();
   });
 });
 
