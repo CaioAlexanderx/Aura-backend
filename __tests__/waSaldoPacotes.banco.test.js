@@ -227,3 +227,22 @@ describe('webhook do Asaas (wa-pack-<id>)', () => {
     expect((await saldo(ID.webhook, 'avisos')).total).toBe(100 + 200);
   });
 });
+
+describe('cota antiga de marketing (activePacksQty)', () => {
+  const quota = require('../src/services/marketing/marketingQuota');
+
+  test('pacote de avisos ou da Aurinha nao mexe na cota antiga de marketing', async () => {
+    const antes = await quota.activePacksQty(ID.semAsaas);
+    await pacotes.criarPacote(ID.semAsaas, { bucket: 'avisos', status: 'active', source: 'admin' });
+    await pacotes.criarPacote(ID.semAsaas, { bucket: 'aurinha', status: 'active', source: 'admin' });
+    expect(await quota.activePacksQty(ID.semAsaas)).toBe(antes);
+  });
+
+  test('pacote de novidades soma na cota antiga e vale 60 dias', async () => {
+    const antes = await quota.activePacksQty(ID.semAsaas);
+    const pack = await pacotes.criarPacote(ID.semAsaas, { bucket: 'novidades', status: 'active', source: 'admin' });
+    expect(await quota.activePacksQty(ID.semAsaas)).toBe(antes + 100);
+    const { rows } = await q(`SELECT (valid_until - CURRENT_DATE)::int AS dias FROM wa_marketing_packs WHERE id = $1`, [pack.id]);
+    expect(rows[0].dias).toBe(60);
+  });
+});

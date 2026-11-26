@@ -27,9 +27,6 @@ const ROTULO = {
   avisos: 'avisos e cobrancas',
   aurinha: 'conversas da Aurinha',
 };
-// Validade do registro do pacote (nao do saldo): a coluna e herdada da 332
-// e o saldo comprado nao vence — uns 10 anos para nenhuma regra antiga cortar.
-const DIAS_REGISTRO = 3650;
 
 function schemaMissing(e) {
   return !!e && (e.code === '42P01' || e.code === '42703');
@@ -52,9 +49,8 @@ async function criarPacote(companyId, { bucket, status = 'pending', source = 'ap
     const { rows } = await db.query(
       `-- wa:saldo-pacote-insert
        INSERT INTO wa_marketing_packs
-         (company_id, qty, price_cents, status, source, created_by, activated_at, bucket, valid_until)
-       VALUES ($1,$2,$3,$4,$5,$6, CASE WHEN $4 = 'active' THEN NOW() END, $7,
-               CURRENT_DATE + ${DIAS_REGISTRO})
+         (company_id, qty, price_cents, status, source, created_by, activated_at, bucket)
+       VALUES ($1,$2,$3,$4,$5,$6, CASE WHEN $4 = 'active' THEN NOW() END, $7)
        RETURNING *`,
       [companyId, qty || base.qty, priceCents === null ? base.preco_centavos : priceCents,
         status, source, createdBy, bucket]

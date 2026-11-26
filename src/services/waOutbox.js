@@ -957,13 +957,22 @@ async function markRow(id, fields) {
 // Processa até `limit` itens pendentes vencidos. Chamado pelo
 // waDispatcherJob e pelo POST /whatsapp/test-send (envio imediato).
 async function processBatch(limit = 20) {
-  const { rows } = await db.query(
+  // Claim atomico: quem pega o lote o marca 'sending' na mesma instrucao
+  // (SKIP LOCKED) — dois despachos nunca pegam a mesma linha, e uma linha
+  // 'sending' nunca e reenviada sozinha (se o processo cair no meio, fica
+  // para conferencia: melhor nao mandar do que mandar duas vezes).
+  const { rows: pegas } = await db.query(
     `-- wa:outbox-pick
-     SELECT * FROM wa_outbox
-      WHERE status = 'pending' AND next_attempt_at <= NOW()
-      ORDER BY created_at ASC LIMIT $1`,
+     UPDATE wa_outbox SET status = 'sending', updated_at = NOW()
+      WHERE id IN (
+        SELECT id FROM wa_outbox
+         WHERE status = 'pending' AND next_attempt_at <= NOW()
+         ORDER BY created_at ASC LIMIT $1
+         FOR UPDATE SKIP LOCKED)
+      RETURNING *`,
     [limit]
   );
+  const rows = (pegas || []).slice().sort((a, b) => new Date(a.created_at) - new Date(b.created_at));
   const out = { picked: rows.length, sent: 0, skipped: 0, retried: 0, failed: 0 };
 
   for (const row of rows) {
@@ -1066,7 +1075,19 @@ async function processBatch(limit = 20) {
         resp = await wa.sendText(creds.phoneNumberId, creds.accessToken, row.to_phone, row.text_body || '');
       }
       const wamid = resp && resp.messages && resp.messages[0] && resp.messages[0].id || null;
-      await markRow(row.id, { status: 'sent', wa_message_id: wamid, last_error: null });
+      try {
+        await markRow(row.id, { status: 'sent', wa_message_id: wamid, last_error: null });
+      } catch (eMark) {
+        // A Meta aceitou e so o registro falhou: NAO reenvia e NAO devolve.
+        // Fica 'sending' com o wamid anotado, para conferencia.
+        console.error('[waOutbox] enviado mas nao registrado — conferir. outbox=%s wamid=%s: %s', row.id, wamid, eMark.message);
+        await db.query(
+          `UPDATE wa_outbox SET wa_message_id = $1, last_error = $2 WHERE id = $3`,
+          [wamid, 'ENVIADO_SEM_REGISTRO', row.id]
+        ).catch(() => {});
+        out.sent++;
+        continue;
+      }
       out.sent++;
 
       // Origem HUB: o espelho é a thread da conversa (hub_messages, 375) —
@@ -1130,7 +1151,7 @@ async function processBatch(limit = 20) {
       } else {
         const backoffMin = Math.min(Math.pow(2, attempts), 60);
         await db.query(
-          `UPDATE wa_outbox SET attempts = $1, last_error = $2,
+          `UPDATE wa_outbox SET status = 'pending', attempts = $1, last_error = $2,
                   next_attempt_at = NOW() + ($3 || ' minutes')::interval, updated_at = NOW()
             WHERE id = $4`,
           [attempts, msg, String(backoffMin), row.id]

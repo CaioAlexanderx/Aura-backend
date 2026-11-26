@@ -335,8 +335,23 @@ async function reservarAvulso(opts) {
 // o log (o cliente nao perde por erro nosso sem a gente saber).
 //   devolver({ outboxId })  |  devolver({ companyId, refKey })
 async function devolver({ outboxId = null, companyId = null, refKey = null } = {}) {
-  if (!ativo()) return { devolvido: false, modo: 'desligado' };
+  // Sem checar a trava: reserva feita com ela ligada volta mesmo depois de desligada.
   if (!outboxId && !(companyId && refKey)) return { devolvido: false };
+  if (outboxId) {
+    // Barato e sem transacao: a imensa maioria dos pulados nunca reservou.
+    try {
+      const r = await db.query(
+        `-- wa:saldo-devolver-existe
+         SELECT 1 FROM wa_saldo_lancamentos WHERE outbox_id = $1 AND kind = 'consumo' LIMIT 1`,
+        [outboxId]
+      );
+      if (!r || !r.rows || !r.rows.length) return { devolvido: false };
+    } catch (e) {
+      if (schemaMissing(e)) return { devolvido: false };
+      console.error('[waSaldo] devolver (checagem) falhou:', e.code || '', e.message);
+      return { devolvido: false, erro: e.code || 'ERRO' };
+    }
+  }
   let client;
   try {
     client = await db.connect();
