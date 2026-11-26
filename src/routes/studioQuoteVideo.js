@@ -23,6 +23,7 @@ const router  = express.Router({ mergeParams: true });
 const db      = require('../config/database');
 const r2      = require('../utils/r2Storage');
 const regras  = require('../services/orcamentoEmVideo');
+const { garantirClienteDoOrcamento } = require('../services/clienteDoOrcamento');
 
 const LIMITE_DO_VIDEO = '12mb';
 
@@ -256,7 +257,12 @@ router.post('/quotes/:qid/marcar-enviado', async function(req, res) {
         RETURNING *`,
       [String(vDays), canal, qid, cid]
     );
-    res.json({ quote: upd.rows[0] });
+    // C4: o cliente do orcamento entra em Clientes ao enviar (ver
+    // services/clienteDoOrcamento.js). Nunca derruba o envio.
+    const enviado = upd.rows[0];
+    const cli = await garantirClienteDoOrcamento(db, enviado);
+    if (cli.customer_id) enviado.customer_id = cli.customer_id;
+    res.json({ quote: enviado });
   } catch (err) {
     if (semColuna(err)) return res.status(503).json({ error: 'Orçamento em vídeo ainda não está disponível' });
     console.error('[studio/quotes/:qid/marcar-enviado]', err.message);
