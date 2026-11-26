@@ -29,6 +29,7 @@ const { requireAuth } = require('../middleware/auth');
 const db = require('../config/database');
 const condicional = require('../services/condicional');
 const listaDeCondicionais = require('../services/listaDeCondicionais');
+const resolver = require('../services/condicionalResolver');
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -112,6 +113,32 @@ router.get('/condicionais', requireAuth, trava, async (req, res) => {
     }
     console.error('[me/condicionais]', err && err.message);
     return res.status(500).json({ error: 'Não conseguimos carregar as condicionais agora. Tente de novo em instantes.' });
+  }
+});
+
+// Pecas para resolver de todas as lojas que o usuario ve (C16): {pecas, total}.
+// Cada peca traz company_id e company_name; resolver e feito na loja (POST da loja).
+router.get('/condicionais/para-resolver', requireAuth, trava, async (req, res) => {
+  try {
+    const userId = req.user && req.user.id;
+    if (!userId) return res.status(401).json({ error: 'Não autenticado' });
+    const lojas = await lojasDoUsuario(userId);
+    const filtro = req.query.company_id ? String(req.query.company_id) : null;
+    if (filtro && (!UUID_RE.test(filtro) || !lojas.some((l) => String(l.id) === filtro))) {
+      return res.status(403).json({ error: 'Sem acesso a esta empresa.' });
+    }
+    const visiveis = lojas.filter((l) => l.entra && (!filtro || String(l.id) === filtro));
+    const out = await resolver.listarParaResolver(db, { empresas: visiveis.map((l) => l.id) });
+    const nomes = new Map(lojas.map((l) => [String(l.id), l.nome]));
+    out.pecas = out.pecas.map((pc) => ({ ...pc, company_name: nomes.get(String(pc.company_id)) || null }));
+    res.set('Cache-Control', 'no-store');
+    return res.json(out);
+  } catch (err) {
+    if (err && (err.code === '42703' || err.code === '42P01')) {
+      return res.status(503).json({ error: 'As condicionais ainda não estão disponíveis. Tente de novo em instantes.', code: 'COND_INDISPONIVEL' });
+    }
+    console.error('[me/condicionais/para-resolver]', err && err.message);
+    return res.status(500).json({ error: 'Não conseguimos carregar as peças para resolver agora. Tente de novo em instantes.' });
   }
 });
 

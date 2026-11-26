@@ -501,4 +501,6 @@ module.exports = {
   acrescentarPecas,
   tudoDevolvido,
   cancelarCondicional,
+  // C16: o resolver usa a mesma transacao (condicional e itens travados, chave).
+  naCondicional,
 };
