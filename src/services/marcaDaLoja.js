@@ -30,6 +30,7 @@
 
 const db = require('../config/database');
 const { vitrineV2Ligada } = require('./vitrineV2');
+const { urlPublicaDoApp } = require('../utils/urlPublicaDoApp');
 
 // Import tardio: storefrontBuilder carrega meio mundo, e as rotas publicas
 // de aprovacao e acompanhamento nao precisam dele no resto do caminho.
@@ -133,7 +134,7 @@ function linkDoPosCompra({ config, studioSettings, tipo, token }) {
   // para um 404. Fica no endereco de sempre, que abre sem depender disso.
   const naLoja = config && texto(config.slug) && config.is_published !== false && vitrineV2Ligada(ss);
   if (naLoja) return `${urlDaLojaDe(config)}/${tipo}/${t}`;
-  return `${process.env.APP_PUBLIC_URL || ''}/${tipo}/${t}`;
+  return `${urlPublicaDoApp()}/${tipo}/${t}`;
 }
 
 /** linkDoPosCompra de uma empresa, lendo a vitrine dela. */
