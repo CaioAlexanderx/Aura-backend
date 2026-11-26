@@ -21,7 +21,7 @@
 
 const ID = {
   EBML: 0x1a45dfa3, SEGMENT: 0x18538067, CLUSTER: 0x1f43b675, TRACKS: 0x1654ae6b,
-  TRACK_ENTRY: 0xae, CODEC_ID: 0x86, CODEC_PRIVATE: 0x63a2, AUDIO: 0xe1, CHANNELS: 0x9f,
+  TRACK_ENTRY: 0xae, TRACK_NUMBER: 0xd7, CODEC_ID: 0x86, CODEC_PRIVATE: 0x63a2, AUDIO: 0xe1, CHANNELS: 0x9f,
   SIMPLE_BLOCK: 0xa3, BLOCK_GROUP: 0xa0, BLOCK: 0xa1,
 };
 const ENTRAR = new Set([ID.SEGMENT, ID.CLUSTER, ID.TRACKS, ID.TRACK_ENTRY, ID.BLOCK_GROUP, ID.AUDIO]);
@@ -87,7 +87,7 @@ function lerWebm(buf) {
     if (!tam) break;
     const dados = pos + id.len + tam.len;
     if (ENTRAR.has(id.id)) {
-      if (id.id === ID.TRACK_ENTRY) trackAtual = { codec: null, canais: 1, head: null };
+      if (id.id === ID.TRACK_ENTRY) trackAtual = { numero: null, codec: null, canais: 1, head: null };
       pos = dados;
       continue;
     }
@@ -100,13 +100,17 @@ function lerWebm(buf) {
         if (trackAtual.codec === 'A_OPUS' && trilhaOpus === null) trilhaOpus = trackAtual;
       } else if (id.id === ID.CODEC_PRIVATE) {
         trackAtual.head = buf.subarray(dados, fim);
+      } else if (id.id === ID.TRACK_NUMBER && tam.tamanho >= 1 && tam.tamanho <= 6) {
+        trackAtual.numero = buf.readUIntBE(dados, tam.tamanho);
       } else if (id.id === ID.CHANNELS) {
-        trackAtual.canais = buf.readUIntBE(dados, Math.min(tam.tamanho, 6)) || 1;
+        if (tam.tamanho < 1 || tam.tamanho > 6) throw erro('WebM com número de canais inválido');
+        trackAtual.canais = buf.readUIntBE(dados, tam.tamanho) || 1;
       }
     }
     if (id.id === ID.SIMPLE_BLOCK || id.id === ID.BLOCK) {
       const trilha = lerVint(buf, dados);
-      if (trilha) {
+      // Só os blocos da trilha Opus (um WebM pode ter outra trilha).
+      if (trilha && (trilhaOpus === null || trilhaOpus.numero === null || trilha.valor === trilhaOpus.numero)) {
         const flags = buf[dados + trilha.len + 2];
         const lacing = (flags & 0x06) >> 1;
         if (lacing !== 0) throw erro('WebM com lacing não suportado');
@@ -224,7 +228,9 @@ function escreverOgg({ pacotes, head, canais }) {
     pagina({ tipo: 0x00, granule: 0, serial, seq: 1, pacotes: [opusTags()] }),
   ];
   let seq = 2;
-  let acumulado = preSkip;
+  // RFC 7845: a granule position conta amostras de 48 kHz desde o início do
+  // stream (o pre-skip já está dentro dos pacotes), então começa em 0.
+  let acumulado = 0;
   let grupo = [];
   let segs = 0;
   const fechar = (ultima) => {

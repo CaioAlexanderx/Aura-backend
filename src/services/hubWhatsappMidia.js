@@ -34,6 +34,11 @@ const MAX_FOTO = 5 * 1024 * 1024;
 const MAX_AUDIO = 16 * 1024 * 1024;
 const MAX_RECEBIDA = 16 * 1024 * 1024;
 const URL_VALIDADE_S = 3600;
+const TIMEOUT_MS = 15000;
+// A URL assinada só muda de meia em meia hora: a thread relê a cada 10 s e o
+// player/foto não pode recarregar a cada leitura. Vale 1 h a partir do começo
+// da meia hora, então sobram pelo menos 30 min.
+const JANELA_ASSINATURA_MS = 30 * 60 * 1000;
 
 // O que a Cloud API aceita como áudio (docs de mídia suportada).
 const AUDIO_PASSA_DIRETO = new Set(['audio/ogg', 'audio/mp4', 'audio/aac', 'audio/mpeg', 'audio/amr']);
@@ -87,6 +92,7 @@ async function subirParaMeta(creds, buffer, mime) {
   form.append('file', new Blob([buffer], { type: mime }), `arquivo.${EXTENSAO[mimeBase(mime)] || 'bin'}`);
   const resp = await fetch(`${GRAPH}/${creds.phoneNumberId}/media`, {
     method: 'POST', headers: { Authorization: `Bearer ${creds.accessToken}` }, body: form,
+    signal: AbortSignal.timeout(TIMEOUT_MS),
   });
   const data = await resp.json();
   if (data.error || !data.id) throw wa.graphError(data, resp.status);
@@ -95,11 +101,11 @@ async function subirParaMeta(creds, buffer, mime) {
 
 async function baixarDaMeta(creds, mediaId) {
   const h = { Authorization: `Bearer ${creds.accessToken}` };
-  const meta = await fetch(`${GRAPH}/${encodeURIComponent(mediaId)}`, { headers: h });
+  const meta = await fetch(`${GRAPH}/${encodeURIComponent(mediaId)}`, { headers: h, signal: AbortSignal.timeout(TIMEOUT_MS) });
   const info = await meta.json();
   if (info.error || !info.url) throw wa.graphError(info, meta.status);
   if (Number(info.file_size) > MAX_RECEBIDA) throw new Error('Mídia recebida grande demais');
-  const arq = await fetch(info.url, { headers: h });
+  const arq = await fetch(info.url, { headers: h, signal: AbortSignal.timeout(TIMEOUT_MS) });
   if (!arq.ok) throw new Error(`Download da mídia falhou (${arq.status})`);
   const buffer = Buffer.from(await arq.arrayBuffer());
   if (buffer.length > MAX_RECEBIDA) throw new Error('Mídia recebida grande demais');
@@ -119,7 +125,8 @@ async function guardar({ companyId, conversationId, buffer, mime }) {
 /** URL assinada de leitura (1 h) ou null. */
 function urlDaMidia(key) {
   if (!key || !r2.disponivel()) return Promise.resolve(null);
-  return r2.urlAssinada(key, URL_VALIDADE_S);
+  const inicio = new Date(Math.floor(Date.now() / JANELA_ASSINATURA_MS) * JANELA_ASSINATURA_MS);
+  return r2.urlAssinada(key, URL_VALIDADE_S, inicio);
 }
 
 // ── Enviar ───────────────────────────────────────────────────

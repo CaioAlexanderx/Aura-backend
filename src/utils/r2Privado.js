@@ -71,13 +71,13 @@ async function enviar(key, buffer, contentType) {
 }
 
 /** URL assinada de leitura (padrão 15 min) ou null. Nunca URL pública. */
-async function urlAssinada(key, segundos = 900) {
+async function urlAssinada(key, segundos = 900, signingDate = undefined) {
   const s3 = client();
   if (!s3 || !key) return null;
   try {
     const { GetObjectCommand } = require('@aws-sdk/client-s3');
     const { getSignedUrl } = require('@aws-sdk/s3-request-presigner');
-    return await getSignedUrl(s3, new GetObjectCommand({ Bucket: config().bucket, Key: key }), { expiresIn: segundos });
+    return await getSignedUrl(s3, new GetObjectCommand({ Bucket: config().bucket, Key: key }), { expiresIn: segundos, ...(signingDate ? { signingDate } : {}) });
   } catch (err) {
     console.error('[r2Privado] assinatura falhou:', err.message);
     return null;
