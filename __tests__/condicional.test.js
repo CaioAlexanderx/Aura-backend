@@ -185,6 +185,39 @@ describe('lista', () => {
     expect(sql.replace(/\s+/g, ' ')).toMatch(/ORDER BY \(c\.status = 'aberta' AND r\.com_cliente > 0 AND c\.due_date < \$2::date\) DESC/);
   });
 
+  test('C18: apresentarLinha acrescenta resumo, primeiras pecas, outras e venda', () => {
+    const base = { id: 'x', company_id: 'c', numero: 3, status: 'aberta', due_date: HOJE, pecas: 5, com_cliente: 2, ficou: 1, a_cobrar: 1, voltou: 1, voltou_defeito: 1, valor_total: 270, valor_com_cliente: 120, valor_a_cobrar: 30, primeiras_pecas: [{ nome: 'Vestido', cor: 'Azul', tamanho: 'P' }, { nome: 'Cinto' }] };
+    const a = lista.apresentarLinha(base, HOJE);
+    expect(a.resumo).toEqual({ com_cliente: 2, voltaram: 2, ficaram: 1, a_cobrar: 1, valor_com_cliente: 120, valor_a_cobrar: 30 });
+    expect(a.primeiras_pecas).toEqual([{ nome: 'Vestido', cor: 'Azul', tamanho: 'P' }, { nome: 'Cinto', cor: null, tamanho: null }]);
+    expect(a.outras_pecas).toBe(3);
+    expect(a.venda).toBeNull();
+    // Campos antigos seguem.
+    expect(a).toMatchObject({ pecas_com_cliente: 2, pecas_voltou: 2, valor_a_cobrar: 30 });
+    // Concluida com venda; json vindo como texto tambem le.
+    const c = lista.apresentarLinha({ ...base, status: 'encerrada', primeiras_pecas: JSON.stringify([{ nome: 'A' }]), vendas: 2, venda_valor: '150.00', venda_numero: 41 }, HOJE);
+    expect(c.venda).toEqual({ numero: 41, valor: 150 });
+    expect(c.outras_pecas).toBe(4);
+    // Encerrada sem venda.
+    expect(lista.apresentarLinha({ ...base, status: 'encerrada', vendas: 0 }, HOJE).venda).toBeNull();
+  });
+
+  test('C18: totais do topo', () => {
+    expect(lista.apresentarTotais(null)).toEqual({
+      vence_hoje: { valor: 0, pecas: 0 }, atrasadas: { valor: 0, pecas: 0 }, a_cobrar: { valor: 0, pecas: 0 },
+    });
+    expect(lista.apresentarTotais({ vence_hoje_valor: '80.00', vence_hoje_pecas: 1, atrasadas_valor: 120, atrasadas_pecas: 2, valor_a_cobrar: 70, pecas_a_cobrar: 2 })).toEqual({
+      vence_hoje: { valor: 80, pecas: 1 }, atrasadas: { valor: 120, pecas: 2 }, a_cobrar: { valor: 70, pecas: 2 },
+    });
+  });
+
+  test('C18: a consulta da lista agrega por condicional da pagina, sem N+1', () => {
+    const { sql } = lista.montarConsultaDaLista({ empresas: ['x'], limit: 30, offset: 0, hoje: HOJE });
+    expect(sql).toMatch(/WITH pagina AS/);
+    expect(sql).toMatch(/s\.condicional_id = pg\.id/);
+    expect(sql).toMatch(/ORDER BY grupo, i\.added_at, i\.id\s+LIMIT 2/);
+  });
+
   test('totalizador "R$ X em N peças com M clientes"', () => {
     expect(lista.textoDoTotalizador({ valor: 1379, pecas: 7, clientes: 3 })).toBe('R$ 1.379,00 em 7 peças com 3 clientes');
     expect(lista.textoDoTotalizador({ valor: 89.9, pecas: 1, clientes: 1 })).toBe('R$ 89,90 em 1 peça com 1 cliente');

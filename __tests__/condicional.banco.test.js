@@ -51,8 +51,9 @@ const ID = {
   vestido: uuid(), varM: uuid(), varG: uuid(), blusa: uuid(), ultima: uuid(), reservada: uuid(),
   servico: uuid(), compartilhada: uuid(), muito: uuid(), zerada: uuid(), daOutra: uuid(),
   cliente: uuid(), semTelefone: uuid(), daFilial: uuid(), clienteDeFora: uuid(),
+  c18a: uuid(), c18b: uuid(),
 };
-const EMPRESAS = [ID.loja, ID.filial, ID.lista, ID.paralela, ID.semEstoque, ID.deFora];
+const EMPRESAS = [ID.loja, ID.filial, ID.lista, ID.paralela, ID.semEstoque, ID.deFora, ID.c18a, ID.c18b];
 const HOJE = hojeSP();
 const dia = (n) => somarDias(HOJE, n);
 
@@ -104,6 +105,9 @@ beforeAll(async () => {
              ($3, $4, 'Fixture Sem Estoque', 'Sem Estoque')`,
   [ID.lista, ID.paralela, ID.semEstoque, ID.dono]);
   await q(`INSERT INTO companies (id, owner_id, legal_name) VALUES ($1, $2, 'Fixture De Fora')`, [ID.deFora, ID.outroDono]);
+  // C18: duas lojas do outro dono, para a lista enriquecida e o consolidado.
+  await q(`INSERT INTO companies (id, owner_id, legal_name, trade_name) VALUES ($1, $3, 'Fixture C18 A', 'C18 A'), ($2, $3, 'Fixture C18 B', 'C18 B')`,
+    [ID.c18a, ID.c18b, ID.outroDono]);
   await q(`UPDATE companies SET pdv_settings = '{"allow_sale_without_stock": true}'::jsonb WHERE id = $1`, [ID.semEstoque]);
   // Membro: ve Vendas na Lista; na Paralela so o Caixa.
   await q(`INSERT INTO company_members (company_id, user_id, role_label, permissions, status, is_active) VALUES
@@ -485,6 +489,140 @@ describe('lista, situacao e totalizador (R11)', () => {
     expect(d.body.condicional.items[0]).toMatchObject({ unit_price: 79.9, preco_hoje: 99.9, preco_mudou: true });
     expect((await request(app).get(`/companies/${ID.filial}/condicionais/${r.body.condicional.id}`)).status).toBe(404);
     expect((await request(app).get(`/companies/${ID.loja}/condicionais/nao-e-uuid`)).status).toBe(404);
+  });
+});
+
+describe('lista enriquecida (C18)', () => {
+  const C = {};
+  const DONO2 = () => ({ id: ID.outroDono, role: 'client', is_staff: true });
+
+  // `min` = minutos depois do inicio: controla a ordem de retirada.
+  async function nova({ empresa = ID.c18a, numero, nome, due, status = 'aberta', itens }) {
+    const id = uuid();
+    await q(`INSERT INTO condicionais (id, company_id, numero, customer_name, customer_phone, due_date, status, closed_at)
+             VALUES ($1, $2, $3, $4, '11922220000', $5::date, $6, CASE WHEN $6 = 'encerrada' THEN NOW() END)`,
+    [id, empresa, numero, nome, due, status]);
+    for (const it of itens) {
+      await q(`INSERT INTO condicional_itens (condicional_id, product_id, product_name, color_name, size_label, unit_price, situacao, sale_id, added_at)
+               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW() - interval '1 day' + ($9 || ' minutes')::interval)`,
+      [id, ID.muito, it.nome, it.cor || null, it.tam || null, it.preco, it.sit || 'com_cliente', it.venda || null, String(it.min || 0)]);
+    }
+    return id;
+  }
+  async function venda(empresa, condicionalId, total, minutosAtras, status = 'completed') {
+    const id = uuid();
+    await q(`INSERT INTO sales (id, company_id, total_amount, status, condicional_id, created_at)
+             VALUES ($1, $2, $3, $4, $5, NOW() - ($6 || ' minutes')::interval)`,
+    [id, empresa, total, status, condicionalId, String(minutosAtras)]);
+    const { rows } = await q(`SELECT sale_number FROM sales WHERE id = $1`, [id]);
+    return { id, numero: Number(rows[0].sale_number) };
+  }
+
+  beforeAll(async () => {
+    // Aberta parcial: peca com a cliente primeiro (por retirada), depois a que
+    // ficou, depois a que voltou, mesmo tendo sido retirada antes.
+    C.parcial = await nova({ numero: 1, nome: 'Ana', due: dia(-2), itens: [
+      { nome: 'Blusa', preco: 50, sit: 'voltou', min: 1 },
+      { nome: 'Saia', cor: 'Preta', tam: 'M', preco: 30, sit: 'ficou', min: 2 },
+      { nome: 'Vestido', cor: 'Azul', tam: 'P', preco: 100, min: 3 },
+      { nome: 'Cinto', preco: 20, min: 4 },
+      { nome: 'Calca', preco: 70, sit: 'voltou_defeito', min: 0 },
+    ] });
+    C.hoje = await nova({ numero: 2, nome: 'Bia', due: dia(0), itens: [{ nome: 'Meia', preco: 80 }] });
+    C.emDia = await nova({ numero: 3, nome: 'Cris', due: dia(5), itens: [
+      { nome: 'Lenco', preco: 40, sit: 'ficou', min: 1 },
+      { nome: 'Bolsa', preco: 60, min: 2 },
+    ] });
+    // Concluida: ordem so de retirada, sem agrupar por situacao.
+    C.concluida = await nova({ numero: 4, nome: 'Duda', due: dia(-1), status: 'encerrada', itens: [
+      { nome: 'Peca A', preco: 100, sit: 'ficou', min: 1 },
+      { nome: 'Peca B', preco: 50, sit: 'ficou', min: 2 },
+      { nome: 'Peca C', preco: 10, sit: 'voltou', min: 0 },
+    ] });
+    C.semVenda = await nova({ numero: 5, nome: 'Eva', due: dia(-1), status: 'encerrada', itens: [{ nome: 'Peca D', preco: 10, sit: 'voltou' }] });
+    C.cancelada = await nova({ numero: 6, nome: 'Fabi', due: dia(1), status: 'cancelada', itens: [{ nome: 'Peca E', preco: 999 }] });
+    await venda(ID.c18a, C.concluida, 100, 120);
+    C.ultima = await venda(ID.c18a, C.concluida, 50, 60);
+    await venda(ID.c18a, C.concluida, 999, 5, 'cancelled'); // a mais nova, mas cancelada
+    // Loja B (consolidado): uma atrasada.
+    C.deB = await nova({ empresa: ID.c18b, numero: 1, nome: 'Gabi', due: dia(-1), itens: [{ nome: 'Casaco', preco: 200 }] });
+  });
+
+  const listar = (qs = '') => request(app).get(`/companies/${ID.c18a}/condicionais${qs}`);
+  const porId = (r) => Object.fromEntries(r.body.condicionais.map((c) => [c.id, c]));
+
+  test('aberta parcial: resumo, primeiras pecas (com a cliente, ficou, voltou) e outras_pecas', async () => {
+    usuario = DONO2();
+    const r = await listar('?filtro=todas&limit=50');
+    expect(r.status).toBe(200);
+    const c = porId(r)[C.parcial];
+    expect(c.resumo).toEqual({ com_cliente: 2, voltaram: 2, ficaram: 1, a_cobrar: 1, valor_com_cliente: 120, valor_a_cobrar: 30 });
+    expect(c.primeiras_pecas).toEqual([
+      { nome: 'Vestido', cor: 'Azul', tamanho: 'P' },
+      { nome: 'Cinto', cor: null, tamanho: null },
+    ]);
+    expect(c.outras_pecas).toBe(3);
+    // Campos antigos continuam.
+    expect(c).toMatchObject({ pecas: 5, pecas_com_cliente: 2, pecas_a_cobrar: 1, valor_com_cliente: 120, primeira_peca: 'Calca' });
+    expect(c.venda).toBeNull();
+    expect(porId(r)[C.hoje].primeiras_pecas).toEqual([{ nome: 'Meia', cor: null, tamanho: null }]);
+    expect(porId(r)[C.hoje].outras_pecas).toBe(0);
+  });
+
+  test('a peca com a cliente vem antes da que ficou, mesmo retirada depois', async () => {
+    usuario = DONO2();
+    const c = porId(await listar('?filtro=todas&limit=50'))[C.emDia];
+    expect(c.primeiras_pecas.map((p) => p.nome)).toEqual(['Bolsa', 'Lenco']);
+  });
+
+  test('concluida: so ordem de retirada; venda somada (sem cancelada) com o numero da ultima', async () => {
+    usuario = DONO2();
+    const r = await listar('?filtro=concluidas');
+    const c = porId(r)[C.concluida];
+    expect(c.primeiras_pecas.map((p) => p.nome)).toEqual(['Peca C', 'Peca A']);
+    expect(c.outras_pecas).toBe(1);
+    expect(c.venda).toEqual({ numero: C.ultima.numero, valor: 150 });
+    expect(porId(r)[C.semVenda].venda).toBeNull();
+  });
+
+  test('cancelada: ordem de retirada e sem venda', async () => {
+    usuario = DONO2();
+    const c = porId(await listar('?filtro=canceladas'))[C.cancelada];
+    expect(c.primeiras_pecas.map((p) => p.nome)).toEqual(['Peca E']);
+    expect(c.venda).toBeNull();
+  });
+
+  test('totais do topo: todas as abertas, independem de pagina e de filtro', async () => {
+    usuario = DONO2();
+    const esperado = {
+      vence_hoje: { valor: 80, pecas: 1 },
+      atrasadas: { valor: 120, pecas: 2 },
+      a_cobrar: { valor: 70, pecas: 2 },
+    };
+    expect((await listar()).body.totais).toEqual(esperado);
+    const pag = await listar('?limit=1&page=2');
+    expect(pag.body.condicionais).toHaveLength(1);
+    expect(pag.body.totais).toEqual(esperado);
+    expect((await listar('?filtro=concluidas&limit=1')).body.totais).toEqual(esperado);
+    expect((await listar('?filtro=canceladas')).body.totais).toEqual(esperado);
+  });
+
+  test('consolidado: totais somam as lojas; ?company_id= restringe', async () => {
+    usuario = DONO2();
+    const r = await request(app).get('/me/condicionais?filtro=concluidas&limit=1');
+    expect(r.status).toBe(200);
+    expect(r.body.totais).toEqual({
+      vence_hoje: { valor: 80, pecas: 1 },
+      atrasadas: { valor: 320, pecas: 3 },
+      a_cobrar: { valor: 70, pecas: 2 },
+    });
+    const a = await request(app).get(`/me/condicionais?company_id=${ID.c18a}&limit=1`);
+    expect(a.body.totais.atrasadas).toEqual({ valor: 120, pecas: 2 });
+    const b = await request(app).get(`/me/condicionais?filtro=todas&company_id=${ID.c18b}`);
+    expect(b.body.totais).toEqual({ vence_hoje: { valor: 0, pecas: 0 }, atrasadas: { valor: 200, pecas: 1 }, a_cobrar: { valor: 0, pecas: 0 } });
+    const linhaB = b.body.condicionais.find((c) => c.id === C.deB);
+    expect(linhaB.resumo).toMatchObject({ com_cliente: 1, valor_com_cliente: 200 });
+    expect(linhaB.primeiras_pecas).toEqual([{ nome: 'Casaco', cor: null, tamanho: null }]);
   });
 });
 
