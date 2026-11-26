@@ -308,7 +308,7 @@ router.patch('/:oid/status', requireRole('client', 'analyst', 'admin'), async (r
     // (idempotente por stock_deducted; delivered_at ja foi gravado acima).
     if (status === 'delivered') {
       await entregaDoPedidoDeOrcamento.entregarPedidoDeOrcamento(db, { companyId: cid, orderId: oid })
-        .catch(err => console.error('[orders] baixa na entrega do pedido de orcamento falhou:', oid, err.message));
+        .catch(err => console.warn('[orders] ATENCAO: pedido entregue mas a baixa de estoque do pedido de orcamento FALHOU (stock_deducted segue false, entregar de novo tenta de novo):', 'company=' + cid, 'pedido=' + oid, err.message));
     }
     // Entregue: o pagar na entrega foi recebido na porta. Quita o a receber.
     if (status === 'delivered') {
