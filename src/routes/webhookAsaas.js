@@ -144,6 +144,7 @@ const notify  = require('../services/digitalOrderNotifications');
 const lojaEvents = require('../services/lojaEvents');
 const { asaas } = require('../services/asaasClient');
 const marketingQuota = require('../services/marketing/marketingQuota');
+const waSaldoPacotes = require('../services/waSaldoPacotes');
 const { proximoVencimento } = require('../services/asaasAssinaturas');
 const pixAutomatico = require('../services/pixAutomatico');
 const pixAutomaticoWebhook = require('../services/pixAutomaticoWebhook');
@@ -815,6 +816,9 @@ async function handleMarketingPackPayment(req, res, event, payment, extRef, isPa
       console.warn('[WEBHOOK] wa-pack nao encontrado (ou cancelado/migration 332 pendente):', packId);
       return res.status(200).json({ received: true, pack_found: false });
     }
+    // Saldo novo (472): pagamento recebido credita o pacote no saldo que
+    // ele comprou. Idempotente por pacote; nunca derruba o webhook.
+    await waSaldoPacotes.creditarPacote(pack.id);
     await logWebhookEvent(pack.company_id, event, payment);
     console.log('[WEBHOOK] wa-pack ' + pack.id + ' ativado para a company ' + pack.company_id +
       ' (+' + pack.qty + ' mensagens de marketing)');

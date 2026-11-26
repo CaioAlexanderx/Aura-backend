@@ -118,17 +118,27 @@ async function loadCompanyQuota(companyId) {
 // Só pacote PAGO (active) e ainda dentro da validade soma. Pacote
 // 'pending' é pedido sem dinheiro: contá-lo entregaria a cota antes do
 // pagamento e a Aura descobriria no estorno.
+// So pacote de NOVIDADES (ou antigo, sem bucket) soma: pacote de avisos ou
+// da Aurinha (472) nao pode virar cota de marketing.
 async function activePacksQty(companyId) {
-  try {
-    const { rows } = await db.query(
-      `-- wa:quota-packs-active
+  const sql = (filtro) => `-- wa:quota-packs-active
        SELECT COALESCE(SUM(qty), 0)::int AS qty FROM wa_marketing_packs
-        WHERE company_id = $1 AND status = 'active'
-          AND valid_until >= (NOW() AT TIME ZONE 'America/Sao_Paulo')::date`,
-      [companyId]
-    );
+        WHERE company_id = $1 AND status = 'active'${filtro}
+          AND valid_until >= (NOW() AT TIME ZONE 'America/Sao_Paulo')::date`;
+  try {
+    const { rows } = await db.query(sql(" AND COALESCE(bucket, 'novidades') = 'novidades'"), [companyId]);
     return Number((rows[0] && rows[0].qty) || 0);
   } catch (e) {
+    if (e.code === '42703') {
+      // 472 pendente: sem a coluna todo pacote e de novidades.
+      try {
+        const { rows } = await db.query(sql(''), [companyId]);
+        return Number((rows[0] && rows[0].qty) || 0);
+      } catch (e2) {
+        if (schemaMissing(e2)) return 0;
+        throw e2;
+      }
+    }
     if (schemaMissing(e)) return 0;
     throw e;
   }
