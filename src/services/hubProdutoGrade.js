@@ -442,6 +442,15 @@ async function aplicarEtiqueta(companyId, conversationId, tamanho) {
       id = rows[0] ? rows[0].id : await achar();
     }
     if (!id) return null;
+    // Uma "Quer o <tamanho>" por conversa: a nova troca a anterior (a cliente mudou de ideia).
+    await db.query(
+      `-- hubgrade:etiqueta-troca
+       DELETE FROM hub_conversation_labels cl
+        USING hub_labels l
+        WHERE cl.label_id = l.id AND cl.conversation_id = $1 AND l.company_id = $2
+          AND cl.label_id <> $3 AND lower(l.name) LIKE 'quer o %'`,
+      [conversationId, companyId, id]
+    );
     await db.query(
       `-- hubgrade:etiqueta-aplica
        INSERT INTO hub_conversation_labels (conversation_id, label_id) VALUES ($1,$2) ON CONFLICT DO NOTHING`,

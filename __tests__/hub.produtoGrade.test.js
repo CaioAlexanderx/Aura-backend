@@ -108,7 +108,13 @@ beforeEach(() => {
     if (s.includes('hubgrade:etiqueta-achar')) return rows(w.labels.filter((l) => l.name.toLowerCase() === params[1].toLowerCase()));
     if (s.includes('hubgrade:etiqueta-conta')) return rows([{ n: w.labels.length }]);
     if (s.includes('hubgrade:etiqueta-cria')) { const l = { id: `lab-${w.labels.length + 1}`, name: params[1] }; w.labels.push(l); return rows([{ id: l.id }]); }
-    if (s.includes('hubgrade:etiqueta-aplica')) { w.vinculos.push(params); return rows([]); }
+    if (s.includes('hubgrade:etiqueta-troca')) {
+      const [conv, , manter] = params;
+      w.vinculos = w.vinculos.filter(([c, l]) => !(c === conv && l !== manter && (w.labels.find((x) => x.id === l) || { name: '' }).name.toLowerCase().startsWith('quer o ')));
+      w.trocas = (w.trocas || 0) + 1;
+      return rows([]);
+    }
+    if (s.includes('hubgrade:etiqueta-aplica')) { if (!w.vinculos.some((v) => v[0] === params[0] && v[1] === params[1])) w.vinculos.push(params); return rows([]); }
     return rows([]);
   });
 });
@@ -351,6 +357,19 @@ describe('resposta da cliente', () => {
     expect(w.updates[0][0]).toBe('Escolheu na lista: GG');
     expect(w.labels).toHaveLength(1);
     expect(w.vinculos).toEqual([[CONV, 'lab-0']]);
+  });
+
+  it('uma etiqueta "Quer o ..." por conversa: a nova troca a anterior; webhook reentregue não duplica', async () => {
+    w.variantes.push(variante(6, PRETO, 'GG', 4));
+    w.labels.push({ id: 'outra', name: 'Esperando Pix' });
+    w.vinculos.push([CONV, 'outra']);
+    await grade.tratarResposta({ companyId: COMPANY, conversationId: CONV, msg: botao(`TAM:${PROD}:${V(1)}:M`) });
+    await grade.tratarResposta({ companyId: COMPANY, conversationId: CONV, msg: botao(`TAM:${PROD}:${V(1)}:M`) });
+    expect(w.vinculos.map((v) => v[1])).toEqual(['outra', 'lab-2']);
+    expect(w.labels.map((l) => l.name)).toEqual(['Esperando Pix', 'Quer o M']);
+    await grade.tratarResposta({ companyId: COMPANY, conversationId: CONV, msg: lista(`TAM:${PROD}:${V(6)}:GG`) });
+    const nomes = w.vinculos.map((v) => w.labels.find((l) => l.id === v[1]).name);
+    expect(nomes).toEqual(['Esperando Pix', 'Quer o GG']); // outras etiquetas ficam; só a "Quer o" troca
   });
 
   it('tamanho que acabou entre o envio e o toque vira sugestão "sem_estoque"', async () => {
