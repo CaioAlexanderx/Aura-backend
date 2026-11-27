@@ -47,6 +47,15 @@
 //     continua "atual + (contado - estoque_no_bipe)";
 //   - "zerar nao contados" leva o estoque a com clientes (nao a 0): a peca
 //     fora da loja nao some;
+//   - sem piso: se o estoque do sistema ficou MENOR que o que esta com
+//     clientes, o esperado aparece negativo e o item sai com `inconsistente`
+//     (aviso na tela); aplicar RECUSA o item (409 ITENS_COM_AVISO) em vez de
+//     gravar um ajuste calculado sobre um numero sem sentido;
+//   - rascunho aberto antes da trava: o snapshot dele nao descontou nada.
+//     Migration 475 (com_clientes_no_bipe NULL) marca esses itens; com peca
+//     fora hoje, sai `contagem_antiga` e aplicar recusa ate contar o item de
+//     novo (o bipe refaz o snapshot) ou desmarca-lo. Nao recalculamos no
+//     escuro: a peca pode ter voltado e o contado ja incluir ela;
 //   - desfazer nao muda: inverte a diferenca_aplicada gravada;
 //   - "para resolver" (voltou_defeito) esta na loja e NAO desconta.
 // Sem a trava nenhuma consulta nova roda e tudo fica como antes. A leitura
@@ -57,6 +66,9 @@
 
 const { rotuloDaVariante } = require('./transferenciaDeEstoque');
 const { lerComClientes, comClientesDaVariante } = require('./comClientes');
+
+const AVISO_INCONSISTENTE = 'O estoque do sistema está menor que as peças com clientes: confira o cadastro antes de ajustar.';
+const AVISO_CONTAGEM_ANTIGA = 'Este item foi contado antes das peças com clientes entrarem na conferência: conte de novo.';
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const QTD_MAX = 1e6;
@@ -107,14 +119,47 @@ function calcularDesfazer({ estoqueAtual, diferencaAplicada }) {
 }
 
 /**
- * Esperado na loja: sistema menos o que esta com clientes. Sem peca fora o
- * numero e o do sistema, inclusive negativo (como sempre foi).
+ * Esperado na loja: sistema menos o que esta com clientes. SEM piso: se o
+ * sistema esta abaixo do que esta com clientes o resultado e negativo de
+ * proposito (inconsistente, ver `inconsistenteDe`), nao escondido em 0.
+ * Sem peca fora o numero e o do sistema (como sempre foi).
  */
 function esperadoDe(sistema, comClientes) {
   const s = Number(sistema) || 0;
   const c = Number(comClientes) || 0;
-  return c > 0 ? arred3(Math.max(0, s - c)) : s;
+  return c > 0 ? arred3(s - c) : s;
 }
+
+/** Estoque do sistema menor que as pecas com clientes (esperado < 0). */
+function inconsistenteDe(sistema, comClientes) {
+  const c = Number(comClientes) || 0;
+  return c > 0 && (Number(sistema) || 0) < c - 1e-9;
+}
+
+/** Snapshot gravado sem descontar o que estava com clientes (hoje ha peca fora). */
+function contagemAntigaDe(l, comClientes) {
+  return l.com_clientes_no_bipe === null && !l.nao_contado && (Number(comClientes) || 0) > 0;
+}
+
+// A coluna da 475 existe? Cache de 60s. So e consultada com a trava ligada.
+let _marcaEm = 0;
+let _marca = null;
+async function temMarcaDeComClientes(conn) {
+  const agora = Date.now();
+  if (_marca !== null && agora - _marcaEm < 60000) return _marca;
+  try {
+    const { rows } = await conn.query(
+      `SELECT 1 FROM information_schema.columns
+        WHERE table_schema = 'public' AND table_name = 'stock_count_items' AND column_name = 'com_clientes_no_bipe'`
+    );
+    _marca = rows.length > 0;
+  } catch (e) {
+    _marca = false;
+  }
+  _marcaEm = agora;
+  return _marca;
+}
+function _resetMarca() { _marcaEm = 0; _marca = null; }
 
 function grupoDaDiferenca(d) {
   if (d < 0) return 'faltam';
@@ -328,10 +373,10 @@ async function rotulos(conn, linhas) {
 const codigoDaLinha = (l) => txt(l.v_barcode) || txt(l.barcode) || txt(l.sku) || null;
 
 // Itens gravados com nome, variante e o estoque de agora.
-async function itensComProduto(conn, countId) {
+async function itensComProduto(conn, countId, { marca = false } = {}) {
   const { rows } = await conn.query(
     `SELECT i.id, i.product_id, i.variant_id, i.contado, i.estoque_no_bipe, i.custo_no_bipe,
-            i.contado_em, i.atualizado_em, i.diferenca_aplicada, i.diferenca_desfeita, i.nao_contado,
+            i.contado_em, i.atualizado_em, i.diferenca_aplicada, i.diferenca_desfeita, i.nao_contado,${marca ? ' i.com_clientes_no_bipe,' : ''}
             p.name AS nome, p.barcode, p.sku, v.barcode AS v_barcode, v.sku_suffix, v.color_name,
             COALESCE(CASE WHEN i.variant_id IS NULL THEN p.stock_qty ELSE v.stock_qty END, 0) AS estoque_atual
        FROM stock_count_items i
@@ -457,6 +502,13 @@ async function transferenciasDaConferencia(conn, countId) {
   }));
 }
 
+/** Campos de aviso do item (so aparecem quando ha aviso). */
+function avisoDoItem(l, fora) {
+  if (inconsistenteDe(l.estoque_atual, fora)) return { inconsistente: true, aviso: AVISO_INCONSISTENTE };
+  if (contagemAntigaDe(l, fora)) return { contagem_antiga: true, aviso: AVISO_CONTAGEM_ANTIGA };
+  return {};
+}
+
 function itemOut(l, rotulo, mostrarEstoque, fora = 0) {
   const out = {
     id: l.id,
@@ -475,6 +527,7 @@ function itemOut(l, rotulo, mostrarEstoque, fora = 0) {
     out.estoque_no_bipe = Number(l.estoque_no_bipe);
     out.estoque_atual = fora > 0 ? esperadoDe(l.estoque_atual, fora) : Number(l.estoque_atual);
     if (fora > 0) out.com_clientes = fora;
+    Object.assign(out, avisoDoItem(l, fora));
   }
   return out;
 }
@@ -498,7 +551,8 @@ async function obter(conn, companyId, countId, { comCondicional = false } = {}) 
   const r = await buscarConferencia(conn, companyId, countId);
   if (!r) throw naoAchada();
   const c = conferenciaOut(r);
-  const linhas = await itensComProduto(conn, c.id);
+  const marca = comCondicional && c.status === 'rascunho' && await temMarcaDeComClientes(conn);
+  const linhas = await itensComProduto(conn, c.id, { marca });
   const rotulo = await rotulos(conn, linhas);
   const mostrarEstoque = !(c.as_cegas && c.status === 'rascunho');
   const foraDe = mostrarEstoque ? await foraDasLinhas(conn, companyId, linhas, { comCondicional }) : () => 0;
@@ -573,21 +627,27 @@ async function registrarItem(conn, { companyId, countId, productId, variantId, q
   const estoqueNoBipe = esperadoDe(Number(variantId ? p.v_stock : p.stock_qty) || 0, foraDe(linhaDoBipe));
   const primeiro = modo === 'somar' ? Math.max(0, quantidade) : quantidade;
   // Snapshot so no INSERT: no conflito o estoque_no_bipe e o custo ficam.
+  // Unica excecao (migration 475): item de snapshot SEM desconto (marca NULL),
+  // contado de novo com a trava ligada, ganha o snapshot descontado agora.
+  const marca = comCondicional && await temMarcaDeComClientes(conn);
   const { rows } = await conn.query(
     `INSERT INTO stock_count_items
-       (stock_count_id, company_id, product_id, variant_id, contado, estoque_no_bipe, custo_no_bipe)
-     VALUES ($1, $2, $3, $4, $5, $6, $7)
+       (stock_count_id, company_id, product_id, variant_id, contado, estoque_no_bipe, custo_no_bipe${marca ? ', com_clientes_no_bipe' : ''})
+     VALUES ($1, $2, $3, $4, $5, $6, $7${marca ? ', $10' : ''})
      ON CONFLICT (stock_count_id, product_id, (COALESCE(variant_id, '00000000-0000-0000-0000-000000000000'::uuid)))
      DO UPDATE SET
        contado = CASE WHEN $8::text = 'somar'
                       THEN GREATEST(0, stock_count_items.contado + $9::numeric)
-                      ELSE $9::numeric END,
+                      ELSE $9::numeric END,${marca ? `
+       estoque_no_bipe = CASE WHEN stock_count_items.com_clientes_no_bipe IS NULL THEN EXCLUDED.estoque_no_bipe
+                              ELSE stock_count_items.estoque_no_bipe END,
+       com_clientes_no_bipe = COALESCE(stock_count_items.com_clientes_no_bipe, EXCLUDED.com_clientes_no_bipe),` : ''}
        atualizado_em = NOW()
      RETURNING id, (xmax = 0) AS criado`,
-    [r.id, companyId, productId, variantId, primeiro, estoqueNoBipe, numOuNull(p.custo), modo, quantidade]
+    [r.id, companyId, productId, variantId, primeiro, estoqueNoBipe, numOuNull(p.custo), modo, quantidade, ...(marca ? [foraDe(linhaDoBipe)] : [])]
   );
   await conn.query(`UPDATE stock_counts SET updated_at = NOW() WHERE id = $1`, [r.id]);
-  const linhas = (await itensComProduto(conn, r.id)).filter((l) => String(l.id) === String(rows[0].id));
+  const linhas = (await itensComProduto(conn, r.id, { marca })).filter((l) => String(l.id) === String(rows[0].id));
   const rotulo = await rotulos(conn, linhas);
   const c = conferenciaOut(r);
   return {
@@ -615,7 +675,8 @@ async function diferencas(conn, companyId, countId, { comCondicional = false } =
   const r = await buscarConferencia(conn, companyId, countId);
   if (!r) throw naoAchada();
   const c = conferenciaOut(r);
-  const linhas = await itensComProduto(conn, c.id);
+  const marca = comCondicional && c.status === 'rascunho' && await temMarcaDeComClientes(conn);
+  const linhas = await itensComProduto(conn, c.id, { marca });
   const contadas = new Set(linhas.map((l) => chaveDaLinha(l.product_id, l.variant_id)));
   const escopo = await linhasDoEscopo(conn, companyId, c.escopo);
   // Nao contado que importa e o que tem estoque (positivo ou negativo):
@@ -652,6 +713,7 @@ async function diferencas(conn, companyId, countId, { comCondicional = false } =
       estoque_no_bipe: Number(l.estoque_no_bipe),
       estoque_atual: esperadoDe(l.estoque_atual, foraDe(l)),
       ...(foraDe(l) > 0 ? { com_clientes: foraDe(l) } : {}),
+      ...avisoDoItem(l, foraDe(l)),
       diferenca,
       // O que fica gravado: o sistema de agora (com as pecas fora) + a diferenca.
       estoque_depois: arred3(Math.max(0, Number(l.estoque_atual) + diferenca)),
@@ -661,6 +723,7 @@ async function diferencas(conn, companyId, countId, { comCondicional = false } =
     };
     if (l.nao_contado) out.nao_contado = true;
     if (l.diferenca_aplicada !== null && l.diferenca_aplicada !== undefined) out.diferenca_aplicada = Number(l.diferenca_aplicada);
+    if (out.aviso && c.status === 'rascunho') resumo.com_aviso = (resumo.com_aviso || 0) + 1;
     return out;
   });
   resumo.valor_faltam = arred2(resumo.valor_faltam);
@@ -678,6 +741,7 @@ async function diferencas(conn, companyId, countId, { comCondicional = false } =
       codigo: codigoDaLinha(l),
       estoque_atual: esperadoDe(l.estoque_atual, foraDe(l)),
       ...(foraDe(l) > 0 ? { com_clientes: foraDe(l) } : {}),
+      ...(inconsistenteDe(l.estoque_atual, foraDe(l)) ? { inconsistente: true, aviso: AVISO_INCONSISTENTE } : {}),
       custo: numOuNull(l.custo),
     })),
   };
@@ -761,8 +825,9 @@ async function aplicar(conn, { companyId, countId, userId, zerarNaoContados = fa
   if (motivo !== undefined) c.motivo = lerMotivo(motivo);
 
   const ignorar = new Set((ignorarItemIds || []).map((x) => String(x).toLowerCase()));
+  const marca = comCondicional && await temMarcaDeComClientes(conn);
   const { rows: itens } = await conn.query(
-    `SELECT id, product_id, variant_id, contado, estoque_no_bipe, custo_no_bipe
+    `SELECT id, product_id, variant_id, contado, estoque_no_bipe, custo_no_bipe${marca ? ', com_clientes_no_bipe' : ''}
        FROM stock_count_items WHERE stock_count_id = $1 AND NOT nao_contado
       ORDER BY id`,
     [c.id]
@@ -785,19 +850,35 @@ async function aplicar(conn, { companyId, countId, userId, zerarNaoContados = fa
     return Number(v.stock_qty) || 0;
   };
 
+  const foraDe = await foraDasLinhas(conn, companyId, [...itens, ...naoContadas], { comCondicional, emTransacao: true });
   const ajustes = [];
   const ignorados = [];
+  const comAviso = [];
   for (const it of itens) {
     const atual = atualDe(it.product_id, it.variant_id);
     if (ignorar.has(String(it.id).toLowerCase())) { ignorados.push({ item_id: it.id, motivo: 'desmarcado' }); continue; }
     if (atual === null) { ignorados.push({ item_id: it.id, motivo: 'produto_indisponivel' }); continue; }
+    // Nao grava ajuste sobre numero sem sentido: estoque menor que o que esta
+    // com clientes, ou snapshot de antes das pecas com clientes.
+    const fora = foraDe(it);
+    if (inconsistenteDe(atual, fora)) { comAviso.push({ item_id: it.id, product_id: it.product_id, variant_id: it.variant_id, motivo: 'estoque_menor_que_com_clientes', estoque: atual, com_clientes: fora }); continue; }
+    if (contagemAntigaDe(it, fora)) { comAviso.push({ item_id: it.id, product_id: it.product_id, variant_id: it.variant_id, motivo: 'contagem_antiga', com_clientes: fora }); continue; }
     const a = calcularAjuste({ contado: it.contado, estoqueNoBipe: it.estoque_no_bipe, estoqueAtual: atual });
     ajustes.push({ item_id: it.id, product_id: it.product_id, variant_id: it.variant_id, efetiva: a.aplicada, custo: numOuNull(it.custo_no_bipe) });
   }
+  if (comAviso.length) {
+    throw new ErroDeConferencia(409, 'ITENS_COM_AVISO',
+      'Alguns itens não podem ser ajustados: o estoque do sistema está menor que as peças com clientes, ou a contagem é de antes da condicional. Confira o cadastro, conte de novo ou desmarque esses itens.',
+      { itens: comAviso });
+  }
   const zerados = [];
-  const foraZerar = await foraDasLinhas(conn, companyId, naoContadas, { comCondicional, emTransacao: true });
+  const foraZerar = foraDe;
   for (const l of naoContadas) {
     const atual = atualDe(l.product_id, l.variant_id);
+    if (atual !== null && inconsistenteDe(atual, foraZerar(l))) {
+      ignorados.push({ product_id: l.product_id, variant_id: l.variant_id || null, motivo: 'estoque_menor_que_com_clientes' });
+      continue;
+    }
     // Zerar leva ao que esta com clientes (o esperado na loja vai a 0).
     const esperado = atual === null ? null : esperadoDe(atual, foraZerar(l));
     if (atual === null || esperado === 0) continue;
@@ -941,6 +1022,8 @@ module.exports = {
   calcularAjuste,
   calcularZerar,
   esperadoDe,
+  inconsistenteDe,
+  _resetMarca,
   calcularDesfazer,
   grupoDaDiferenca,
   lerEscopo,

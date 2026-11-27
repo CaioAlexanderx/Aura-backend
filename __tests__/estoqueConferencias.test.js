@@ -110,9 +110,9 @@ describe('regra do ajuste', () => {
     expect(svc.calcularDesfazer({ estoqueAtual: 1, diferencaAplicada: 3 })).toEqual({ novo: 0, efetiva: -1 });
   });
 
-  test('esperado: sistema menos com clientes, piso 0 so quando ha peca fora (C14)', () => {
+  test('esperado: sistema menos com clientes, sem piso (negativo = inconsistente)', () => {
     expect(svc.esperadoDe(10, 2)).toBe(8);
-    expect(svc.esperadoDe(1, 3)).toBe(0);
+    expect(svc.esperadoDe(1, 3)).toBe(-2);
     expect(svc.esperadoDe(10, 0)).toBe(10);
     expect(svc.esperadoDe(-2, 0)).toBe(-2); // sem peca fora, o numero e o de sempre
     // contou so o que esta na loja: nao ha falta falsa, e o estoque gravado e fisico + fora
