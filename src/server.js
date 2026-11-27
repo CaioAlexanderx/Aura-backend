@@ -121,6 +121,12 @@ function startServer() {
     const { initWaDispatcher } = require('./jobs/waDispatcherJob');
     initWaDispatcher();
 
+    // Alerta de mensagem parada em 'sending' (>15 min): marca sent se a Meta
+    // aceitou, avisa a equipe se nao tem wamid. Nunca reenvia. Kill switch
+    // WA_SENDING_ALERT_ENABLED=false.
+    const { initWaSendingParadaJob } = require('./jobs/waSendingParadaJob');
+    initWaSendingParadaJob();
+
     // FASE 6: régua do crediário pelo WhatsApp oficial — diário 9h BRT,
     // kill switch CREDIT_WA_AUTO_ENABLED=false. Quem despacha continua
     // sendo o waDispatcher; este job só enfileira.
