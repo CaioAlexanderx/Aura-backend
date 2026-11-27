@@ -30,6 +30,15 @@ const MOTIVO = Object.freeze({
   SEM_TELEFONE: 'SEM_TELEFONE',
   OPT_OUT: 'OPT_OUT',
   RECENTE: 'RECEBEU_HA_MENOS_DE_7_DIAS',
+  SEM_PECA: 'SEM_PECA_ULTIMA_COMPRA',
+});
+
+// Frase para a lojista de cada motivo de ficar de fora.
+const MOTIVO_TEXTO = Object.freeze({
+  SEM_TELEFONE: 'sem telefone',
+  OPT_OUT: 'pediu para não receber',
+  RECEBEU_HA_MENOS_DE_7_DIAS: 'recebeu novidade há menos de 7 dias',
+  SEM_PECA_ULTIMA_COMPRA: 'sem a peça da última compra',
 });
 
 // Faixas do Venda+ (dias desde a última compra). "Sumiu" vai até 180:
@@ -48,6 +57,30 @@ function somarDias(iso, n) {
   return d.toISOString().slice(0, 10);
 }
 function mesDe(iso) { return iso.slice(0, 7); }
+
+/**
+ * Nome da peça como a mensagem fala dela: minúsculas, sem código nem SKU
+ * ("Vestido Verde - AB1234 (M)" -> "vestido verde"). null quando não sobra nome.
+ */
+function nomeDaPeca(nome) {
+  let t = String(nome || '').toLowerCase();
+  t = t.replace(/\([^)]*\)|\[[^\]]*\]/g, ' ');                       // (M), [AB123]
+  t = t.replace(/\b(?:sku|cod|cód|c[óo]digo|ref)\.?\s*[:#-]?\s*\S+/g, ' '); // "sku 123", "ref: ab1"
+  t = t.replace(/\s[-–|\/]\s*\S*\d\S*\s*$/g, ' ');                      // " - AB123" no fim
+  t = t.split(/\s+/).filter((w) => !(/\d/.test(w) && /[a-z]/.test(w) && w.length >= 4) && !(/^\d{5,}$/.test(w))).join(' ');
+  t = t.replace(/[\s\-–|\/,;:.]+$/g, '').replace(/^[\s\-–|\/,;:.]+/g, '').replace(/\s{2,}/g, ' ').trim();
+  if (!t || t.length < 2) return null;
+  return t.slice(0, 60);
+}
+
+/** Venda+: quem não tem a peça da última compra fica de fora (o modelo aprovado tem a variável fixa). */
+function separarSemPeca(elegiveis) {
+  const comPeca = []; const semPeca = [];
+  for (const c of elegiveis) {
+    if (c.ultima_peca) comPeca.push(c); else semPeca.push({ ...c, motivo: MOTIVO.SEM_PECA });
+  }
+  return { comPeca, semPeca };
+}
 
 const MESES_PT = ['janeiro', 'fevereiro', 'março', 'abril', 'maio', 'junho', 'julho', 'agosto', 'setembro', 'outubro', 'novembro', 'dezembro'];
 
@@ -76,6 +109,8 @@ function camposExtras(c) {
   }
   const ultima = isoBRT(c.ultima_compra);
   if (ultima) { extra.ultima_compra = ultima; extra.mes_ultima_compra = mesPorExtenso(ultima); }
+  // A PEÇA da última compra ({Última compra} no modelo): nunca a data.
+  if (c.ultima_peca) extra.ultima_peca = c.ultima_peca;
   return extra;
 }
 
@@ -117,6 +152,7 @@ function contarForas(fora) {
     recebeu_ha_menos_de_7_dias: c(MOTIVO.RECENTE),
     pediu_para_nao_receber: c(MOTIVO.OPT_OUT),
     sem_telefone: c(MOTIVO.SEM_TELEFONE),
+    sem_a_peca_da_ultima_compra: c(MOTIVO.SEM_PECA),
   };
 }
 
@@ -147,7 +183,7 @@ function montarPrevia({ key, periodo, elegiveis, fora, livres, ordem, detalhe })
     ficam_guardados: guardados.length,
     guardados: guardados.slice(0, 20).map(item),
     fora: contarForas(fora),
-    fora_lista: fora.slice(0, 50).map((c) => ({ customer_id: c.id, nome: c.name || 'Cliente', motivo: c.motivo, ...camposExtras(c) })),
+    fora_lista: fora.slice(0, 50).map((c) => ({ customer_id: c.id, nome: c.name || 'Cliente', motivo: c.motivo, motivo_texto: MOTIVO_TEXTO[c.motivo] || null, ...camposExtras(c) })),
     falta_para_todos: Math.max(0, elegiveis.length - Math.max(0, Number(livres) || 0)),
   };
 }
@@ -216,6 +252,13 @@ async function candidatosVendaMais(companyId, segmento, hoje) {
               COALESCE((SELECT MAX(s.created_at) FROM sales s
                          WHERE s.company_id = c.company_id AND s.customer_id = c.id AND s.status <> 'cancelled'),
                        c.last_purchase_at) AS ultima_compra,
+              -- A peça da última venda não cancelada; havendo mais de um item, o de MAIOR VALOR
+              -- (empate: o primeiro item gravado). Nome do produto cadastrado.
+              (SELECT p.name FROM sales s
+                 JOIN sale_items si ON si.sale_id = s.id
+                 JOIN products p ON p.id = si.product_id
+                WHERE s.company_id = c.company_id AND s.customer_id = c.id AND s.status <> 'cancelled'
+                ORDER BY s.created_at DESC, si.total_price DESC NULLS LAST, si.id ASC LIMIT 1) AS ultima_peca_nome,
               ($2::date - c.last_purchase_at::date) AS dias_sem_comprar
          FROM customers c
         WHERE c.company_id = $1 AND c.is_active = true AND c.last_purchase_at IS NOT NULL
@@ -224,7 +267,7 @@ async function candidatosVendaMais(companyId, segmento, hoje) {
         LIMIT ${LIMITE_CANDIDATOS}`,
       [companyId, hoje, faixa[0], faixa[1]]
     );
-    return rows;
+    return rows.map((r) => ({ ...r, ultima_peca: nomeDaPeca(r.ultima_peca_nome) }));
   } catch (e) { if (schemaMissing(e)) return []; throw e; }
 }
 
@@ -277,7 +320,7 @@ async function parcelasParaCobrar(companyId, hoje, deslocamentos) {
 }
 
 module.exports = {
-  MAX_POR_ENVIO, JANELA_DIAS, MOTIVO, SEGMENTOS_VENDA_MAIS,
+  MAX_POR_ENVIO, JANELA_DIAS, MOTIVO, MOTIVO_TEXTO, nomeDaPeca, separarSemPeca, SEGMENTOS_VENDA_MAIS,
   hojeBRT, somarDias, mesDe, isoBRT, mesPorExtenso, camposExtras, MESES_PT, ordenar, classificar, cortar, contarForas, iniciais, reais, montarPrevia,
   conjuntosDeBloqueio, classificarDoBanco,
   candidatosAniversario, candidatosVendaMais, candidatosCrediarioVender, parcelasParaCobrar,
