@@ -172,7 +172,9 @@ async function sendViaDev(opts) {
   // Sem o e-mail do destinatário no log (tq-72): o id do envio no lugar.
   console.log(`  Id: ${id}`);
   console.log(`  Subject: ${opts.subject}`);
-  console.log(`  Link/Code: ${opts.text?.match(/(https?:\/\/\S+|\d{4,6})/)?.[0] || 'N/A'}`);
+  // Link ou codigo do e-mail (redefinicao de senha, verificacao) NUNCA vai
+  // para o log: so se havia um.
+  console.log(`  Link/Code: ${opts.text && /(https?:\/\/\S+|\d{4,6})/.test(opts.text) ? '[omitido]' : 'N/A'}`);
   return { id };
 }
 

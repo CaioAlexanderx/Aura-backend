@@ -711,6 +711,20 @@ function saldoIndisponivel(causa) {
 // banco ou lock vencido: o despacho devolve a linha para a fila.
 const INDISPONIVEL_DEFINITIVO = new Set(['PARAMETROS', 'EMPRESA_AUSENTE', 'REF_DUPLICADA', 'SEM_TRANSACAO']);
 const RETRY_SALDO_MIN = 2;
+// Teto do retry de saldo: erro que se repete (tabela ausente, constraint no
+// livro-razao) nao pode girar para sempre e mandar a mensagem horas depois.
+// Passou de 6 h desde o enfileiramento, ou de 10 voltas, a linha vira skip
+// SALDO_INDISPONIVEL (com estorno, se houver reserva). As voltas ficam
+// contadas no proprio last_error ("SALDO_INDISPONIVEL:<codigo> volta <n>"),
+// sem coluna nova e sem gastar o `attempts` dos erros da Meta.
+const RETRY_SALDO_MAX_VOLTAS = 10;
+const RETRY_SALDO_MAX_HORAS = 6;
+
+function voltasDeSaldo(lastError) {
+  const m = /^SALDO_INDISPONIVEL:\S+(?: volta (\d+))?$/.exec(String(lastError || ''));
+  if (!m) return 0;
+  return m[1] ? Number(m[1]) : 1;
+}
 
 // Recusa de SALDO nao segura a dedupe_key (472). Sem isto, a cliente que
 // ficou de fora porque o saldo acabou nunca mais recebia a mesma mensagem,
@@ -1197,13 +1211,21 @@ async function processBatch(limit = 20) {
         if (!g.ok && g.transitorio) {
           // Erro de banco ou lock vencido nao e falta de saldo: nada saiu e
           // nada foi gasto. A linha volta para a fila e tenta de novo, sem
-          // contar tentativa (a Meta nem foi chamada).
+          // contar tentativa (a Meta nem foi chamada) — ate o teto.
+          const voltas = voltasDeSaldo(row.last_error) + 1;
+          const idadeH = row.created_at ? (Date.now() - new Date(row.created_at).getTime()) / 3600000 : 0;
+          const motivo = `SALDO_INDISPONIVEL:${g.motivo || 'ERRO'} volta ${voltas}`;
+          if (voltas > RETRY_SALDO_MAX_VOLTAS || idadeH > RETRY_SALDO_MAX_HORAS) {
+            await markRow(row.id, { status: 'skipped', skip_reason: 'SALDO_INDISPONIVEL', last_error: motivo });
+            out.skipped++;
+            continue;
+          }
           await db.query(
             `-- wa:outbox-saldo-retry
              UPDATE wa_outbox SET status = 'pending', last_error = $1,
                     next_attempt_at = NOW() + ($2 || ' minutes')::interval, updated_at = NOW()
               WHERE id = $3`,
-            [`SALDO_INDISPONIVEL:${g.motivo || 'ERRO'}`, String(RETRY_SALDO_MIN), row.id]
+            [motivo, String(RETRY_SALDO_MIN), row.id]
           );
           out.retried++;
           continue;
@@ -1360,7 +1382,7 @@ module.exports = {
   isTokenError, markTokenInvalid, clearTokenInvalid, connectionState,
   enqueue, enqueueHub, inserirReservando, processBatch,
   bucketDoTemplate, liberarDedupeRecusada, garantirReservaNoDespacho, RECUSAS_DE_SALDO,
-  INDISPONIVEL_DEFINITIVO, RETRY_SALDO_MIN, simulate, applyStatusUpdate, applyTemplateStatus,
+  INDISPONIVEL_DEFINITIVO, RETRY_SALDO_MIN, RETRY_SALDO_MAX_VOLTAS, RETRY_SALDO_MAX_HORAS, voltasDeSaldo, simulate, applyStatusUpdate, applyTemplateStatus,
   windowOpenAt,
   // Guardas de custo (Fase 2) — expostas para o GET /whatsapp/preview e
   // para os testes de guarda.
