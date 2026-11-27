@@ -60,7 +60,7 @@ async function loadAsaasCustomerId(companyId) {
 
 // Pedido que nao virou cobranca nao morre em silencio: alerta para a Gestao.
 async function avisarSuportePacoteManual(companyId, pack, motivo) {
-  console.warn(`[whatsappSaldo] pacote ${pack.id} (${pack.bucket}) da company ${companyId} precisa de ativacao MANUAL — ${motivo}`);
+  console.warn(`[whatsappSaldo] pacote ${pack.id} (${pack.bucket}) da company ${companyId} precisa de ativacao MANUAL - ${motivo}`);
   try {
     await db.query(
       `-- wa:saldo-pacote-alerta-manual
