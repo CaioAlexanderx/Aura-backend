@@ -140,6 +140,9 @@ async function limpar() {
     'DELETE FROM wa_marketing_packs WHERE company_id = ANY($1)',
     'DELETE FROM webhook_logs WHERE company_id = ANY($1)',
     'DELETE FROM alert_history WHERE company_id = ANY($1)',
+    'DELETE FROM sale_items WHERE sale_id IN (SELECT id FROM sales WHERE company_id = ANY($1))',
+    'DELETE FROM sales WHERE company_id = ANY($1)',
+    'DELETE FROM products WHERE company_id = ANY($1)',
     'DELETE FROM customers WHERE company_id = ANY($1)',
     'DELETE FROM companies WHERE id = ANY($1)',
   ]) {
@@ -248,10 +251,17 @@ describe('c) automatica nao passa da parte dela (4/4/2)', () => {
   const executor = () => require('../src/services/waAutomaticas/executor');
 
   async function clientesSumindo(companyId, n) {
+    // Venda+ cita a peca da ultima compra: sem ela o cliente fica de fora (#1145).
+    const produto = (await q(`INSERT INTO products (company_id, name, price) VALUES ($1, 'Blusa de linho', 120) RETURNING id`,
+      [companyId])).rows[0].id;
     for (let i = 0; i < n; i++) {
-      await q(`INSERT INTO customers (company_id, name, phone, total_spent, is_active, last_purchase_at)
-               VALUES ($1, $2, $3, $4, true, NOW() - INTERVAL '40 days')`,
-        [companyId, `Cliente ${i}`, fone(), 1000 - i]);
+      const cli = (await q(`INSERT INTO customers (company_id, name, phone, total_spent, is_active, last_purchase_at)
+               VALUES ($1, $2, $3, $4, true, NOW() - INTERVAL '40 days') RETURNING id`,
+        [companyId, `Cliente ${i}`, fone(), 1000 - i])).rows[0].id;
+      const venda = (await q(`INSERT INTO sales (company_id, customer_id, total_amount, status, created_at)
+               VALUES ($1, $2, 120, 'completed', NOW() - INTERVAL '40 days') RETURNING id`, [companyId, cli])).rows[0].id;
+      await q(`INSERT INTO sale_items (sale_id, product_id, quantity, unit_price, total_price) VALUES ($1, $2, 1, 120, 120)`,
+        [venda, produto]);
     }
   }
   async function prepararVendaMais(companyId) {
