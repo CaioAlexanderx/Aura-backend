@@ -56,6 +56,18 @@ const SOURCE_BUCKET = {
   convite_conversa: 'avisos',
 };
 
+// Templates que, POR DECISAO, ainda nao gastam saldo (so o uso justo de
+// 1.500/mes e os tetos do dia valem): mensalidade do dojo, otica pronta e
+// adaptacao, placar do dia. Lista FECHADA: template de qualquer outra origem
+// que nao esteja no SOURCE_BUCKET gasta saldo mesmo assim (avisos, ou
+// novidades se o modelo e MARKETING) — origem nova esquecida nunca sai de
+// graca para a loja e paga pela Aura (waOutbox.bucketDoTemplate).
+const FORA_DO_SALDO = new Set(['dojo_mensalidade', 'otica_pronta', 'otica_adaptacao', 'placar_dia']);
+
+function foraDoSaldo(sourceType) {
+  return FORA_DO_SALDO.has(String(sourceType || ''));
+}
+
 const PLANOS_COM_FRANQUIA = new Set(['negocio', 'expansao']);
 const VERTICAIS_COM_FRANQUIA = new Set(['karate_dojo', 'karate_federation']);
 
@@ -387,7 +399,7 @@ async function devolver({ outboxId = null, companyId = null, refKey = null } = {
 }
 
 module.exports = {
-  BUCKETS, FRANQUIA_MENSAL, BOAS_VINDAS, PACOTES, SOURCE_BUCKET, FUSO,
-  ativo, isento, bucketDaOrigem, periodoDe, renovaEmDe,
+  BUCKETS, FRANQUIA_MENSAL, BOAS_VINDAS, PACOTES, SOURCE_BUCKET, FORA_DO_SALDO, FUSO,
+  ativo, isento, bucketDaOrigem, foraDoSaldo, periodoDe, renovaEmDe,
   getSaldos, restante, reservar, reservarAvulso, devolver,
 };

@@ -589,17 +589,25 @@ async function marcarRespostaHumana(companyId, conversationId, userId = null) {
 }
 
 // O que a Aurinha tinha na fila para esta conversa e ainda não saiu.
+// Resposta que reservou saldo (template fora da janela gasta 1 aviso, 472)
+// e não vai sair: o aviso volta para a loja (idempotente; no-op sem reserva).
 async function cancelarRespostasDaAurinha(conversationId) {
+  let canceladas = [];
   try {
-    await db.query(
+    const r = await db.query(
       `-- hubwa:cancela-aurinha
        UPDATE wa_outbox
           SET status = 'skipped', skip_reason = 'HUMANO_RESPONDEU', updated_at = NOW()
-        WHERE hub_conversation_id = $1 AND status = 'pending' AND source_type = 'aurinha'`,
+        WHERE hub_conversation_id = $1 AND status = 'pending' AND source_type = 'aurinha'
+        RETURNING id`,
       [conversationId]
     );
+    canceladas = (r && Array.isArray(r.rows)) ? r.rows : [];
   } catch (e) {
     if (!isMissingSchema(e)) throw e;
+  }
+  for (const row of canceladas) {
+    if (row && row.id) await require('./waSaldo').devolver({ outboxId: row.id });
   }
 }
 
