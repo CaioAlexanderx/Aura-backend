@@ -1,5 +1,5 @@
 -- ============================================================
--- 475 — alert_history: garantir que a tabela existe fora de producao
+-- 476 — alert_history: garantir que a tabela existe fora de producao
 --
 -- A tabela existe em producao desde antes das migrations (criada a mao), com
 -- as colunas id, company_id, alert_type, severity, title, message, data,
