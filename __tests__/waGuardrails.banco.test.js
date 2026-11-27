@@ -267,7 +267,10 @@ describe('c) automatica nao passa da parte dela (4/4/2)', () => {
       executor().rodar(ID.auto, 'venda_mais', { ignorarLigada: true }),
       executor().rodar(ID.auto, 'venda_mais', { ignorarLigada: true }),
     ]);
-    expect(a.enfileiradas + b.enfileiradas).toBe(4);
+    // Em falha, o objeto inteiro (puladas, parou_por, previa) aparece no log do CI.
+    const previa = await executor().previa(ID.auto, 'venda_mais');
+    expect({ total: a.enfileiradas + b.enfileiradas, a, b, previa: { elegiveis: previa.elegiveis, cabem: previa.cabem, fora: previa.fora } })
+      .toMatchObject({ total: 4 });
     expect(await linhas(ID.auto, `source_type = 'venda_mais' AND status = 'pending'`)).toHaveLength(4);
     expect(await debito(ID.auto, 'novidades')).toBe(4);
     // uma terceira rodada nao acha mais nada na parte
@@ -283,8 +286,7 @@ describe('c) automatica nao passa da parte dela (4/4/2)', () => {
     await prepararVendaMais(ID.autoPouco);
     await clientesSumindo(ID.autoPouco, 6);
     const r = await executor().rodar(ID.autoPouco, 'venda_mais', { ignorarLigada: true });
-    expect(r.enfileiradas).toBe(2);
-    expect(r.parou_por).toBe('SALDO_ESGOTADO');
+    expect(r).toMatchObject({ enfileiradas: 2, parou_por: 'SALDO_ESGOTADO' });
     await despachar();
     expect(templatesAceitos(ID.autoPouco)).toBe(2);
     expect(await restante(ID.autoPouco, 'novidades')).toBe(0);
