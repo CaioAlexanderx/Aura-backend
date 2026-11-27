@@ -500,7 +500,8 @@ router.post('/send-phone-verification', requireAuth, async (req, res) => {
     const code = generateCode(4);
     const expiresAt = new Date(Date.now() + 5 * 60 * 1000);
     await db.query(`INSERT INTO verification_codes (user_id,type,code,destination,expires_at) VALUES ($1,'phone',$2,$3,$4)`, [req.user.id, code, user.phone, expiresAt]);
-    console.log(`\n[PHONE VERIFY] ${user.phone} => Code: ${code}`);
+    // O codigo NUNCA vai para o log, nem o telefone inteiro: so o evento.
+    console.log(`[PHONE VERIFY] codigo gerado para o usuario ${req.user.id}, final ${String(user.phone).replace(/\D+/g, '').slice(-4)}`);
     res.json({ sent: true, destination: user.phone.replace(/(\(\d{2}\) )(\d{3})(.*)/, '$1***$3'), expires_in: 300 });
   } catch (err) { console.error('send-phone-verification error:', err.message); res.status(500).json({ error: 'Erro ao enviar codigo' }); }
 });

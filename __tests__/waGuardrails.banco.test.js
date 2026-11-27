@@ -46,7 +46,7 @@ const ID = {
   corrida: uuid(), corrida10: uuid(), auto: uuid(), autoPouco: uuid(), pacote: uuid(),
   convite: uuid(), teste: uuid(), despacho: uuid(), dedupe: uuid(), origem: uuid(),
   aurinha: uuid(), teto: uuid(), contato: uuid(), desligado: uuid(),
-  retry: uuid(), lock: uuid(), categoria: uuid(), aurinhaSkip: uuid(),
+  retry: uuid(), lock: uuid(), categoria: uuid(), aurinhaSkip: uuid(), teto10: uuid(), velha: uuid(),
 };
 const EMPRESAS = Object.keys(ID).filter((k) => k !== 'dono').map((k) => ID[k]);
 
@@ -620,7 +620,7 @@ describe('erro de banco no saldo: volta para a fila ou fica gravado, nunca some'
       Object.assign(new Error('Connection terminated unexpectedly'), { code: 'ECONNRESET' }));
     try { await despachar(); } finally { restaurar(); }
     expect(await linha(id)).toMatchObject({
-      status: 'pending', skip_reason: null, attempts: 0, adiada: true, last_error: 'SALDO_INDISPONIVEL:ECONNRESET',
+      status: 'pending', skip_reason: null, attempts: 0, adiada: true, last_error: 'SALDO_INDISPONIVEL:ECONNRESET volta 1',
     });
     expect(chamadasDa(ID.retry)).toBe(0);
     expect(await debito(ID.retry, 'avisos')).toBe(0);
@@ -643,7 +643,7 @@ describe('erro de banco no saldo: volta para a fila ou fica gravado, nunca some'
       outra.release();
     }
     expect(await linha(id)).toMatchObject({
-      status: 'pending', skip_reason: null, attempts: 0, last_error: 'SALDO_INDISPONIVEL:55P03',
+      status: 'pending', skip_reason: null, attempts: 0, last_error: 'SALDO_INDISPONIVEL:55P03 volta 1',
     });
     expect(chamadasDa(ID.lock)).toBe(0);
     await vencer(id);
@@ -680,12 +680,53 @@ describe('erro de banco no saldo: volta para a fila ou fica gravado, nunca some'
     const restaurar = falharConsulta('-- wa:template-categoria', ID.categoria,
       Object.assign(new Error('timeout'), { code: '57014' }));
     try { await despachar(); } finally { restaurar(); }
-    expect(await linha(id)).toMatchObject({ status: 'pending', attempts: 0, last_error: 'SALDO_INDISPONIVEL:57014' });
+    expect(await linha(id)).toMatchObject({ status: 'pending', attempts: 0, last_error: 'SALDO_INDISPONIVEL:57014 volta 1' });
     expect(chamadasDa(ID.categoria)).toBe(0);
     await vencer(id);
     await despachar();
     expect((await linha(id)).status).toBe('sent');
     expect(await debito(ID.categoria, 'avisos')).toBe(1);
+  });
+
+  test('teto de voltas: erro que se repete (42P01) volta 10 vezes e na 11a vira skip SALDO_INDISPONIVEL; a Meta nunca e chamada', async () => {
+    const id = await inserirSemReserva(ID.teto10);
+    const restaurar = falharConsulta('-- wa:saldo-despacho-reserva', id,
+      Object.assign(new Error('relation "wa_saldo_lancamentos" does not exist'), { code: '42P01' }));
+    try {
+      for (let volta = 1; volta <= waOutbox.RETRY_SALDO_MAX_VOLTAS; volta++) {
+        await despachar();
+        expect(await linha(id)).toMatchObject({ status: 'pending', attempts: 0, last_error: `SALDO_INDISPONIVEL:42P01 volta ${volta}` });
+        await vencer(id);
+      }
+      await despachar();
+    } finally { restaurar(); }
+    expect(await linha(id)).toMatchObject({
+      status: 'skipped', skip_reason: 'SALDO_INDISPONIVEL', last_error: 'SALDO_INDISPONIVEL:42P01 volta 11',
+    });
+    await despachar(); // pulada nao volta para a fila
+    expect(chamadasDa(ID.teto10)).toBe(0);
+    expect(await debito(ID.teto10)).toBe(0);
+  });
+
+  test('teto de idade: linha com mais de 6 h ainda caindo no retry vira skip e a reserva que existia e estornada', async () => {
+    const id = await inserirSemReserva(ID.velha);
+    await q(`UPDATE wa_outbox SET created_at = NOW() - INTERVAL '7 hours' WHERE id = $1`, [id]);
+    expect(await waSaldo.reservarAvulso({ companyId: ID.velha, bucket: 'avisos', refKey: `outbox:${id}`, outboxId: id }))
+      .toMatchObject({ ok: true });
+    expect(await debito(ID.velha, 'avisos')).toBe(1);
+    const restaurar = falharConsulta('-- wa:saldo-despacho-reserva', id,
+      Object.assign(new Error('Connection terminated unexpectedly'), { code: 'ECONNRESET' }));
+    try { await despachar(); } finally { restaurar(); }
+    expect(await linha(id)).toMatchObject({ status: 'skipped', skip_reason: 'SALDO_INDISPONIVEL', last_error: 'SALDO_INDISPONIVEL:ECONNRESET volta 1' });
+    expect(await debito(ID.velha, 'avisos')).toBe(0);
+    expect(chamadasDa(ID.velha)).toBe(0);
+  });
+
+  test('a conta de voltas le o proprio last_error (formato antigo conta como 1)', () => {
+    expect(waOutbox.voltasDeSaldo(null)).toBe(0);
+    expect(waOutbox.voltasDeSaldo('rede')).toBe(0);
+    expect(waOutbox.voltasDeSaldo('SALDO_INDISPONIVEL:55P03')).toBe(1);
+    expect(waOutbox.voltasDeSaldo('SALDO_INDISPONIVEL:55P03 volta 7')).toBe(7);
   });
 });
 

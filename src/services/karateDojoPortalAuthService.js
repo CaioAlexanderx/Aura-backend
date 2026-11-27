@@ -111,7 +111,8 @@ async function requestOtp({ federationId, identifier }) {
     if (channel === 'email' && mailer && mailer.sendVerificationEmail) {
       await mailer.sendVerificationEmail(dojo.email, code, dojo.contact_name || 'Responsável');
     } else {
-      console.log(`[karateDojoPortalAuth] (dev) OTP ${channel} p/ dojô ${dojo.dojo_id}: ${code}`);
+      // O codigo NUNCA vai para o log: so o evento e o destino mascarado.
+      console.log(`[karateDojoPortalAuth] OTP gerado, canal ${channel} sem entrega automatica, dojô ${dojo.dojo_id}, destino ${destHint || '-'}`);
     }
   } catch (e) {
     console.error('[karateDojoPortalAuth] falha ao enviar OTP:', e.message);
