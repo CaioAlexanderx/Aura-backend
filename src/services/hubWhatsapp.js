@@ -109,6 +109,7 @@ function textoDaMensagem(msg) {
     || (msg.document && msg.document.caption)
     || (msg.button && msg.button.text)
     || (msg.interactive && msg.interactive.button_reply && msg.interactive.button_reply.title)
+    || (msg.interactive && msg.interactive.list_reply && msg.interactive.list_reply.title)
     || `[${msg.type || 'mensagem'}]`;
 }
 

@@ -292,6 +292,39 @@ describe('receber', () => {
   });
 });
 
+describe('thread: metadata do produto com grade', () => {
+  it('devolve sugestao, opcoes, produto_grade e cartao numa lista permitida (sem o resto do metadata)', async () => {
+    const sugestao = { tipo: 'reservar_e_mandar_pix', rotulo: 'Reservar e mandar o Pix', tamanho: 'M', estado: 'pendente' };
+    const produtoGrade = { product_id: 'p1', variant_id: 'v1', tamanho: 'M' };
+    const cartao = { tipo: 'produto', nome: 'Saia', cor: 'Preto', preco: 189.9, fotos: ['https://r2/a.jpg'], tamanhos: [{ tamanho: 'M', ultimo: false }] };
+    let sqlThread = '';
+    db.query.mockImplementation((sql) => {
+      const s = String(sql);
+      if (s.includes('FROM hub_conversations')) return Promise.resolve({ rows: [{ id: CONV, channel: 'whatsapp', external_id: '5511988887777', customer_name: null, status: 'humano', category: null, handoff_reason: null, last_inbound_at: horas(1) }] });
+      if (s.includes('hub:thread-whatsapp')) {
+        sqlThread = s;
+        return Promise.resolve({ rows: [
+          { id: 'm1', direction: 'outbound', content: 'Saia', author: 'humano', created_at: horas(1), tipo: 'produto', cartao, metadata: { cartao }, media: null },
+          { id: 'm2', direction: 'inbound', content: 'Tocou no botão: M', author: 'cliente', created_at: horas(1), cartao: null, metadata: { sugestao, produto_grade: produtoGrade }, media: null },
+          { id: 'm3', direction: 'outbound', content: 'Qual tamanho?', author: 'humano', created_at: horas(1), tipo: 'pergunta_tamanho', metadata: { opcoes: ['P', 'M', 'G'] }, media: null },
+        ] });
+      }
+      return Promise.resolve({ rows: [] });
+    });
+    const res = await request(app()).get(`/companies/${COMPANY}/hub/conversations/${CONV}/messages`);
+    expect(res.status).toBe(200);
+    const [m1, m2, m3] = res.body.messages;
+    expect(m1.cartao).toEqual(cartao); // o campo de antes segue igual
+    expect(m1.metadata.cartao).toEqual(cartao);
+    expect(m2.metadata.sugestao).toEqual(sugestao);
+    expect(m2.metadata.produto_grade).toEqual(produtoGrade);
+    expect(m3.metadata.opcoes).toEqual(['P', 'M', 'G']);
+    // O SQL monta o metadata só com a lista permitida (ids da Meta, telefone e afins não saem).
+    expect(sqlThread).toMatch(/jsonb_build_object\('sugestao'.*'opcoes'.*'produto_grade'.*'cartao'.*'pergunta'.*'formato'/s);
+    expect(sqlThread).not.toMatch(/metadata AS metadata|SELECT \*\s+FROM hub_messages|, metadata,/);
+  });
+});
+
 describe('lojas no hub (WA_HUB_LOJAS_LIGADO)', () => {
   const hubWhatsapp = require('../src/services/hubWhatsapp');
   const spy = jest.spyOn(hubWhatsapp, 'registrarInbound').mockResolvedValue({ ok: true });

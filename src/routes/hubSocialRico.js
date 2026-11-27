@@ -11,6 +11,9 @@ const express = require('express');
 const router = express.Router({ mergeParams: true });
 const db = require('../config/database');
 const envio = require('../services/hubWhatsappEnvio');
+const produtoGrade = require('../services/hubProdutoGrade');
+const { pedidoLiberado } = require('../services/pedidoBalcao');
+const { condicionalLiberada } = require('../services/condicional');
 const { camposDoProduto, colunasPromo, colunasPromoNulas, comColunasPromo } = require('../services/precoEfetivo');
 
 function isMissingSchema(e) { return e && (e.code === '42P01' || e.code === '42703'); }
@@ -90,8 +93,18 @@ router.get('/conversations/:convId/orcamentos', async (req, res) => {
 // { type: 'produto'|'orcamento'|'pix'|'link_loja', product_id|quote_id|amount }
 router.post('/conversations/:convId/send', async (req, res) => {
   const { type, ...dados } = req.body || {};
+  if (type === 'produto_grade') {
+    try {
+      const r = await produtoGrade.enviarProdutoGrade({
+        companyId: req.params.id, conversationId: req.params.convId, userId: req.user && req.user.id, dados,
+      });
+      return res.json({ ok: true, wamid: r.wamid });
+    } catch (e) {
+      return responderErro(res, e, 'send produto_grade');
+    }
+  }
   if (!envio.TIPOS.includes(type)) {
-    return res.status(400).json({ error: `type inválido (${envio.TIPOS.join(', ')})` });
+    return res.status(400).json({ error: `type inválido (${[...envio.TIPOS, 'produto_grade'].join(', ')})` });
   }
   try {
     const r = await envio.enviarSessao({
@@ -101,6 +114,36 @@ router.post('/conversations/:convId/send', async (req, res) => {
     res.json({ ok: true, wamid: r.wamid });
   } catch (e) {
     responderErro(res, e, 'send');
+  }
+});
+
+// ── GET /hub/produtos/:productId/grade ───────────────────────
+// Fotos, cores e tamanhos livres (sem quantidade) do produto, para o painel
+// "mandar produto com fotos e tamanhos". Estoque da loja da conversa.
+router.get('/produtos/:productId/grade', async (req, res) => {
+  try {
+    const grade = await produtoGrade.lerGrade(req.params.id, req.params.productId);
+    if (!grade) return res.status(404).json({ error: 'Produto não encontrado', code: 'PRODUTO_NAO_ENCONTRADO' });
+    res.json(grade);
+  } catch (e) {
+    if (isMissingSchema(e)) return res.status(409).json({ error: 'Produto ainda não disponível (migration pendente)' });
+    console.error('[HUB] grade error:', e.message);
+    res.status(500).json({ error: 'Erro ao ler o produto' });
+  }
+});
+
+// ── POST /hub/conversations/:convId/reservar-pix ─────────────
+// { message_id, quantity } (ou product_id + variant_id): reserva a peça
+// (pedido do balcão, sem baixar estoque) e manda o Pix da loja.
+router.post('/conversations/:convId/reservar-pix', async (req, res) => {
+  try {
+    const r = await produtoGrade.reservarEPix({
+      companyId: req.params.id, conversationId: req.params.convId, userId: req.user && req.user.id,
+      dados: req.body || {}, pedidoLiberado: pedidoLiberado(req), condicionalLiberada: condicionalLiberada(req),
+    });
+    res.json(r);
+  } catch (e) {
+    responderErro(res, e, 'reservar-pix');
   }
 });
 
