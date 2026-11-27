@@ -102,9 +102,11 @@ async function requestOtp({ federationId, cpf }) {
     } else if (channel === 'whatsapp') {
       // WhatsApp exige WABA por federação (phoneNumberId+token). Hook deixado
       // para a Track F (automação). Em dev, logamos para teste.
-      console.log(`[karatePortalAuth] (dev) OTP WhatsApp p/ ${destHint}: ${code}`);
+      // O codigo NUNCA vai para o log (o log de producao e lido por gente e
+      // por ferramentas): so o evento e o telefone mascarado.
+      console.log(`[karatePortalAuth] OTP gerado, canal whatsapp sem entrega automatica, destino ${destHint}`);
     } else {
-      console.log(`[karatePortalAuth] (dev) OTP sem canal p/ student ${p.id}: ${code}`);
+      console.log(`[karatePortalAuth] OTP gerado sem canal de entrega, student ${p.id}`);
     }
   } catch (e) {
     console.error('[karatePortalAuth] falha ao enviar OTP:', e.message);
