@@ -77,7 +77,7 @@ describe('corte e classificação (funções puras)', () => {
     expect(Object.fromEntries(fora.map((c) => [c.id, c.motivo]))).toEqual({
       c2: 'SEM_TELEFONE', c3: 'OPT_OUT', c4: 'RECEBEU_HA_MENOS_DE_7_DIAS', c5: 'OPT_OUT',
     });
-    expect(publico.contarForas(fora)).toEqual({ recebeu_ha_menos_de_7_dias: 1, pediu_para_nao_receber: 2, sem_telefone: 1 });
+    expect(publico.contarForas(fora)).toEqual({ recebeu_ha_menos_de_7_dias: 1, pediu_para_nao_receber: 2, sem_telefone: 1, sem_a_peca_da_ultima_compra: 0 });
   });
 
   test('cortar: nunca passa do que cabe, nem de 50', () => {
@@ -325,10 +325,11 @@ function prepararEnvio({ candidatos, vendaParte = 4, usadasVenda = 0, recentes =
     }
     if (/wa:auto-divisao\b/.test(sql)) return { rows: [{ aniversario: 4, venda_mais: vendaParte, crediario: 2 }] };
     if (/wa:auto-usadas/.test(sql)) return { rows: usadasVenda + enfileiradas ? [{ source_type: 'venda_mais', n: usadasVenda + enfileiradas }] : [] };
-    if (/wa:publico-venda-mais/.test(sql)) return { rows: candidatos };
+    if (/wa:publico-venda-mais/.test(sql)) {
+      return { rows: candidatos.map((c) => ('ultima_peca_nome' in c ? c : { ...c, ultima_peca_nome: 'Vestido Verde - AB1234', ultima_compra: '2026-10-16T15:00:00Z' })) };
+    }
     if (/wa:publico-recentes/.test(sql)) return { rows: recentes.map((to_phone) => ({ to_phone })) };
     if (/wa:publico-optouts/.test(sql)) return { rows: optouts.map((phone) => ({ phone })) };
-    if (/wa:auto-ultima-compra/.test(sql)) return { rows: [{ produto: 'Vestido Verde' }] };
     return { rows: [] };
   });
 }
@@ -343,7 +344,7 @@ describe('envio da automática (Venda+)', () => {
     expect(idsEnviados).toEqual(['c9', 'c8', 'c7', 'c6']);
     const args = waOutbox.enqueue.mock.calls[0][0];
     expect(args).toMatchObject({ sourceType: 'venda_mais', kind: 'template', templateName: 'aura_venda_sumindo_com' });
-    expect(args.components[0].parameters.map((p) => p.text)).toEqual(['Cliente 9'.split(' ')[0], 'Lume Moda', 'Vestido Verde', 'R$ 20,00 de desconto', '15/12/2026']);
+    expect(args.components[0].parameters.map((p) => p.text)).toEqual(['Cliente 9'.split(' ')[0], 'Lume Moda', 'vestido verde', 'R$ 20,00 de desconto', '15/12/2026']);
   });
 
   test('a parte já usada abate: parte 4, usadas 3, só cabe 1', async () => {
@@ -426,6 +427,77 @@ describe('envio da automática (Venda+)', () => {
     prepararEnvio({ candidatos: [cli(1, { dias_sem_comprar: 40 })] });
     await executor.rodar(COMPANY, 'venda_mais', { hoje: '2026-12-01' });
     expect(waOutbox.enqueue.mock.calls[0][0].dedupeKey).toBe('vmais-c1-2026-12');
+  });
+});
+
+describe('Venda+: {Última compra} é a PEÇA, nunca a data', () => {
+  test('nomeDaPeca: minúsculas, sem código nem SKU', () => {
+    expect(publico.nomeDaPeca('Vestido Verde')).toBe('vestido verde');
+    expect(publico.nomeDaPeca('Vestido Verde - AB1234')).toBe('vestido verde');
+    expect(publico.nomeDaPeca('Blusa de Linho (M) SKU 99871')).toBe('blusa de linho');
+    expect(publico.nomeDaPeca('Calça Jeans Ref: JN-2201')).toBe('calça jeans');
+    expect(publico.nomeDaPeca('  Bolsa  Couro  7891234567890 ')).toBe('bolsa couro');
+    expect(publico.nomeDaPeca('Camiseta 2 em 1')).toBe('camiseta 2 em 1');
+    expect(publico.nomeDaPeca('')).toBeNull();
+    expect(publico.nomeDaPeca(null)).toBeNull();
+    expect(publico.nomeDaPeca('(M)')).toBeNull();
+  });
+
+  test('o envio manda a peça e o mês por extenso; nunca a data ISO', async () => {
+    const candidatos = [cli(1, { dias_sem_comprar: 70, last_purchase_at: '2026-08-14T15:00:00Z', ultima_compra: '2026-08-14T15:00:00Z', ultima_peca_nome: 'Blusa de Linho' })];
+    prepararEnvio({ candidatos });
+    db.query.mockImplementation(async (sql) => {
+      if (/wa:auto-linhas/.test(sql)) return { rows: [{ automatica: 'venda_mais', ligada: true, config: { segmento: 'sumiu', presente: { tipo: 'fixed', valor: 20 } } }] };
+      if (/wa:auto-divisao\b/.test(sql)) return { rows: [{ aniversario: 4, venda_mais: 4, crediario: 2 }] };
+      if (/wa:publico-venda-mais/.test(sql)) return { rows: candidatos };
+      return { rows: [] };
+    });
+    modelosStore.resolverParaEnvio.mockResolvedValue({
+      templateName: 'aura_venda_sumiu_com', language: 'pt_BR', pronto: true,
+      texto: 'Oi, {Nome}. Sua última compra na {Nome da loja} foi em {Mês da última compra}: {Última compra}. Te dou {Presente} até {Validade}.',
+    });
+    const r = await executor.rodar(COMPANY, 'venda_mais', { hoje: '2026-12-01', segmento: 'sumiu' });
+    expect(r.enfileiradas).toBe(1);
+    const textosEnviados = waOutbox.enqueue.mock.calls[0][0].components[0].parameters.map((p) => p.text);
+    expect(textosEnviados).toEqual(['Cliente', 'Lume Moda', 'agosto', 'blusa de linho', 'R$ 20,00 de desconto', '15/12/2026']);
+    expect(textosEnviados.join(' ')).not.toMatch(/\d{4}-\d{2}/);
+  });
+
+  test('sem a peça da última compra o cliente fica de fora (nada de "uma peça" nem data) e não gasta lugar no corte', async () => {
+    const candidatos = [
+      cli(1, { dias_sem_comprar: 40, total_spent: 900, ultima_peca_nome: null, ultima_compra: '2026-10-16T15:00:00Z' }),
+      cli(2, { dias_sem_comprar: 40, total_spent: 100 }),
+    ];
+    prepararEnvio({ candidatos, vendaParte: 1 });
+    const r = await executor.rodar(COMPANY, 'venda_mais', { hoje: '2026-12-01' });
+    expect(r.enfileiradas).toBe(1);
+    expect(waOutbox.enqueue.mock.calls[0][0].customerId).toBe('c2');
+    const params = waOutbox.enqueue.mock.calls[0][0].components[0].parameters.map((p) => p.text);
+    expect(params).toContain('vestido verde');
+    expect(params.join(' ')).not.toMatch(/uma peça|2026-/);
+  });
+
+  test('a prévia lista quem ficou sem peça em "fora" com o motivo e a frase', async () => {
+    const candidatos = [
+      cli(1, { dias_sem_comprar: 40, ultima_peca_nome: null }),
+      cli(2, { dias_sem_comprar: 40 }),
+    ];
+    prepararEnvio({ candidatos, vendaParte: 4 });
+    const r = await executor.previa(COMPANY, 'venda_mais', { hoje: '2026-12-01' });
+    expect(r.elegiveis).toBe(1);
+    expect(r.fora.sem_a_peca_da_ultima_compra).toBe(1);
+    expect(r.fora_lista[0]).toMatchObject({ customer_id: 'c1', motivo: 'SEM_PECA_ULTIMA_COMPRA', motivo_texto: 'sem a peça da última compra' });
+    expect(r.vao[0].ultima_peca).toBe('vestido verde');
+    expect(r.vao[0].mes_ultima_compra).toBe('outubro');
+  });
+
+  test('a consulta pega a peça da última venda não cancelada, a de maior valor', async () => {
+    db.query.mockReset();
+    db.query.mockResolvedValue({ rows: [] });
+    await publico.candidatosVendaMais(COMPANY, 'sumindo', '2026-12-01');
+    const sql = db.query.mock.calls[0][0];
+    expect(sql).toMatch(/AS ultima_peca_nome/);
+    expect(sql).toMatch(/s\.status <> 'cancelled'\s+ORDER BY s\.created_at DESC, si\.total_price DESC NULLS LAST, si\.id ASC LIMIT 1/);
   });
 });
 

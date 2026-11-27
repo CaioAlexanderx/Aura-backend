@@ -52,25 +52,6 @@ function modeloDoAniversario(config) {
 }
 
 // ── dados extras de cada cliente ────────────────────────────
-async function ultimaCompra(companyId, customerId) {
-  try {
-    const { rows } = await db.query(
-      `-- wa:auto-ultima-compra
-       SELECT COALESCE(NULLIF(p.name, ''), NULL) AS produto
-         FROM sales s
-         JOIN sale_items si ON si.sale_id = s.id
-         LEFT JOIN products p ON p.id = si.product_id
-        WHERE s.company_id = $1 AND s.customer_id = $2
-        ORDER BY s.created_at DESC, si.id ASC LIMIT 1`,
-      [companyId, customerId]
-    );
-    return (rows[0] && rows[0].produto) || null;
-  } catch (e) {
-    if (e.code === '42P01' || e.code === '42703') return null;
-    throw e;
-  }
-}
-
 async function cupomVigenteDoAniversario(companyId, customerId) {
   try {
     const { rows } = await db.query(
@@ -121,7 +102,10 @@ async function previa(companyId, key, { segmento = null, hoje = publico.hojeBRT(
 
   if (key === 'venda_mais') {
     const cands = await publico.candidatosVendaMais(companyId, config.segmento, hoje);
-    const { elegiveis, fora } = await publico.classificarDoBanco(companyId, cands);
+    const classificados = await publico.classificarDoBanco(companyId, cands);
+    // Sem a peça da última compra a mensagem sairia com dado errado: fica de fora.
+    const { comPeca, semPeca } = publico.separarSemPeca(classificados.elegiveis);
+    const elegiveis = comPeca; const fora = classificados.fora.concat(semPeca);
     return { ...publico.montarPrevia({
       key, periodo, elegiveis: publico.ordenar(elegiveis), fora, livres, ordem: ORDEM.padrao,
       detalhe: (c) => `${publico.reais(c.total_spent)} em compras · ${c.dias_sem_comprar} dias`,
@@ -234,7 +218,9 @@ const valoresBase = async (companyId, loja) => ({ 'Nome da loja': loja });
 
 async function rodarVendaMais(companyId, config, hoje, loja) {
   const cands = await publico.candidatosVendaMais(companyId, config.segmento, hoje);
-  const { elegiveis } = await publico.classificarDoBanco(companyId, cands);
+  const { elegiveis: todos } = await publico.classificarDoBanco(companyId, cands);
+  // Sem a peça da última compra o cliente fica de fora (nunca "uma peça" nem a data).
+  const { comPeca: elegiveis } = publico.separarSemPeca(todos);
   const { livres } = await livresDaAutomatica(companyId, 'venda_mais');
   const { vao } = publico.cortar(publico.ordenar(elegiveis), livres);
   const sumiu = config.segmento === 'sumiu';
@@ -245,8 +231,8 @@ async function rodarVendaMais(companyId, config, hoje, loja) {
     valoresDe: async (c, cupom) => ({
       ...(await valoresBase(companyId, loja)),
       'Nome': primeiroNome(c.name),
-      'Última compra': (await ultimaCompra(companyId, c.id)) || 'uma peça',
-      'Mês da última compra': sumiu && c.last_purchase_at ? MESES[new Date(c.last_purchase_at).getUTCMonth()] : '',
+      'Última compra': c.ultima_peca,
+      'Mês da última compra': sumiu ? (publico.mesPorExtenso(publico.isoBRT(c.ultima_compra || c.last_purchase_at)) || '') : '',
       'Presente': descreverPresente(config.presente),
       'Validade': cupom ? mkt.formatDateBR(cupom.expires_at) : '',
     }),
