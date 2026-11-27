@@ -41,6 +41,7 @@ async function limpar() {
     [`DELETE FROM hub_conversation_labels WHERE conversation_id IN (SELECT id FROM hub_conversations WHERE company_id = ANY($1))`, [[ID.lojaA, ID.lojaB]]],
     [`DELETE FROM hub_labels WHERE company_id = ANY($1)`, [[ID.lojaA, ID.lojaB]]],
     [`DELETE FROM hub_conversations WHERE company_id = ANY($1)`, [[ID.lojaA, ID.lojaB]]],
+    [`DELETE FROM sales WHERE company_id = ANY($1)`, [[ID.lojaA, ID.lojaB]]],
     [`DELETE FROM customers WHERE company_id = ANY($1)`, [[ID.lojaA, ID.lojaB]]],
     [`DELETE FROM companies WHERE id = ANY($1)`, [[ID.lojaA, ID.lojaB]]],
     [`DELETE FROM users WHERE id = $1`, [ID.dono]],
@@ -159,6 +160,14 @@ describe('"É ela"', () => {
     expect(r.body.sugestao).toMatchObject({ id: ID.ana, name: 'Ana Paula Ribeiro' });
   });
 
+  it('devolve o valor da última compra: a última venda NÃO cancelada, só desta loja', async () => {
+    await q(`INSERT INTO sales (company_id, customer_id, total_amount, created_at) VALUES ($1, $2, 80.00, NOW() - interval '5 days')`, [ID.lojaA, ID.ana]);
+    await q(`INSERT INTO sales (company_id, customer_id, total_amount, created_at) VALUES ($1, $2, 129.90, NOW() - interval '2 days')`, [ID.lojaA, ID.ana]);
+    await q(`INSERT INTO sales (company_id, customer_id, total_amount, status, created_at) VALUES ($1, $2, 999.00, 'cancelled', NOW() - interval '1 day')`, [ID.lojaA, ID.ana]);
+    const r = await request(app).get(`${hub(ID.lojaA)}/conversations/${ID.conv1}/cliente`);
+    const c = r.body.cliente || r.body.sugestao;
+    expect(c.last_purchase_amount).toBe(129.9);
+  });
   it('conversa sem cadastro de mesmo telefone não sugere ninguém', async () => {
     const r = await request(app).get(`${hub(ID.lojaA)}/conversations/${ID.conv2}/cliente`);
     expect(r.body).toEqual({ cliente: null, sugestao: null });

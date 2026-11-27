@@ -137,13 +137,18 @@ router.delete('/conversations/:convId/etiquetas/:labelId', async (req, res) => {
 });
 
 // ── "É ela": o cadastro de Clientes desta conversa ───────────
-const COLUNAS_CLIENTE = `c.id, c.name, c.phone, c.email, c.birth_date, c.created_at, c.last_purchase_at, c.total_spent`;
+// last_purchase_amount: total da última venda NÃO cancelada do cliente nesta loja (mesmo predicado de customers.last_purchase_at, migration 311).
+const COLUNAS_CLIENTE = `c.id, c.name, c.phone, c.email, c.birth_date, c.created_at, c.last_purchase_at, c.total_spent,
+  (SELECT s.total_amount FROM sales s
+    WHERE s.customer_id = c.id AND s.company_id = c.company_id AND COALESCE(s.status, 'completed') != 'cancelled'
+    ORDER BY s.created_at DESC LIMIT 1) AS last_purchase_amount`;
 
 function cartao(r) {
   return {
     id: r.id, name: r.name, phone: r.phone || null, email: r.email || null,
     birth_date: r.birth_date || null, since: r.created_at || null,
     last_purchase_at: r.last_purchase_at || null,
+    last_purchase_amount: r.last_purchase_amount != null ? Number(r.last_purchase_amount) : null,
     total_spent: r.total_spent != null ? Number(r.total_spent) : null,
   };
 }
