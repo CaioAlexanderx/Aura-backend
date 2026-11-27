@@ -28,6 +28,7 @@
 const express = require('express');
 const { linkDoPosCompraDaEmpresa } = require('../services/marcaDaLoja');
 const { nomeDaLoja } = require('../utils/nomeDaLoja');
+const { textoDaAprovacao } = require('../utils/mensagemDaAprovacao');
 const router  = express.Router({ mergeParams: true });
 const crypto  = require('crypto');
 const db      = require('../config/database');
@@ -1135,7 +1136,9 @@ router.post('/orders/:oid/approval', async function(req, res) {
     `Oi ${customerFirstName}! A arte do seu pedido ficou pronta.\n\n` +
     `Dá uma olhada e me confirma se posso produzir:\n${approvalUrl}\n\n` +
     `_${shopName}_`;
-  const messageText = (custom_message && String(custom_message).trim()) || defaultMsg;
+  // O app manda {link} no lugar do link (que só nasce aqui): o texto guardado
+  // e o wa.me passam a ser o que de fato vai à cliente.
+  const messageText = textoDaAprovacao(custom_message, approvalUrl, defaultMsg);
 
   try {
     // Visual Engine F2: tenta gravar render_id (migration 209). Se a coluna
