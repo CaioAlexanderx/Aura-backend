@@ -34,6 +34,7 @@ const { nomeDaCorDaVariante } = require('./nomeDaCor');
 const { validarNome, isMissingSchema, MAX_ETIQUETAS_POR_LOJA, COR_PADRAO } = require('./hubEtiquetas');
 const { normalizarTelefoneSemRecusar } = require('../utils/telefone');
 const pedidoBalcao = require('./pedidoBalcao');
+const { mesmosItens } = require('./pedidoOnlineIdempotente');
 
 const { erro, reais } = envio;
 
@@ -560,26 +561,40 @@ async function tratarResposta({ companyId, msg, conversationId }) {
 const MAX_TENTATIVAS_CHAVE = 6;
 
 /**
- * O pedido desta reserva pela chave (e as chaves -2, -3... de tentativas depois de um
- * cancelamento). Pedido cancelado nunca é devolvido: passa para a próxima chave.
- * Devolve { existente: {id, order_number, total} | null, chave }.
+ * O pedido desta reserva pela chave (e as chaves -2, -3... das tentativas seguintes).
+ * Só é reaproveitado o pedido NÃO cancelado, com pagamento pendente e os MESMOS itens
+ * (produto, variante e quantidade). Cancelado, já pago (ou com sinal) ou de outra
+ * quantidade passam para a próxima chave: a cliente nunca paga duas vezes a mesma peça.
+ * Exceção (`pagoEncerra`, reserva ligada a uma mensagem): pedido dessa mensagem já pago
+ * não é refeito nem reenviado: devolve { pago: true }.
+ * Devolve { existente: {id, order_number, total, quantidade} | null, chave, pago }.
  */
-async function acharPedidoDaChave(companyId, base) {
+async function acharPedidoDaChave(companyId, base, itens, { pagoEncerra = false } = {}) {
   const candidatas = [base, ...Array.from({ length: MAX_TENTATIVAS_CHAVE - 1 }, (_, n) => `${base}-${n + 2}`)];
   const { rows } = await db.query(
     `-- hubgrade:pedido-da-chave
-     SELECT id, order_number, total, idempotency_key,
-            (status::text ILIKE 'cancel%' OR cancelled_at IS NOT NULL) AS cancelado
-       FROM digital_orders WHERE company_id = $1 AND idempotency_key = ANY($2::text[])`,
+     SELECT o.id, o.order_number, o.total, o.idempotency_key, o.payment_status::text AS payment_status,
+            (o.status::text ILIKE 'cancel%' OR o.cancelled_at IS NOT NULL) AS cancelado,
+            COALESCE((SELECT json_agg(json_build_object('product_id', i.product_id, 'variant_id', i.variant_id, 'quantity', i.quantity))
+                        FROM digital_order_items i WHERE i.order_id = o.id), '[]'::json) AS itens
+       FROM digital_orders o WHERE o.company_id = $1 AND o.idempotency_key = ANY($2::text[])`,
     [companyId, candidatas]
   );
   const porChave = new Map(rows.map((r) => [r.idempotency_key, r]));
   for (const chave of candidatas) {
     const r = porChave.get(chave);
-    if (!r) return { existente: null, chave };
-    if (!r.cancelado) return { existente: { id: r.id, order_number: r.order_number, total: Number(r.total) }, chave };
+    if (!r) return { existente: null, chave, pago: false };
+    if (r.cancelado) continue;
+    const gravados = Array.isArray(r.itens) ? r.itens : [];
+    if (!mesmosItens(itens, gravados)) continue;
+    const existente = {
+      id: r.id, order_number: r.order_number, total: Number(r.total),
+      quantidade: gravados.reduce((t, x) => t + Number(x.quantity || 0), 0),
+    };
+    if (String(r.payment_status) === 'pending') return { existente, chave, pago: false };
+    if (pagoEncerra) return { existente, chave, pago: true };
   }
-  throw erro('RESERVA_REPETIDA_DEMAIS', 'Essa reserva já foi cancelada várias vezes. Faça um novo pedido pelo Caixa.', 409);
+  throw erro('RESERVA_REPETIDA_DEMAIS', 'Essa reserva já foi refeita várias vezes. Faça um novo pedido pelo Caixa.', 409);
 }
 
 /** Marca a sugestão como "enviando" (atômico). Quem chega depois leva 409. Trava vence em 2 minutos. */
@@ -653,7 +668,14 @@ async function reservarEPix({
   const base = mensagemId ? `wa-res-${conversationId}-${mensagemId}` : `wa-res-${conversationId}-${variantId}-${hoje}`;
   // B/E: o pedido desta tentativa já existe (falha depois de criar)? Só reenvia o Pix.
   // Pedido cancelado nunca é reaproveitado: a próxima tentativa usa outra chave.
-  const { existente, chave } = await acharPedidoDaChave(companyId, base);
+  const { existente, chave, pago } = await acharPedidoDaChave(
+    companyId, base, [{ product_id: productId, variant_id: variantId, quantity: quantidade }], { pagoEncerra: !!mensagemId },
+  );
+  // H: o pedido desta mensagem já está pago (o "feita" não chegou a gravar): não reenvia o Pix, só fecha a sugestão.
+  if (pago) {
+    await marcarFeita(companyId, mensagemId, sug, existente, existente.quantidade);
+    return { ok: true, ja_pago: true, order_id: existente.id, order_number: existente.order_number, total: existente.total };
+  }
 
   // Preço e nome vêm do banco, nunca do corpo.
   const carregado = await carregar(companyId, productId);
@@ -703,10 +725,29 @@ async function reservarEPix({
   }
 }
 
+function quantidadeDoPedido(pedido, padrao) {
+  if (pedido && Number.isFinite(Number(pedido.quantidade)) && Number(pedido.quantidade) > 0) return Number(pedido.quantidade);
+  const itens = pedido && Array.isArray(pedido.items) ? pedido.items : [];
+  const soma = itens.reduce((t, x) => t + Number(x.quantity || 0), 0);
+  return soma > 0 ? soma : padrao;
+}
+
+async function marcarFeita(companyId, mensagemId, sug, pedido, quantidade) {
+  if (!mensagemId) return;
+  const feita = { ...sug, estado: 'feita', quantidade, order_id: pedido.id, order_number: pedido.order_number };
+  await db.query(
+    `-- hubgrade:sugestao-feita
+     UPDATE hub_messages SET metadata = COALESCE(metadata, '{}'::jsonb) || $1::jsonb WHERE id = $2 AND company_id = $3`,
+    [JSON.stringify({ sugestao: feita }), mensagemId, companyId]
+  ).catch((e) => console.error('[HUB-GRADE] sugestão não atualizada: %s', e.message));
+}
+
 async function enviarReservaEPix({
   companyId, conversationId, userId, creds, phone, pedido, pix, nome, rotuloVariante, total,
   productId, variantId, quantidade, mensagemId, sug,
 }) {
+  // I: a quantidade gravada é a do pedido de fato (não a do corpo da requisição).
+  const qtdReal = quantidadeDoPedido(pedido, quantidade);
   const post = (corpo) => wa.graphPost(`/${creds.phoneNumberId}/messages`, creds.accessToken, {
     messaging_product: 'whatsapp', to: phone, ...corpo,
   });
@@ -715,7 +756,7 @@ async function enviarReservaEPix({
   const r1 = await post({ type: 'text', text: { body: intro, preview_url: false } });
   await envio.gravarNaThread({
     companyId, conversationId, userId, wamid: envio.wamidDe(r1), content: intro,
-    metadata: { tipo: 'reserva', order_id: pedido.id, order_number: pedido.order_number, product_id: productId, variant_id: variantId, quantidade, total },
+    metadata: { tipo: 'reserva', order_id: pedido.id, order_number: pedido.order_number, product_id: productId, variant_id: variantId, quantidade: qtdReal, total },
   });
   const codigo = pix.metadata.cartao.codigo;
   const r2 = await post({ type: 'text', text: { body: codigo, preview_url: false } });
@@ -724,14 +765,7 @@ async function enviarReservaEPix({
     metadata: { ...pix.metadata, order_id: pedido.id },
   });
 
-  if (mensagemId) {
-    const feita = { ...sug, estado: 'feita', order_id: pedido.id, order_number: pedido.order_number };
-    await db.query(
-      `-- hubgrade:sugestao-feita
-       UPDATE hub_messages SET metadata = COALESCE(metadata, '{}'::jsonb) || $1::jsonb WHERE id = $2 AND company_id = $3`,
-      [JSON.stringify({ sugestao: feita }), mensagemId, companyId]
-    ).catch((e) => console.error('[HUB-GRADE] sugestão não atualizada: %s', e.message));
-  }
+  if (mensagemId) await marcarFeita(companyId, mensagemId, sug, pedido, qtdReal);
   return { ok: true, order_id: pedido.id, order_number: pedido.order_number, total, wamid: envio.wamidDe(r1) };
 }
 
