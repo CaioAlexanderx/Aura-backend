@@ -222,6 +222,17 @@ function lerCorpo(body, { hoje = hojeSP() } = {}) {
   };
 }
 
+/** Trava (pg_advisory_xact_lock, ate o fim da transacao) por produto do pedido, em ordem. */
+async function travarPecas(client, itens) {
+  const pids = [...new Set(itens.filter((i) => i.product_id).map((i) => String(i.product_id)))].sort();
+  if (!pids.length) return;
+  await client.query(
+    `SELECT pg_advisory_xact_lock(hashtext('condicional-peca:' || s.pid))
+       FROM (SELECT t.pid FROM unnest($1::text[]) WITH ORDINALITY AS t(pid, n) ORDER BY t.n) s`,
+    [pids]
+  );
+}
+
 /** Produtos e variantes do pedido numa consulta, pela regra unica de visibilidade. */
 async function conferirProdutos(client, companyId, itens) {
   const ids = [...new Set(itens.filter((i) => i.product_id).map((i) => i.product_id))];
@@ -461,6 +472,11 @@ async function guardarPedido({ companyId, userId, body, chave, hoje, comCondicio
       const ja = await buscarPorChave(client, companyId, chave);
       if (ja) throw Object.assign(new Error('repetido'), { [REPETIDO]: ja });
     }
+    // Uma reserva por vez em cada produto, em ordem fixa (sem deadlock): duas clientes no
+    // ultimo M nao geram dois pedidos. Mesma chave da condicional (condicional-peca), entao
+    // pedido e condicional tambem se serializam. So o caminho do pedido: a venda do Caixa
+    // (POST /pdv/sale) nao passa por aqui e nao muda.
+    await travarPecas(client, dados.itens);
     await conferirProdutos(client, companyId, dados.itens);
     // B2: sem saldo livre, o pedido nao separa (409). Com "vender sem estoque"
     // ligado (allow_sale_without_stock), entra com o aviso.
@@ -549,6 +565,7 @@ module.exports = {
   lerCorpo,
   guardarPedido,
   conferirSaldo,
+  travarPecas,
   fraseDaFalta,
   lerPedidoCompleto,
   apresentarPedido,

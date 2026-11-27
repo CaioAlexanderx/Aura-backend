@@ -44,6 +44,7 @@ const PAYLOAD_RE = new RegExp(`^${PAYLOAD_PREFIXO}:(${UUID}):(${UUID}):(.{1,40})
 const MAX_FOTOS_ENVIO = 5;
 const MAX_FOTOS_PADRAO = 4;
 const MAX_BOTOES = 3;
+const MAX_TAMANHO_PAYLOAD = 40;
 const MAX_LINHAS_LISTA = 10;
 const PERGUNTA = 'Qual tamanho?';
 const MAX_CORPO_INTERATIVO = 1024;
@@ -224,14 +225,14 @@ async function lerGrade(companyId, productId) {
 }
 
 // ── 2. Envio ─────────────────────────────────────────────────
-function legendaDaGrade({ nome, cor, preco, tamanhos }) {
+function legendaDaGrade({ nome, cor, preco, tamanhos, mais = 0 }) {
   const partes = [nome];
   if (cor) partes.push(cor);
   partes.push(reais(preco));
   if (tamanhos && tamanhos.length) {
     const rotulos = tamanhos.map((t) => (t.ultimo ? `${t.tamanho} (último)` : t.tamanho));
     const lista = rotulos.length === 1 ? rotulos[0] : `${rotulos.slice(0, -1).join(', ')} e ${rotulos[rotulos.length - 1]}`;
-    partes.push(`Tem ${lista}`);
+    partes.push(`Tem ${lista}${mais > 0 ? ` (e mais ${mais})` : ''}`);
   }
   return partes.join(' · ');
 }
@@ -270,8 +271,30 @@ function payloadDoTamanho(productId, variantId, tamanho) {
 }
 
 // `unica` ({ foto, corpo }): botões com a foto no cabeçalho e o texto junto, numa bolha só.
+// Título que a Meta aceita (botão até 20, linha até 24); o que passa do limite vira "…" em vez de recusa.
+function tituloCurto(t, max) {
+  const x = String(t);
+  return x.length <= max ? x : `${x.slice(0, max - 1)}…`;
+}
+
+/**
+ * O que dá para oferecer de verdade: o payload TAM:... cabe no id da Meta só com tamanho de
+ * até 40 caracteres, e a lista mostra no máximo 10. `mais` = quantos ficaram de fora
+ * (a legenda avisa "e mais N").
+ */
+function ofertaDeTamanhos(tamanhos) {
+  const cabem = tamanhos.filter((t) => String(t.tamanho).length <= MAX_TAMANHO_PAYLOAD);
+  const ofertados = cabem.slice(0, MAX_LINHAS_LISTA);
+  return { ofertados, mais: tamanhos.length - ofertados.length };
+}
+
+function cabeEmBotoes(tamanhos) {
+  const titulos = tamanhos.map((t) => tituloCurto(t.tamanho, 20).toUpperCase());
+  return tamanhos.length <= MAX_BOTOES && new Set(titulos).size === titulos.length;
+}
+
 function montarPergunta(productId, tamanhos, unica = null) {
-  if (tamanhos.length <= MAX_BOTOES) {
+  if (cabeEmBotoes(tamanhos)) {
     return {
       formato: 'botoes',
       opcoes: tamanhos.map((t) => t.tamanho),
@@ -283,7 +306,7 @@ function montarPergunta(productId, tamanhos, unica = null) {
           body: { text: unica ? unica.corpo : PERGUNTA },
           action: {
             buttons: tamanhos.map((t) => ({
-              type: 'reply', reply: { id: payloadDoTamanho(productId, t.variant_id, t.tamanho), title: t.tamanho.slice(0, 20) },
+              type: 'reply', reply: { id: payloadDoTamanho(productId, t.variant_id, t.tamanho), title: tituloCurto(t.tamanho, 20) },
             })),
           },
         },
@@ -303,7 +326,7 @@ function montarPergunta(productId, tamanhos, unica = null) {
           button: 'Escolher o tamanho',
           sections: [{
             title: 'Tamanhos',
-            rows: linhas.map((t) => ({ id: payloadDoTamanho(productId, t.variant_id, t.tamanho), title: t.tamanho.slice(0, 24) })),
+            rows: linhas.map((t) => ({ id: payloadDoTamanho(productId, t.variant_id, t.tamanho), title: tituloCurto(t.tamanho, 24) })),
           }],
         },
       },
@@ -325,12 +348,15 @@ async function enviarProdutoGrade({ companyId, conversationId, userId, dados = {
   const tamanhos = cor ? cor.tamanhos : [];
   const fotos = fotosDoEnvio(grade, cor, dados.fotos);
   const perguntar = dados.perguntar_tamanho === true;
-  if (perguntar && !tamanhos.length) {
+  const oferta = perguntar ? ofertaDeTamanhos(tamanhos) : null;
+  if (perguntar && !oferta.ofertados.length) {
     throw erro('SEM_TAMANHO_PARA_PERGUNTAR', 'Este produto não tem tamanhos com estoque para perguntar.');
   }
+  // A legenda anuncia só o que a pergunta oferece; o resto vem como "e mais N".
+  const doTexto = oferta ? oferta.ofertados : tamanhos;
 
   const preco = cor ? cor.preco : grade.produto.preco;
-  const legenda = legendaDaGrade({ nome: grade.produto.nome, cor: cor && cor.nome, preco, tamanhos });
+  const legenda = legendaDaGrade({ nome: grade.produto.nome, cor: cor && cor.nome, preco, tamanhos: doTexto, mais: oferta ? oferta.mais : 0 });
   const post = (corpo) => wa.graphPost(`/${creds.phoneNumberId}/messages`, creds.accessToken, {
     messaging_product: 'whatsapp', to: phone, ...corpo,
   });
@@ -341,9 +367,9 @@ async function enviarProdutoGrade({ companyId, conversationId, userId, dados = {
   const corpoUnico = `${legenda}
 
 ${PERGUNTA}`;
-  if (perguntar && fotos.length && tamanhos.length <= MAX_BOTOES && corpoUnico.length <= MAX_CORPO_INTERATIVO) {
+  if (perguntar && fotos.length && cabeEmBotoes(oferta.ofertados) && corpoUnico.length <= MAX_CORPO_INTERATIVO) {
     for (let i = 1; i < fotos.length; i++) await post({ type: 'image', image: { link: fotos[i] } });
-    const p = montarPergunta(grade.produto.id, tamanhos, { foto: fotos[0], corpo: corpoUnico });
+    const p = montarPergunta(grade.produto.id, oferta.ofertados, { foto: fotos[0], corpo: corpoUnico });
     const wamid = envio.wamidDe(await post(p.graph));
     await gravarCartao({
       companyId, conversationId, userId, wamid, legenda, grade, cor, preco, tamanhos, fotos,
@@ -369,7 +395,7 @@ ${PERGUNTA}`;
   }
 
   if (perguntar) {
-    const p = montarPergunta(grade.produto.id, tamanhos);
+    const p = montarPergunta(grade.produto.id, oferta.ofertados);
     const resp = await post(p.graph);
     await envio.gravarNaThread({
       companyId, conversationId, userId, wamid: envio.wamidDe(resp), content: PERGUNTA,
@@ -530,6 +556,64 @@ async function tratarResposta({ companyId, msg, conversationId }) {
   return { handled: true, resultado: 'TAMANHO', tamanho, message_id: rows[0] ? rows[0].id : null, etiqueta };
 }
 
+// ── Chave do pedido, trava do envio ──────────────────────────
+const MAX_TENTATIVAS_CHAVE = 6;
+
+/**
+ * O pedido desta reserva pela chave (e as chaves -2, -3... de tentativas depois de um
+ * cancelamento). Pedido cancelado nunca é devolvido: passa para a próxima chave.
+ * Devolve { existente: {id, order_number, total} | null, chave }.
+ */
+async function acharPedidoDaChave(companyId, base) {
+  const candidatas = [base, ...Array.from({ length: MAX_TENTATIVAS_CHAVE - 1 }, (_, n) => `${base}-${n + 2}`)];
+  const { rows } = await db.query(
+    `-- hubgrade:pedido-da-chave
+     SELECT id, order_number, total, idempotency_key,
+            (status::text ILIKE 'cancel%' OR cancelled_at IS NOT NULL) AS cancelado
+       FROM digital_orders WHERE company_id = $1 AND idempotency_key = ANY($2::text[])`,
+    [companyId, candidatas]
+  );
+  const porChave = new Map(rows.map((r) => [r.idempotency_key, r]));
+  for (const chave of candidatas) {
+    const r = porChave.get(chave);
+    if (!r) return { existente: null, chave };
+    if (!r.cancelado) return { existente: { id: r.id, order_number: r.order_number, total: Number(r.total) }, chave };
+  }
+  throw erro('RESERVA_REPETIDA_DEMAIS', 'Essa reserva já foi cancelada várias vezes. Faça um novo pedido pelo Caixa.', 409);
+}
+
+/** Marca a sugestão como "enviando" (atômico). Quem chega depois leva 409. Trava vence em 2 minutos. */
+async function reservarEnvio(companyId, mensagemId) {
+  const { rows } = await db.query(
+    `-- hubgrade:sugestao-enviando
+     UPDATE hub_messages
+        SET metadata = jsonb_set(COALESCE(metadata, '{}'::jsonb), '{sugestao}',
+              COALESCE(metadata->'sugestao', '{}'::jsonb)
+              || jsonb_build_object('estado', 'enviando', 'enviando_em', to_jsonb(now()::text)))
+      WHERE id = $1 AND company_id = $2
+        AND COALESCE(metadata->'sugestao'->>'estado', '') <> 'feita'
+        AND NOT (COALESCE(metadata->'sugestao'->>'estado', '') = 'enviando'
+                 AND (metadata->'sugestao'->>'enviando_em')::timestamptz > now() - interval '2 minutes')
+      RETURNING id`,
+    [mensagemId, companyId]
+  );
+  if (!rows.length) throw erro('JA_RESERVADO', 'Essa peça já foi reservada ou está sendo reservada agora.', 409);
+}
+
+async function liberarEnvio(companyId, mensagemId) {
+  try {
+    await db.query(
+      `-- hubgrade:sugestao-liberar
+       UPDATE hub_messages
+          SET metadata = jsonb_set(metadata, '{sugestao}', (metadata->'sugestao') || '{"estado":"pendente"}'::jsonb)
+        WHERE id = $1 AND company_id = $2 AND metadata->'sugestao'->>'estado' = 'enviando'`,
+      [mensagemId, companyId]
+    );
+  } catch (e) {
+    console.error('[HUB-GRADE] sugestão não liberada: %s', e.message);
+  }
+}
+
 // ── 4. Reservar e mandar o Pix ───────────────────────────────
 async function reservarEPix({
   companyId, conversationId, userId, dados = {}, pedidoLiberado = false, condicionalLiberada = false,
@@ -565,6 +649,12 @@ async function reservarEPix({
     throw erro('QUANTIDADE_INVALIDA', 'A quantidade precisa ser um número inteiro de peças.', 400);
   }
 
+  const hoje = pedidoBalcao.hojeSP();
+  const base = mensagemId ? `wa-res-${conversationId}-${mensagemId}` : `wa-res-${conversationId}-${variantId}-${hoje}`;
+  // B/E: o pedido desta tentativa já existe (falha depois de criar)? Só reenvia o Pix.
+  // Pedido cancelado nunca é reaproveitado: a próxima tentativa usa outra chave.
+  const { existente, chave } = await acharPedidoDaChave(companyId, base);
+
   // Preço e nome vêm do banco, nunca do corpo.
   const carregado = await carregar(companyId, productId);
   if (!carregado) throw erro('PRODUTO_NAO_ENCONTRADO', 'Produto não encontrado', 404);
@@ -572,32 +662,51 @@ async function reservarEPix({
   if (!v || v.productId !== String(carregado.grade.produto.id)) {
     throw erro('VARIANTE_INDISPONIVEL', 'Essa variação não é deste produto.', 404);
   }
-  if (v.livres < quantidade) {
+  // Com pedido já criado a peça está reservada por ele: o saldo livre não é mais pré-checado.
+  if (!existente && v.livres < quantidade) {
     throw erro('PEDIDO_SEM_SALDO', `Não dá para separar: só ${String(v.livres).replace('.', ',')} livre${v.livres === 1 ? '' : 's'} desse tamanho.`, 409);
   }
   const nome = carregado.grade.produto.nome;
   const rotuloVariante = [v.cor, v.tamanho].filter(Boolean).join(' · ') || null;
-  const total = round2(quantidade * round2(v.preco));
+  const total = existente ? round2(existente.total) : round2(quantidade * round2(v.preco));
 
   // O Pix primeiro: loja sem Pix recusa antes de criar o pedido.
   const pix = await envio.montar('pix', companyId, { amount: total });
 
-  const hoje = pedidoBalcao.hojeSP();
-  const chave = mensagemId ? `wa-res-${conversationId}-${mensagemId}` : `wa-res-${conversationId}-${variantId}-${hoje}`;
-  const { pedido } = await pedidoBalcao.guardarPedido({
-    companyId, userId,
-    chave,
-    hoje,
-    comCondicional: condicionalLiberada,
-    body: {
-      items: [{ product_id: productId, variant_id: variantId, variant_label: rotuloVariante, quantity: quantidade, unit_price: v.preco }],
-      customer_id: conv.customer_id || null,
-      customer_name: conv.customer_name || null,
-      customer_phone: normalizarTelefoneSemRecusar(conv.external_id),
-      notes: 'Reservado pela conversa do WhatsApp',
-    },
-  });
+  // D: marca a sugestão como "enviando" de forma atômica; duplo clique recebe 409 e não manda o Pix de novo.
+  if (mensagemId) await reservarEnvio(companyId, mensagemId);
+  let pedido = existente;
+  try {
+    if (!pedido) {
+      ({ pedido } = await pedidoBalcao.guardarPedido({
+        companyId, userId,
+        chave,
+        hoje,
+        comCondicional: condicionalLiberada,
+        body: {
+          items: [{ product_id: productId, variant_id: variantId, variant_label: rotuloVariante, quantity: quantidade, unit_price: v.preco }],
+          customer_id: conv.customer_id || null,
+          customer_name: conv.customer_name || null,
+          customer_phone: normalizarTelefoneSemRecusar(conv.external_id),
+          notes: 'Reservado pela conversa do WhatsApp',
+        },
+      }));
+    }
+    return await enviarReservaEPix({
+      companyId, conversationId, userId, creds, phone, pedido, pix, nome, rotuloVariante, total,
+      productId, variantId, quantidade, mensagemId, sug,
+    });
+  } catch (e) {
+    // Falhou antes de ficar pronto: libera a sugestão para a lojista tentar de novo (o pedido, se criado, é reaproveitado pela chave).
+    if (mensagemId) await liberarEnvio(companyId, mensagemId);
+    throw e;
+  }
+}
 
+async function enviarReservaEPix({
+  companyId, conversationId, userId, creds, phone, pedido, pix, nome, rotuloVariante, total,
+  productId, variantId, quantidade, mensagemId, sug,
+}) {
   const post = (corpo) => wa.graphPost(`/${creds.phoneNumberId}/messages`, creds.accessToken, {
     messaging_product: 'whatsapp', to: phone, ...corpo,
   });
