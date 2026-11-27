@@ -81,7 +81,7 @@ beforeEach(() => {
     ],
     reservas: [], comClientes: [],
     loja: { slug: 'lume', is_published: true, pix_key: '11144477735', pix_key_type: 'CPF', pix_holder_name: 'Lume Moda', pix_holder_city: 'Sao Paulo', trade_name: 'Lume Moda' },
-    labels: [], vinculos: [], updates: [],
+    labels: [], vinculos: [], updates: [], pedidosChave: [], enviandoBloqueado: false,
     sugestao: null,
   };
   wa.graphPost.mockReset().mockImplementation(async () => ({ messages: [{ id: `wamid.${++w.seq}` }] }));
@@ -106,6 +106,9 @@ beforeEach(() => {
     if (s.includes('condicional_itens')) return rows(w.comClientes);
     if (s.includes('hubgrade:msg')) return rows(w.sugestao ? [{ id: MSG, metadata: { sugestao: w.sugestao } }] : []);
     if (s.includes('hubgrade:resposta-grava')) { w.updates.push(params); return rows([{ id: MSG }]); }
+    if (s.includes('hubgrade:pedido-da-chave')) return rows(w.pedidosChave.filter((r) => params[1].includes(r.idempotency_key)));
+    if (s.includes('hubgrade:sugestao-enviando')) { w.claims = (w.claims || 0) + 1; return rows(w.enviandoBloqueado ? [] : [{ id: MSG }]); }
+    if (s.includes('hubgrade:sugestao-liberar')) { w.liberou = true; return rows([]); }
     if (s.includes('hubgrade:sugestao-feita')) { w.updates.push(params); return rows([]); }
     if (s.includes('hubgrade:etiqueta-achar')) return rows(w.labels.filter((l) => l.name.toLowerCase() === params[1].toLowerCase()));
     if (s.includes('hubgrade:etiqueta-conta')) return rows([{ n: w.labels.length }]);
@@ -510,6 +513,83 @@ describe('reservar e mandar o Pix', () => {
     const res = await reservar({ product_id: PROD, variant_id: '44444444-4444-4444-8444-444444444499' });
     expect(res.status).toBe(404);
     expect(res.body.code).toBe('VARIANTE_INDISPONIVEL');
+  });
+});
+
+describe('reserva: B, D, E', () => {
+  beforeEach(() => {
+    w.sugestao = { tipo: 'reservar_e_mandar_pix', product_id: PROD, variant_id: V(1), tamanho: 'M', quantidade: 1, estado: 'pendente' };
+  });
+  const reservar = () => request(app()).post(`/companies/${COMPANY}/hub/conversations/${CONV}/reservar-pix`).send({ message_id: MSG });
+  const chaveBase = `wa-res-${CONV}-${MSG}`;
+
+  it('B: pedido já criado (falha depois dele): só reenvia o Pix, sem novo pedido e sem pré-checar o saldo', async () => {
+    w.pedidosChave = [{ idempotency_key: chaveBase, id: 'ord-9', order_number: 'PED-9', total: '189.90', cancelado: false }];
+    w.reservas = [{ product_id: PROD, variant_id: V(1), qtd: '3' }]; // a própria reserva esgotou o livre
+    const res = await reservar();
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({ order_id: 'ord-9', order_number: 'PED-9', total: 189.9 });
+    expect(pedidoBalcao.guardarPedido).not.toHaveBeenCalled();
+    expect(graph()[1].text.body).toMatch(/^00020126/);
+  });
+
+  it('E: pedido cancelado não é reaproveitado: nova tentativa usa a chave -2', async () => {
+    w.pedidosChave = [{ idempotency_key: chaveBase, id: 'ord-0', order_number: 'PED-0', total: '189.90', cancelado: true }];
+    const res = await reservar();
+    expect(res.status).toBe(200);
+    expect(pedidoBalcao.guardarPedido.mock.calls[0][0].chave).toBe(`${chaveBase}-2`);
+    expect(res.body.order_id).toBe('ord-1');
+  });
+
+  it('D: duplo clique (sugestão já "enviando") → 409 e nenhum pedido nem Pix', async () => {
+    w.enviandoBloqueado = true;
+    const res = await reservar();
+    expect(res.status).toBe(409);
+    expect(res.body.code).toBe('JA_RESERVADO');
+    expect(pedidoBalcao.guardarPedido).not.toHaveBeenCalled();
+    expect(wa.graphPost).not.toHaveBeenCalled();
+  });
+
+  it('D: a sugestão é reservada de forma atômica antes de criar o pedido; falha libera para tentar de novo', async () => {
+    pedidoBalcao.guardarPedido.mockRejectedValueOnce(Object.assign(new Error('sem saldo'), { status: 409, code: 'PEDIDO_SEM_SALDO' }));
+    const res = await reservar();
+    expect(res.status).toBe(409);
+    expect(w.claims).toBe(1);
+    expect(w.liberou).toBe(true);
+  });
+});
+
+describe('F: o que a legenda anuncia é o que a pergunta oferece', () => {
+  it('mais de 10 tamanhos: lista com 10 e a legenda diz "e mais N"', async () => {
+    for (const [i, t] of ['34', '35', '36', '37', '38', '39', '40', '41', '42', '43', '44'].entries()) w.variantes.push(variante(10 + i, PRETO, t, 2));
+    // 3 do base (M, P, G) + 11 = 14 tamanhos; 10 ofertados.
+    const res = await enviar({ type: 'produto_grade', product_id: PROD, cor: '000000', fotos: [FOTO], perguntar_tamanho: true });
+    expect(res.status).toBe(200);
+    const [foto, lista] = graph();
+    expect(lista.interactive.type).toBe('list');
+    expect(lista.interactive.action.sections[0].rows).toHaveLength(10);
+    expect(foto.image.caption).toMatch(/\(e mais 4\)$/);
+  });
+
+  it('tamanho com mais de 40 caracteres não vira botão (o payload não caberia) e entra no "e mais"', async () => {
+    w.variantes.push(variante(20, PRETO, 'X'.repeat(45), 2));
+    const res = await enviar({ type: 'produto_grade', product_id: PROD, cor: '000000', fotos: [FOTO], perguntar_tamanho: true });
+    expect(res.status).toBe(200);
+    const q = graph()[0].interactive;
+    expect(q.action.buttons.map((b) => b.reply.title)).toEqual(['P', 'M', 'G']);
+    expect(q.body.text).toContain('(e mais 1)');
+  });
+
+  it('título maior que o limite da Meta vira "…" em vez de ser recusado', () => {
+    const p = grade.montarPergunta(PROD, [{ tamanho: 'T'.repeat(30), variant_id: V(1) }]);
+    expect(p.graph.interactive.action.buttons[0].reply.title).toHaveLength(20);
+    expect(p.graph.interactive.action.buttons[0].reply.title.endsWith('…')).toBe(true);
+  });
+
+  it('títulos que colidem depois de cortados vão para a lista (botões repetidos a Meta recusa)', () => {
+    const a = 'M'.repeat(25) + 'A'; const b = 'M'.repeat(25) + 'B';
+    const p = grade.montarPergunta(PROD, [{ tamanho: a, variant_id: V(1) }, { tamanho: b, variant_id: V(2) }]);
+    expect(p.formato).toBe('lista');
   });
 });
 

@@ -364,3 +364,22 @@ describe('pecas com clientes no pedido (C17, R3)', () => {
     expect((await guardar(pedir(2))).status).toBe(201);
   });
 });
+
+describe('trava por peca: duas clientes no ultimo tamanho', () => {
+  test('dois pedidos ao mesmo tempo para a ultima peca: um separa, o outro recebe 409 PEDIDO_SEM_SALDO', async () => {
+    const ultima = uuid();
+    await q(`INSERT INTO product_variants (id, product_id, sku_suffix, stock_qty) VALUES ($1, $2, 'ULTIMO-M', 1)`, [ultima, ID.camiseta]);
+    const corpo = { items: [{ product_id: ID.camiseta, variant_id: ultima, quantity: 1, unit_price: 59.9 }] };
+    const [a, b] = await Promise.all([guardar(corpo), guardar(corpo)]);
+    const status = [a.status, b.status].sort();
+    expect(status).toEqual([201, 409]);
+    const recusado = a.status === 409 ? a : b;
+    expect(recusado.body.code).toBe('PEDIDO_SEM_SALDO');
+    const { rows } = await q(
+      `SELECT COUNT(*)::int AS n FROM digital_order_items i JOIN digital_orders o ON o.id = i.order_id
+        WHERE i.variant_id = $1 AND o.origem = 'balcao'`, [ultima]);
+    expect(rows[0].n).toBe(1);
+    const { rows: [est] } = await q(`SELECT stock_qty::numeric AS s FROM product_variants WHERE id = $1`, [ultima]);
+    expect(Number(est.s)).toBe(1); // reservar nunca baixa o estoque
+  });
+});
