@@ -63,6 +63,8 @@ beforeEach(() => {
     if (s.includes('hubenvio:creds')) return Promise.resolve({ rows: [{ wa_phone_number_id: 'PNID', wa_access_token: 'tok' }] });
     if (s.includes('hubenvio:produto')) return Promise.resolve({ rows: params[0] === 'p1' ? [dados.produto] : [] });
     if (s.includes('hubenvio:loja')) return Promise.resolve({ rows: [dados.loja] });
+    if (s.includes('hubenvio:orcamento-itens')) return Promise.resolve({ rows: dados.itens || [] });
+    if (s.includes('hubenvio:orcamento')) return Promise.resolve({ rows: dados.orcamento ? [dados.orcamento] : [] });
     if (s.includes('hubenvio:grava')) { inseridas.push(params); return Promise.resolve({ rows: [] }); }
     return Promise.resolve({ rows: [] });
   });
@@ -140,6 +142,61 @@ describe('pix e link da loja', () => {
     const res = await enviar({ type: 'link_loja' });
     expect(res.status).toBe(409);
     expect(res.body.code).toBe('LOJA_NAO_PUBLICADA');
+  });
+});
+
+describe('cartões estruturados no metadata (Main.dc.html)', () => {
+  const meta = () => JSON.parse(inseridas[0][4]);
+
+  it('orçamento: número, itens, total, validade e o link de aprovar', async () => {
+    const validade = new Date(Date.now() + 7 * 24 * 3600000);
+    dados.orcamento = { id: 'q1', token: 'tok123', status: 'sent', total: '189.90', expires_at: validade.toISOString(), customer_name: 'Ana', numero: 21 };
+    dados.itens = [
+      { description: 'Saia midi plissada · M', quantity: '1.00', unit_price: '189.90' },
+      { description: 'Ajuste de barra', quantity: '1.00', unit_price: '0.00' },
+    ];
+    const res = await enviar({ type: 'orcamento', quote_id: 'q1' });
+    expect(res.status).toBe(200);
+    const m = meta();
+    expect(m.tipo).toBe('orcamento');
+    expect(m.cartao.numero).toBe(21);
+    expect(m.cartao.itens).toEqual([
+      { nome: 'Saia midi plissada · M', qtd: 1, valor: 189.9 },
+      { nome: 'Ajuste de barra', qtd: 1, valor: 0 },
+    ]);
+    expect(m.cartao.total).toBe(189.9);
+    expect(m.cartao.validade).toBe(validade.toISOString());
+    expect(m.cartao.url).toMatch(/\/orcamento\/tok123$/);
+  });
+
+  it('Pix: valor, chave e o código copia e cola', async () => {
+    const res = await enviar({ type: 'pix', amount: 180.4 });
+    expect(res.status).toBe(200);
+    const m = meta();
+    expect(m.cartao.valor).toBe(180.4);
+    expect(m.cartao.loja).toBe('Lume Moda');
+    expect(m.cartao.chave).toBe('11144477735');
+    expect(m.cartao.codigo).toContain('00020126');
+  });
+
+  it('link da loja: nome, URL, imagem e descrição da prévia (só https)', async () => {
+    dados.loja.logo_url = 'https://r2.getaura.com.br/logo.png';
+    dados.loja.tagline = 'Moda feita para você';
+    const res = await enviar({ type: 'link_loja' });
+    expect(res.status).toBe(200);
+    const m = meta();
+    expect(m.cartao.loja).toBe('Lume Moda');
+    expect(m.cartao.url).toMatch(/\/lumemoda$/);
+    expect(m.cartao.imagem).toBe('https://r2.getaura.com.br/logo.png');
+    expect(m.cartao.descricao).toBe('Moda feita para você');
+  });
+
+  it('link da loja sem logo https e sem texto: imagem e descrição nulas', async () => {
+    dados.loja.logo_url = 'http://inseguro/logo.png';
+    await enviar({ type: 'link_loja' });
+    const m = meta();
+    expect(m.cartao.imagem).toBeNull();
+    expect(m.cartao.descricao).toBeNull();
   });
 });
 

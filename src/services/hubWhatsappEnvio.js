@@ -134,7 +134,8 @@ async function montarOrcamento(companyId, { quote_id: quoteId }) {
   try {
     ({ rows: [q] } = await db.query(
       `-- hubenvio:orcamento
-       SELECT id, token, status, total, expires_at, customer_name
+       SELECT id, token, status, total, expires_at, customer_name, created_at,
+              (SELECT COUNT(*)::int FROM studio_quotes x WHERE x.company_id = studio_quotes.company_id AND x.created_at <= studio_quotes.created_at) AS numero
          FROM studio_quotes WHERE id = $1 AND company_id = $2 LIMIT 1`,
       [quoteId, companyId]
     ));
@@ -154,10 +155,32 @@ async function montarOrcamento(companyId, { quote_id: quoteId }) {
   if (q.expires_at) linhas.push(`Vale até ${dataCurta(q.expires_at)}`);
   linhas.push(`Veja e aprove: ${url}`);
   const texto = linhas.join('\n');
+  // Itens para o cartão da thread (nome, quantidade, valor unitário). Sem a tabela de itens o cartão sai só com o total.
+  let itens = [];
+  try {
+    const { rows } = await db.query(
+      `-- hubenvio:orcamento-itens
+       SELECT description, quantity, unit_price FROM studio_quote_items WHERE quote_id = $1 ORDER BY sort_order, created_at LIMIT 30`,
+      [q.id]
+    );
+    itens = rows.map((r) => ({ nome: r.description, qtd: Number(r.quantity), valor: Number(r.unit_price) }));
+  } catch (e) {
+    if (!isMissingSchema(e)) throw e;
+  }
   return {
     graph: { type: 'text', text: { body: texto, preview_url: true } },
     content: texto,
-    metadata: { tipo: 'orcamento', quote_id: q.id, total: Number(q.total), url },
+    metadata: {
+      tipo: 'orcamento', quote_id: q.id, total: Number(q.total), url,
+      // `cartao`: o que a thread do app desenha (Main.dc.html). Mensagens antigas não têm; o app lê o texto.
+      cartao: {
+        numero: q.numero != null ? Number(q.numero) : null,
+        itens,
+        total: Number(q.total),
+        validade: q.expires_at ? new Date(q.expires_at).toISOString() : null,
+        url,
+      },
+    },
   };
 }
 
@@ -167,6 +190,7 @@ async function carregarLoja(companyId) {
     ({ rows: [cfg] } = await db.query(
       `-- hubenvio:loja
        SELECT d.slug, d.is_published, d.pix_key, d.pix_key_type, d.pix_holder_name, d.pix_holder_city,
+              d.tagline, d.logo_url, d.description,
               c.trade_name, c.legal_name
          FROM companies c
          LEFT JOIN digital_channel_config d ON d.company_id = c.id
@@ -194,7 +218,7 @@ async function montarPix(companyId, { amount = null }) {
   return {
     graph: { type: 'text', text: { body: texto, preview_url: false } },
     content: texto,
-    metadata: { tipo: 'pix', valor, loja: nome },
+    metadata: { tipo: 'pix', valor, loja: nome, cartao: { valor, loja: nome, chave: v.normalized, codigo } },
   };
 }
 
@@ -209,7 +233,14 @@ async function montarLinkLoja(companyId) {
   return {
     graph: { type: 'text', text: { body: texto, preview_url: true } },
     content: texto,
-    metadata: { tipo: 'link_loja', url },
+    metadata: {
+      tipo: 'link_loja', url,
+      cartao: {
+        loja: nome, url,
+        imagem: /^https:\/\//i.test(String(loja.logo_url || '')) ? loja.logo_url : null,
+        descricao: String(loja.tagline || loja.description || '').trim().slice(0, 160) || null,
+      },
+    },
   };
 }
 

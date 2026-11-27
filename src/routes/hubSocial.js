@@ -129,7 +129,7 @@ router.get('/conversations/:convId/messages', async (req, res) => {
         `-- hub:thread-whatsapp
          SELECT * FROM (
            SELECT id, direction, content, author, created_at, metadata->>'source_type' AS source_type,
-                  metadata->>'tipo' AS tipo, metadata->>'image_url' AS image_url,
+                  metadata->>'tipo' AS tipo, metadata->>'image_url' AS image_url, metadata->'cartao' AS cartao,
                   metadata->'media' AS media
              FROM hub_messages
             WHERE conversation_id = $1
