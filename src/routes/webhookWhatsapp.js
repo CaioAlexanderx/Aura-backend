@@ -12,6 +12,7 @@ const waOutbox = require('../services/waOutbox');
 const customerConsent = require('../services/customerConsent');
 const hubWhatsapp = require('../services/hubWhatsapp');
 const queroPix = require('../services/credit/queroPix');
+const produtoGrade = require('../services/hubProdutoGrade');
 
 // Sem fallback hardcoded: o verify token PRECISA vir do ambiente; sem ele, a
 // verificação da Meta falha (403).
@@ -371,9 +372,15 @@ router.post('/', async (req, res) => {
           // a foto/áudio). Sem Aurinha: a conversa fica "precisa de você".
           if (hubLojasLigado()) {
             const contato = (value.contacts || []).find((c) => c && c.wa_id === msg.from);
-            await hubWhatsapp.registrarInbound({ companyId, enabled: false, plantao: null, statusAberto: 'precisa_humano' }, msg, {
+            const gravada = await hubWhatsapp.registrarInbound({ companyId, enabled: false, plantao: null, statusAberto: 'precisa_humano' }, msg, {
               nome: (contato && contato.profile && contato.profile.name) || null,
-            }).catch((e) => console.error('[WA-WEBHOOK] hub inbound (loja) error:', e.message));
+            }).catch((e) => { console.error('[WA-WEBHOOK] hub inbound (loja) error:', e.message); return null; });
+            // Toque no tamanho do "Qual tamanho?" (payload TAM:...): etiqueta + sugestão de reservar.
+            // Payload que não é nosso segue o fluxo normal (a mensagem já está gravada).
+            if (gravada && gravada.ok && !gravada.duplicate && gravada.conversationId) {
+              await produtoGrade.tratarResposta({ companyId, msg, conversationId: gravada.conversationId })
+                .catch((e) => console.error('[WA-WEBHOOK] produto-grade error:', e.message));
+            }
           }
         }
       }
