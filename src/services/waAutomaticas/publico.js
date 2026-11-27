@@ -49,6 +49,36 @@ function somarDias(iso, n) {
 }
 function mesDe(iso) { return iso.slice(0, 7); }
 
+const MESES_PT = ['janeiro', 'fevereiro', 'março', 'abril', 'maio', 'junho', 'julho', 'agosto', 'setembro', 'outubro', 'novembro', 'dezembro'];
+
+// Data (Date ou texto) -> 'YYYY-MM-DD' no dia de Brasília; null se não for data.
+function isoBRT(valor) {
+  if (!valor) return null;
+  const d = valor instanceof Date ? valor : new Date(valor);
+  if (Number.isNaN(d.getTime())) return null;
+  return new Date(d.getTime() - 3 * 3600000).toISOString().slice(0, 10);
+}
+
+/** "2026-08-14" -> "agosto". */
+function mesPorExtenso(iso) {
+  const m = Number(String(iso || '').slice(5, 7));
+  return m >= 1 && m <= 12 ? MESES_PT[m - 1] : null;
+}
+
+// Campos que a prévia mostra por cliente além do detalhe (mockup): o limite
+// livre do Crediário e a última compra do Venda+. Só aparecem quando a
+// automática tem o dado.
+function camposExtras(c) {
+  const extra = {};
+  if (c.limite_livre !== undefined && c.limite_livre !== null) {
+    const n = Number(c.limite_livre);
+    if (Number.isFinite(n)) extra.limite_livre = Math.round(n * 100) / 100;
+  }
+  const ultima = isoBRT(c.ultima_compra);
+  if (ultima) { extra.ultima_compra = ultima; extra.mes_ultima_compra = mesPorExtenso(ultima); }
+  return extra;
+}
+
 // ── funções puras ────────────────────────────────────────────
 // Do que mais pesa para o que menos pesa; empate pelo nome (estável).
 function ordenar(cands, campo = 'total_spent') {
@@ -106,7 +136,7 @@ function reais(v) {
 /** Corpo do GET .../publico para as automáticas de novidade. */
 function montarPrevia({ key, periodo, elegiveis, fora, livres, ordem, detalhe }) {
   const { vao, guardados } = cortar(elegiveis, livres);
-  const item = (c) => ({ customer_id: c.id, nome: c.name || 'Cliente', iniciais: iniciais(c.name), detalhe: detalhe(c) });
+  const item = (c) => ({ customer_id: c.id, nome: c.name || 'Cliente', iniciais: iniciais(c.name), detalhe: detalhe(c), ...camposExtras(c) });
   return {
     key, periodo,
     elegiveis: elegiveis.length,
@@ -117,7 +147,7 @@ function montarPrevia({ key, periodo, elegiveis, fora, livres, ordem, detalhe })
     ficam_guardados: guardados.length,
     guardados: guardados.slice(0, 20).map(item),
     fora: contarForas(fora),
-    fora_lista: fora.slice(0, 50).map((c) => ({ customer_id: c.id, nome: c.name || 'Cliente', motivo: c.motivo })),
+    fora_lista: fora.slice(0, 50).map((c) => ({ customer_id: c.id, nome: c.name || 'Cliente', motivo: c.motivo, ...camposExtras(c) })),
     falta_para_todos: Math.max(0, elegiveis.length - Math.max(0, Number(livres) || 0)),
   };
 }
@@ -183,6 +213,9 @@ async function candidatosVendaMais(companyId, segmento, hoje) {
     const { rows } = await db.query(
       `-- wa:publico-venda-mais
        SELECT c.id, c.name, c.phone, c.total_spent, c.marketing_opt_out, c.last_purchase_at,
+              COALESCE((SELECT MAX(s.created_at) FROM sales s
+                         WHERE s.company_id = c.company_id AND s.customer_id = c.id AND s.status <> 'cancelled'),
+                       c.last_purchase_at) AS ultima_compra,
               ($2::date - c.last_purchase_at::date) AS dias_sem_comprar
          FROM customers c
         WHERE c.company_id = $1 AND c.is_active = true AND c.last_purchase_at IS NOT NULL
@@ -245,7 +278,7 @@ async function parcelasParaCobrar(companyId, hoje, deslocamentos) {
 
 module.exports = {
   MAX_POR_ENVIO, JANELA_DIAS, MOTIVO, SEGMENTOS_VENDA_MAIS,
-  hojeBRT, somarDias, mesDe, ordenar, classificar, cortar, contarForas, iniciais, reais, montarPrevia,
+  hojeBRT, somarDias, mesDe, isoBRT, mesPorExtenso, camposExtras, MESES_PT, ordenar, classificar, cortar, contarForas, iniciais, reais, montarPrevia,
   conjuntosDeBloqueio, classificarDoBanco,
   candidatosAniversario, candidatosVendaMais, candidatosCrediarioVender, parcelasParaCobrar,
 };

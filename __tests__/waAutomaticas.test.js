@@ -104,6 +104,56 @@ describe('corte e classificação (funções puras)', () => {
   });
 });
 
+describe('campos extras da prévia (mockup)', () => {
+  const previaDe = (cands, livres, extra = {}) => {
+    const { elegiveis, fora } = publico.classificar(cands);
+    return publico.montarPrevia({ key: 'x', periodo: '2026-12', elegiveis: publico.ordenar(elegiveis), fora, livres, ordem: 'o', detalhe: () => 'd', ...extra });
+  };
+
+  test('Crediário vender: limite_livre em R$ (número) em quem vai e em quem fica guardado', () => {
+    const r = previaDe([
+      { ...cli(1), total_spent: 10, limite_livre: '480.00' },
+      { ...cli(2), total_spent: 20, limite_livre: 320.5 },
+      { ...cli(3), total_spent: 30, limite_livre: 90 },
+    ], 1);
+    r.vao.forEach((v) => expect(typeof v.limite_livre).toBe('number'));
+    expect(r.vao[0].limite_livre).toBe(90);
+    expect(r.guardados.map((g) => g.limite_livre)).toEqual([320.5, 480]);
+  });
+
+  test('Venda+: ultima_compra em ISO e mes_ultima_compra em português', () => {
+    const r = previaDe([
+      cli(1, { ultima_compra: new Date('2026-08-14T15:00:00Z') }),
+      cli(2, { ultima_compra: '2026-03-02T01:00:00Z' }),
+      cli(3, { ultima_compra: null }),
+    ], 5);
+    const por = Object.fromEntries(r.vao.map((v) => [v.customer_id, v]));
+    expect(por.c1).toMatchObject({ ultima_compra: '2026-08-14', mes_ultima_compra: 'agosto' });
+    // 01:00 UTC ainda é 01/03 noite de 01/03? em Brasília é 28/02 22h: o dia é o de Brasília
+    expect(por.c2).toMatchObject({ ultima_compra: '2026-03-01', mes_ultima_compra: 'março' });
+    expect(por.c3.ultima_compra).toBeUndefined();
+    expect(por.c3.mes_ultima_compra).toBeUndefined();
+  });
+
+  test('o mês fecha as 12 pontas e data inválida não quebra', () => {
+    expect(publico.MESES_PT).toHaveLength(12);
+    expect(publico.mesPorExtenso('2026-12-31')).toBe('dezembro');
+    expect(publico.mesPorExtenso('2026-01-01')).toBe('janeiro');
+    expect(publico.isoBRT('lixo')).toBeNull();
+    expect(publico.camposExtras({})).toEqual({});
+  });
+
+  test('as consultas trazem os campos: Venda+ lê a última venda não cancelada, Crediário o limite livre', async () => {
+    db.query.mockReset();
+    db.query.mockResolvedValue({ rows: [] });
+    await publico.candidatosVendaMais(COMPANY, 'sumindo', '2026-12-01');
+    await publico.candidatosCrediarioVender(COMPANY, '2026-12-01');
+    const sqls = db.query.mock.calls.map((c) => c[0]);
+    expect(sqls.find((q) => /wa:publico-venda-mais/.test(q))).toMatch(/s\.status <> 'cancelled'[\s\S]*AS ultima_compra/);
+    expect(sqls.find((q) => /wa:publico-crediario-vender/.test(q))).toMatch(/\(p\.credit_limit - p\.credit_used\) AS limite_livre/);
+  });
+});
+
 describe('divisão das novidades', () => {
   function simularDivisao({ total = 10, usadas = {} } = {}) {
     db.query.mockReset();
