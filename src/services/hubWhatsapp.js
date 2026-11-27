@@ -290,6 +290,13 @@ async function avaliarConversa(conv, { companyId, plantao: config = null }, { ag
     await restaurarPendencia(conv.id, conv.aguardando_resposta_desde);
     return { respondeu: false, motivo: 'SCHEMA_PENDENTE' };
   }
+  // A resposta nao entrou na fila (pulada: SALDO_ESGOTADO dos avisos no
+  // template fora da janela, limite do dia, pausa...; ou duplicada): a
+  // Aurinha nao atendeu esta conversa, entao a conversa cobrada volta.
+  // Parada esperando template (held) segue cobrada: ainda pode sair.
+  if (!enq.queued && !enq.held) {
+    await waSaldoAurinha.devolver(companyId, cobranca);
+  }
   await logEvent(companyId, conv.id, 'resposta_enfileirada', {
     outbox_id: enq.id || null, status: enq.status || null,
     motivo: enq.reason || null, parada: !!enq.held,

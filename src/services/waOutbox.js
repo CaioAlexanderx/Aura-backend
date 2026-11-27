@@ -584,12 +584,20 @@ async function enqueue({
   // menos a lista fechada FORA_DO_SALDO; texto em janela aberta nao gasta.
   // Sem saldo, grava 'skipped' com o motivo (SALDO_ESGOTADO...).
   const saldoLigado = waSaldo.ativo();
-  const bucket = status === 'pending' && saldoLigado
-    ? (saldoBucket || (kind === 'template'
-      ? await bucketDoTemplate(companyId, { sourceType, templateName, templateLanguage }) : null))
-    : null;
-  if (saldoLigado && dedupeKey) await liberarDedupeRecusada(dedupeKey);
+  let bucket = null;
   let saldoInfo = null;
+  if (status === 'pending' && saldoLigado) {
+    try {
+      bucket = saldoBucket || (kind === 'template'
+        ? await bucketDoTemplate(companyId, { sourceType, templateName, templateLanguage }) : null);
+    } catch (e) {
+      if (e.code !== 'SALDO_INDISPONIVEL') throw e;
+      console.error('[waOutbox] saldo do template indisponivel (bloqueia):', e.motivo, e.causa && e.causa.message);
+      status = 'skipped'; skipReason = 'SALDO_INDISPONIVEL';
+      saldoInfo = { ok: false, code: 'SALDO_INDISPONIVEL', motivo: e.motivo };
+    }
+  }
+  if (saldoLigado && dedupeKey) await liberarDedupeRecusada(dedupeKey);
   if (status === 'pending' && bucket) {
     const comp = components ? JSON.stringify(components) : null;
     const r = await inserirReservando({
@@ -684,10 +692,25 @@ async function bucketDoTemplate(companyId, { sourceType = null, templateName = n
     );
     categoria = rows && rows[0] && rows[0].category ? String(rows[0].category).toUpperCase() : null;
   } catch (e) {
-    if (e.code !== '42P01' && e.code !== '42703') throw e;
+    if (e.code === '42P01' || e.code === '42703') return 'avisos';
+    // Erro de banco: nao da para saber qual saldo gasta. Quem chama trata
+    // como SALDO_INDISPONIVEL (na duvida, bloqueia), nunca como excecao solta.
+    throw saldoIndisponivel(e);
   }
   return categoria === 'MARKETING' ? 'novidades' : 'avisos';
 }
+
+function saldoIndisponivel(causa) {
+  return Object.assign(new Error('saldo indisponivel'), {
+    code: 'SALDO_INDISPONIVEL', motivo: (causa && causa.code) || 'ERRO', causa,
+  });
+}
+
+// Recusas de reserva que NAO melhoram tentando de novo (parametro, empresa
+// que nao existe, refKey ja usada). O resto de SALDO_INDISPONIVEL e erro de
+// banco ou lock vencido: o despacho devolve a linha para a fila.
+const INDISPONIVEL_DEFINITIVO = new Set(['PARAMETROS', 'EMPRESA_AUSENTE', 'REF_DUPLICADA', 'SEM_TRANSACAO']);
+const RETRY_SALDO_MIN = 2;
 
 // Recusa de SALDO nao segura a dedupe_key (472). Sem isto, a cliente que
 // ficou de fora porque o saldo acabou nunca mais recebia a mesma mensagem,
@@ -717,12 +740,21 @@ async function liberarDedupeRecusada(dedupeKey) {
 // outbox_id); linha que nasceu com a trava desligada, ou INSERT direto na
 // wa_outbox, reserva agora — com a mesma refKey do enqueue (outbox:<id>),
 // entao nunca debita duas vezes. Sem saldo: nao envia.
+//   { ok:true, ... }                        pode enviar
+//   { ok:false, code }                      sem saldo de verdade: pula
+//   { ok:false, transitorio:true, code }    erro de banco/lock: volta para a fila
 async function garantirReservaNoDespacho(row) {
   if (waSaldo.isento(row.company_id)) return { ok: true, isento: true };
-  const bucket = await bucketDoTemplate(row.company_id, {
-    sourceType: row.source_type, templateName: row.template_name,
-    templateLanguage: row.template_language, hub: !!row.hub_conversation_id,
-  });
+  let bucket;
+  try {
+    bucket = await bucketDoTemplate(row.company_id, {
+      sourceType: row.source_type, templateName: row.template_name,
+      templateLanguage: row.template_language, hub: !!row.hub_conversation_id,
+    });
+  } catch (e) {
+    if (e.code !== 'SALDO_INDISPONIVEL') throw e;
+    return { ok: false, transitorio: true, code: 'SALDO_INDISPONIVEL', motivo: e.motivo };
+  }
   if (!bucket) return { ok: true, foraDoSaldo: true };
   try {
     const { rows } = await db.query(
@@ -732,10 +764,14 @@ async function garantirReservaNoDespacho(row) {
     );
     if (rows && rows.length) return { ok: true, jaReservado: true };
   } catch (e) {
-    console.error('[waOutbox] conferencia do saldo no despacho falhou (bloqueia):', e.code || '', e.message);
-    return { ok: false, code: 'SALDO_INDISPONIVEL' };
+    console.error('[waOutbox] conferencia do saldo no despacho falhou (volta para a fila):', e.code || '', e.message);
+    return { ok: false, transitorio: true, code: 'SALDO_INDISPONIVEL', motivo: e.code || 'ERRO' };
   }
-  return waSaldo.reservarAvulso({ companyId: row.company_id, bucket, refKey: `outbox:${row.id}`, outboxId: row.id });
+  const r = await waSaldo.reservarAvulso({ companyId: row.company_id, bucket, refKey: `outbox:${row.id}`, outboxId: row.id });
+  if (!r.ok && r.code === 'SALDO_INDISPONIVEL' && !INDISPONIVEL_DEFINITIVO.has(String(r.motivo || ''))) {
+    return { ...r, transitorio: true };
+  }
+  return r;
 }
 
 // ── Origem HUB (375) ────────────────────────────────────────
@@ -1158,6 +1194,20 @@ async function processBatch(limit = 20) {
       // a mensagem reservada, venha a linha de onde vier.
       if (row.kind === 'template' && waSaldo.ativo()) {
         const g = await garantirReservaNoDespacho(row);
+        if (!g.ok && g.transitorio) {
+          // Erro de banco ou lock vencido nao e falta de saldo: nada saiu e
+          // nada foi gasto. A linha volta para a fila e tenta de novo, sem
+          // contar tentativa (a Meta nem foi chamada).
+          await db.query(
+            `-- wa:outbox-saldo-retry
+             UPDATE wa_outbox SET status = 'pending', last_error = $1,
+                    next_attempt_at = NOW() + ($2 || ' minutes')::interval, updated_at = NOW()
+              WHERE id = $3`,
+            [`SALDO_INDISPONIVEL:${g.motivo || 'ERRO'}`, String(RETRY_SALDO_MIN), row.id]
+          );
+          out.retried++;
+          continue;
+        }
         if (!g.ok) {
           await markRow(row.id, { status: 'skipped', skip_reason: g.code || 'SALDO_INDISPONIVEL' });
           out.skipped++;
@@ -1309,7 +1359,8 @@ module.exports = {
   normalizePhone, touchInbound, touchOutboundHuman, windowOpen, getContact, decryptToken,
   isTokenError, markTokenInvalid, clearTokenInvalid, connectionState,
   enqueue, enqueueHub, inserirReservando, processBatch,
-  bucketDoTemplate, liberarDedupeRecusada, garantirReservaNoDespacho, RECUSAS_DE_SALDO, simulate, applyStatusUpdate, applyTemplateStatus,
+  bucketDoTemplate, liberarDedupeRecusada, garantirReservaNoDespacho, RECUSAS_DE_SALDO,
+  INDISPONIVEL_DEFINITIVO, RETRY_SALDO_MIN, simulate, applyStatusUpdate, applyTemplateStatus,
   windowOpenAt,
   // Guardas de custo (Fase 2) — expostas para o GET /whatsapp/preview e
   // para os testes de guarda.

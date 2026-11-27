@@ -26,6 +26,9 @@ jest.mock('../src/middleware/auth', () => ({
   requirePlan: () => (req, _res, next) => next(),
   requireRole: () => (req, _res, next) => next(),
 }));
+jest.mock('../src/services/aurinhaAgent', () => ({
+  responderSuporte: jest.fn(async () => ({ texto: 'Oi de novo, aqui e a Aurinha.' })),
+}));
 jest.mock('../src/services/asaasClient', () => ({
   asaasRequest: jest.fn(async () => ({ id: 'pay_guard', invoiceUrl: 'https://asaas.test/i/g' })),
 }));
@@ -43,6 +46,7 @@ const ID = {
   corrida: uuid(), corrida10: uuid(), auto: uuid(), autoPouco: uuid(), pacote: uuid(),
   convite: uuid(), teste: uuid(), despacho: uuid(), dedupe: uuid(), origem: uuid(),
   aurinha: uuid(), teto: uuid(), contato: uuid(), desligado: uuid(),
+  retry: uuid(), lock: uuid(), categoria: uuid(), aurinhaSkip: uuid(),
 };
 const EMPRESAS = Object.keys(ID).filter((k) => k !== 'dono').map((k) => ID[k]);
 
@@ -589,6 +593,125 @@ describe('g) teto diario (WA_DAILY_CAP) e teto por contato (WA_PER_PHONE_DAILY_C
     await despachar();
     expect(templatesAceitos(ID.contato)).toBe(2);
     expect(meta.chamadas.filter((c) => doPn(ID.contato)(c) && c.body.type === 'text')).toHaveLength(1);
+  });
+});
+
+// ── erro de banco nao e falta de saldo ─────────────────────
+describe('erro de banco no saldo: volta para a fila ou fica gravado, nunca some', () => {
+  const inserirSemReserva = async (companyId, sourceType = 'crediario') => (await q(
+    `INSERT INTO wa_outbox (company_id, to_phone, kind, template_name, template_language, status, source_type)
+     VALUES ($1, $2, 'template', 'parcela_lembrete', 'pt_BR', 'pending', $3) RETURNING id`,
+    [companyId, fone(), sourceType])).rows[0].id;
+  const linha = async (id) => (await q(
+    `SELECT status, skip_reason, attempts, last_error, next_attempt_at > NOW() AS adiada
+       FROM wa_outbox WHERE id = $1`, [id])).rows[0];
+  const vencer = (id) => q('UPDATE wa_outbox SET next_attempt_at = NOW() WHERE id = $1', [id]);
+  const falharConsulta = (marca, companyOuId, erro) => {
+    const impl = db.query.getMockImplementation();
+    db.query.mockImplementation((sql, params) => (String(sql).includes(marca) && params && params[0] === companyOuId
+      ? Promise.reject(erro)
+      : impl(sql, params)));
+    return () => db.query.mockImplementation(impl);
+  };
+
+  test('a conferencia da reserva cai no despacho: a linha volta para pending (sem pular), depois sai com 1 debito', async () => {
+    const id = await inserirSemReserva(ID.retry);
+    const restaurar = falharConsulta('-- wa:saldo-despacho-reserva', id,
+      Object.assign(new Error('Connection terminated unexpectedly'), { code: 'ECONNRESET' }));
+    try { await despachar(); } finally { restaurar(); }
+    expect(await linha(id)).toMatchObject({
+      status: 'pending', skip_reason: null, attempts: 0, adiada: true, last_error: 'SALDO_INDISPONIVEL:ECONNRESET',
+    });
+    expect(chamadasDa(ID.retry)).toBe(0);
+    expect(await debito(ID.retry, 'avisos')).toBe(0);
+    await vencer(id);
+    await despachar();
+    expect((await linha(id)).status).toBe('sent');
+    expect(templatesAceitos(ID.retry)).toBe(1);
+    expect(await debito(ID.retry, 'avisos')).toBe(1);
+  });
+
+  test('lock do saldo preso em outra conexao (lock_timeout): volta para pending; solto o lock, sai uma vez', async () => {
+    const id = await inserirSemReserva(ID.lock);
+    const outra = await pool.connect();
+    try {
+      await outra.query('BEGIN');
+      await outra.query('SELECT pg_advisory_xact_lock(hashtextextended($1, 0))', [`wa_saldo:${ID.lock}:avisos`]);
+      await despachar(); // espera os 3 s do lock_timeout do reservarAvulso
+    } finally {
+      await outra.query('ROLLBACK');
+      outra.release();
+    }
+    expect(await linha(id)).toMatchObject({
+      status: 'pending', skip_reason: null, attempts: 0, last_error: 'SALDO_INDISPONIVEL:55P03',
+    });
+    expect(chamadasDa(ID.lock)).toBe(0);
+    await vencer(id);
+    await despachar();
+    expect((await linha(id)).status).toBe('sent');
+    expect(templatesAceitos(ID.lock)).toBe(1);
+    expect(await debito(ID.lock, 'avisos')).toBe(1);
+  });
+
+  test('falta de saldo de verdade no despacho continua pulando (SALDO_ESGOTADO)', async () => {
+    await deixar(ID.lock, 'avisos', 0);
+    const id = await inserirSemReserva(ID.lock);
+    await despachar();
+    expect(await linha(id)).toMatchObject({ status: 'skipped', skip_reason: 'SALDO_ESGOTADO' });
+    expect(templatesAceitos(ID.lock)).toBe(1);
+  });
+
+  test('erro ao ler a categoria do modelo no enqueue: recusa gravada SALDO_INDISPONIVEL, sem excecao e sem debito', async () => {
+    const restaurar = falharConsulta('-- wa:template-categoria', ID.categoria,
+      Object.assign(new Error('canceling statement due to statement timeout'), { code: '57014' }));
+    let r;
+    try {
+      r = await waOutbox.enqueue({ companyId: ID.categoria, toPhone: fone(), templateName: 'parcela_lembrete', sourceType: 'origem_nova' });
+    } finally { restaurar(); }
+    expect(r).toMatchObject({ queued: false, status: 'skipped', reason: 'SALDO_INDISPONIVEL' });
+    expect((await linhas(ID.categoria, 'id = $2', [r.id]))[0]).toMatchObject({ status: 'skipped', skip_reason: 'SALDO_INDISPONIVEL' });
+    expect(await debito(ID.categoria)).toBe(0);
+    await despachar();
+    expect(chamadasDa(ID.categoria)).toBe(0);
+  });
+
+  test('erro ao ler a categoria no despacho: volta para pending, nao pula', async () => {
+    const id = await inserirSemReserva(ID.categoria, 'origem_nova');
+    const restaurar = falharConsulta('-- wa:template-categoria', ID.categoria,
+      Object.assign(new Error('timeout'), { code: '57014' }));
+    try { await despachar(); } finally { restaurar(); }
+    expect(await linha(id)).toMatchObject({ status: 'pending', attempts: 0, last_error: 'SALDO_INDISPONIVEL:57014' });
+    expect(chamadasDa(ID.categoria)).toBe(0);
+    await vencer(id);
+    await despachar();
+    expect((await linha(id)).status).toBe('sent');
+    expect(await debito(ID.categoria, 'avisos')).toBe(1);
+  });
+});
+
+describe('Aurinha: resposta pulada devolve a conversa cobrada', () => {
+  test('template fora da janela sem aviso (SALDO_ESGOTADO): a fila pula e a conversa da Aurinha volta', async () => {
+    await modelo(ID.aurinhaSkip, 'aurinha_retomada');
+    await deixar(ID.aurinhaSkip, 'avisos', 0);
+    const conv = (await q(
+      `INSERT INTO hub_conversations (company_id, channel, external_id, status, last_inbound_at, aguardando_resposta_desde)
+       VALUES ($1, 'whatsapp', $2, 'ia', NOW() - INTERVAL '25 hours', NOW() - INTERVAL '25 hours')
+       RETURNING id, company_id, external_id, status, last_inbound_at, ultima_mensagem_humana_em, aguardando_resposta_desde`,
+      [ID.aurinhaSkip, fone()])).rows[0];
+    const aurinhaAntes = await restante(ID.aurinhaSkip, 'aurinha');
+    const r = await require('../src/services/hubWhatsapp').avaliarConversa(conv, {
+      companyId: ID.aurinhaSkip,
+      plantao: { ativo: true, espera_minutos: 0, template: { nome: 'aurinha_retomada', idioma: 'pt_BR' } },
+    }, { agora: new Date() });
+    expect(r).toMatchObject({ respondeu: false, status: 'skipped', motivo: 'SALDO_ESGOTADO' });
+    expect(await restante(ID.aurinhaSkip, 'aurinha')).toBe(aurinhaAntes);
+    const { rows } = await q(
+      `SELECT COUNT(*) FILTER (WHERE kind = 'consumo')::int AS consumos,
+              COUNT(*) FILTER (WHERE kind = 'estorno')::int AS estornos
+         FROM wa_saldo_lancamentos WHERE company_id = $1 AND bucket = 'aurinha'`, [ID.aurinhaSkip]);
+    expect(rows[0]).toEqual({ consumos: 1, estornos: 1 });
+    await despachar();
+    expect(chamadasDa(ID.aurinhaSkip)).toBe(0);
   });
 });
 
