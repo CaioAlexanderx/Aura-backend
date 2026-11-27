@@ -137,7 +137,8 @@ router.get('/conversations/:convId/messages', async (req, res) => {
                   metadata->>'tipo' AS tipo, metadata->>'image_url' AS image_url, metadata->'cartao' AS cartao,
                   -- lista permitida: o resto do metadata (ids da Meta, telefone) não sai
                   jsonb_strip_nulls(jsonb_build_object('sugestao', metadata->'sugestao', 'opcoes', metadata->'opcoes',
-                    'produto_grade', metadata->'produto_grade', 'cartao', metadata->'cartao')) AS metadata,
+                    'produto_grade', metadata->'produto_grade', 'cartao', metadata->'cartao',
+                    'pergunta', metadata->'pergunta', 'formato', metadata->'formato')) AS metadata,
                   metadata->'media' AS media
              FROM hub_messages
             WHERE conversation_id = $1

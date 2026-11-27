@@ -320,7 +320,7 @@ describe('thread: metadata do produto com grade', () => {
     expect(m2.metadata.produto_grade).toEqual(produtoGrade);
     expect(m3.metadata.opcoes).toEqual(['P', 'M', 'G']);
     // O SQL monta o metadata só com a lista permitida (ids da Meta, telefone e afins não saem).
-    expect(sqlThread).toMatch(/jsonb_build_object\('sugestao'.*'opcoes'.*'produto_grade'.*'cartao'/s);
+    expect(sqlThread).toMatch(/jsonb_build_object\('sugestao'.*'opcoes'.*'produto_grade'.*'cartao'.*'pergunta'.*'formato'/s);
     expect(sqlThread).not.toMatch(/metadata AS metadata|SELECT \*\s+FROM hub_messages|, metadata,/);
   });
 });
