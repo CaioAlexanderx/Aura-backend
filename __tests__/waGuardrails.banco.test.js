@@ -267,10 +267,22 @@ describe('c) automatica nao passa da parte dela (4/4/2)', () => {
       executor().rodar(ID.auto, 'venda_mais', { ignorarLigada: true }),
       executor().rodar(ID.auto, 'venda_mais', { ignorarLigada: true }),
     ]);
-    // Em falha, o objeto inteiro (puladas, parou_por, previa) aparece no log do CI.
-    const previa = await executor().previa(ID.auto, 'venda_mais');
-    expect({ total: a.enfileiradas + b.enfileiradas, a, b, previa: { elegiveis: previa.elegiveis, cabem: previa.cabem, fora: previa.fora } })
-      .toMatchObject({ total: 4 });
+    if (a.enfileiradas + b.enfileiradas !== 4) {
+      const publico = require('../src/services/waAutomaticas/publico');
+      const auto = require('../src/services/waAutomaticas/automaticas');
+      const previa = await executor().previa(ID.auto, 'venda_mais').catch((e) => ({ erro: e.message }));
+      const brutos = (await q(`SELECT last_purchase_at, NOW() AS agora, current_setting('TimeZone') AS tz,
+        ($2::date - last_purchase_at::date) AS dias FROM customers WHERE company_id = $1 LIMIT 2`, [ID.auto, publico.hojeBRT()])).rows;
+      console.log('DIAG-AUTO', JSON.stringify({
+        a, b, hoje: publico.hojeBRT(), brutos,
+        cands: (await publico.candidatosVendaMais(ID.auto, 'sumindo', publico.hojeBRT())).length,
+        divisao: await auto.lerDivisao(ID.auto), usadas: await auto.usadasNoMes(ID.auto),
+        linhas: [...(await auto.lerLinhas(ID.auto)).values()],
+        previa: { elegiveis: previa.elegiveis, cabem: previa.cabem, fora: previa.fora, erro: previa.erro },
+        saldo: (await waSaldo.getSaldos(ID.auto)).saldos.novidades,
+      }));
+    }
+    expect(a.enfileiradas + b.enfileiradas).toBe(4);
     expect(await linhas(ID.auto, `source_type = 'venda_mais' AND status = 'pending'`)).toHaveLength(4);
     expect(await debito(ID.auto, 'novidades')).toBe(4);
     // uma terceira rodada nao acha mais nada na parte
