@@ -143,6 +143,14 @@ describe('campos extras da prévia (mockup)', () => {
     expect(publico.camposExtras({})).toEqual({});
   });
 
+  test('camposExtras devolve o telefone só em dígitos, e só quando existe', () => {
+    expect(publico.camposExtras({ phone: '(11) 90000-0001' }).telefone).toBe('5511900000001');
+    expect(publico.camposExtras({ phone: '' })).toEqual({});
+    expect(publico.camposExtras({ phone: null })).toEqual({});
+    const r = previaDe([cli(1), cli(2, { phone: '' })], 5);
+    expect(r.vao[0].telefone).toMatch(/^\d+$/);
+  });
+
   test('as consultas trazem os campos: Venda+ lê a última venda não cancelada, Crediário o limite livre', async () => {
     db.query.mockReset();
     db.query.mockResolvedValue({ rows: [] });

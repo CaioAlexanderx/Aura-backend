@@ -111,6 +111,10 @@ function camposExtras(c) {
   if (ultima) { extra.ultima_compra = ultima; extra.mes_ultima_compra = mesPorExtenso(ultima); }
   // A PEÇA da última compra ({Última compra} no modelo): nunca a data.
   if (c.ultima_peca) extra.ultima_peca = c.ultima_peca;
+  // O telefone da própria cliente (da lojista), só dígitos, para o botão
+  // "Chamar pelo meu WhatsApp". Só quando existe e é válido.
+  const telefone = waOutbox.normalizePhone(c.phone);
+  if (telefone) extra.telefone = telefone;
   return extra;
 }
 
