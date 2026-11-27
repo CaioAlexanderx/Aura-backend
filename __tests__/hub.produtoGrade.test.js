@@ -22,7 +22,7 @@ jest.mock('../src/services/waOutbox', () => ({
   loadPauseReason: jest.fn().mockResolvedValue(null),
 }));
 jest.mock('../src/services/pedidoBalcao', () => ({
-  pedidoLiberado: (req) => !!(req && req.user && req.user.is_staff === true),
+  pedidoLiberado: (req) => process.env.PEDIDO_LIBERADO === 'true' || !!(req && req.user && req.user.is_staff === true),
   hojeSP: () => '2026-11-27',
   guardarPedido: jest.fn(),
 }));
@@ -65,6 +65,7 @@ const ROSA = { nome: 'Rosa', hex: '#ec4899' };
 let w; // mundo do teste
 beforeEach(() => {
   user = { id: 'user-1', is_staff: true };
+  process.env.PEDIDO_LIBERADO = 'true';
   w = {
     seq: 0, queries: [],
     conversa: { id: CONV, channel: 'whatsapp', external_id: '5511988887777', customer_id: 'cli-1', customer_name: 'Ana', last_inbound_at: horas(2) },
@@ -87,6 +88,7 @@ beforeEach(() => {
   waOutbox.getContact.mockReset().mockResolvedValue(null);
   waOutbox.loadPauseReason.mockReset().mockResolvedValue(null);
   pedidoBalcao.guardarPedido.mockReset().mockResolvedValue({ status: 201, pedido: { id: 'ord-1', order_number: 'PED-7' } });
+  db.connect.mockReset().mockImplementation(async () => ({ query: (...a) => db.query(...a), release: jest.fn() }));
   db.query.mockReset().mockImplementation((sql, params = []) => {
     const s = String(sql);
     w.queries.push(s);
@@ -108,10 +110,15 @@ beforeEach(() => {
     if (s.includes('hubgrade:etiqueta-achar')) return rows(w.labels.filter((l) => l.name.toLowerCase() === params[1].toLowerCase()));
     if (s.includes('hubgrade:etiqueta-conta')) return rows([{ n: w.labels.length }]);
     if (s.includes('hubgrade:etiqueta-cria')) { const l = { id: `lab-${w.labels.length + 1}`, name: params[1] }; w.labels.push(l); return rows([{ id: l.id }]); }
-    if (s.includes('hubgrade:etiqueta-troca')) {
+    if (s.includes('hubgrade:etiqueta-quer')) {
       const [conv, , manter] = params;
-      w.vinculos = w.vinculos.filter(([c, l]) => !(c === conv && l !== manter && (w.labels.find((x) => x.id === l) || { name: '' }).name.toLowerCase().startsWith('quer o ')));
-      w.trocas = (w.trocas || 0) + 1;
+      return rows(w.vinculos.filter(([c, l]) => c === conv && l !== manter)
+        .map(([, l]) => ({ label_id: l, name: w.labels.find((x) => x.id === l).name }))
+        .filter((r) => r.name.toLowerCase().startsWith('quer o ')));
+    }
+    if (s.includes('hubgrade:etiqueta-troca')) {
+      const [conv, ids] = params;
+      w.vinculos = w.vinculos.filter(([c, l]) => !(c === conv && ids.includes(l)));
       return rows([]);
     }
     if (s.includes('hubgrade:etiqueta-aplica')) { if (!w.vinculos.some((v) => v[0] === params[0] && v[1] === params[1])) w.vinculos.push(params); return rows([]); }
@@ -372,6 +379,36 @@ describe('resposta da cliente', () => {
     expect(nomes).toEqual(['Esperando Pix', 'Quer o GG']); // outras etiquetas ficam; só a "Quer o" troca
   });
 
+  it('etiqueta manual com o mesmo começo ("Quer o vestido da vitrine") nunca é apagada', async () => {
+    w.labels.push({ id: 'man', name: 'Quer o vestido da vitrine' }, { id: 'ant', name: 'Quer o P' });
+    w.vinculos.push([CONV, 'man'], [CONV, 'ant']);
+    await grade.tratarResposta({ companyId: COMPANY, conversationId: CONV, msg: botao(`TAM:${PROD}:${V(1)}:M`) });
+    const nomes = w.vinculos.map((v) => w.labels.find((l) => l.id === v[1]).name).sort();
+    expect(nomes).toEqual(['Quer o M', 'Quer o vestido da vitrine']);
+  });
+
+  it('a troca e a aplicação correm numa transação com trava por conversa', async () => {
+    await grade.tratarResposta({ companyId: COMPANY, conversationId: CONV, msg: botao(`TAM:${PROD}:${V(1)}:M`) });
+    const ordem = db.query.mock.calls.map((c) => String(c[0]));
+    const iBegin = ordem.indexOf('BEGIN');
+    const iLock = ordem.findIndex((q) => q.includes('pg_advisory_xact_lock'));
+    const iAplica = ordem.findIndex((q) => q.includes('hubgrade:etiqueta-aplica'));
+    const iCommit = ordem.indexOf('COMMIT');
+    expect(iBegin).toBeGreaterThanOrEqual(0);
+    expect(iLock).toBeGreaterThan(iBegin);
+    expect(iAplica).toBeGreaterThan(iLock);
+    expect(iCommit).toBeGreaterThan(iAplica);
+    const trava = db.query.mock.calls.find((c) => String(c[0]).includes('pg_advisory_xact_lock'));
+    expect(trava[1][0]).toContain(CONV);
+  });
+
+  it('Pedido desligado: a sugestão é só "Mandar o Pix" (sem oferecer a reserva)', async () => {
+    process.env.PEDIDO_LIBERADO = 'false';
+    await grade.tratarResposta({ companyId: COMPANY, conversationId: CONV, msg: botao(`TAM:${PROD}:${V(1)}:M`) });
+    const sug = JSON.parse(w.updates[0][1]).sugestao;
+    expect(sug).toMatchObject({ tipo: 'mandar_pix', rotulo: 'Mandar o Pix', reserva: false });
+  });
+
   it('tamanho que acabou entre o envio e o toque vira sugestão "sem_estoque"', async () => {
     await grade.tratarResposta({ companyId: COMPANY, conversationId: CONV, msg: botao(`TAM:${PROD}:${V(4)}:M`) });
     expect(JSON.parse(w.updates[0][1]).sugestao.estado).toBe('sem_estoque');
@@ -463,6 +500,7 @@ describe('reservar e mandar o Pix', () => {
 
   it('trava do Pedido desligada → 403', async () => {
     user = { id: 'u', is_staff: false };
+    process.env.PEDIDO_LIBERADO = 'false';
     const res = await reservar();
     expect(res.status).toBe(403);
     expect(res.body.code).toBe('PEDIDO_NAO_LIBERADO');

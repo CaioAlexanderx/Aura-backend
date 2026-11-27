@@ -48,6 +48,7 @@ const MAX_LINHAS_LISTA = 10;
 const PERGUNTA = 'Qual tamanho?';
 const MAX_CORPO_INTERATIVO = 1024;
 const ROTULO_SUGESTAO = 'Reservar e mandar o Pix';
+const ROTULO_SO_PIX = 'Mandar o Pix';
 
 const round2 = (n) => Math.round((Number(n) + Number.EPSILON) * 100) / 100;
 const https = (u) => /^https:\/\//i.test(String(u || '').trim());
@@ -416,12 +417,31 @@ function lerPayload(payload) {
   return m ? { productId: m[1], variantId: m[2], tamanho: m[3].trim() } : null;
 }
 
-async function aplicarEtiqueta(companyId, conversationId, tamanho) {
+// Tamanho de verdade: letras da grade, número de calçado/roupa, único ou um tamanho desta grade.
+// Etiqueta manual como "Quer o vestido da vitrine" não é nossa e nunca é apagada.
+function ehTamanhoConhecido(t, daGrade) {
+  const u = String(t || '').trim().toUpperCase();
+  if (!u) return false;
+  return ORDEM_LETRAS.includes(u) || ['U', 'UNICO', 'ÚNICO'].includes(u) || /^\d{1,3}([.,]\d)?$/.test(u)
+    || (daGrade || []).some((x) => String(x).trim().toUpperCase() === u);
+}
+
+function ehEtiquetaDeTamanho(nome, daGrade) {
+  const m = String(nome || '').match(/^quer o (.+)$/i);
+  return !!m && ehTamanhoConhecido(m[1], daGrade);
+}
+
+async function aplicarEtiqueta(companyId, conversationId, tamanho, tamanhosDaGrade = []) {
   const v = validarNome(`Quer o ${tamanho}`.slice(0, 30));
   if (!v.ok) return null;
+  let client;
   try {
+    client = await db.connect();
+    await client.query('BEGIN');
+    // Dois toques juntos na mesma conversa: um de cada vez (troca + aplica atômicos).
+    await client.query('SELECT pg_advisory_xact_lock(hashtext($1))', [`hubgrade-etiqueta:${conversationId}`]);
     const achar = async () => {
-      const { rows } = await db.query(
+      const { rows } = await client.query(
         `-- hubgrade:etiqueta-achar
          SELECT id FROM hub_labels WHERE company_id = $1 AND lower(name) = lower($2) LIMIT 1`,
         [companyId, v.nome]
@@ -430,10 +450,10 @@ async function aplicarEtiqueta(companyId, conversationId, tamanho) {
     };
     let id = await achar();
     if (!id) {
-      const { rows: [{ n }] } = await db.query(`-- hubgrade:etiqueta-conta
+      const { rows: [{ n }] } = await client.query(`-- hubgrade:etiqueta-conta
         SELECT COUNT(*)::int AS n FROM hub_labels WHERE company_id = $1`, [companyId]);
-      if (n >= MAX_ETIQUETAS_POR_LOJA) return null;
-      const { rows } = await db.query(
+      if (n >= MAX_ETIQUETAS_POR_LOJA) { await client.query('ROLLBACK'); return null; }
+      const { rows } = await client.query(
         `-- hubgrade:etiqueta-cria
          INSERT INTO hub_labels (company_id, name, color) VALUES ($1,$2,$3)
          ON CONFLICT (company_id, lower(name)) DO NOTHING RETURNING id`,
@@ -441,25 +461,36 @@ async function aplicarEtiqueta(companyId, conversationId, tamanho) {
       );
       id = rows[0] ? rows[0].id : await achar();
     }
-    if (!id) return null;
+    if (!id) { await client.query('ROLLBACK'); return null; }
     // Uma "Quer o <tamanho>" por conversa: a nova troca a anterior (a cliente mudou de ideia).
-    await db.query(
-      `-- hubgrade:etiqueta-troca
-       DELETE FROM hub_conversation_labels cl
-        USING hub_labels l
-        WHERE cl.label_id = l.id AND cl.conversation_id = $1 AND l.company_id = $2
-          AND cl.label_id <> $3 AND lower(l.name) LIKE 'quer o %'`,
+    const { rows: atuais } = await client.query(
+      `-- hubgrade:etiqueta-quer
+       SELECT cl.label_id, l.name FROM hub_conversation_labels cl
+         JOIN hub_labels l ON l.id = cl.label_id
+        WHERE cl.conversation_id = $1 AND l.company_id = $2 AND cl.label_id <> $3 AND lower(l.name) LIKE 'quer o %'`,
       [conversationId, companyId, id]
     );
-    await db.query(
+    const sair = atuais.filter((r) => ehEtiquetaDeTamanho(r.name, tamanhosDaGrade)).map((r) => r.label_id);
+    if (sair.length) {
+      await client.query(
+        `-- hubgrade:etiqueta-troca
+         DELETE FROM hub_conversation_labels WHERE conversation_id = $1 AND label_id = ANY($2::uuid[])`,
+        [conversationId, sair]
+      );
+    }
+    await client.query(
       `-- hubgrade:etiqueta-aplica
        INSERT INTO hub_conversation_labels (conversation_id, label_id) VALUES ($1,$2) ON CONFLICT DO NOTHING`,
       [conversationId, id]
     );
+    await client.query('COMMIT');
     return { id, nome: v.nome };
   } catch (e) {
+    if (client) await client.query('ROLLBACK').catch(() => {});
     if (isMissingSchema(e)) return null;
     throw e;
+  } finally {
+    if (client) client.release();
   }
 }
 
@@ -479,8 +510,11 @@ async function tratarResposta({ companyId, msg, conversationId }) {
   const tamanho = p.tamanho || v.tamanho || toque.titulo;
   const content = toque.formato === 'lista' ? `Escolheu na lista: ${tamanho}` : `Tocou no botão: ${tamanho}`;
   const base = { product_id: p.productId, variant_id: p.variantId, tamanho, nome: carregado.grade.produto.nome, cor: v.cor || null, preco: v.preco };
+  // Sem o Pedido liberado a reserva dá 403: a sugestão é só "Mandar o Pix" (o app usa o envio de Pix).
+  const reserva = pedidoBalcao.pedidoLiberado();
   const sugestao = {
-    tipo: 'reservar_e_mandar_pix', rotulo: ROTULO_SUGESTAO, ...base, quantidade: 1,
+    tipo: reserva ? 'reservar_e_mandar_pix' : 'mandar_pix',
+    rotulo: reserva ? ROTULO_SUGESTAO : ROTULO_SO_PIX, reserva, ...base, quantidade: 1,
     estado: v.livres > 0 ? 'pendente' : 'sem_estoque',
   };
   const { rows } = await db.query(
@@ -491,7 +525,8 @@ async function tratarResposta({ companyId, msg, conversationId }) {
       RETURNING id`,
     [content, JSON.stringify({ produto_grade: base, sugestao }), companyId, conversationId, msg.id]
   );
-  const etiqueta = await aplicarEtiqueta(companyId, conversationId, tamanho);
+  const daGrade = carregado.grade.cores.flatMap((c) => (c.todos_tamanhos || []).map((t) => t.tamanho));
+  const etiqueta = await aplicarEtiqueta(companyId, conversationId, tamanho, daGrade);
   return { handled: true, resultado: 'TAMANHO', tamanho, message_id: rows[0] ? rows[0].id : null, etiqueta };
 }
 
