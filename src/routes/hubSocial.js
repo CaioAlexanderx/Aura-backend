@@ -66,6 +66,9 @@ router.get('/conversations', async (req, res) => {
               -- "É ela": o nome do cadastro vale no lugar do nome do perfil.
               COALESCE(cu.name, c.customer_name) AS customer_name,
               c.status, c.category, c.handoff_reason, c.last_inbound_at, c.last_message_at,
+              -- quem está no comando: o app mostra "Com <nome>" quando não é o usuário logado
+              c.assigned_user_id,
+              (SELECT split_part(COALESCE(u.full_name, ''), ' ', 1) FROM users u WHERE u.id = c.assigned_user_id) AS assigned_user_name,
               ${preview} AS last_message_preview,
               (SELECT COUNT(*)::int FROM ig_outbox o
                 WHERE o.conversation_id = c.id AND o.status = 'pending_approval') AS pending_approvals
@@ -115,7 +118,9 @@ router.get('/conversations/:convId/messages', async (req, res) => {
     const { rows: conv } = await db.query(
       `SELECT c.id, c.channel, c.external_id, c.customer_id,
               COALESCE(cu.name, c.customer_name) AS customer_name,
-              c.status, c.category, c.handoff_reason, c.last_inbound_at
+              c.status, c.category, c.handoff_reason, c.last_inbound_at,
+              c.assigned_user_id,
+              (SELECT split_part(COALESCE(u.full_name, ''), ' ', 1) FROM users u WHERE u.id = c.assigned_user_id) AS assigned_user_name
          FROM hub_conversations c
          LEFT JOIN customers cu ON cu.id = c.customer_id AND cu.company_id = c.company_id
         WHERE c.id = $1 AND c.company_id = $2 LIMIT 1`,
