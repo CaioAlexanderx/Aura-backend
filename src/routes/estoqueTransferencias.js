@@ -32,6 +32,7 @@ const router = require('express').Router({ mergeParams: true });
 const db = require('../config/database');
 const svc = require('../services/transferenciaDeEstoque');
 const conferencia = require('../services/conferenciaDeEstoque');
+const { condicionalLiberada } = require('../services/condicional');
 const { hasConferenciaSchema } = require('../utils/conferenciaSchema');
 
 function falhaDeSchema(err) {
@@ -73,6 +74,7 @@ router.post('/', async (req, res) => {
       isStaff: !!(req.user && req.user.role === 'admin'),
       itens: pedido.itens,
       observacao: pedido.observacao,
+      comCondicional: condicionalLiberada(req),
       ...(stockCountId ? { stockCountId } : {}),
     });
     await client.query('COMMIT');

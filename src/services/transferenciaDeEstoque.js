@@ -43,6 +43,7 @@
 'use strict';
 
 const { randomUUID } = require('crypto');
+const { lerComClientes, comClientesDaVariante } = require('./comClientes');
 const { nomeDaCorDaVariante, nomeGravadoQueAparece } = require('./nomeDaCor');
 // 20/11/2026: a copia do cadastro (colunas, fotos, fornecedores, categorias,
 // variantes) e de services/copiaDeCadastro.js, usada tambem pelo cadastro do
@@ -217,12 +218,32 @@ function agrupar(rows, chave) {
   return m;
 }
 
+/**
+ * Pecas com clientes (condicional aberta) dos produtos, por produto/variante,
+ * ou null quando a trava esta desligada. Dentro da transacao: SAVEPOINT, para
+ * uma base sem a migration 467 nao derrubar a transferencia (cai no saldo de
+ * sempre, como a conferencia e o GET /products fazem).
+ */
+async function lerForaDaOrigem(conn, origemId, pids, comCondicional) {
+  if (!comCondicional || !pids.length) return null;
+  try {
+    await conn.query('SAVEPOINT cc_transferencia');
+    const mapa = await lerComClientes(conn, origemId, pids);
+    await conn.query('RELEASE SAVEPOINT cc_transferencia');
+    return mapa;
+  } catch (e) {
+    console.error('[transferencia] pecas com clientes indisponivel:', e && e.message);
+    await conn.query('ROLLBACK TO SAVEPOINT cc_transferencia').catch(() => {});
+    return null;
+  }
+}
+
 // ─── o nucleo ────────────────────────────────────────────────
 /**
  * Roda DENTRO de uma transacao aberta pelo chamador (BEGIN ... COMMIT).
  * Lanca ErroDeTransferencia (4xx) sem ter escrito nada.
  */
-async function transferir(conn, { origemId, destinoId, userId, isStaff = false, itens, observacao = null, stockCountId = null }) {
+async function transferir(conn, { origemId, destinoId, userId, isStaff = false, itens, observacao = null, stockCountId = null, comCondicional = false }) {
   origemId = String(origemId).toLowerCase();
   destinoId = String(destinoId).toLowerCase();
   const lojas = await conferirLojas(conn, { origemId, destinoId, userId, isStaff });
@@ -285,21 +306,31 @@ async function transferir(conn, { origemId, destinoId, userId, isStaff = false, 
   }
 
   // 2. saldo (ja travado)
+  // Venda condicional: a peca com cliente continua no estoque, mas nao esta na
+  // loja e nao pode ser mandada. Com a trava ligada, o disponivel e
+  // estoque - com clientes, por variante (igual ao produto sem grade).
+  // Trava desligada: nem consulta, o saldo e o de sempre.
+  const fora = await lerForaDaOrigem(conn, origemId, pids, comCondicional);
   const faltando = [];
   for (const it of itens) {
     const linha = it.variant_id ? varPorId.get(it.variant_id) : prodPorId.get(it.product_id);
-    const disponivel = Number(linha.stock_qty) || 0;
+    const comClientes = fora ? comClientesDaVariante(fora, it.product_id, it.variant_id || null) : 0;
+    const disponivel = (Number(linha.stock_qty) || 0) - comClientes;
     if (it.quantidade > disponivel + 1e-9) {
       faltando.push({
         product_id: it.product_id, variant_id: it.variant_id,
         nome: prodPorId.get(it.product_id).name,
         quantidade: it.quantidade, disponivel: arred3(Math.max(0, disponivel)),
+        ...(comClientes > 0 ? { com_clientes: comClientes } : {}),
       });
     }
   }
   if (faltando.length) {
+    const algumaComCliente = faltando.some((f) => f.com_clientes > 0);
     throw new ErroDeTransferencia(409, 'ESTOQUE_INSUFICIENTE',
-      'Alguns itens não têm estoque suficiente na loja de origem.', { itens: faltando });
+      algumaComCliente
+        ? 'Alguns itens não têm peças livres na loja: parte do estoque está com clientes em condicional.'
+        : 'Alguns itens não têm estoque suficiente na loja de origem.', { itens: faltando });
   }
 
   // 3. atributos das variantes de origem (rotulo + match + copia)
