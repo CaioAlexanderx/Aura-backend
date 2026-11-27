@@ -580,11 +580,17 @@ async function enqueue({
   }
 
   // ── Saldo (migration 472): a reserva e o INSERT na MESMA transacao.
-  // Template pago de uma origem com saldo; texto em janela aberta e teste
-  // nao gastam. Sem saldo, grava 'skipped' com o motivo (SALDO_ESGOTADO...).
-  const bucket = saldoBucket || (kind === 'template' ? waSaldo.bucketDaOrigem(sourceType) : null);
+  // Todo TEMPLATE gasta saldo (o envio de teste tambem: a Meta cobra igual),
+  // menos a lista fechada FORA_DO_SALDO; texto em janela aberta nao gasta.
+  // Sem saldo, grava 'skipped' com o motivo (SALDO_ESGOTADO...).
+  const saldoLigado = waSaldo.ativo();
+  const bucket = status === 'pending' && saldoLigado
+    ? (saldoBucket || (kind === 'template'
+      ? await bucketDoTemplate(companyId, { sourceType, templateName, templateLanguage }) : null))
+    : null;
+  if (saldoLigado && dedupeKey) await liberarDedupeRecusada(dedupeKey);
   let saldoInfo = null;
-  if (status === 'pending' && bucket && !isTeste && waSaldo.ativo()) {
+  if (status === 'pending' && bucket) {
     const comp = components ? JSON.stringify(components) : null;
     const r = await inserirReservando({
       companyId, bucket,
@@ -657,6 +663,81 @@ async function inserirReservando({ companyId, bucket, sql, params }) {
   }
 }
 
+// Saldo que um TEMPLATE gasta (472). null = nao gasta (lista fechada
+// waSaldo.FORA_DO_SALDO). Template do hub fora da janela = aviso. Origem
+// sem saldo registrado no SOURCE_BUCKET (inclusive o envio de teste, ou uma
+// origem nova que alguem esqueceu de registrar) gasta pela categoria do
+// modelo: MARKETING gasta novidade, o resto gasta aviso. Na duvida, gasta —
+// um template nunca sai de graca para a loja e pago pela Aura.
+async function bucketDoTemplate(companyId, { sourceType = null, templateName = null, templateLanguage = 'pt_BR', hub = false } = {}) {
+  const doMapa = waSaldo.bucketDaOrigem(sourceType);
+  if (doMapa) return doMapa;
+  if (waSaldo.foraDoSaldo(sourceType)) return null;
+  if (hub) return 'avisos';
+  let categoria = null;
+  try {
+    const { rows } = await db.query(
+      `-- wa:template-categoria
+       SELECT category FROM wa_templates
+        WHERE company_id = $1 AND name = $2 AND language = $3 LIMIT 1`,
+      [companyId, templateName, templateLanguage || 'pt_BR']
+    );
+    categoria = rows && rows[0] && rows[0].category ? String(rows[0].category).toUpperCase() : null;
+  } catch (e) {
+    if (e.code !== '42P01' && e.code !== '42703') throw e;
+  }
+  return categoria === 'MARKETING' ? 'novidades' : 'avisos';
+}
+
+// Recusa de SALDO nao segura a dedupe_key (472). Sem isto, a cliente que
+// ficou de fora porque o saldo acabou nunca mais recebia a mesma mensagem,
+// nem depois do pacote pago: o enqueue seguinte respondia DUPLICADO. A linha
+// recusada continua na fila (auditavel), so com a chave renomeada. Vale so
+// para as recusas de saldo (nada saiu, nada foi gasto); as outras recusas
+// seguem segurando a chave como sempre. Duas chamadas ao mesmo tempo: o
+// UPDATE trava a linha e o indice unico deixa entrar uma linha viva so.
+const RECUSAS_DE_SALDO = Object.freeze(['SALDO_ESGOTADO', 'SALDO_INDISPONIVEL', 'NUMERO_EM_ATENCAO']);
+
+async function liberarDedupeRecusada(dedupeKey) {
+  if (!dedupeKey) return;
+  try {
+    await db.query(
+      `-- wa:outbox-libera-dedupe
+       UPDATE wa_outbox SET dedupe_key = dedupe_key || ':recusa:' || id::text, updated_at = NOW()
+        WHERE dedupe_key = $1 AND status = 'skipped' AND skip_reason = ANY($2::text[])`,
+      [dedupeKey, RECUSAS_DE_SALDO]
+    );
+  } catch (e) {
+    if (e.code !== '42P01' && e.code !== '42703') throw e;
+  }
+}
+
+// Ultima palavra no DESPACHO (472): template so sai com a mensagem reservada
+// no livro-razao. Quem enfileirou pela fila ja reservou (achamos pelo
+// outbox_id); linha que nasceu com a trava desligada, ou INSERT direto na
+// wa_outbox, reserva agora — com a mesma refKey do enqueue (outbox:<id>),
+// entao nunca debita duas vezes. Sem saldo: nao envia.
+async function garantirReservaNoDespacho(row) {
+  if (waSaldo.isento(row.company_id)) return { ok: true, isento: true };
+  const bucket = await bucketDoTemplate(row.company_id, {
+    sourceType: row.source_type, templateName: row.template_name,
+    templateLanguage: row.template_language, hub: !!row.hub_conversation_id,
+  });
+  if (!bucket) return { ok: true, foraDoSaldo: true };
+  try {
+    const { rows } = await db.query(
+      `-- wa:saldo-despacho-reserva
+       SELECT 1 FROM wa_saldo_lancamentos WHERE outbox_id = $1 AND kind = 'consumo' LIMIT 1`,
+      [row.id]
+    );
+    if (rows && rows.length) return { ok: true, jaReservado: true };
+  } catch (e) {
+    console.error('[waOutbox] conferencia do saldo no despacho falhou (bloqueia):', e.code || '', e.message);
+    return { ok: false, code: 'SALDO_INDISPONIVEL' };
+  }
+  return waSaldo.reservarAvulso({ companyId: row.company_id, bucket, refKey: `outbox:${row.id}`, outboxId: row.id });
+}
+
 // ── Origem HUB (375) ────────────────────────────────────────
 // Mensagem de uma conversa do hub (Aurinha de plantão ou resposta humana
 // pelo painel) → telefone do cliente. Diferenças para o enqueue() da
@@ -727,6 +808,7 @@ async function enqueueHub({
   // Saldo (472): template fora da janela de 24h e um AVISO (convite de
   // conversa fechada). Texto na janela aberta e gratis e nao reserva.
   const bucketHub = saldoBucket || (kind === 'template' ? 'avisos' : null);
+  if (waSaldo.ativo() && dedupeKey) await liberarDedupeRecusada(dedupeKey);
   let saldoInfo = null;
   if (status === 'pending' && !held && bucketHub && waSaldo.ativo()) {
     try {
@@ -1072,6 +1154,17 @@ async function processBatch(limit = 20) {
         }
       }
 
+      // Saldo (472): ultima palavra antes da Meta. Nenhum template sai sem
+      // a mensagem reservada, venha a linha de onde vier.
+      if (row.kind === 'template' && waSaldo.ativo()) {
+        const g = await garantirReservaNoDespacho(row);
+        if (!g.ok) {
+          await markRow(row.id, { status: 'skipped', skip_reason: g.code || 'SALDO_INDISPONIVEL' });
+          out.skipped++;
+          continue;
+        }
+      }
+
       let resp;
       if (row.kind === 'template') {
         resp = await wa.sendTemplate(
@@ -1215,7 +1308,8 @@ async function applyTemplateStatus(companyId, { name, language, status, metaTemp
 module.exports = {
   normalizePhone, touchInbound, touchOutboundHuman, windowOpen, getContact, decryptToken,
   isTokenError, markTokenInvalid, clearTokenInvalid, connectionState,
-  enqueue, enqueueHub, inserirReservando, processBatch, simulate, applyStatusUpdate, applyTemplateStatus,
+  enqueue, enqueueHub, inserirReservando, processBatch,
+  bucketDoTemplate, liberarDedupeRecusada, garantirReservaNoDespacho, RECUSAS_DE_SALDO, simulate, applyStatusUpdate, applyTemplateStatus,
   windowOpenAt,
   // Guardas de custo (Fase 2) — expostas para o GET /whatsapp/preview e
   // para os testes de guarda.

@@ -336,11 +336,15 @@ describe('enfileirar com reserva na mesma transacao (waOutbox.enqueue)', () => {
     expect((await waSaldo.getSaldos(ID.fila)).saldos.avisos.restante).toBe(meio);
   });
 
-  test('texto em janela aberta e teste nao gastam saldo', async () => {
+  test('texto nao gasta saldo; template de TESTE gasta (a Meta cobra o teste igual)', async () => {
     const antes = await consumos(ID.fila, 'avisos');
     await enfileirar(400, { kind: 'text', templateName: null, textBody: 'oi' }); // janela fechada -> skipped, sem reserva
-    await enfileirar(401, { sourceType: 'teste' });
     expect(await consumos(ID.fila, 'avisos')).toBe(antes);
+    await q(`INSERT INTO wa_saldo_lancamentos (company_id, bucket, kind, fonte, qty, ref_key)
+             VALUES ($1, 'avisos', 'pacote', 'pacote', 5, $2)`, [ID.fila, `pacote-teste:${uuid()}`]);
+    const t = await enfileirar(401, { sourceType: 'teste' });
+    expect(t.queued).toBe(true);
+    expect(await consumos(ID.fila, 'avisos')).toBe(antes + 1);
   });
 });
 
