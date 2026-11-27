@@ -194,20 +194,74 @@ describe('envio', () => {
     const meta = JSON.parse(db.query.mock.calls.find((c) => String(c[0]).includes('hubenvio:grava'))[1][4]);
     expect(meta.tipo).toBe('produto');
     expect(meta.cartao).toMatchObject({ nome: 'Saia midi', cor: 'Preto', preco: 189.9, fotos: [FOTO, FOTO2] });
-    expect(meta.cartao.tamanhos).toEqual([{ tamanho: 'P', ultimo: false }, { tamanho: 'M', ultimo: false }, { tamanho: 'G', ultimo: true }]);
+    expect(meta.cartao.tamanhos).toEqual([{ tamanho: 'P', disponivel: true, ultimo: false }, { tamanho: 'M', disponivel: true, ultimo: false }, { tamanho: 'G', disponivel: true, ultimo: true }]);
   });
 
-  it('até 3 tamanhos: botões de resposta com o payload TAM:', async () => {
+  it('até 3 tamanhos: UMA bolha, foto no cabeçalho dos botões, legenda e pergunta no corpo', async () => {
     const res = await enviar({ type: 'produto_grade', product_id: PROD, cor: '000000', fotos: [FOTO], perguntar_tamanho: true });
     expect(res.status).toBe(200);
-    const q = graph()[1];
+    expect(graph()).toHaveLength(1);
+    const q = graph()[0];
     expect(q.type).toBe('interactive');
     expect(q.interactive.type).toBe('button');
-    expect(q.interactive.body.text).toBe('Qual tamanho?');
+    expect(q.interactive.header).toEqual({ type: 'image', image: { link: FOTO } });
+    expect(q.interactive.body.text).toBe('Saia midi · Preto · R$ 189,90 · Tem P, M e G (último)\n\nQual tamanho?');
     const botoes = q.interactive.action.buttons;
     expect(botoes.map((b) => b.reply.title)).toEqual(['P', 'M', 'G']);
     expect(botoes[0].reply.id).toBe(`TAM:${PROD}:${V(2)}:P`);
+    // Uma linha na thread: o cartão, já com as opções da pergunta.
+    expect(grava()).toHaveLength(1);
+    const meta = JSON.parse(db.query.mock.calls.find((c) => String(c[0]).includes('hubenvio:grava'))[1][4]);
+    expect(meta).toMatchObject({ tipo: 'produto', pergunta: true, formato: 'botoes', opcoes: ['P', 'M', 'G'] });
+  });
+
+  it('várias fotos + botões: as outras vão antes e a bolha (com a 1ª foto) fecha', async () => {
+    await enviar({ type: 'produto_grade', product_id: PROD, cor: '000000', fotos: [FOTO, FOTO2], perguntar_tamanho: true });
+    expect(graph().map((g) => g.type)).toEqual(['image', 'interactive']);
+    expect(graph()[0].image.link).toBe(FOTO2);
+    expect(graph()[1].interactive.header.image.link).toBe(FOTO);
+  });
+
+  it('corpo acima de 1024 caracteres: volta para foto com legenda + pergunta separada', async () => {
+    w.produto.name = 'Saia '.repeat(220);
+    await enviar({ type: 'produto_grade', product_id: PROD, cor: '000000', fotos: [FOTO], perguntar_tamanho: true });
+    expect(graph().map((g) => g.type)).toEqual(['image', 'interactive']);
+    expect(graph()[1].interactive.header).toBeUndefined();
+    expect(graph()[1].interactive.body.text).toBe('Qual tamanho?');
     expect(grava()).toHaveLength(2);
+  });
+
+  it('tamanho sem peça: vai no cartão com disponivel:false, mas fora da legenda e dos botões', async () => {
+    w.variantes.push(variante(6, PRETO, 'GG', 0));
+    const res = await enviar({ type: 'produto_grade', product_id: PROD, cor: '000000', fotos: [FOTO], perguntar_tamanho: true });
+    expect(res.status).toBe(200);
+    const q = graph()[0].interactive;
+    expect(q.body.text).toContain('Tem P, M e G (último)');
+    expect(q.body.text).not.toContain('GG');
+    expect(q.action.buttons.map((b) => b.reply.title)).toEqual(['P', 'M', 'G']);
+    const meta = JSON.parse(db.query.mock.calls.find((c) => String(c[0]).includes('hubenvio:grava'))[1][4]);
+    expect(meta.cartao.tamanhos).toEqual([
+      { tamanho: 'P', disponivel: true, ultimo: false }, { tamanho: 'M', disponivel: true, ultimo: false },
+      { tamanho: 'G', disponivel: true, ultimo: true }, { tamanho: 'GG', disponivel: false, ultimo: false },
+    ]);
+  });
+
+  it('leitura: todos_tamanhos traz a grade inteira; tamanhos só os com peça', async () => {
+    w.variantes.push(variante(6, PRETO, 'GG', 0));
+    const res = await request(app()).get(`/companies/${COMPANY}/hub/produtos/${PROD}/grade`);
+    const preto = res.body.cores.find((c) => c.nome === 'Preto');
+    expect(preto.tamanhos.map((t) => t.tamanho)).toEqual(['P', 'M', 'G']);
+    expect(preto.todos_tamanhos.map((t) => [t.tamanho, t.disponivel])).toEqual([['P', true], ['M', true], ['G', true], ['GG', false]]);
+    const rosa = res.body.cores.find((c) => c.nome === 'Rosa');
+    expect(rosa.todos_tamanhos.every((t) => t.disponivel === false)).toBe(true);
+  });
+
+  it('reservar tamanho sem peça continua recusado no servidor', async () => {
+    w.sugestao = { tipo: 'reservar_e_mandar_pix', product_id: PROD, variant_id: V(4), tamanho: 'M', quantidade: 1, estado: 'sem_estoque' };
+    const res = await request(app()).post(`/companies/${COMPANY}/hub/conversations/${CONV}/reservar-pix`).send({ message_id: MSG });
+    expect(res.status).toBe(409);
+    expect(res.body.code).toBe('PEDIDO_SEM_SALDO');
+    expect(pedidoBalcao.guardarPedido).not.toHaveBeenCalled();
   });
 
   it('acima de 3 tamanhos: lista', async () => {

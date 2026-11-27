@@ -46,6 +46,7 @@ const MAX_FOTOS_PADRAO = 4;
 const MAX_BOTOES = 3;
 const MAX_LINHAS_LISTA = 10;
 const PERGUNTA = 'Qual tamanho?';
+const MAX_CORPO_INTERATIVO = 1024;
 const ROTULO_SUGESTAO = 'Reservar e mandar o Pix';
 
 const round2 = (n) => Math.round((Number(n) + Number.EPSILON) * 100) / 100;
@@ -173,13 +174,20 @@ async function carregar(companyId, productId) {
 
     // Tamanhos com estoque: uma entrada por tamanho (soma variantes repetidas).
     const porTam = new Map();
+    const todosPorTam = new Map(); // a grade inteira, inclusive o tamanho sem peça (riscado no app)
     for (const x of g.variantes) {
-      if (!x.tamanho || x.livres <= 0) continue;
+      if (!x.tamanho) continue;
       const k = x.tamanho.toUpperCase();
+      const t = todosPorTam.get(k);
+      if (t) t.livres += x.livres; else todosPorTam.set(k, { tamanho: x.tamanho, livres: x.livres });
+      if (x.livres <= 0) continue;
       const atual = porTam.get(k);
       if (atual) { atual.livres += x.livres; continue; }
       porTam.set(k, { tamanho: x.tamanho, variant_id: String(x.v.id), preco: x.preco, livres: x.livres });
     }
+    const todosTamanhos = [...todosPorTam.values()]
+      .sort((a, b) => compararTamanho(a.tamanho, b.tamanho))
+      .map((t) => ({ tamanho: t.tamanho, disponivel: t.livres > 0, ultimo: t.livres === 1 }));
     const tamanhos = [...porTam.values()]
       .sort((a, b) => compararTamanho(a.tamanho, b.tamanho))
       .map((t) => ({ tamanho: t.tamanho, variant_id: t.variant_id, preco: t.preco, ultimo: t.livres === 1 }));
@@ -191,6 +199,7 @@ async function carregar(companyId, productId) {
       foto: fotoDaCor, fotos,
       disponivel: tamanhos.length > 0 || semTamanho,
       tamanhos,
+      todos_tamanhos: todosTamanhos,
     };
   });
 
@@ -259,7 +268,8 @@ function payloadDoTamanho(productId, variantId, tamanho) {
   return `${PAYLOAD_PREFIXO}:${productId}:${variantId}:${tamanho}`;
 }
 
-function montarPergunta(productId, tamanhos) {
+// `unica` ({ foto, corpo }): botões com a foto no cabeçalho e o texto junto, numa bolha só.
+function montarPergunta(productId, tamanhos, unica = null) {
   if (tamanhos.length <= MAX_BOTOES) {
     return {
       formato: 'botoes',
@@ -268,7 +278,8 @@ function montarPergunta(productId, tamanhos) {
         type: 'interactive',
         interactive: {
           type: 'button',
-          body: { text: PERGUNTA },
+          ...(unica ? { header: { type: 'image', image: { link: unica.foto } } } : {}),
+          body: { text: unica ? unica.corpo : PERGUNTA },
           action: {
             buttons: tamanhos.map((t) => ({
               type: 'reply', reply: { id: payloadDoTamanho(productId, t.variant_id, t.tamanho), title: t.tamanho.slice(0, 20) },
@@ -323,6 +334,23 @@ async function enviarProdutoGrade({ companyId, conversationId, userId, dados = {
     messaging_product: 'whatsapp', to: phone, ...corpo,
   });
 
+  // Uma bolha só: foto no cabeçalho dos botões + legenda e pergunta no corpo (até 3
+  // tamanhos e 1024 caracteres). Lista (acima de 3) não aceita foto no cabeçalho, e
+  // texto longo não cabe: nesses casos seguem foto com legenda + pergunta em separado.
+  const corpoUnico = `${legenda}
+
+${PERGUNTA}`;
+  if (perguntar && fotos.length && tamanhos.length <= MAX_BOTOES && corpoUnico.length <= MAX_CORPO_INTERATIVO) {
+    for (let i = 1; i < fotos.length; i++) await post({ type: 'image', image: { link: fotos[i] } });
+    const p = montarPergunta(grade.produto.id, tamanhos, { foto: fotos[0], corpo: corpoUnico });
+    const wamid = envio.wamidDe(await post(p.graph));
+    await gravarCartao({
+      companyId, conversationId, userId, wamid, legenda, grade, cor, preco, tamanhos, fotos,
+      extra: { pergunta: true, formato: p.formato, opcoes: p.opcoes },
+    });
+    return { ok: true, wamid, content: legenda };
+  }
+
   // Fotos (a 1ª leva a legenda) ou, sem foto, só o texto.
   let primeira = null;
   if (fotos.length) {
@@ -350,16 +378,24 @@ async function enviarProdutoGrade({ companyId, conversationId, userId, dados = {
   return { ok: true, wamid: primeira, content: legenda };
 }
 
-function gravarCartao({ companyId, conversationId, userId, wamid, legenda, grade, cor, preco, tamanhos, fotos }) {
+// Cartão da thread: a grade inteira, com disponivel:false no tamanho sem peça.
+function todosDaCor(cor, tamanhos) {
+  if (cor && Array.isArray(cor.todos_tamanhos)) {
+    return cor.todos_tamanhos.map((t) => ({ tamanho: t.tamanho, disponivel: t.disponivel, ultimo: t.ultimo }));
+  }
+  return tamanhos.map((t) => ({ tamanho: t.tamanho, disponivel: true, ultimo: t.ultimo }));
+}
+
+function gravarCartao({ companyId, conversationId, userId, wamid, legenda, grade, cor, preco, tamanhos, fotos, extra = {} }) {
   return envio.gravarNaThread({
     companyId, conversationId, userId, wamid, content: legenda,
     metadata: {
-      tipo: 'produto', product_id: grade.produto.id,
+      tipo: 'produto', product_id: grade.produto.id, ...extra,
       variant_ids: tamanhos.map((t) => t.variant_id),
       nome: grade.produto.nome, preco, image_url: fotos[0] || null,
       cartao: {
         tipo: 'produto', nome: grade.produto.nome, cor: (cor && cor.nome) || null, preco,
-        fotos, tamanhos: tamanhos.map((t) => ({ tamanho: t.tamanho, ultimo: t.ultimo })),
+        fotos, tamanhos: todosDaCor(cor, tamanhos),
       },
     },
   });
