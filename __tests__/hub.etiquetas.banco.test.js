@@ -152,6 +152,22 @@ describe('etiquetas', () => {
   });
 });
 
+describe('quem está no comando', () => {
+  it('a lista e a thread trazem assigned_user_id e o primeiro nome de quem assumiu', async () => {
+    await q(`UPDATE hub_conversations SET assigned_user_id = $1 WHERE id = $2`, [ID.dono, ID.conv1]);
+    const lista = await request(app).get(`${hub(ID.lojaA)}/conversations`);
+    const c = lista.body.conversations.find((x) => x.id === ID.conv1);
+    expect(c.assigned_user_id).toBe(ID.dono);
+    expect(c.assigned_user_name).toBe('Fixture');
+    const thread = await request(app).get(`${hub(ID.lojaA)}/conversations/${ID.conv1}/messages`);
+    expect(thread.body.conversation.assigned_user_id).toBe(ID.dono);
+    expect(thread.body.conversation.assigned_user_name).toBe('Fixture');
+    await q(`UPDATE hub_conversations SET assigned_user_id = NULL WHERE id = $1`, [ID.conv1]);
+    const livre = await request(app).get(`${hub(ID.lojaA)}/conversations`);
+    expect(livre.body.conversations.find((x) => x.id === ID.conv1).assigned_user_id).toBeNull();
+  });
+});
+
 describe('"É ela"', () => {
   it('sugere o cadastro de mesmo telefone da MESMA loja, mesmo com máscara', async () => {
     const r = await request(app).get(`${hub(ID.lojaA)}/conversations/${ID.conv1}/cliente`);
