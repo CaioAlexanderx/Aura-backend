@@ -73,12 +73,12 @@ function requireCompanyAccess(opts = {}) {
       // que substituem o módulo database sem o helper). Chamamos como MÉTODO de
       // db (db.queryRetry(...) / db.query(...)) p/ preservar o `this` do pool.
       const roleSql =
-        `SELECT 'owner' AS role, is_sandbox FROM companies WHERE id = $1 AND owner_id = $2
-         UNION
-         SELECT cm.role_label AS role, c.is_sandbox FROM company_members cm
-         JOIN companies c ON c.id = cm.company_id
-         WHERE cm.company_id = $1 AND cm.user_id = $2 AND cm.status = 'active' AND cm.is_active = true
-         LIMIT 1`;
+        `SELECT r.role, (SELECT is_sandbox FROM companies WHERE id = $1) AS is_sandbox FROM (
+           SELECT 'owner' AS role FROM companies WHERE id = $1 AND owner_id = $2
+           UNION
+           SELECT cm.role_label AS role FROM company_members cm
+           WHERE cm.company_id = $1 AND cm.user_id = $2 AND cm.status = 'active' AND cm.is_active = true
+         ) r LIMIT 1`;
       const roleParams = [companyId, req.user.id];
       const { rows } = await (typeof db.queryRetry === 'function'
         ? db.queryRetry(roleSql, roleParams)

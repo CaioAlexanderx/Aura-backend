@@ -71,7 +71,7 @@ describe('trava da condicional com a empresa de teste', () => {
   test('o acesso nao faz consulta a mais por causa do flag', async () => {
     await request(app(lojista)).post(`/companies/${REAL}/`).send({});
     expect(consultas.filter(([s]) => /AS role/.test(s)).length).toBe(1);
-    expect(consultas.some(([s]) => /SELECT is_sandbox/.test(s))).toBe(false);
+    expect(consultas.length).toBe(1);
   });
 
   test('condicionalLiberada: so o carimbo do servidor libera', () => {
