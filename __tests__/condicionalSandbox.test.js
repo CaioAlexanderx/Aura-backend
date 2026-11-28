@@ -1,0 +1,77 @@
+// ============================================================
+// AURA. — Venda condicional: a empresa de teste (is_sandbox) passa pela trava
+// (28/11/2026). Banco de mentira; o flag vem de companies.is_sandbox pela
+// empresa da rota, nunca do que o cliente manda.
+// ============================================================
+'use strict';
+
+const express = require('express');
+const request = require('supertest');
+const db = require('../src/config/database');
+const c = require('../src/services/condicional');
+const condicionaisRouter = require('../src/routes/condicionais');
+
+const REAL = '11111111-2222-3333-4444-555555555555';
+const TESTE = 'b0463109-aaaa-bbbb-cccc-dddddddddddd';
+
+function app(user) {
+  const a = express();
+  a.use(express.json());
+  a.use('/companies/:id', (req, _res, next) => { req.user = user; next(); }, c.marcarEmpresaDeTeste, condicionaisRouter);
+  return a;
+}
+
+let consultas;
+beforeEach(() => {
+  delete process.env.CONDICIONAL_LIBERADA;
+  c._limparCacheSandbox();
+  consultas = [];
+  jest.spyOn(db, 'query').mockImplementation(async (sql, params) => {
+    consultas.push([String(sql), params]);
+    if (/SELECT is_sandbox FROM companies/.test(sql)) return { rows: [{ is_sandbox: params[0] === TESTE }] };
+    return { rows: [] };
+  });
+});
+afterEach(() => { jest.restoreAllMocks(); delete process.env.CONDICIONAL_LIBERADA; });
+
+const lojista = { id: 'u1', role: 'client', is_staff: false };
+
+describe('trava da condicional com a empresa de teste', () => {
+  test('empresa real, sem staff e trava desligada: 404', async () => {
+    const r = await request(app(lojista)).post(`/companies/${REAL}/`).send({ is_sandbox: true });
+    expect(r.status).toBe(404);
+  });
+
+  test('empresa de teste (is_sandbox no banco): passa pela trava', async () => {
+    const r = await request(app(lojista)).post(`/companies/${TESTE}/`).send({});
+    expect(r.status).not.toBe(404);
+    expect(r.body.error).not.toBe('Não encontrado');
+  });
+
+  test('is_sandbox enviado pelo cliente (corpo, query, usuario) nao conta', async () => {
+    const r = await request(app({ ...lojista, is_sandbox: true }))
+      .post(`/companies/${REAL}/?is_sandbox=true`).send({ is_sandbox: true, company: { is_sandbox: true } });
+    expect(r.status).toBe(404);
+  });
+
+  test('staff passa sem consultar o banco; trava ligada tambem', async () => {
+    await request(app({ ...lojista, is_staff: true })).post(`/companies/${REAL}/`).send({});
+    expect(consultas.some(([s]) => /is_sandbox/.test(s))).toBe(false);
+    process.env.CONDICIONAL_LIBERADA = 'true';
+    const r = await request(app(lojista)).post(`/companies/${REAL}/`).send({});
+    expect(r.status).not.toBe(404);
+    expect(consultas.some(([s]) => /is_sandbox/.test(s))).toBe(false);
+  });
+
+  test('falha de banco ao ler o flag nao libera', async () => {
+    db.query.mockImplementation(async () => { throw new Error('boom'); });
+    const r = await request(app(lojista)).post(`/companies/${TESTE}/`).send({});
+    expect(r.status).toBe(404);
+  });
+
+  test('condicionalLiberada: so o carimbo do servidor libera', () => {
+    expect(c.condicionalLiberada({ user: lojista })).toBe(false);
+    expect(c.condicionalLiberada({ user: lojista, body: { is_sandbox: true } })).toBe(false);
+    expect(c.condicionalLiberada({ user: lojista, condicionalSandbox: true })).toBe(true);
+  });
+});
