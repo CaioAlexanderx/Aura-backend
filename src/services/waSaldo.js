@@ -31,8 +31,13 @@ const FUSO = 'America/Sao_Paulo';
 
 // Franquia que RENOVA todo mes: Negocio e Essencial com o add-on.
 const FRANQUIA_MENSAL = { novidades: 10, avisos: 100, aurinha: 80 };
-// Presente do Essencial sem add-on: uma vez so, nao renova.
-const BOAS_VINDAS = { novidades: 10, avisos: 30, aurinha: 50 };
+// Saldo do TESTE (trial), uma vez so, sem renovar, so depois da 1a venda no
+// Caixa (28/11/2026, estrategia de planos): 20 avisos e 5 novidades. Sem
+// Aurinha na v1. Substitui o pacote de boas-vindas 30/10/50 do Essencial.
+// Se a loja assina o Negocio, passa na hora para a franquia do Negocio.
+const SALDO_TESTE = { novidades: 5, avisos: 20, aurinha: 0 };
+// Compat: o nome antigo segue exportado, agora com o saldo do teste.
+const BOAS_VINDAS = SALDO_TESTE;
 // Pacotes (precos em centavos). Numero fechado no codigo: e PRECO.
 const PACOTES = {
   novidades: { qty: 100, preco_centavos: 6900 },
@@ -101,16 +106,47 @@ function schemaMissing(e) {
   return !!e && (e.code === '42P01' || e.code === '42703');
 }
 
+// Em teste (trial): data de fim no futuro, sem assinatura e sem cobranca
+// ativa (mesma conta do trialRegra.SQL_INICIAR). Quem assina sai do teste
+// na hora e cai na franquia do plano.
+function emTeste(r, agora = new Date()) {
+  if (!r || !r.trial_ends_at) return false;
+  if (!(new Date(r.trial_ends_at) > agora)) return false;
+  if (r.asaas_subscription_id) return false;
+  return String(r.billing_status || '').toLowerCase() !== 'active';
+}
+
+// Teste VENCIDO (28/11/2026, decisao da Nina): so quem tem billing_status
+// 'trial', trial_ends_at no passado e nenhuma assinatura perde o WhatsApp.
+// Ficam como estao: active, overdue, valor personalizado, equipe e sandbox.
+// O Caixa segue vendendo (Caixa vivo apos o trial); so o WhatsApp para.
+function testeVencido(r, agora = new Date()) {
+  if (!r || String(r.billing_status || '').toLowerCase() !== 'trial') return false;
+  if (!r.trial_ends_at || !(new Date(r.trial_ends_at) < agora)) return false;
+  if (r.asaas_subscription_id) return false;
+  if (r.custom_subscription_value !== null && r.custom_subscription_value !== undefined) return false;
+  if (r.is_sandbox === true || r.dono_staff === true) return false;
+  return true;
+}
+
+// Add-on so garante a franquia mensal quando e PAGO (price_cents > 0 e source
+// diferente de 'trial'); add-on de teste segue a regra do teste (Nina, 28/11).
 // Empresa: plano/vertical/add-on (quem tem franquia que renova), cota
 // excepcional e qualidade do numero — uma consulta so, pelo runner.
-async function lerEmpresa(runner, companyId) {
+async function lerEmpresa(runner, companyId, agora = new Date()) {
   const { rows } = await runner.query(
     `-- wa:saldo-empresa
      SELECT c.plan, c.vertical_active, c.vertical,
             c.wa_marketing_quota, c.wa_quality_rating, c.wa_paused_reason,
+            c.trial_ends_at, c.billing_status, c.asaas_subscription_id,
+            c.trial_started_by_sale_at, c.custom_subscription_value, c.is_sandbox,
+            COALESCE((SELECT u.is_staff FROM users u WHERE u.id = c.owner_id), false) AS dono_staff,
+            EXISTS (SELECT 1 FROM sales sv WHERE sv.company_id = c.id) AS tem_venda,
             EXISTS (SELECT 1 FROM company_addons a
                      WHERE a.company_id = c.id AND a.addon_key = 'whatsapp_auto'
-                       AND a.status = 'active') AS addon
+                       AND a.status = 'active'
+                       AND COALESCE(a.price_cents, 0) > 0
+                       AND COALESCE(a.source, '') <> 'trial') AS addon
        FROM companies c WHERE c.id = $1 LIMIT 1`,
     [companyId]
   );
@@ -118,20 +154,43 @@ async function lerEmpresa(runner, companyId) {
   if (!r) throw Object.assign(new Error('empresa nao encontrada'), { code: 'EMPRESA_AUSENTE' });
   const plan = r.plan ? String(r.plan).toLowerCase() : null;
   const verticais = [r.vertical_active, r.vertical].map((v) => (v ? String(v).toLowerCase() : null));
+  const teste = emTeste(r, agora);
   let origem = 'essencial';
   if (r.addon) origem = 'addon';
+  else if (verticais.some((v) => v && VERTICAIS_COM_FRANQUIA.has(v)) && !(plan && PLANOS_COM_FRANQUIA.has(plan))) origem = 'vertical';
+  else if (teste) origem = 'teste';
+  else if (testeVencido(r, agora)) origem = 'essencial';
   else if (plan && PLANOS_COM_FRANQUIA.has(plan)) origem = 'plano';
   else if (verticais.some((v) => v && VERTICAIS_COM_FRANQUIA.has(v))) origem = 'vertical';
+  const primeiraVenda = !!(r.tem_venda || r.trial_started_by_sale_at);
   const cota = r.wa_marketing_quota === null || r.wa_marketing_quota === undefined
     ? null : Number(r.wa_marketing_quota);
   const rating = r.wa_quality_rating ? String(r.wa_quality_rating).toUpperCase() : null;
   return {
-    renova: origem !== 'essencial',
+    renova: origem !== 'essencial' && origem !== 'teste',
     origem,
+    // Teste: o saldo so existe depois da 1a venda concluida no Caixa.
+    primeiraVenda,
+    testeAte: teste && r.trial_ends_at ? new Date(r.trial_ends_at).toISOString() : null,
     cotaNovidades: Number.isInteger(cota) && cota >= 0 ? cota : null,
     emAtencao: rating === 'YELLOW' || rating === 'RED' || !!r.wa_paused_reason,
     motivoAtencao: rating === 'YELLOW' || rating === 'RED' ? 'QUALIDADE'
       : (r.wa_paused_reason ? 'PAUSA' : null),
+  };
+}
+
+// Liberacao do WhatsApp para a loja (decidida aqui, no servidor):
+//   plano/addon/vertical: libera (o app ainda confere o plano);
+//   teste: so depois da 1a venda; antes, o item do menu nao existe;
+//   essencial: fechado (os 14 dias de quem usou entram na B2).
+function liberacaoDe(empresa) {
+  const porPlano = empresa.origem === 'plano' || empresa.origem === 'addon' || empresa.origem === 'vertical';
+  const liberado = porPlano || (empresa.origem === 'teste' && empresa.primeiraVenda);
+  return {
+    liberado,
+    fase: porPlano ? 'plano' : (empresa.origem === 'teste'
+      ? (empresa.primeiraVenda ? 'teste' : 'teste_aguardando_venda') : 'fechado'),
+    teste_ate: empresa.testeAte || null,
   };
 }
 
@@ -172,9 +231,13 @@ function montarSaldo(bucket, empresa, linhas, periodo, renovaEm) {
   if (totalFranquia > 0) pushFonte('franquia', totalFranquia, renovaEm);
 
   const concedido = linhas.some((x) => x.bucket === bucket && x.kind === 'boas_vindas');
-  const creditoBV = soma('boas_vindas', 'boas_vindas');
+  // O saldo do teste so conta enquanto a loja esta em teste E ja vendeu.
+  // Assinou o Negocio: vale a franquia do plano; o que sobrou do teste nao
+  // acompanha (e nunca vira saldo de quem so e Essencial).
+  const noTeste = empresa.origem === 'teste' && empresa.primeiraVenda;
+  const creditoBV = noTeste ? soma('boas_vindas', 'boas_vindas') : 0;
   // Ainda nao gravado no livro-razao: aparece como disponivel (o reservar grava).
-  const totalBV = creditoBV || (!empresa.renova && !concedido ? BOAS_VINDAS[bucket] : 0);
+  const totalBV = creditoBV || (noTeste && !concedido ? SALDO_TESTE[bucket] : 0);
   if (totalBV > 0) pushFonte('boas_vindas', totalBV, null);
 
   const totalPacote = soma('pacote', 'pacote');
@@ -209,7 +272,7 @@ function resumir(bucket, empresa, montado, renovaEm) {
 async function getSaldos(companyId, { agora = new Date(), runner = db } = {}) {
   const periodo = periodoDe(agora);
   const renovaEm = renovaEmDe(agora);
-  const empresa = await lerEmpresa(runner, companyId);
+  const empresa = await lerEmpresa(runner, companyId, agora);
   const linhas = await lerLinhas(runner, companyId, periodo);
   const saldos = {};
   for (const b of BUCKETS) {
@@ -221,9 +284,20 @@ async function getSaldos(companyId, { agora = new Date(), runner = db } = {}) {
     renova_em: renovaEm,
     fuso: FUSO,
     plano: { renova: empresa.renova, origem: empresa.origem },
+    liberacao: liberacaoDe(empresa),
     numero: { em_atencao: empresa.emAtencao, motivo: empresa.motivoAtencao },
     saldos,
   };
+}
+
+// So a liberacao (uma consulta), para o /auth/me. Nunca lanca: erro = null
+// e o app cai no comportamento por plano.
+async function lerLiberacao(companyId, { agora = new Date(), runner = db } = {}) {
+  try {
+    return liberacaoDe(await lerEmpresa(runner, companyId, agora));
+  } catch (_) {
+    return null;
+  }
 }
 
 async function restante(companyId, bucket, opts) {
@@ -272,20 +346,21 @@ async function reservar(runner, { companyId, bucket, refKey, outboxId = null, co
 
     const periodo = periodoDe(agora);
     const renovaEm = renovaEmDe(agora);
-    const empresa = await lerEmpresa(runner, companyId);
+    const empresa = await lerEmpresa(runner, companyId, agora);
 
     // Numero em atencao pausa as novidades; avisos e aurinha seguem.
     if (bucket === 'novidades' && empresa.emAtencao) {
       return recusa('NUMERO_EM_ATENCAO', { motivo: empresa.motivoAtencao });
     }
 
-    // Presente do Essencial: grava uma vez (ref_key unico por saldo).
-    if (!empresa.renova) {
+    // Saldo do teste: grava uma vez (ref_key unico por saldo), so depois da
+    // 1a venda. Antes dela, sem fonte nenhuma: SALDO_ESGOTADO.
+    if (empresa.origem === 'teste' && empresa.primeiraVenda && SALDO_TESTE[bucket] > 0) {
       await runner.query(
         `INSERT INTO wa_saldo_lancamentos (company_id, bucket, kind, fonte, qty, ref_key, meta)
          VALUES ($1, $2, 'boas_vindas', 'boas_vindas', $3, $4, $5)
          ON CONFLICT (company_id, ref_key) DO NOTHING`,
-        [companyId, bucket, BOAS_VINDAS[bucket], `boas_vindas:${bucket}`, JSON.stringify({ origem: 'primeira_reserva' })]
+        [companyId, bucket, SALDO_TESTE[bucket], `boas_vindas:${bucket}`, JSON.stringify({ origem: 'saldo_teste' })]
       );
     }
 
@@ -399,7 +474,7 @@ async function devolver({ outboxId = null, companyId = null, refKey = null } = {
 }
 
 module.exports = {
-  BUCKETS, FRANQUIA_MENSAL, BOAS_VINDAS, PACOTES, SOURCE_BUCKET, FORA_DO_SALDO, FUSO,
-  ativo, isento, bucketDaOrigem, foraDoSaldo, periodoDe, renovaEmDe,
+  BUCKETS, FRANQUIA_MENSAL, BOAS_VINDAS, SALDO_TESTE, PACOTES, SOURCE_BUCKET, FORA_DO_SALDO, FUSO,
+  ativo, isento, emTeste, testeVencido, liberacaoDe, lerLiberacao, bucketDaOrigem, foraDoSaldo, periodoDe, renovaEmDe,
   getSaldos, restante, reservar, reservarAvulso, devolver,
 };

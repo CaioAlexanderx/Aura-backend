@@ -6,7 +6,7 @@
 // Provado no banco de verdade:
 //   - corrida: reservas simultaneas nunca gastam a mesma mensagem;
 //   - esgotado: sem saldo nao enfileira e grava o motivo;
-//   - boas-vindas do Essencial: uma vez so, nao renova;
+//   - saldo do teste (20/5): uma vez so, nao renova, so depois da 1a venda;
 //   - virada do mes no fuso de Sao Paulo;
 //   - devolver (falha de vez) e idempotente;
 //   - numero em atencao recusa novidades e deixa avisos passar;
@@ -32,8 +32,10 @@ jest.setTimeout(60000);
 const ID = {
   dono: uuid(), negocio: uuid(), essencial: uuid(), addon: uuid(), corrida: uuid(),
   atencao: uuid(), fila: uuid(), virada: uuid(),
+  semVenda: uuid(), puro: uuid(), assinou: uuid(), vencido: uuid(), vencidoAtivo: uuid(), addonTeste: uuid(),
 };
-const EMPRESAS = [ID.negocio, ID.essencial, ID.addon, ID.corrida, ID.atencao, ID.fila, ID.virada];
+const EMPRESAS = [ID.negocio, ID.essencial, ID.addon, ID.corrida, ID.atencao, ID.fila, ID.virada,
+  ID.semVenda, ID.puro, ID.assinou, ID.vencido, ID.vencidoAtivo, ID.addonTeste];
 
 let pool;
 let waSaldo;
@@ -83,13 +85,32 @@ beforeAll(async () => {
     q(`INSERT INTO companies (id, owner_id, legal_name, trade_name, plan) VALUES ($1, $2, $3, $3, $4)`,
       [id, ID.dono, nome, plan]);
   await loja(ID.negocio, 'Saldo Negocio', 'negocio');
-  await loja(ID.essencial, 'Saldo Essencial', 'essencial');
+  // Teste (trial) com a 1a venda feita: 20 avisos e 5 novidades, uma vez so.
+  await loja(ID.essencial, 'Saldo Teste', 'negocio');
+  await q(`UPDATE companies SET trial_ends_at = '2100-01-01', trial_started_by_sale_at = NOW() WHERE id = $1`, [ID.essencial]);
+  // Teste ainda sem venda: o WhatsApp nao esta liberado.
+  await loja(ID.semVenda, 'Saldo Teste Sem Venda', 'negocio');
+  await q(`UPDATE companies SET trial_ends_at = '2100-01-01' WHERE id = $1`, [ID.semVenda]);
+  // Essencial pago, sem teste: nenhum saldo (os 14 dias entram na B2).
+  await loja(ID.puro, 'Saldo Essencial', 'essencial');
+  // Teste vencido, sem assinatura, billing trial: fecha. Com billing active: segue como hoje.
+  await loja(ID.vencido, 'Saldo Vencido', 'negocio');
+  await q(`UPDATE companies SET billing_status = 'trial', trial_ends_at = '2026-01-01' WHERE id = $1`, [ID.vencido]);
+  await loja(ID.vencidoAtivo, 'Saldo Vencido Ativo', 'negocio');
+  await q(`UPDATE companies SET billing_status = 'active', trial_ends_at = '2026-01-01' WHERE id = $1`, [ID.vencidoAtivo]);
+  // Add-on de TESTE (preco 0, source trial) com o teste vencido: nao garante franquia.
+  await loja(ID.addonTeste, 'Saldo Addon Teste', 'negocio');
+  await q(`UPDATE companies SET billing_status = 'trial', trial_ends_at = '2026-01-01' WHERE id = $1`, [ID.addonTeste]);
+  await q(`INSERT INTO company_addons (company_id, addon_key, status, price_cents, source) VALUES ($1, 'whatsapp_auto', 'active', 0, 'trial')`, [ID.addonTeste]);
+  // Assinou o Negocio no meio do teste: passa para a franquia do Negocio.
+  await loja(ID.assinou, 'Saldo Assinou', 'negocio');
+  await q(`UPDATE companies SET trial_ends_at = '2100-01-01', trial_started_by_sale_at = NOW(), asaas_subscription_id = 'sub_teste' WHERE id = $1`, [ID.assinou]);
   await loja(ID.addon, 'Saldo Addon', 'essencial');
   await loja(ID.corrida, 'Saldo Corrida', 'negocio');
   await loja(ID.atencao, 'Saldo Atencao', 'negocio');
   await loja(ID.fila, 'Saldo Fila', 'negocio');
   await loja(ID.virada, 'Saldo Virada', 'negocio');
-  await q(`INSERT INTO company_addons (company_id, addon_key, status, price_cents) VALUES ($1, 'whatsapp_auto', 'active', 2900)`, [ID.addon]);
+  await q(`INSERT INTO company_addons (company_id, addon_key, status, price_cents, source) VALUES ($1, 'whatsapp_auto', 'active', 2900, 'asaas')`, [ID.addon]);
   // Cota excepcional: a corrida precisa de um saldo pequeno e exato.
   await q(`UPDATE companies SET wa_marketing_quota = 5 WHERE id = $1`, [ID.corrida]);
   await q(`UPDATE companies SET wa_quality_rating = 'RED' WHERE id = $1`, [ID.atencao]);
@@ -128,14 +149,53 @@ describe('franquias por plano', () => {
     expect([s.saldos.novidades.total, s.saldos.avisos.total, s.saldos.aurinha.total]).toEqual([10, 100, 80]);
   });
 
-  test('Essencial sem add-on: 10 / 30 / 50 de boas-vindas, sem renovar', async () => {
+  test('Teste com a 1a venda feita: 5 novidades e 20 avisos, sem Aurinha, sem renovar', async () => {
     const s = await waSaldo.getSaldos(ID.essencial);
-    expect(s.plano).toEqual({ renova: false, origem: 'essencial' });
-    expect([s.saldos.novidades.total, s.saldos.avisos.total, s.saldos.aurinha.total]).toEqual([10, 30, 50]);
+    expect(s.plano).toEqual({ renova: false, origem: 'teste' });
+    expect(s.liberacao).toMatchObject({ liberado: true, fase: 'teste' });
+    expect([s.saldos.novidades.total, s.saldos.avisos.total, s.saldos.aurinha.total]).toEqual([5, 20, 0]);
     expect(s.saldos.avisos.fontes).toEqual([
-      expect.objectContaining({ fonte: 'boas_vindas', total: 30, renova_em: null }),
+      expect.objectContaining({ fonte: 'boas_vindas', total: 20, renova_em: null }),
     ]);
     expect(s.saldos.avisos.renova_em).toBeNull();
+  });
+
+  test('Teste antes da 1a venda: nao liberado e sem saldo', async () => {
+    const s = await waSaldo.getSaldos(ID.semVenda);
+    expect(s.liberacao).toMatchObject({ liberado: false, fase: 'teste_aguardando_venda' });
+    expect(s.saldos.avisos.total).toBe(0);
+    expect(await reservar(ID.semVenda, 'avisos')).toMatchObject({ ok: false, code: 'SALDO_ESGOTADO' });
+  });
+
+  test('Essencial pago sem teste: fechado, sem saldo', async () => {
+    const s = await waSaldo.getSaldos(ID.puro);
+    expect(s.plano).toEqual({ renova: false, origem: 'essencial' });
+    expect(s.liberacao).toMatchObject({ liberado: false, fase: 'fechado' });
+    expect(s.saldos.avisos.total).toBe(0);
+  });
+
+  test('Teste vencido sem assinatura: saldo 0, nada sai; billing active segue com a franquia', async () => {
+    const v = await waSaldo.getSaldos(ID.vencido);
+    expect(v.liberacao).toMatchObject({ liberado: false, fase: 'fechado' });
+    expect(v.saldos.avisos.total).toBe(0);
+    expect(await reservar(ID.vencido, 'avisos')).toMatchObject({ ok: false, code: 'SALDO_ESGOTADO' });
+    const a = await waSaldo.getSaldos(ID.vencidoAtivo);
+    expect(a.plano).toEqual({ renova: true, origem: 'plano' });
+    expect(a.saldos.avisos.total).toBe(100);
+  });
+
+  test('Add-on pago: franquia cheia; add-on de teste (preco 0, trial): fica 0 com o teste vencido', async () => {
+    expect((await waSaldo.getSaldos(ID.addon)).saldos.avisos.total).toBe(100);
+    const t = await waSaldo.getSaldos(ID.addonTeste);
+    expect(t.plano).toEqual({ renova: false, origem: 'essencial' });
+    expect(t.saldos.avisos.total).toBe(0);
+  });
+
+  test('Assinou o Negocio no teste: passa na hora para 100 avisos e 10 novidades', async () => {
+    const s = await waSaldo.getSaldos(ID.assinou);
+    expect(s.plano).toEqual({ renova: true, origem: 'plano' });
+    expect(s.liberacao).toMatchObject({ liberado: true, fase: 'plano' });
+    expect([s.saldos.novidades.total, s.saldos.avisos.total]).toEqual([10, 100]);
   });
 });
 
@@ -185,8 +245,8 @@ describe('reservar', () => {
     expect(await consumos(ID.fila, 'aurinha')).toBe(1);
   });
 
-  test('boas-vindas: os 30 avisos do Essencial acabam e nao voltam no mes seguinte', async () => {
-    for (let i = 0; i < 30; i++) {
+  test('saldo do teste: os 20 avisos acabam e nao voltam no mes seguinte', async () => {
+    for (let i = 0; i < 20; i++) {
       const r = await reservar(ID.essencial, 'avisos');
       expect(r).toMatchObject({ ok: true, fonte: 'boas_vindas' });
     }
