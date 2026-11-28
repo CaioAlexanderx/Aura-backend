@@ -14,6 +14,9 @@
 // ============================================================
 'use strict';
 
+// A Aurinha fica atras da trava AURINHA_WA_LIBERADA (28/11/2026): aqui ela esta ligada.
+process.env.AURINHA_WA_LIBERADA = '1';
+
 jest.mock('../src/services/aurinhaAgent', () => ({
   responderSuporte: jest.fn(async () => ({ texto: 'Oi! Aqui e a Aurinha.' })),
 }));

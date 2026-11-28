@@ -32,6 +32,7 @@ const db = require('../config/database');
 const waOutbox = require('./waOutbox');
 const plantao = require('./plantao');
 const waSaldoAurinha = require('./waSaldoAurinha');
+const aurinhaLiberada = require('./aurinhaLiberada');
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const WINDOW_MS = 24 * 3600 * 1000;
@@ -201,6 +202,22 @@ async function jaAvisouRecentemente(conversationId) {
 // conv: linha de hub_conversations (id, company_id, external_id, status,
 // last_inbound_at, ultima_mensagem_humana_em, aguardando_resposta_desde).
 async function avaliarConversa(conv, { companyId, plantao: config = null }, { agora = new Date(), registrarAgendamento = false } = {}) {
+  // Trava da Aurinha (28/11/2026): fora da primeira versao. Nao responde, nao gasta
+  // saldo e a conversa fica com a lojista (a mensagem ja esta na caixa). Limpa a
+  // pendencia, senao o job reavaliaria a conversa todo minuto.
+  if (!(await aurinhaLiberada.permitida(companyId))) {
+    await db.query(
+      `-- hubwa:aurinha-travada
+       UPDATE hub_conversations
+          SET aguardando_resposta_desde = NULL,
+              status = CASE WHEN status = 'ia' THEN 'precisa_humano' ELSE status END,
+              updated_at = NOW()
+        WHERE id = $1`,
+      [conv.id]
+    );
+    return { respondeu: false, motivo: aurinhaLiberada.MOTIVO };
+  }
+
   const cfg = plantao.resolverConfig(config);
   const ctx = {
     agora,

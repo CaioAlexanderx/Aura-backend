@@ -11,6 +11,9 @@
 // ============================================================
 'use strict';
 
+// A Aurinha fica atras da trava AURINHA_WA_LIBERADA (28/11/2026): aqui ela esta ligada.
+process.env.AURINHA_WA_LIBERADA = '1';
+
 jest.mock('../src/config/database');
 jest.mock('../src/services/instagram', () => ({
   sendText: jest.fn(), sendImage: jest.fn(), clampText: (s) => s,

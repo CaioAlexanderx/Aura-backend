@@ -22,6 +22,7 @@
 
 const db = require('../config/database');
 const waSaldo = require('./waSaldo');
+const aurinhaLiberada = require('./aurinhaLiberada');
 
 const JANELA_HORAS = 24;
 
@@ -36,6 +37,8 @@ function recusa(code, extra = {}) { return { ok: false, code, ...extra }; }
 //   { ok:false, code:'SALDO_ESGOTADO'|'SALDO_INDISPONIVEL' }  NAO responder
 async function atender({ companyId, conversationId, agora = new Date() } = {}) {
   if (!companyId || !conversationId) return recusa('SALDO_INDISPONIVEL', { motivo: 'PARAMETROS' });
+  // Trava da Aurinha (28/11/2026): fora da primeira versao. Nao responde e nao gasta saldo.
+  if (!(await aurinhaLiberada.permitida(companyId))) return recusa(aurinhaLiberada.MOTIVO);
   if (!waSaldo.ativo()) return { ok: true, modo: 'desligado' };
   if (waSaldo.isento(companyId)) return { ok: true, isento: true };
 

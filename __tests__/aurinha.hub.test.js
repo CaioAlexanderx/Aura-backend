@@ -16,6 +16,9 @@
 // ============================================================
 'use strict';
 
+// A Aurinha fica atras da trava AURINHA_WA_LIBERADA (28/11/2026): aqui ela esta ligada.
+process.env.AURINHA_WA_LIBERADA = '1';
+
 process.env.IG_VERIFY_TOKEN = 'ig-verify-test';
 process.env.IG_APP_SECRET = 'ig-secret-test';
 
