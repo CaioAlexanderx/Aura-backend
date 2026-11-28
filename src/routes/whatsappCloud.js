@@ -842,10 +842,25 @@ router.post('/whatsapp/templates', ...guard, async (req, res) => {
 router.get('/whatsapp/outbox', ...guard, async (req, res) => {
   try {
     const { rows } = await db.query(
-      `SELECT id, to_phone, kind, template_name, status, skip_reason, attempts,
-              last_error, source_type, created_at, updated_at
-         FROM wa_outbox WHERE company_id = $1
-        ORDER BY created_at DESC LIMIT 50`,
+      // customer_name: a wa_outbox nao guarda customer_id, entao o nome vem
+      // do cadastro pelo telefone normalizado, SEMPRE da mesma empresa
+      // (c.company_id = o.company_id). LATERAL + LIMIT 1 evita duplicar a
+      // linha se houver dois cadastros com o mesmo telefone. Sem cliente: NULL.
+      `SELECT o.id, o.to_phone, o.kind, o.template_name, o.status, o.skip_reason,
+              o.attempts, o.last_error, o.source_type, o.created_at, o.updated_at,
+              cu.name AS customer_name
+         FROM wa_outbox o
+         LEFT JOIN LATERAL (
+           SELECT c.name FROM customers c
+            WHERE c.company_id = o.company_id
+              AND NULLIF(regexp_replace(COALESCE(c.phone, ''), '[^0-9]', '', 'g'), '') IS NOT NULL
+              AND (regexp_replace(c.phone, '[^0-9]', '', 'g') = o.to_phone
+                   OR '55' || regexp_replace(c.phone, '[^0-9]', '', 'g') = o.to_phone)
+            ORDER BY c.created_at DESC
+            LIMIT 1
+         ) cu ON true
+        WHERE o.company_id = $1
+        ORDER BY o.created_at DESC LIMIT 50`,
       [req.params.id]
     );
     return res.json({ data: rows });
