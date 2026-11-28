@@ -300,6 +300,9 @@ router.get('/', async (req, res) => {
               ${colDuracao}
               ${comPromo ? colunasPromo() : colunasPromoNulas()},
               is_active, is_group_shared, company_id, created_at,
+              -- Condicional (QA 28/11): peca personalizavel feita sob encomenda nao sai em
+              -- condicional; o app barra no passo 2 em vez de so no Guardar.
+              (is_personalizable IS TRUE AND customization_config IS NOT NULL) AS sob_encomenda,
               supplier_id,
               -- Fase 1 fornecedores: objeto pronto em vez de 3 colunas soltas --
               -- fica null quando supplier_id e null OU aponta pra um supplier
@@ -377,6 +380,7 @@ router.get('/', async (req, res) => {
         ? null : (parseInt(r.duration_minutes, 10) || 0),
       is_active: r.is_active !== false,
       is_group_shared: r.is_group_shared || false,
+      sob_encomenda: r.sob_encomenda === true,
       // Fase 1 fornecedores (16/09/2026, migration 342).
       supplier_id: r.supplier_id || null,
       supplier: r.supplier_json || null,
