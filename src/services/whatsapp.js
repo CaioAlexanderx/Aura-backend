@@ -190,6 +190,38 @@ async function graphPost(path, accessToken, body) {
   return data;
 }
 
+// ── Perfil do WhatsApp (business profile) ───────────────────
+// POST /{phone_number_id}/whatsapp_business_profile — about (1-139),
+// address (256), description (512), email (128), websites (até 2, com
+// http/https), profile_picture_handle. Doc: Cloud API > Business Profiles.
+async function updateBusinessProfile(phoneNumberId, accessToken, perfil) {
+  return graphPost(`/${phoneNumberId}/whatsapp_business_profile`, accessToken, {
+    messaging_product: 'whatsapp',
+    ...perfil,
+  });
+}
+
+// Foto do perfil: a Meta não aceita URL, só um "handle" gerado pelo
+// Resumable Upload API (1: abre a sessão no app; 2: envia os bytes).
+async function uploadProfilePictureHandle(accessToken, buffer, mimeType) {
+  if (!META_APP_ID) throw new Error('WA_APP_ID ausente');
+  const open = await fetch(
+    `${GRAPH_URL}/${META_APP_ID}/uploads?file_length=${buffer.length}&file_type=${encodeURIComponent(mimeType)}`,
+    { method: 'POST', headers: { Authorization: `Bearer ${accessToken}` } }
+  );
+  const sess = await open.json();
+  if (sess.error) throw graphError(sess, open.status);
+  const up = await fetch(`${GRAPH_URL}/${sess.id}`, {
+    method: 'POST',
+    headers: { Authorization: `OAuth ${accessToken}`, file_offset: '0', 'Content-Type': mimeType },
+    body: buffer,
+  });
+  const data = await up.json();
+  if (data.error) throw graphError(data, up.status);
+  if (!data.h) throw new Error('A Meta não devolveu o identificador da foto');
+  return data.h;
+}
+
 module.exports = {
   exchangeCodeForToken,
   sendTemplate, sendText, sendMedia,
@@ -197,4 +229,5 @@ module.exports = {
   getPhoneInfo, getPhoneOnboarding, graphPost, graphError,
   listPhoneNumbers, subscribeApp, unsubscribeApp, registerPhone,
   shareCreditLine,
+  updateBusinessProfile, uploadProfilePictureHandle,
 };

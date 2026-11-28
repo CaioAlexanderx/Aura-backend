@@ -18,7 +18,20 @@ router.get('/profile', async (req, res) => {
               vigilancia_alvara_reminder_enabled,
               cro_state, cro_pj_number, cro_rt_number, cro_rt_user_id,
               cnes_number, uses_controlled_meds, dental_compliance_enabled,
-              to_jsonb(c)->>'cpf' AS cpf
+              to_jsonb(c)->>'cpf' AS cpf,
+              -- 28/11/2026: site e endereço estruturado (to_jsonb: coluna que
+              -- falte no ambiente vira null, nunca derruba o perfil). Servem ao
+              -- pré-preenchimento e ao perfil do WhatsApp.
+              to_jsonb(c)->>'website' AS website,
+              to_jsonb(c)->>'address_street' AS address_street,
+              to_jsonb(c)->>'address_number' AS address_number,
+              to_jsonb(c)->>'address_complement' AS address_complement,
+              to_jsonb(c)->>'address_district' AS address_district,
+              to_jsonb(c)->>'address_city' AS address_city,
+              to_jsonb(c)->>'address_state' AS address_state,
+              to_jsonb(c)->>'address_zip' AS address_zip,
+              to_jsonb(c)->>'city' AS city,
+              to_jsonb(c)->>'state' AS state
        FROM companies c WHERE id = $1`,
       [req.params.id]
     );
@@ -38,6 +51,14 @@ router.get('/profile', async (req, res) => {
       phone:           c.phone        || '',
       email:           c.email        || '',
       address:         c.address      || '',
+      website:         c.website      || '',
+      address_street:     c.address_street     || '',
+      address_number:     c.address_number     || '',
+      address_complement: c.address_complement || '',
+      address_district:   c.address_district   || '',
+      address_city:       c.address_city || c.city || '',
+      address_state:      c.address_state || c.state || '',
+      address_zip:        c.address_zip        || '',
       tax_regime:      c.tax_regime   || 'simples',
       plan:            c.plan         || 'essencial',
       billing_status:  c.billing_status || 'inactive',

@@ -40,6 +40,9 @@ const quota = require('../services/marketing/marketingQuota');
 const placarDoDia = require('../services/placarDoDia');
 const { asaasRequest } = require('../services/asaasClient');
 const { encrypt } = require('../services/dojoBaasCrypto');
+const waConexaoPos = require('../services/waConexao/posConexao');
+const waConexaoProgresso = require('../services/waConexao/progresso');
+const { causaDoErro } = require('../services/waConexao/causas');
 
 const guard = [requireAuth, requireCompanyAccess({})];
 
@@ -447,22 +450,62 @@ router.post('/whatsapp/connect', ...guard, async (req, res) => {
       is_on_biz_app: isOnBizApp,
       warnings,
     });
-    // Modelos-base das automáticas: criados na Meta DEPOIS da resposta
-    // (não atrasa a conexão) e sem poder derrubá-la (prepararPadroesSeguro
-    // nunca lança). Se falhar, a rede de segurança
-    // (jobs/waModelosPreparoJob) tenta de novo.
-    if (registered && wabaId) {
-      const companyId = req.params.id;
-      setImmediate(() => {
-        require('../services/waAutomaticas/modelosStore')
-          .prepararPadroesSeguro(companyId, { origem: 'conexao' })
-          .catch(() => {});
-      });
-    }
+    // Depois da resposta o servidor termina sozinho (a lojista não aperta
+    // nada): perfil do WhatsApp pelo cadastro e modelos-base das
+    // automáticas. Cada item vira ✓ em GET /whatsapp/connect/progresso;
+    // um que falha não derruba os outros nem a conexão. Se o preparo dos
+    // modelos falhar, a rede de segurança (jobs/waModelosPreparoJob) tenta
+    // de novo.
+    waConexaoPos.dispararSeguro(req.params.id, {
+      registered, subscribed, wabaId, phoneNumberId, accessToken,
+    });
     return undefined;
   } catch (err) {
     console.error('[whatsappCloud] connect error:', err.message);
-    return res.status(502).json({ error: String(err.message).slice(0, 200) });
+    // A causa (para o quadro certo na tela) e o código curto (para o
+    // "Chamar a Aura") vão junto; o texto da Meta segue em `error`.
+    const { causa, codigo } = causaDoErro(err);
+    waConexaoProgresso.registrarPasso(req.params.id, req.user && req.user.id, 'erro', { causa, origem: 'servidor' }).catch(() => {});
+    return res.status(502).json({ error: String(err.message).slice(0, 200), causa, codigo });
+  }
+});
+
+// ── Conexão nova: progresso, funil e link por e-mail ───────────
+// GET /whatsapp/connect/progresso: cada item do "Quase lá" (número,
+// eventos, perfil, modelos) com estado pendente|rodando|ok|erro. A tela
+// consulta de poucos em poucos segundos; nada aqui chama a Meta.
+router.get('/whatsapp/connect/progresso', ...guard, async (req, res) => {
+  try {
+    return res.json(await waConexaoProgresso.lerProgresso(req.params.id));
+  } catch (err) {
+    console.error('[whatsappCloud] progresso error:', err.message);
+    return res.status(500).json({ error: 'Erro ao ler o progresso' });
+  }
+});
+
+// POST /whatsapp/connect/funil { passo, causa? }: os passos que só o app vê
+// (abriu, entrou na janela, terminou a janela, erro, chamou a Aura).
+router.post('/whatsapp/connect/funil', ...guard, async (req, res) => {
+  const { passo, causa } = req.body || {};
+  if (!waConexaoProgresso.PASSOS_DO_APP.includes(passo)) {
+    return res.status(400).json({ error: 'Passo inválido', code: 'VALIDATION_ERROR' });
+  }
+  await waConexaoProgresso.registrarPasso(req.params.id, req.user && req.user.id, passo, {
+    causa: typeof causa === 'string' ? causa : null, origem: 'app',
+  });
+  return res.json({ ok: true });
+});
+
+// POST /whatsapp/connect/link-por-email: no celular a janela do Facebook
+// não abre; manda o link da tela para o e-mail de quem está logado.
+router.post('/whatsapp/connect/link-por-email', ...guard, async (req, res) => {
+  try {
+    const r = await require('../services/waConexao/linkPorEmail').enviar(req.params.id, req.user && req.user.id);
+    await waConexaoProgresso.registrarPasso(req.params.id, req.user && req.user.id, 'celular_link_pedido', { origem: 'app' });
+    return res.json({ ok: true, enviado: r.enviado });
+  } catch (err) {
+    console.error('[whatsappCloud] link-por-email error:', err.message);
+    return res.status(500).json({ error: 'Não foi possível mandar o e-mail agora' });
   }
 });
 
