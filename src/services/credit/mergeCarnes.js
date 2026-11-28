@@ -236,6 +236,54 @@ function resolveOrigins(ctx, rawIds) {
   return { origins, existingNames, detail };
 }
 
+/**
+ * Confere o razao: as parcelas vivas de um carne de origem nao podem passar do
+ * que o razao dele reconhece (debitos - estornos, por conta). Se passam, o
+ * carne tem parcela orfa (venda cancelada ou devolvida depois de uma juncao ou
+ * renegociacao antiga) e juntar espalharia o erro para o carne novo.
+ * O grupo sem carne nao entra (nao ha razao por conta para comparar).
+ * Usado por preview e apply -- as mesmas recusas nos dois.
+ */
+async function assertOriginsMatchLedger(q, { companyId, customerId, origins }) {
+  const ids = (origins || []).filter(o => o.key !== NO_ACCOUNT_KEY).map(o => o.account_id);
+  if (!ids.length) return;
+  const { rows: inst } = await q.query(
+    `SELECT account_id, COALESCE(SUM(amount_due), 0) AS total
+       FROM credit_installments
+      WHERE company_id = $1 AND customer_id = $2 AND account_id = ANY($3::uuid[])
+        AND status <> 'cancelled'
+      GROUP BY account_id`,
+    [companyId, customerId, ids]
+  );
+  if (!inst || !inst.length) return;
+  const { rows: led } = await q.query(
+    `SELECT account_id,
+            COALESCE(SUM(CASE WHEN type = 'debit' THEN amount
+                              WHEN type = 'refund' THEN -amount ELSE 0 END), 0) AS total
+       FROM customer_credit_transactions
+      WHERE company_id = $1 AND customer_id = $2 AND account_id = ANY($3::uuid[])
+      GROUP BY account_id`,
+    [companyId, customerId, ids]
+  );
+  const razao = {};
+  for (const r of led || []) razao[String(r.account_id)] = round2(parseFloat(r.total) || 0);
+  for (const o of origins) {
+    if (o.key === NO_ACCOUNT_KEY) continue;
+    const row = inst.find(r => String(r.account_id) === String(o.account_id));
+    if (!row) continue;
+    const parcelas = round2(parseFloat(row.total) || 0);
+    const noRazao = razao[String(o.account_id)] || 0;
+    if (parcelas - noRazao > CENT_TOLERANCE) {
+      throw mergeError(409, 'CARNE_DIVERGENTE',
+        `O carne "${o.name}" tem parcelas que somam mais do que a divida dele no sistema `
+        + `(parcelas R$ ${parcelas.toFixed(2)}, divida R$ ${noRazao.toFixed(2)}). `
+        + 'Isso costuma vir de uma venda cancelada depois de juntar ou renegociar. '
+        + 'Fale com o suporte da Aura antes de juntar este carne.',
+        { account_id: o.account_id, installments_total: parcelas, ledger_total: noRazao });
+    }
+  }
+}
+
 /** Valida os parâmetros do parcelamento. Lança mergeError 400. */
 function validateTerms({ installments, total, firstDueDate }) {
   const n = parseInt(installments, 10);
@@ -277,6 +325,7 @@ async function previewMerge(q, { companyId, customerId, accountIds, total = null
   const n = validateTerms({ installments, total, firstDueDate });
   const ctx = await carneSummary.loadCarneContext(q, companyId, customerId, {});
   const { origins, existingNames } = resolveOrigins(ctx, accountIds);
+  await assertOriginsMatchLedger(q, { companyId, customerId, origins });
   return computeMergePlan({
     origins, total, installments: n, firstDueDate, periodUnit, periodCount, name, existingNames,
   });
@@ -297,6 +346,7 @@ async function applyMerge(client, {
   // 1. Trava carnês e parcelas do cliente e valida as origens.
   const ctx = await carneSummary.loadCarneContext(client, companyId, customerId, { forUpdate: true });
   const { origins, existingNames } = resolveOrigins(ctx, accountIds);
+  await assertOriginsMatchLedger(client, { companyId, customerId, origins });
 
   // 2. Plano puro (preview === apply).
   const plan = computeMergePlan({
@@ -487,6 +537,7 @@ module.exports = {
   mergedCarneName,
   computeMergePlan,
   resolveOrigins,
+  assertOriginsMatchLedger,
   validateTerms,
   previewMerge,
   applyMerge,

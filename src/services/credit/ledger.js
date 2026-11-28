@@ -10,6 +10,7 @@ const { scoreLabel, scoreWarning, _recalculateScore } = require('./score');
 const { computeUnifyPlan } = require('./unify');
 const carneAuto = require('./carneAuto');
 const { returnReleasedCoverage } = require('./releasedCoverage');
+const { shrinkMergedCarne } = require('./shrinkMergedCarne');
 
 const SP_DATE_NOW = "(NOW() AT TIME ZONE 'America/Sao_Paulo')::date";
 
@@ -1050,6 +1051,16 @@ async function cancelCreditSale(client, { companyId, saleId }) {
   );
   const saleAccountIds = ((delDebit && delDebit.rows) || []).map(r => r.account_id).filter(Boolean);
 
+  // Carne JUNTADO ou RENEGOCIADO: o debito da venda foi para o carne novo, cujo
+  // cronograma nao tem o sale_id dela. O valor sai de la (ver shrinkMergedCarne).
+  // Carne normal nao entra: o filtro exige parcela aberta sem venda na conta.
+  let carneAjuste = [];
+  if (customerId && saleAccountIds.length) {
+    carneAjuste = await _shrinkMergedCarnes(client, {
+      companyId, customerId, saleId, debits: delDebit.rows, createdBy: null,
+    });
+  }
+
   await client.query(
     `DELETE FROM transactions
      WHERE idempotency_key = $1 AND company_id = $2`,
@@ -1111,7 +1122,44 @@ async function cancelCreditSale(client, { companyId, saleId }) {
     released_coverage:     coverage.released,
     reallocated_amount:    coverage.reallocated,
     credit_left:           coverage.credit_left,
+    carne_ajuste:          carneAjuste,
   };
+}
+
+// Por conta (carne) onde o debito da venda esta: debito - o que as parcelas
+// vivas da propria venda ja cobrem naquele carne - devolucoes ja feitas.
+// So o que sobra e tirado das parcelas abertas sem venda do carne.
+async function _shrinkMergedCarnes(client, { companyId, customerId, saleId, debits, createdBy }) {
+  const porConta = {};
+  for (const d of (debits || [])) {
+    if (!d.account_id || d.payment_method === 'credito_cliente') continue;
+    porConta[d.account_id] = (porConta[d.account_id] || 0) + (parseFloat(d.amount) || 0);
+  }
+  const out = [];
+  for (const accountId of Object.keys(porConta)) {
+    let amount = porConta[accountId];
+    try {
+      const { rows } = await client.query(
+        `SELECT
+           COALESCE((SELECT SUM(amount_due) FROM credit_installments
+                      WHERE company_id = $1 AND account_id = $2 AND sale_id = $3
+                        AND status <> 'cancelled'), 0) AS parcelas_da_venda,
+           COALESCE((SELECT SUM(amount) FROM customer_credit_transactions
+                      WHERE company_id = $1 AND account_id = $2 AND sale_id = $3
+                        AND type = 'refund'), 0) AS devolvido`,
+        [companyId, accountId, saleId]
+      );
+      amount -= (parseFloat(rows[0].parcelas_da_venda) || 0) + (parseFloat(rows[0].devolvido) || 0);
+    } catch (e) {
+      if (e.code === '42703' || e.code === '42P01') continue;
+      throw e;
+    }
+    const r = await shrinkMergedCarne(client, {
+      companyId, customerId, accountId, saleId, amount, kind: 'cancel', createdBy,
+    });
+    if (r) out.push(r);
+  }
+  return out;
 }
 
 async function getCustomerCreditPreview(companyId, customerId) {

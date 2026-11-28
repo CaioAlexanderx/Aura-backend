@@ -25,6 +25,7 @@
 
 const creditLedger = require('../creditLedger');
 const ledger = require('./ledger');
+const { shrinkMergedCarne } = require('./shrinkMergedCarne');
 const pool = require('../../config/database');
 
 // 16/09/2026 (migration 343): sales.refund_abatement guarda o que a
@@ -343,6 +344,28 @@ async function refundCreditSale(client, { companyId, saleId, items, reason = nul
         new_status: inst.status, new_amount_due: newDue,
       });
       rem = 0;
+    }
+  }
+  // 8.1. Carne JUNTADO ou RENEGOCIADO: o debito da venda esta num carne cujo
+  //      cronograma nao tem o sale_id dela, entao o abatimento acima nao achou
+  //      parcela. O que sobrou sai das parcelas abertas desse carne -- e nao
+  //      vira "credito gerado" (a divida nao era so razao). Carne normal: nao
+  //      ha parcela aberta sem venda na conta e nada muda.
+  let carneAjuste = null;
+  if (rem > 0.005 && accountId && customerId) {
+    carneAjuste = await shrinkMergedCarne(client, {
+      companyId: saleCompanyId, customerId, accountId, saleId, amount: rem,
+      kind: 'refund', refId: devolucaoSaleId, createdBy,
+    });
+    if (carneAjuste) {
+      for (const c of carneAjuste.installments) {
+        abated.push({ installment_id: c.id, number: c.number, action: c.action, amount: c.amount, new_amount_due: c.new_amount_due, carne_juntado: true });
+        abatementLog.installments.push({
+          id: c.id, prev_status: c.prev_status, prev_amount_due: c.prev_amount_due, prev_covered: c.prev_covered,
+          new_status: c.new_status, new_amount_due: c.new_amount_due,
+        });
+      }
+      rem = round2(rem - carneAjuste.shrunk);
     }
   }
   const creditGenerated = round2(Math.max(0, rem));
