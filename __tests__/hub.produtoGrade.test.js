@@ -526,7 +526,7 @@ describe('reserva: B, D, E', () => {
   const chaveBase = `wa-res-${CONV}-${MSG}`;
 
   it('B: pedido já criado (falha depois dele): só reenvia o Pix, sem novo pedido e sem pré-checar o saldo', async () => {
-    w.pedidosChave = [{ idempotency_key: chaveBase, id: 'ord-9', order_number: 'PED-9', total: '189.90', cancelado: false, payment_status: 'pending', status: 'confirmed', deposit_paid: null, itens: ITENS_1 }];
+    w.pedidosChave = [{ idempotency_key: chaveBase, id: 'ord-9', order_number: 'PED-9', total: '189.90', cancelado: false, payment_status: 'pending', status: 'confirmed', recente: true, deposit_paid: null, itens: ITENS_1 }];
     w.reservas = [{ product_id: PROD, variant_id: V(1), qtd: '3' }]; // a própria reserva esgotou o livre
     const res = await reservar();
     expect(res.status).toBe(200);
@@ -536,7 +536,7 @@ describe('reserva: B, D, E', () => {
   });
 
   it('E: pedido cancelado não é reaproveitado: nova tentativa usa a chave -2', async () => {
-    w.pedidosChave = [{ idempotency_key: chaveBase, id: 'ord-0', order_number: 'PED-0', total: '189.90', cancelado: true, payment_status: 'pending', status: 'confirmed', deposit_paid: null, itens: ITENS_1 }];
+    w.pedidosChave = [{ idempotency_key: chaveBase, id: 'ord-0', order_number: 'PED-0', total: '189.90', cancelado: true, payment_status: 'pending', status: 'confirmed', recente: true, deposit_paid: null, itens: ITENS_1 }];
     const res = await reservar();
     expect(res.status).toBe(200);
     expect(pedidoBalcao.guardarPedido.mock.calls[0][0].chave).toBe(`${chaveBase}-2`);
@@ -565,7 +565,7 @@ describe('reserva: G, H, I', () => {
   const corpoDireto = { product_id: PROD, variant_id: V(1) };
   const reservarDireto = (extra = {}) => request(app()).post(`/companies/${COMPANY}/hub/conversations/${CONV}/reservar-pix`).send({ ...corpoDireto, ...extra });
   const chaveDia = `wa-res-${CONV}-${V(1)}-2026-11-27`;
-  const linha = (chave, extra) => ({ idempotency_key: chave, id: `ord-${chave}`, order_number: 'PED', total: '189.90', cancelado: false, payment_status: 'pending', status: 'confirmed', deposit_paid: null, itens: ITENS_1, ...extra });
+  const linha = (chave, extra) => ({ idempotency_key: chave, id: `ord-${chave}`, order_number: 'PED', total: '189.90', cancelado: false, payment_status: 'pending', status: 'confirmed', recente: true, deposit_paid: null, itens: ITENS_1, ...extra });
 
   it('G: reserva sem message_id reaproveita só pedido pendente com os mesmos itens', async () => {
     w.pedidosChave = [linha(chaveDia)];
@@ -581,6 +581,28 @@ describe('reserva: G, H, I', () => {
     const res = await reservarDireto();
     expect(res.status).toBe(200);
     expect(pedidoBalcao.guardarPedido.mock.calls[0][0].chave).toBe(`${chaveDia}-2`);
+    expect(graph()[1].text.body).toMatch(/^00020126/);
+  });
+
+  it('G: pedido pendente mais antigo que 15 min não é retomado (Pix pago e não registrado): chave -2', async () => {
+    w.pedidosChave = [linha(chaveDia, { recente: false })];
+    await reservarDireto();
+    expect(pedidoBalcao.guardarPedido.mock.calls[0][0].chave).toBe(`${chaveDia}-2`);
+  });
+
+  it('G: sem mensagem, pedido que já "andou" (preparing) abre a próxima chave', async () => {
+    w.pedidosChave = [linha(chaveDia, { status: 'preparing' })];
+    await reservarDireto();
+    expect(pedidoBalcao.guardarPedido.mock.calls[0][0].chave).toBe(`${chaveDia}-2`);
+  });
+
+  it('H: com mensagem, pedido que só "andou" (ready) é reaproveitado e o Pix é reenviado, nunca ja_pago', async () => {
+    w.sugestao = { tipo: 'reservar_e_mandar_pix', product_id: PROD, variant_id: V(1), tamanho: 'M', quantidade: 1, estado: 'pendente' };
+    w.pedidosChave = [linha(`wa-res-${CONV}-${MSG}`, { status: 'ready', recente: false })];
+    const res = await request(app()).post(`/companies/${COMPANY}/hub/conversations/${CONV}/reservar-pix`).send({ message_id: MSG });
+    expect(res.status).toBe(200);
+    expect(res.body.ja_pago).toBeUndefined();
+    expect(pedidoBalcao.guardarPedido).not.toHaveBeenCalled();
     expect(graph()[1].text.body).toMatch(/^00020126/);
   });
 

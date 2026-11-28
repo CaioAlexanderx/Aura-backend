@@ -421,6 +421,36 @@ describe('reserva do WhatsApp: o que conta como pedido pago (estado real do banc
     expect(x.pago).toBe(true);
   });
 
+  async function pedidoNovo(k) {
+    const v = await novaVariante();
+    const r = await guardar({ items: [{ product_id: ID.camiseta, variant_id: v, quantity: 1, unit_price: 100 }] }, k);
+    expect(r.status).toBe(201);
+    return { v, id: r.body.order.id };
+  }
+
+  test('sem mensagem: so retoma pedido pendente criado nos ultimos 15 min; o mais velho abre a chave -2', async () => {
+    const k = chave();
+    const { v, id } = await pedidoNovo(k);
+    const recente = await acharPedidoDaChave(ID.loja, k, itens(v), { pagoEncerra: false });
+    expect(recente.existente && recente.existente.id).toBe(id);
+    await q(`UPDATE digital_orders SET created_at = now() - interval '1 hour' WHERE id = $1`, [id]);
+    const velho = await acharPedidoDaChave(ID.loja, k, itens(v), { pagoEncerra: false });
+    expect(velho).toMatchObject({ existente: null, chave: `${k}-2` });
+  });
+
+  test('"andou" (preparing/ready) nao e pago: com mensagem reaproveita e reenvia, sem mensagem abre a proxima chave', async () => {
+    const k = chave();
+    const { v, id } = await pedidoNovo(k);
+    await q(`UPDATE digital_orders SET status = 'preparing' WHERE id = $1`, [id]);
+    const comMensagem = await acharPedidoDaChave(ID.loja, k, itens(v), { pagoEncerra: true });
+    expect(comMensagem.pago).toBe(false);
+    expect(comMensagem.existente.id).toBe(id);
+    await q(`UPDATE digital_orders SET status = 'ready' WHERE id = $1`, [id]);
+    expect((await acharPedidoDaChave(ID.loja, k, itens(v), { pagoEncerra: true })).pago).toBe(false);
+    const semMensagem = await acharPedidoDaChave(ID.loja, k, itens(v), { pagoEncerra: false });
+    expect(semMensagem).toMatchObject({ existente: null, chave: `${k}-2` });
+  });
+
   test('pedido aberto da mesma mensagem com outra quantidade: 409, sem abrir segundo pedido', async () => {
     const v = await novaVariante();
     const k = chave();
