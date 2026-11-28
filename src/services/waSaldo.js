@@ -116,6 +116,19 @@ function emTeste(r, agora = new Date()) {
   return String(r.billing_status || '').toLowerCase() !== 'active';
 }
 
+// Teste VENCIDO (28/11/2026, decisao da Nina): so quem tem billing_status
+// 'trial', trial_ends_at no passado e nenhuma assinatura perde o WhatsApp.
+// Ficam como estao: active, overdue, valor personalizado, equipe e sandbox.
+// O Caixa segue vendendo (Caixa vivo apos o trial); so o WhatsApp para.
+function testeVencido(r, agora = new Date()) {
+  if (!r || String(r.billing_status || '').toLowerCase() !== 'trial') return false;
+  if (!r.trial_ends_at || !(new Date(r.trial_ends_at) < agora)) return false;
+  if (r.asaas_subscription_id) return false;
+  if (r.custom_subscription_value !== null && r.custom_subscription_value !== undefined) return false;
+  if (r.is_sandbox === true || r.dono_staff === true) return false;
+  return true;
+}
+
 // Empresa: plano/vertical/add-on (quem tem franquia que renova), cota
 // excepcional e qualidade do numero — uma consulta so, pelo runner.
 async function lerEmpresa(runner, companyId, agora = new Date()) {
@@ -124,7 +137,8 @@ async function lerEmpresa(runner, companyId, agora = new Date()) {
      SELECT c.plan, c.vertical_active, c.vertical,
             c.wa_marketing_quota, c.wa_quality_rating, c.wa_paused_reason,
             c.trial_ends_at, c.billing_status, c.asaas_subscription_id,
-            c.trial_started_by_sale_at,
+            c.trial_started_by_sale_at, c.custom_subscription_value, c.is_sandbox,
+            COALESCE((SELECT u.is_staff FROM users u WHERE u.id = c.owner_id), false) AS dono_staff,
             EXISTS (SELECT 1 FROM sales sv WHERE sv.company_id = c.id) AS tem_venda,
             EXISTS (SELECT 1 FROM company_addons a
                      WHERE a.company_id = c.id AND a.addon_key = 'whatsapp_auto'
@@ -141,6 +155,7 @@ async function lerEmpresa(runner, companyId, agora = new Date()) {
   if (r.addon) origem = 'addon';
   else if (verticais.some((v) => v && VERTICAIS_COM_FRANQUIA.has(v)) && !(plan && PLANOS_COM_FRANQUIA.has(plan))) origem = 'vertical';
   else if (teste) origem = 'teste';
+  else if (testeVencido(r, agora)) origem = 'essencial';
   else if (plan && PLANOS_COM_FRANQUIA.has(plan)) origem = 'plano';
   else if (verticais.some((v) => v && VERTICAIS_COM_FRANQUIA.has(v))) origem = 'vertical';
   const primeiraVenda = !!(r.tem_venda || r.trial_started_by_sale_at);
@@ -456,6 +471,6 @@ async function devolver({ outboxId = null, companyId = null, refKey = null } = {
 
 module.exports = {
   BUCKETS, FRANQUIA_MENSAL, BOAS_VINDAS, SALDO_TESTE, PACOTES, SOURCE_BUCKET, FORA_DO_SALDO, FUSO,
-  ativo, isento, emTeste, liberacaoDe, lerLiberacao, bucketDaOrigem, foraDoSaldo, periodoDe, renovaEmDe,
+  ativo, isento, emTeste, testeVencido, liberacaoDe, lerLiberacao, bucketDaOrigem, foraDoSaldo, periodoDe, renovaEmDe,
   getSaldos, restante, reservar, reservarAvulso, devolver,
 };

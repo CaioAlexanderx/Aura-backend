@@ -32,10 +32,10 @@ jest.setTimeout(60000);
 const ID = {
   dono: uuid(), negocio: uuid(), essencial: uuid(), addon: uuid(), corrida: uuid(),
   atencao: uuid(), fila: uuid(), virada: uuid(),
-  semVenda: uuid(), puro: uuid(), assinou: uuid(),
+  semVenda: uuid(), puro: uuid(), assinou: uuid(), vencido: uuid(), vencidoAtivo: uuid(),
 };
 const EMPRESAS = [ID.negocio, ID.essencial, ID.addon, ID.corrida, ID.atencao, ID.fila, ID.virada,
-  ID.semVenda, ID.puro, ID.assinou];
+  ID.semVenda, ID.puro, ID.assinou, ID.vencido, ID.vencidoAtivo];
 
 let pool;
 let waSaldo;
@@ -93,6 +93,11 @@ beforeAll(async () => {
   await q(`UPDATE companies SET trial_ends_at = '2100-01-01' WHERE id = $1`, [ID.semVenda]);
   // Essencial pago, sem teste: nenhum saldo (os 14 dias entram na B2).
   await loja(ID.puro, 'Saldo Essencial', 'essencial');
+  // Teste vencido, sem assinatura, billing trial: fecha. Com billing active: segue como hoje.
+  await loja(ID.vencido, 'Saldo Vencido', 'negocio');
+  await q(`UPDATE companies SET billing_status = 'trial', trial_ends_at = '2026-01-01' WHERE id = $1`, [ID.vencido]);
+  await loja(ID.vencidoAtivo, 'Saldo Vencido Ativo', 'negocio');
+  await q(`UPDATE companies SET billing_status = 'active', trial_ends_at = '2026-01-01' WHERE id = $1`, [ID.vencidoAtivo]);
   // Assinou o Negocio no meio do teste: passa para a franquia do Negocio.
   await loja(ID.assinou, 'Saldo Assinou', 'negocio');
   await q(`UPDATE companies SET trial_ends_at = '2100-01-01', trial_started_by_sale_at = NOW(), asaas_subscription_id = 'sub_teste' WHERE id = $1`, [ID.assinou]);
@@ -163,6 +168,16 @@ describe('franquias por plano', () => {
     expect(s.plano).toEqual({ renova: false, origem: 'essencial' });
     expect(s.liberacao).toMatchObject({ liberado: false, fase: 'fechado' });
     expect(s.saldos.avisos.total).toBe(0);
+  });
+
+  test('Teste vencido sem assinatura: saldo 0, nada sai; billing active segue com a franquia', async () => {
+    const v = await waSaldo.getSaldos(ID.vencido);
+    expect(v.liberacao).toMatchObject({ liberado: false, fase: 'fechado' });
+    expect(v.saldos.avisos.total).toBe(0);
+    expect(await reservar(ID.vencido, 'avisos')).toMatchObject({ ok: false, code: 'SALDO_ESGOTADO' });
+    const a = await waSaldo.getSaldos(ID.vencidoAtivo);
+    expect(a.plano).toEqual({ renova: true, origem: 'plano' });
+    expect(a.saldos.avisos.total).toBe(100);
   });
 
   test('Assinou o Negocio no teste: passa na hora para 100 avisos e 10 novidades', async () => {
