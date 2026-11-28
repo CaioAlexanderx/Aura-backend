@@ -160,9 +160,10 @@ const app = express();
 app.use(express.json());
 
 beforeAll(async () => {
-  for (const k of ['WA_SALDO_ATIVO', 'AURA_COMPANY_ID', 'WA_DAILY_CAP', 'WA_PER_PHONE_DAILY_CAP']) ENV_ANTES[k] = process.env[k];
+  for (const k of ['WA_SALDO_ATIVO', 'AURINHA_WA_LIBERADA', 'AURA_COMPANY_ID', 'WA_DAILY_CAP', 'WA_PER_PHONE_DAILY_CAP']) ENV_ANTES[k] = process.env[k];
   process.env.WA_SALDO_ATIVO = '1';
   delete process.env.AURA_COMPANY_ID;
+  process.env.AURINHA_WA_LIBERADA = '1';
   delete process.env.WA_DAILY_CAP;
   delete process.env.WA_PER_PHONE_DAILY_CAP;
 

@@ -20,6 +20,7 @@ const db = require('../config/database');
 const igOutbox = require('../services/igOutbox');
 const waOutbox = require('../services/waOutbox');
 const hubWhatsapp = require('../services/hubWhatsapp');
+const aurinhaLiberada = require('../services/aurinhaLiberada');
 const hubMidia = require('../services/hubWhatsappMidia');
 const { anexarEtiquetas, UUID_RE } = require('../services/hubEtiquetas');
 
@@ -352,6 +353,11 @@ router.put('/settings', soDonoOuAdmin, async (req, res) => {
   const cid = req.params.id;
   const { enabled, approval_mode, extra_instructions } = req.body || {};
   try {
+    // Trava da Aurinha (28/11/2026): fora da primeira versao. Desligar sempre pode;
+    // ligar so a equipe Aura e a empresa sandbox (ou com AURINHA_WA_LIBERADA ligada).
+    if (enabled === true && !(await aurinhaLiberada.podeLigar(cid, req.user))) {
+      return res.status(403).json({ error: 'A Aurinha ainda não está disponível para a sua loja.', code: 'AURINHA_NAO_LIBERADA' });
+    }
     const { rows } = await db.query(
       `INSERT INTO hub_agent_settings (company_id, enabled, approval_mode, extra_instructions)
        VALUES ($1, COALESCE($2, false), COALESCE($3, true), $4)

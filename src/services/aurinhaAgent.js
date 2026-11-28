@@ -37,6 +37,7 @@ function precoDaAurinha(row, campos) {
 const { buildSystemPrompt, CATEGORIES } = require('./aurinhaPrompt');
 const igOutbox = require('./igOutbox');
 const waSaldoAurinha = require('./waSaldoAurinha');
+const aurinhaLiberada = require('./aurinhaLiberada');
 
 // Modelo da Aurinha — override por env ou por hub_agent_settings.model.
 // Piloto roda Sonnet 5 (decisão 30/08: se apertar em algum caso, o teste
@@ -373,6 +374,17 @@ async function handleInbound(companyId, conversationId) {
   try {
     const settings = await loadSettings(companyId);
     if (!settings || !settings.enabled) return { handled: false, reason: 'DESATIVADA' };
+
+    // Trava da Aurinha (28/11/2026): fora da primeira versao. Nao responde, nao gasta
+    // saldo e a conversa fica com a lojista.
+    if (!(await aurinhaLiberada.permitida(companyId))) {
+      await db.query(
+        `UPDATE hub_conversations SET status = 'precisa_humano', updated_at = NOW()
+          WHERE id = $1 AND company_id = $2 AND status = 'ia'`,
+        [conversationId, companyId]
+      ).catch(() => {});
+      return { handled: false, reason: aurinhaLiberada.MOTIVO };
+    }
 
     const { rows: convRows } = await db.query(
       `SELECT id, external_id, status, category, customer_name
