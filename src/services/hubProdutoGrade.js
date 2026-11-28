@@ -560,16 +560,23 @@ async function tratarResposta({ companyId, msg, conversationId }) {
 
 // ── Chave do pedido, trava do envio ──────────────────────────
 const MAX_TENTATIVAS_CHAVE = 6;
+// Pedido aberto (não pago nem entregue): "andou" = a lojista já começou a separar (preparing/ready),
+// o que NÃO prova pagamento. Pago é outra coisa (ver pedidoPago).
+const STATUS_ANDOU = ['preparing', 'ready'];
+const STATUS_ABERTOS = ['pending', 'pending_payment', 'confirmed', ...STATUS_ANDOU];
+// Reserva sem mensagem só retoma pedido criado há pouco (falha no meio); mais velho abre a próxima chave.
+const JANELA_RETOMADA_MIN = 15;
 
 /**
  * Pedido do balcão já pago? O pedido nasce `pending` e nada no fluxo dele muda payment_status:
  * o sinal grava studio_payments (kind 'deposit') e liga deposit_paid. Conta como pago:
- * deposit_paid, sinal pago acima de zero (a mesma conta de sinalDoPedido.comSinal) ou
- * status já fora de pendente/confirmado.
+ * deposit_paid, sinal pago acima de zero (a mesma conta de sinalDoPedido.comSinal),
+ * payment_status fora de pending ou status encerrado (delivered e afins). preparing/ready
+ * ("andou") NÃO contam como pago.
  */
 async function pedidoPago(r) {
   if (r.deposit_paid === true || String(r.deposit_paid) === 'true') return true;
-  if (!['pending', 'confirmed'].includes(String(r.status))) return true;
+  if (!STATUS_ABERTOS.includes(String(r.status))) return true; // entregue e afins
   if (String(r.payment_status) !== 'pending') return true;
   try {
     const c = await sinalDoPedido.comSinal(db, { id: r.id, total: r.total });
@@ -585,9 +592,13 @@ async function pedidoPago(r) {
  * Só é reaproveitado o pedido NÃO cancelado, ainda sem pagamento (ver pedidoPago) e com os
  * MESMOS itens (produto, variante e quantidade). Cancelado, já pago ou de outra quantidade
  * passam para a próxima chave: a cliente nunca paga duas vezes a mesma peça.
+ * Sem mensagem: só retoma pedido pendente criado nos últimos 15 minutos e que ainda não
+ * "andou" (preparing/ready); mais velho ou andado abre a próxima chave (um Pix pago e não
+ * registrado não volta a ser cobrado).
  * Reserva ligada a uma mensagem (`pagoEncerra`): pedido pago dessa mensagem não é refeito nem
- * reenviado ({ pago: true }); pedido aberto com OUTRA quantidade dá 409 (não abre um segundo
- * pedido que prenderia mais peças).
+ * reenviado ({ pago: true }); o que só "andou" é reaproveitado e o Pix reenviado (nunca
+ * `pago`); pedido aberto com OUTRA quantidade dá 409 (não abre um segundo pedido que
+ * prenderia mais peças).
  * Devolve { existente: {id, order_number, total, quantidade} | null, chave, pago }.
  */
 async function acharPedidoDaChave(companyId, base, itens, { pagoEncerra = false } = {}) {
@@ -597,6 +608,7 @@ async function acharPedidoDaChave(companyId, base, itens, { pagoEncerra = false 
      SELECT o.id, o.order_number, o.total, o.idempotency_key, o.status::text AS status,
             o.payment_status::text AS payment_status, to_jsonb(o)->>'deposit_paid' AS deposit_paid,
             (o.status::text ILIKE 'cancel%' OR o.cancelled_at IS NOT NULL) AS cancelado,
+            (o.created_at > now() - interval '${JANELA_RETOMADA_MIN} minutes') AS recente,
             COALESCE((SELECT json_agg(json_build_object('product_id', i.product_id, 'variant_id', i.variant_id, 'quantity', i.quantity))
                         FROM digital_order_items i WHERE i.order_id = o.id), '[]'::json) AS itens
        FROM digital_orders o WHERE o.company_id = $1 AND o.idempotency_key = ANY($2::text[])`,
@@ -618,8 +630,13 @@ async function acharPedidoDaChave(companyId, base, itens, { pagoEncerra = false 
       id: r.id, order_number: r.order_number, total: Number(r.total),
       quantidade: gravados.reduce((t, x) => t + Number(x.quantity || 0), 0),
     };
-    if (!(await pedidoPago(r))) return { existente, chave, pago: false };
-    if (pagoEncerra) return { existente, chave, pago: true };
+    if (await pedidoPago(r)) {
+      if (pagoEncerra) return { existente, chave, pago: true };
+      continue;
+    }
+    if (pagoEncerra) return { existente, chave, pago: false };
+    // Sem mensagem: só retomada de falha (recente e ainda não separado).
+    if (r.recente === true && !STATUS_ANDOU.includes(String(r.status))) return { existente, chave, pago: false };
   }
   throw erro('RESERVA_REPETIDA_DEMAIS', 'Essa reserva já foi refeita várias vezes. Faça um novo pedido pelo Caixa.', 409);
 }
