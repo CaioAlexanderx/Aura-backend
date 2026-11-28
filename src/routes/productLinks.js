@@ -12,7 +12,7 @@
 //        POST   /products/:productId/master-sku
 //        DELETE /products/:productId/master-sku
 //   - userRouter:    pra montar em /me (não precisa de :id)
-//        GET    /products/aggregated
+//        GET    /products/aggregated?limit=&offset=
 //
 // A separação existe porque a view agregada SÓ faz sentido no modo
 // consolidado (req.user.company === null), e nesse modo não há um
@@ -26,6 +26,26 @@ const { requireAuth } = require('../middleware/auth');
 
 const companyRouter = express.Router({ mergeParams: true });
 const userRouter    = express.Router();
+
+// ── Paginação do agregado (18/11/2026, INC-2026-11-18-01) ──
+// Antes a lista cortava em LIMIT 500 fixo: grupo com ~1.500 produtos via
+// só os 500 primeiros na visão "Somado" (e o filtro "Loja" do app só
+// enxergava esses). Agora segue o padrão do GET /companies/:id/products:
+// sem `limit` vem tudo até o teto HARD_CAP; `limit`/`offset` paginam.
+// Ordem estável: nome e depois group_key (que carrega o id do produto ou
+// o código mestre), para a paginação não repetir nem pular grupo.
+const AGGREGATED_HARD_CAP = 20000;
+
+function lerPaginacao(query) {
+  const pedido = parseInt(query && query.limit, 10);
+  const limit = Math.min(
+    Number.isFinite(pedido) && pedido > 0 ? pedido : AGGREGATED_HARD_CAP,
+    AGGREGATED_HARD_CAP
+  );
+  const desloc = parseInt(query && query.offset, 10);
+  const offset = Number.isFinite(desloc) && desloc > 0 ? desloc : 0;
+  return { limit, offset };
+}
 
 // ── Helper: lista IDs de TODAS as empresas ativas do owner ─
 async function getOwnerCompanyIds(ownerId) {
@@ -387,9 +407,10 @@ userRouter.get('/products/aggregated', requireAuth, async (req, res) => {
     // Resolve as empresas do owner. Note: usa userId direto pra owner_id,
     // o que assume que owners são sempre o user autenticado. Pra members
     // (não-owners), retorna vazio — eles operam empresa-por-empresa.
+    const { limit, offset } = lerPaginacao(req.query);
     const ownerCompanyIds = await getOwnerCompanyIds(userId);
     if (ownerCompanyIds.length === 0) {
-      return res.json({ products: [], total: 0, note: 'Nenhuma empresa encontrada para o owner.' });
+      return res.json({ products: [], total: 0, limit, offset, has_more: false, note: 'Nenhuma empresa encontrada para o owner.' });
     }
 
     // Query: agrega por master_sku quando existe; senão, cada produto
@@ -459,11 +480,26 @@ userRouter.get('/products/aggregated', requireAuth, async (req, res) => {
         FROM all_products
         WHERE master_sku IS NULL
       )
-      SELECT * FROM grouped
-       ORDER BY name
-       LIMIT 500`,
-      [ownerCompanyIds]
+      SELECT *, COUNT(*) OVER () AS total_grupos FROM grouped
+       ORDER BY name, group_key
+       LIMIT $2 OFFSET $3`,
+      [ownerCompanyIds, limit, offset]
     );
+
+    // O total vem na própria linha (COUNT OVER). Página além do fim não
+    // traz linha nenhuma: aí o total sai de uma contagem à parte.
+    let total = rows.length ? parseInt(rows[0].total_grupos, 10) || 0 : 0;
+    if (!rows.length && offset > 0) {
+      const c = await db.query(
+        `SELECT
+           (SELECT COUNT(DISTINCT master_sku) FROM products
+             WHERE company_id = ANY($1::uuid[]) AND is_active = true AND master_sku IS NOT NULL)
+         + (SELECT COUNT(*) FROM products
+             WHERE company_id = ANY($1::uuid[]) AND is_active = true AND master_sku IS NULL) AS total`,
+        [ownerCompanyIds]
+      );
+      total = parseInt(c.rows[0] && c.rows[0].total, 10) || 0;
+    }
 
     res.json({
       products: rows.map((r) => ({
@@ -483,7 +519,11 @@ userRouter.get('/products/aggregated', requireAuth, async (req, res) => {
         product_count: r.product_count,
         items:         r.items,
       })),
-      total: rows.length,
+      // total = quantos grupos existem (antes era só o tamanho da página).
+      total,
+      limit,
+      offset,
+      has_more: offset + rows.length < total,
       searched_companies: ownerCompanyIds.length,
     });
   } catch (err) {
