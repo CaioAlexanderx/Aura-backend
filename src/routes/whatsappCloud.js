@@ -435,7 +435,7 @@ router.post('/whatsapp/connect', ...guard, async (req, res) => {
     // padrão depois de já ter sido coexistence precisa desligar a flag.
     await saveCoexistence(req.params.id, coexistence);
 
-    return res.json({
+    res.json({
       connected: true,
       phone_display: phoneDisplay,
       waba_id: wabaId,
@@ -447,6 +447,19 @@ router.post('/whatsapp/connect', ...guard, async (req, res) => {
       is_on_biz_app: isOnBizApp,
       warnings,
     });
+    // Modelos-base das automáticas: criados na Meta DEPOIS da resposta
+    // (não atrasa a conexão) e sem poder derrubá-la (prepararPadroesSeguro
+    // nunca lança). Se falhar, a rede de segurança
+    // (jobs/waModelosPreparoJob) tenta de novo.
+    if (registered && wabaId) {
+      const companyId = req.params.id;
+      setImmediate(() => {
+        require('../services/waAutomaticas/modelosStore')
+          .prepararPadroesSeguro(companyId, { origem: 'conexao' })
+          .catch(() => {});
+      });
+    }
+    return undefined;
   } catch (err) {
     console.error('[whatsappCloud] connect error:', err.message);
     return res.status(502).json({ error: String(err.message).slice(0, 200) });
