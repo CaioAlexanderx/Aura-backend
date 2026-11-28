@@ -49,7 +49,8 @@
 // cliente" no estoque unico da loja dona.
 //
 // Trava de lancamento: CONDICIONAL_LIBERADA (env, desligada). Desligada, so a
-// equipe Aura (is_staff / admin) usa as rotas; para o lojista sao 404.
+// equipe Aura (is_staff / admin) e a empresa de teste (is_sandbox) usam as rotas;
+// para o lojista sao 404.
 // ============================================================
 'use strict';
 
@@ -86,10 +87,16 @@ function erro(status, message, code, extra) {
  * Trava do recurso. Desligada (padrao) = so a equipe Aura usa, para QA em
  * producao. CONDICIONAL_LIBERADA=true libera para todo lojista, junto com a
  * trava de mesmo nome do app.
+ *
+ * 28/11/2026: a empresa de teste (companies.is_sandbox = true, a loja "Aura"
+ * da QA) tambem passa. O flag vem do banco, na mesma consulta de acesso que
+ * requireCompanyAccess ja faz pela empresa da rota (req.companySandbox);
+ * nunca do corpo, da query nem do token.
  */
 function condicionalLiberada(req) {
   const env = String(process.env.CONDICIONAL_LIBERADA || '').trim().toLowerCase();
   if (env === 'true' || env === '1') return true;
+  if (req && req.companySandbox === true) return true;
   const u = req && req.user;
   return !!u && (u.is_staff === true || u.role === 'admin');
 }
