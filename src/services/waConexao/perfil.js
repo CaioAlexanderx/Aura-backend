@@ -94,7 +94,13 @@ async function aplicarPerfil(companyId, { phoneNumberId, accessToken }, deps = {
   }
   if (Object.keys(perfil).length === 0) return { aplicado: [], foto: false, vazio: true };
   await wa.updateBusinessProfile(phoneNumberId, accessToken, perfil);
-  return { aplicado: Object.keys(perfil), foto };
+  // O que foi posto DE FATO (a tela só afirma isto): foto, nome (about), endereço, site, e-mail.
+  const campos = [];
+  if (foto) campos.push('foto');
+  if (perfil.about) campos.push('nome');
+  if (perfil.address) campos.push('endereco');
+  if (perfil.websites) campos.push('site');
+  return { aplicado: Object.keys(perfil), foto, campos };
 }
 
 module.exports = { montarPerfil, enderecoEmTexto, aplicarPerfil, siteValido };

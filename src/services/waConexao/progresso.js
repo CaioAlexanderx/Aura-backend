@@ -15,7 +15,8 @@
 const db = require('../../config/database');
 
 const ITENS = ['numero', 'eventos', 'perfil', 'modelos'];
-const ESTADOS = ['rodando', 'ok', 'erro'];
+// 'indisponivel' = o WhatsApp não deixou (ex.: perfil na coexistência): não é erro, não vira vermelho.
+const ESTADOS = ['rodando', 'ok', 'erro', 'indisponivel'];
 // Passos que o app pode informar. Os "item" e "pronto" são do servidor.
 const PASSOS_DO_APP = ['abriu', 'entrou_janela', 'terminou_janela', 'erro', 'celular_link_pedido', 'chamou_a_aura'];
 
@@ -37,6 +38,7 @@ async function registrarItem(companyId, item, estado, extra = {}) {
   const md = { item, estado };
   if (extra.causa) md.causa = String(extra.causa).slice(0, 40);
   if (extra.codigo) md.codigo = String(extra.codigo).slice(0, 40);
+  if (Array.isArray(extra.campos)) md.campos = extra.campos.map((c) => String(c).slice(0, 20)).slice(0, 10);
   return gravar(companyId, null, 'wa.conexao.item', md);
 }
 
@@ -55,7 +57,8 @@ async function lerProgresso(companyId) {
       `-- wa:conexao-progresso
        SELECT DISTINCT ON (a.metadata->>'item')
               a.metadata->>'item' AS item, a.metadata->>'estado' AS estado,
-              a.metadata->>'causa' AS causa, a.metadata->>'codigo' AS codigo
+              a.metadata->>'causa' AS causa, a.metadata->>'codigo' AS codigo,
+              a.metadata->'campos' AS campos
          FROM audit_log a
          JOIN companies c ON c.id = a.company_id
         WHERE a.company_id = $1 AND a.action = 'wa.conexao.item'
@@ -74,9 +77,10 @@ async function lerProgresso(companyId) {
     const o = { item, estado: x.estado };
     if (x.causa) o.causa = x.causa;
     if (x.codigo) o.codigo = x.codigo;
+    if (Array.isArray(x.campos)) o.campos = x.campos;
     return o;
   });
-  const concluido = itens.every((i) => i.estado === 'ok' || i.estado === 'erro');
+  const concluido = itens.every((i) => i.estado === 'ok' || i.estado === 'erro' || i.estado === 'indisponivel');
   return { itens, concluido, pronto: concluido && itens.some((i) => i.estado === 'ok') };
 }
 

@@ -11,7 +11,7 @@
 const progresso = require('./progresso');
 const { causaDoErro } = require('./causas');
 
-async function rodar(companyId, item, fn) {
+async function rodar(companyId, item, fn, { recusaNeutra = false } = {}) {
   await progresso.registrarItem(companyId, item, 'rodando');
   try {
     const r = await fn();
@@ -19,10 +19,17 @@ async function rodar(companyId, item, fn) {
       await progresso.registrarItem(companyId, item, 'erro', { causa: 'outro', codigo: String(r.erro || 'sem-codigo') });
       return false;
     }
-    await progresso.registrarItem(companyId, item, 'ok');
+    await progresso.registrarItem(companyId, item, 'ok', { campos: r && r.campos });
     return true;
   } catch (e) {
     const { causa, codigo } = causaDoErro(e);
+    // A Meta recusou mexer no perfil de número que roda no app do celular
+    // (coexistência): não é falha da Aura, a lojista faz pelo celular.
+    if (recusaNeutra && e && e.meta) {
+      console.warn(`[waConexao] item ${item} indisponível company=${companyId} codigo=${codigo}`);
+      await progresso.registrarItem(companyId, item, 'indisponivel', { causa, codigo });
+      return true;
+    }
     console.warn(`[waConexao] item ${item} falhou company=${companyId} codigo=${codigo}: ${String(e.message).slice(0, 120)}`);
     await progresso.registrarItem(companyId, item, 'erro', { causa, codigo });
     return false;
@@ -36,7 +43,7 @@ async function marcar(companyId, item, ok, codigoErro) {
 }
 
 /**
- * @param {object} c { registered, subscribed, wabaId, phoneNumberId, accessToken }
+ * @param {object} c { registered, subscribed, coexistence, wabaId, phoneNumberId, accessToken }
  * accessToken só vive em memória aqui; nunca é logado.
  */
 async function executar(companyId, c, deps = {}) {
@@ -51,7 +58,8 @@ async function executar(companyId, c, deps = {}) {
   let okPerfil = false;
   if (c.phoneNumberId) {
     okPerfil = await rodar(companyId, 'perfil', () =>
-      perfil.aplicarPerfil(companyId, { phoneNumberId: c.phoneNumberId, accessToken: c.accessToken }, deps));
+      perfil.aplicarPerfil(companyId, { phoneNumberId: c.phoneNumberId, accessToken: c.accessToken }, deps),
+    { recusaNeutra: !!c.coexistence });
   } else {
     await marcar(companyId, 'perfil', false, 'sem-numero');
   }
