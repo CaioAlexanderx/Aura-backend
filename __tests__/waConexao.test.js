@@ -66,6 +66,7 @@ describe('aplicarPerfil', () => {
     const fetch = jest.fn().mockResolvedValue({ ok: true, headers: { get: () => 'image/png' }, arrayBuffer: async () => new Uint8Array([1]).buffer });
     const r = await aplicarPerfil('c1', { phoneNumberId: 'p1', accessToken: 't' }, { wa, fetch });
     expect(r.foto).toBe(true);
+    expect(r.campos).toEqual(['foto', 'nome']);
     expect(wa.updateBusinessProfile.mock.calls[0][2].profile_picture_handle).toBe('H1');
   });
 });
@@ -86,6 +87,15 @@ describe('lerProgresso', () => {
     expect(r.concluido).toBe(true);
     expect(r.pronto).toBe(true);
     expect(r.itens.find((i) => i.item === 'perfil')).toEqual({ item: 'perfil', estado: 'erro', causa: 'outro', codigo: 'meta-100' });
+  });
+  it('indisponivel conta como concluído e leva os campos postos', async () => {
+    db.query.mockResolvedValue({ rows: [
+      { item: 'numero', estado: 'ok' }, { item: 'eventos', estado: 'ok' },
+      { item: 'perfil', estado: 'indisponivel', causa: 'outro', codigo: 'meta-100' }, { item: 'modelos', estado: 'ok', campos: null },
+    ] });
+    const r = await progresso.lerProgresso('c1');
+    expect(r.concluido).toBe(true);
+    expect(r.itens.find((i) => i.item === 'perfil').estado).toBe('indisponivel');
   });
   it('tabela ausente não derruba', async () => {
     db.query.mockRejectedValue(Object.assign(new Error('x'), { code: '42P01' }));
@@ -115,6 +125,24 @@ describe('posConexao.executar', () => {
     expect(itens).toEqual({ numero: 'ok', eventos: 'ok', perfil: 'erro', modelos: 'ok' });
     expect(r.okPerfil).toBe(false);
     expect(r.okModelos).toBe(true);
+  });
+  it('coexistência: a Meta recusa o perfil -> indisponivel (neutro), os outros seguem', async () => {
+    const itens = eventos();
+    const r = await pos.executar('c1', { registered: true, subscribed: true, coexistence: true, wabaId: 'w', phoneNumberId: 'p', accessToken: 't' }, {
+      perfil: { aplicarPerfil: jest.fn().mockRejectedValue(Object.assign(new Error('not allowed'), { meta: { code: 100 } })) },
+      modelos: () => ({ prepararPadroesSeguro: jest.fn().mockResolvedValue({ ok: true }) }),
+    });
+    expect(itens.perfil).toBe('indisponivel');
+    expect(itens.modelos).toBe('ok');
+    expect(r.okPerfil).toBe(true);
+  });
+  it('fora da coexistência, a mesma recusa continua sendo erro', async () => {
+    const itens = eventos();
+    await pos.executar('c1', { registered: true, subscribed: true, coexistence: false, wabaId: 'w', phoneNumberId: 'p', accessToken: 't' }, {
+      perfil: { aplicarPerfil: jest.fn().mockRejectedValue(Object.assign(new Error('x'), { meta: { code: 100 } })) },
+      modelos: () => ({ prepararPadroesSeguro: jest.fn().mockResolvedValue({ ok: true }) }),
+    });
+    expect(itens.perfil).toBe('erro');
   });
   it('número não registrado: marca erro e não prepara modelos', async () => {
     const itens = eventos();

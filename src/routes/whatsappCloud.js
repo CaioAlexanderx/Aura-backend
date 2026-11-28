@@ -457,7 +457,7 @@ router.post('/whatsapp/connect', ...guard, async (req, res) => {
     // modelos falhar, a rede de segurança (jobs/waModelosPreparoJob) tenta
     // de novo.
     waConexaoPos.dispararSeguro(req.params.id, {
-      registered, subscribed, wabaId, phoneNumberId, accessToken,
+      registered, subscribed, coexistence, wabaId, phoneNumberId, accessToken,
     });
     return undefined;
   } catch (err) {
