@@ -320,6 +320,72 @@ async function prepararPadroes(companyId) {
   return { criados, ja_existiam: jaExistiam };
 }
 
+// Tira qualquer cara de token do texto antes de ir para o log.
+function redigir(msg) {
+  return String(msg || '')
+    .replace(/EA[A-Za-z0-9]{20,}/g, '[token]')
+    .replace(/Bearer\s+\S+/gi, 'Bearer [token]')
+    .slice(0, 200);
+}
+
+// Uma preparação por loja por vez neste processo (a conexão e a rede de
+// segurança podem cair na mesma loja ao mesmo tempo).
+const preparando = new Set();
+
+// Versão que NUNCA lança: serve à conexão do número (que não pode falhar
+// por causa disto) e à rede de segurança. Falhou? Registra sem token e
+// segue; a rede de segurança tenta de novo. Só cria modelo na Meta: não
+// toca em saldo nem em wa_outbox.
+async function prepararPadroesSeguro(companyId, { origem = 'manual' } = {}) {
+  if (preparando.has(companyId)) return { ok: false, pulado: true };
+  preparando.add(companyId);
+  try {
+    const r = await prepararPadroes(companyId);
+    return { ok: true, ...r };
+  } catch (e) {
+    const det = e && e.extra && e.extra.detalhe ? ` detalhe=${redigir(e.extra.detalhe)}` : '';
+    console.error(`[waModelos] preparo (${origem}) falhou company=${companyId} code=${(e && e.code) || '-'}: ${redigir(e && e.message)}${det}`);
+    return { ok: false, erro: (e && e.code) || 'ERRO' };
+  } finally {
+    preparando.delete(companyId);
+  }
+}
+
+// Lojas conectadas a que ainda falta criar algum dos 15 modelos padrão
+// (sem linha em wa_templates). Modelo PENDING na Meta já tem linha, então
+// não entra aqui: não adianta recriar enquanto a Meta decide.
+async function empresasComPadroesFaltando(limite = 20) {
+  const nomes = modelosCatalogo.listar().map((x) => x.template_base);
+  try {
+    const { rows } = await db.query(
+      `-- wa:modelos-faltando
+       SELECT c.id FROM companies c
+        WHERE c.wa_waba_id IS NOT NULL AND c.wa_access_token IS NOT NULL
+          AND (SELECT COUNT(DISTINCT t.name) FROM wa_templates t
+                WHERE t.company_id = c.id AND t.language = 'pt_BR' AND t.name = ANY($1::text[])) < $2
+        ORDER BY c.wa_connected_at NULLS LAST
+        LIMIT $3`,
+      [nomes, nomes.length, limite]
+    );
+    return rows.map((r) => r.id);
+  } catch (e) {
+    if (schemaAusente(e)) return [];
+    throw e;
+  }
+}
+
+// Rede de segurança: tenta de novo as lojas conectadas que ficaram sem
+// os modelos. Idempotente (prepararPadroes só cria o que falta).
+async function prepararPendentes({ limite = 20 } = {}) {
+  const ids = await empresasComPadroesFaltando(limite);
+  const out = { lojas: ids.length, ok: 0, falhas: 0 };
+  for (const id of ids) {
+    const r = await prepararPadroesSeguro(id, { origem: 'rede-de-seguranca' });
+    if (r.ok) out.ok++; else if (!r.pulado) out.falhas++;
+  }
+  return out;
+}
+
 // ── Aprovação (webhook / sync) ───────────────────────────────
 const MOTIVOS = {
   TAG_CONTENT_MISMATCH: 'o texto parece propaganda',
@@ -373,5 +439,6 @@ module.exports = {
   ErroModelo, LIMITE_24H, LIMITE_30D,
   carregarVersoes, limiteDeEdicao, montarEstado, listar, obter, resolverParaEnvio,
   montarTemplateMeta, enviarTextoNovo, restaurarPadrao, prepararPadroes,
+  prepararPadroesSeguro, empresasComPadroesFaltando, prepararPendentes,
   onTemplateStatus, frasePorMotivo,
 };

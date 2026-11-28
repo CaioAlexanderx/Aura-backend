@@ -156,6 +156,12 @@ function startServer() {
     const { initWaAutomaticasJob } = require('./jobs/waAutomaticasJob');
     initWaAutomaticasJob();
 
+    // Rede de segurança dos modelos-base do WhatsApp: a cada 6 h cria na Meta
+    // os modelos que faltam para lojas conectadas (a conexão já tenta uma vez).
+    // Kill switch WA_MODELOS_PREPARO_ENABLED=false.
+    const { initWaModelosPreparoJob } = require('./jobs/waModelosPreparoJob');
+    initWaModelosPreparoJob();
+
     // AURINHA (312): dispatcher da fila Instagram (ig_outbox) — tick 15s,
     // kill switch IG_DISPATCH_ENABLED=false.
     const { initIgDispatcher } = require('./jobs/igDispatcherJob');
