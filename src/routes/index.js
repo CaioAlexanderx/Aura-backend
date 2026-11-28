@@ -324,6 +324,13 @@ router.use('/public/roster-update', require('./karateRosterPortalPublic'));
 //   POST /public/roster-self/:token/update
 router.use('/public/roster-self', require('./karateRosterSelfServicePublic'));
 
+// ── Cadastro do cliente por link (p-209, 23/11/2026, migration 465) ──
+// SEM auth: o token de uso único é a credencial. Só grava; nunca devolve
+// dado do cliente (ver o cabeçalho do arquivo).
+//   GET  /public/cadastro/:token   (nome e logo da loja)
+//   POST /public/cadastro/:token   (grava e o link morre)
+router.use('/public/cadastro', require('./cadastroLinkPublic'));
+
 // ── AURA KARATÊ — Track A (backend cadastros) ────────
 // POST /karate/federation/setup (sem escopo de empresa, auth only)
 // GET  /federation/:id/dashboard
