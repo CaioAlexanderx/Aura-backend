@@ -46,6 +46,21 @@ describe('testeVencido (50 lojas reais)', () => {
   });
 });
 
+describe('add-on: so o pago garante a franquia (a query filtra price_cents > 0 e source <> trial)', () => {
+  test('o SELECT da empresa so conta add-on pago', async () => {
+    const runner = { query: jest.fn().mockResolvedValueOnce({ rows: [{ plan: 'negocio', billing_status: 'trial', trial_ends_at: passado, addon: false }] }) };
+    await waSaldo.lerLiberacao('c', { agora: AGORA, runner });
+    const sql = runner.query.mock.calls[0][0];
+    expect(sql).toMatch(/price_cents, 0\) > 0/);
+    expect(sql).toMatch(/source, ''\) <> 'trial'/);
+  });
+  test('add-on pago libera por plano; sem add-on pago e teste vencido, fecha', async () => {
+    const q = (addon) => ({ query: jest.fn().mockResolvedValueOnce({ rows: [{ plan: 'negocio', billing_status: 'trial', trial_ends_at: passado, addon }] }) });
+    expect(await waSaldo.lerLiberacao('c', { agora: AGORA, runner: q(true) })).toMatchObject({ liberado: true, fase: 'plano' });
+    expect(await waSaldo.lerLiberacao('c', { agora: AGORA, runner: q(false) })).toMatchObject({ liberado: false, fase: 'fechado' });
+  });
+});
+
 describe('liberacaoDe', () => {
   test('teste: so depois da 1a venda', () => {
     expect(waSaldo.liberacaoDe({ origem: 'teste', primeiraVenda: false }))

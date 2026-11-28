@@ -32,10 +32,10 @@ jest.setTimeout(60000);
 const ID = {
   dono: uuid(), negocio: uuid(), essencial: uuid(), addon: uuid(), corrida: uuid(),
   atencao: uuid(), fila: uuid(), virada: uuid(),
-  semVenda: uuid(), puro: uuid(), assinou: uuid(), vencido: uuid(), vencidoAtivo: uuid(),
+  semVenda: uuid(), puro: uuid(), assinou: uuid(), vencido: uuid(), vencidoAtivo: uuid(), addonTeste: uuid(),
 };
 const EMPRESAS = [ID.negocio, ID.essencial, ID.addon, ID.corrida, ID.atencao, ID.fila, ID.virada,
-  ID.semVenda, ID.puro, ID.assinou, ID.vencido, ID.vencidoAtivo];
+  ID.semVenda, ID.puro, ID.assinou, ID.vencido, ID.vencidoAtivo, ID.addonTeste];
 
 let pool;
 let waSaldo;
@@ -98,6 +98,10 @@ beforeAll(async () => {
   await q(`UPDATE companies SET billing_status = 'trial', trial_ends_at = '2026-01-01' WHERE id = $1`, [ID.vencido]);
   await loja(ID.vencidoAtivo, 'Saldo Vencido Ativo', 'negocio');
   await q(`UPDATE companies SET billing_status = 'active', trial_ends_at = '2026-01-01' WHERE id = $1`, [ID.vencidoAtivo]);
+  // Add-on de TESTE (preco 0, source trial) com o teste vencido: nao garante franquia.
+  await loja(ID.addonTeste, 'Saldo Addon Teste', 'negocio');
+  await q(`UPDATE companies SET billing_status = 'trial', trial_ends_at = '2026-01-01' WHERE id = $1`, [ID.addonTeste]);
+  await q(`INSERT INTO company_addons (company_id, addon_key, status, price_cents, source) VALUES ($1, 'whatsapp_auto', 'active', 0, 'trial')`, [ID.addonTeste]);
   // Assinou o Negocio no meio do teste: passa para a franquia do Negocio.
   await loja(ID.assinou, 'Saldo Assinou', 'negocio');
   await q(`UPDATE companies SET trial_ends_at = '2100-01-01', trial_started_by_sale_at = NOW(), asaas_subscription_id = 'sub_teste' WHERE id = $1`, [ID.assinou]);
@@ -106,7 +110,7 @@ beforeAll(async () => {
   await loja(ID.atencao, 'Saldo Atencao', 'negocio');
   await loja(ID.fila, 'Saldo Fila', 'negocio');
   await loja(ID.virada, 'Saldo Virada', 'negocio');
-  await q(`INSERT INTO company_addons (company_id, addon_key, status, price_cents) VALUES ($1, 'whatsapp_auto', 'active', 2900)`, [ID.addon]);
+  await q(`INSERT INTO company_addons (company_id, addon_key, status, price_cents, source) VALUES ($1, 'whatsapp_auto', 'active', 2900, 'asaas')`, [ID.addon]);
   // Cota excepcional: a corrida precisa de um saldo pequeno e exato.
   await q(`UPDATE companies SET wa_marketing_quota = 5 WHERE id = $1`, [ID.corrida]);
   await q(`UPDATE companies SET wa_quality_rating = 'RED' WHERE id = $1`, [ID.atencao]);
@@ -178,6 +182,13 @@ describe('franquias por plano', () => {
     const a = await waSaldo.getSaldos(ID.vencidoAtivo);
     expect(a.plano).toEqual({ renova: true, origem: 'plano' });
     expect(a.saldos.avisos.total).toBe(100);
+  });
+
+  test('Add-on pago: franquia cheia; add-on de teste (preco 0, trial): fica 0 com o teste vencido', async () => {
+    expect((await waSaldo.getSaldos(ID.addon)).saldos.avisos.total).toBe(100);
+    const t = await waSaldo.getSaldos(ID.addonTeste);
+    expect(t.plano).toEqual({ renova: false, origem: 'essencial' });
+    expect(t.saldos.avisos.total).toBe(0);
   });
 
   test('Assinou o Negocio no teste: passa na hora para 100 avisos e 10 novidades', async () => {

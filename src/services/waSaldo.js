@@ -129,6 +129,8 @@ function testeVencido(r, agora = new Date()) {
   return true;
 }
 
+// Add-on so garante a franquia mensal quando e PAGO (price_cents > 0 e source
+// diferente de 'trial'); add-on de teste segue a regra do teste (Nina, 28/11).
 // Empresa: plano/vertical/add-on (quem tem franquia que renova), cota
 // excepcional e qualidade do numero — uma consulta so, pelo runner.
 async function lerEmpresa(runner, companyId, agora = new Date()) {
@@ -142,7 +144,9 @@ async function lerEmpresa(runner, companyId, agora = new Date()) {
             EXISTS (SELECT 1 FROM sales sv WHERE sv.company_id = c.id) AS tem_venda,
             EXISTS (SELECT 1 FROM company_addons a
                      WHERE a.company_id = c.id AND a.addon_key = 'whatsapp_auto'
-                       AND a.status = 'active') AS addon
+                       AND a.status = 'active'
+                       AND COALESCE(a.price_cents, 0) > 0
+                       AND COALESCE(a.source, '') <> 'trial') AS addon
        FROM companies c WHERE c.id = $1 LIMIT 1`,
     [companyId]
   );
