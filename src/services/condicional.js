@@ -89,48 +89,16 @@ function erro(status, message, code, extra) {
  * trava de mesmo nome do app.
  *
  * 28/11/2026: a empresa de teste (companies.is_sandbox = true, a loja "Aura"
- * da QA) tambem passa. O flag e lido do banco pela empresa da rota (id ja
- * validado por requireCompanyAccess) e carimbado em req.condicionalSandbox
- * por marcarEmpresaDeTeste; nunca vem do corpo, da query nem do token.
+ * da QA) tambem passa. O flag vem do banco, na mesma consulta de acesso que
+ * requireCompanyAccess ja faz pela empresa da rota (req.companySandbox);
+ * nunca do corpo, da query nem do token.
  */
 function condicionalLiberada(req) {
   const env = String(process.env.CONDICIONAL_LIBERADA || '').trim().toLowerCase();
   if (env === 'true' || env === '1') return true;
-  if (req && req.condicionalSandbox === true) return true;
+  if (req && req.companySandbox === true) return true;
   const u = req && req.user;
   return !!u && (u.is_staff === true || u.role === 'admin');
-}
-
-// Cache curto do is_sandbox por empresa (evita uma ida ao banco por request).
-const SANDBOX_TTL_MS = 60 * 1000;
-const _cacheSandbox = new Map();
-
-async function empresaDeTeste(companyId) {
-  if (!UUID_RE.test(String(companyId || ''))) return false;
-  const agora = Date.now();
-  const hit = _cacheSandbox.get(companyId);
-  if (hit && agora - hit.t < SANDBOX_TTL_MS) return hit.v;
-  const { rows } = await db.query('SELECT is_sandbox FROM companies WHERE id = $1', [companyId]);
-  const v = !!rows[0] && rows[0].is_sandbox === true;
-  if (_cacheSandbox.size > 5000) _cacheSandbox.clear();
-  _cacheSandbox.set(companyId, { v, t: agora });
-  return v;
-}
-
-/**
- * Middleware (depois de requireAuth + requireCompanyAccess): com a trava
- * desligada e o usuario fora da equipe, marca req.condicionalSandbox quando a
- * empresa da rota e a de teste. Falha de banco = nao libera (lado seguro).
- */
-async function marcarEmpresaDeTeste(req, res, next) {
-  try {
-    if (!condicionalLiberada(req)) {
-      req.condicionalSandbox = await empresaDeTeste(req.params && req.params.id);
-    }
-  } catch (err) {
-    req.condicionalSandbox = false;
-  }
-  return next();
 }
 
 /** Hoje em Sao Paulo, 'YYYY-MM-DD'. */
@@ -824,8 +792,6 @@ module.exports = {
   PRAZO_MAX_DIAS,
   TERMOS_MAX,
   condicionalLiberada,
-  marcarEmpresaDeTeste,
-  _limparCacheSandbox: () => _cacheSandbox.clear(),
   hojeSP,
   somarDias,
   diasEntre,

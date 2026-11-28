@@ -14,9 +14,6 @@ router.use('/pdv', require('../services/vendaTiming').carimbarInicio);
 
 router.use(requireAuth);
 router.use(requireCompanyAccess());
-// 28/11/2026: carimba a empresa de teste (is_sandbox) para a trava da Venda
-// condicional (services/condicional.js). So consulta com a trava desligada.
-router.use(require('../services/condicional').marcarEmpresaDeTeste);
 
 router.use('/', require('./company'));
 router.use('/dashboard', require('./dashboard'));

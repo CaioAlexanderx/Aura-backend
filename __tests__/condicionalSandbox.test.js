@@ -9,6 +9,7 @@ const express = require('express');
 const request = require('supertest');
 const db = require('../src/config/database');
 const c = require('../src/services/condicional');
+const { requireCompanyAccess } = require('../src/middleware/auth');
 const condicionaisRouter = require('../src/routes/condicionais');
 
 const REAL = '11111111-2222-3333-4444-555555555555';
@@ -17,18 +18,17 @@ const TESTE = 'b0463109-aaaa-bbbb-cccc-dddddddddddd';
 function app(user) {
   const a = express();
   a.use(express.json());
-  a.use('/companies/:id', (req, _res, next) => { req.user = user; next(); }, c.marcarEmpresaDeTeste, condicionaisRouter);
+  a.use('/companies/:id', (req, _res, next) => { req.user = user; next(); }, requireCompanyAccess(), condicionaisRouter);
   return a;
 }
 
 let consultas;
 beforeEach(() => {
   delete process.env.CONDICIONAL_LIBERADA;
-  c._limparCacheSandbox();
   consultas = [];
   jest.spyOn(db, 'query').mockImplementation(async (sql, params) => {
     consultas.push([String(sql), params]);
-    if (/SELECT is_sandbox FROM companies/.test(sql)) return { rows: [{ is_sandbox: params[0] === TESTE }] };
+    if (/AS role/.test(sql)) return { rows: [{ role: 'owner', is_sandbox: params[0] === TESTE }] };
     return { rows: [] };
   });
 });
@@ -54,24 +54,29 @@ describe('trava da condicional com a empresa de teste', () => {
     expect(r.status).toBe(404);
   });
 
-  test('staff passa sem consultar o banco; trava ligada tambem', async () => {
-    await request(app({ ...lojista, is_staff: true })).post(`/companies/${REAL}/`).send({});
-    expect(consultas.some(([s]) => /is_sandbox/.test(s))).toBe(false);
+  test('staff passa; trava ligada tambem', async () => {
+    const staff = await request(app({ ...lojista, is_staff: true })).post(`/companies/${REAL}/`).send({});
+    expect(staff.status).not.toBe(404);
     process.env.CONDICIONAL_LIBERADA = 'true';
     const r = await request(app(lojista)).post(`/companies/${REAL}/`).send({});
     expect(r.status).not.toBe(404);
-    expect(consultas.some(([s]) => /is_sandbox/.test(s))).toBe(false);
   });
 
-  test('falha de banco ao ler o flag nao libera', async () => {
+  test('falha de banco no acesso nao libera (500, nunca 2xx)', async () => {
     db.query.mockImplementation(async () => { throw new Error('boom'); });
     const r = await request(app(lojista)).post(`/companies/${TESTE}/`).send({});
-    expect(r.status).toBe(404);
+    expect(r.status).toBe(500);
+  });
+
+  test('o acesso nao faz consulta a mais por causa do flag', async () => {
+    await request(app(lojista)).post(`/companies/${REAL}/`).send({});
+    expect(consultas.filter(([s]) => /AS role/.test(s)).length).toBe(1);
+    expect(consultas.some(([s]) => /SELECT is_sandbox/.test(s))).toBe(false);
   });
 
   test('condicionalLiberada: so o carimbo do servidor libera', () => {
     expect(c.condicionalLiberada({ user: lojista })).toBe(false);
     expect(c.condicionalLiberada({ user: lojista, body: { is_sandbox: true } })).toBe(false);
-    expect(c.condicionalLiberada({ user: lojista, condicionalSandbox: true })).toBe(true);
+    expect(c.condicionalLiberada({ user: lojista, companySandbox: true })).toBe(true);
   });
 });

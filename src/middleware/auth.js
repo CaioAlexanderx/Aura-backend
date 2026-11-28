@@ -73,9 +73,10 @@ function requireCompanyAccess(opts = {}) {
       // que substituem o módulo database sem o helper). Chamamos como MÉTODO de
       // db (db.queryRetry(...) / db.query(...)) p/ preservar o `this` do pool.
       const roleSql =
-        `SELECT 'owner' AS role FROM companies WHERE id = $1 AND owner_id = $2
+        `SELECT 'owner' AS role, is_sandbox FROM companies WHERE id = $1 AND owner_id = $2
          UNION
-         SELECT cm.role_label AS role FROM company_members cm
+         SELECT cm.role_label AS role, c.is_sandbox FROM company_members cm
+         JOIN companies c ON c.id = cm.company_id
          WHERE cm.company_id = $1 AND cm.user_id = $2 AND cm.status = 'active' AND cm.is_active = true
          LIMIT 1`;
       const roleParams = [companyId, req.user.id];
@@ -90,6 +91,8 @@ function requireCompanyAccess(opts = {}) {
         return res.status(403).json({ error: 'Permissão insuficiente', required_roles: opts.roles, your_role: role });
       }
       req.companyRole = role;
+      // 28/11/2026: empresa de teste, para a trava da Venda condicional (services/condicional.js).
+      req.companySandbox = rows[0].is_sandbox === true;
       // 12/10/2026: último acesso real da empresa (throttle 15 min, sem await).
       touchCompanyActivity(companyId);
       next();
