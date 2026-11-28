@@ -122,6 +122,7 @@ const { resolveKarateContext } = require('../config/karateRoles');
 const { getExtraSeatsForCompany, getExtraSeatsMap } = require('../services/extraSeats');
 const { appModeDoCabecalho } = require('../utils/appMode');
 const trialRegra = require('../services/trialRegra');
+const waSaldo = require('../services/waSaldo');
 const { applySegment, isValidSegment, normalizeCnae, ALLOWED_EXTRAS } = require('../services/segment');
 const signupOrigem = require('../services/signupOrigem');
 const { lookupCNPJ } = require('../services/cnpj');
@@ -1135,6 +1136,13 @@ router.post('/me', requireAuth, async (req, res) => {
       const handshakeP = memberRole === 'owner' ? handshakeDoDono(company.id) : null;
       companyOut = await billingP;
       whatsappHandshake = handshakeP ? await handshakeP : null;
+      // 28/11/2026 (WhatsApp no teste e no Essencial): quem decide se o item
+      // WhatsApp existe para ESTA loja e o servidor (services/waSaldo). Por
+      // ultimo e sem lancar: erro = campo ausente = o app segue so pelo plano.
+      try {
+        const wl = await waSaldo.lerLiberacao(company.id);
+        if (wl) companyOut = { ...companyOut, whatsapp_loja: wl };
+      } catch (_) { /* campo ausente */ }
     }
 
     // 18/11/2026 (e-mail que volta): so para quem ainda nao confirmou, por
