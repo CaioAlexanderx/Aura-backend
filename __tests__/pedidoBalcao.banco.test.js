@@ -383,3 +383,49 @@ describe('trava por peca: duas clientes no ultimo tamanho', () => {
     expect(Number(est.s)).toBe(1); // reservar nunca baixa o estoque
   });
 });
+
+describe('reserva do WhatsApp: o que conta como pedido pago (estado real do banco)', () => {
+  const { acharPedidoDaChave } = require('../src/services/hubProdutoGrade');
+  const itens = (variante) => [{ product_id: ID.camiseta, variant_id: variante, quantity: 1 }];
+  const novaVariante = async () => {
+    const v = uuid();
+    await q(`INSERT INTO product_variants (id, product_id, sku_suffix, stock_qty) VALUES ($1, $2, 'WA', 5)`, [v, ID.camiseta]);
+    return v;
+  };
+
+  test('pedido sem sinal segue reaproveitavel; com sinal gravado pelo caminho real conta como pago', async () => {
+    const v = await novaVariante();
+    const corpo = { items: [{ product_id: ID.camiseta, variant_id: v, quantity: 1, unit_price: 100 }] };
+    const kSem = chave(); const kCom = chave();
+    expect((await guardar(corpo, kSem)).status).toBe(201);
+    const comSinal = await guardar({ ...corpo, sinal: { amount: 40, method: 'pix' } }, kCom);
+    expect(comSinal.status).toBe(201);
+
+    const sem = await acharPedidoDaChave(ID.loja, kSem, itens(v), { pagoEncerra: true });
+    expect(sem.pago).toBe(false);
+    expect(sem.existente).toBeTruthy();
+    const com = await acharPedidoDaChave(ID.loja, kCom, itens(v), { pagoEncerra: true });
+    expect(com.pago).toBe(true);
+    // Sem message_id (G): o pedido com sinal nao e reaproveitado, vai para a chave -2.
+    const g = await acharPedidoDaChave(ID.loja, kCom, itens(v), { pagoEncerra: false });
+    expect(g).toMatchObject({ existente: null, chave: `${kCom}-2` });
+  });
+
+  test('status fora de pendente/confirmado (entregue) tambem conta como pago', async () => {
+    const v = await novaVariante();
+    const k = chave();
+    const r = await guardar({ items: [{ product_id: ID.camiseta, variant_id: v, quantity: 1, unit_price: 100 }] }, k);
+    expect(r.status).toBe(201);
+    await q(`UPDATE digital_orders SET status = 'delivered' WHERE id = $1`, [r.body.order.id]);
+    const x = await acharPedidoDaChave(ID.loja, k, itens(v), { pagoEncerra: true });
+    expect(x.pago).toBe(true);
+  });
+
+  test('pedido aberto da mesma mensagem com outra quantidade: 409, sem abrir segundo pedido', async () => {
+    const v = await novaVariante();
+    const k = chave();
+    expect((await guardar({ items: [{ product_id: ID.camiseta, variant_id: v, quantity: 1, unit_price: 100 }] }, k)).status).toBe(201);
+    await expect(acharPedidoDaChave(ID.loja, k, [{ product_id: ID.camiseta, variant_id: v, quantity: 2 }], { pagoEncerra: true }))
+      .rejects.toMatchObject({ code: 'RESERVA_COM_OUTRA_QUANTIDADE', status: 409 });
+  });
+});

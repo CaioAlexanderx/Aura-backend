@@ -95,6 +95,7 @@ beforeEach(() => {
     w.queries.push(s);
     const rows = (r) => Promise.resolve({ rows: r });
     if (s.includes('hubgrade:pedido-da-chave')) return rows(w.pedidosChave.filter((r) => params[1].includes(r.idempotency_key)));
+    if (s.includes('FROM studio_payments')) return rows([{ v: w.sinalPago || 0 }]);
     if (s.includes('hubenvio:conv')) return rows(params[1] === COMPANY ? [w.conversa] : []);
     if (s.includes('hubenvio:creds')) return rows([{ wa_phone_number_id: 'PNID', wa_access_token: 'tok' }]);
     if (s.includes('hubenvio:loja')) return rows([w.loja]);
@@ -525,7 +526,7 @@ describe('reserva: B, D, E', () => {
   const chaveBase = `wa-res-${CONV}-${MSG}`;
 
   it('B: pedido já criado (falha depois dele): só reenvia o Pix, sem novo pedido e sem pré-checar o saldo', async () => {
-    w.pedidosChave = [{ idempotency_key: chaveBase, id: 'ord-9', order_number: 'PED-9', total: '189.90', cancelado: false, payment_status: 'pending', itens: ITENS_1 }];
+    w.pedidosChave = [{ idempotency_key: chaveBase, id: 'ord-9', order_number: 'PED-9', total: '189.90', cancelado: false, payment_status: 'pending', status: 'confirmed', deposit_paid: null, itens: ITENS_1 }];
     w.reservas = [{ product_id: PROD, variant_id: V(1), qtd: '3' }]; // a própria reserva esgotou o livre
     const res = await reservar();
     expect(res.status).toBe(200);
@@ -535,7 +536,7 @@ describe('reserva: B, D, E', () => {
   });
 
   it('E: pedido cancelado não é reaproveitado: nova tentativa usa a chave -2', async () => {
-    w.pedidosChave = [{ idempotency_key: chaveBase, id: 'ord-0', order_number: 'PED-0', total: '189.90', cancelado: true, payment_status: 'pending', itens: ITENS_1 }];
+    w.pedidosChave = [{ idempotency_key: chaveBase, id: 'ord-0', order_number: 'PED-0', total: '189.90', cancelado: true, payment_status: 'pending', status: 'confirmed', deposit_paid: null, itens: ITENS_1 }];
     const res = await reservar();
     expect(res.status).toBe(200);
     expect(pedidoBalcao.guardarPedido.mock.calls[0][0].chave).toBe(`${chaveBase}-2`);
@@ -564,7 +565,7 @@ describe('reserva: G, H, I', () => {
   const corpoDireto = { product_id: PROD, variant_id: V(1) };
   const reservarDireto = (extra = {}) => request(app()).post(`/companies/${COMPANY}/hub/conversations/${CONV}/reservar-pix`).send({ ...corpoDireto, ...extra });
   const chaveDia = `wa-res-${CONV}-${V(1)}-2026-11-27`;
-  const linha = (chave, extra) => ({ idempotency_key: chave, id: `ord-${chave}`, order_number: 'PED', total: '189.90', cancelado: false, payment_status: 'pending', itens: ITENS_1, ...extra });
+  const linha = (chave, extra) => ({ idempotency_key: chave, id: `ord-${chave}`, order_number: 'PED', total: '189.90', cancelado: false, payment_status: 'pending', status: 'confirmed', deposit_paid: null, itens: ITENS_1, ...extra });
 
   it('G: reserva sem message_id reaproveita só pedido pendente com os mesmos itens', async () => {
     w.pedidosChave = [linha(chaveDia)];
@@ -574,16 +575,17 @@ describe('reserva: G, H, I', () => {
     expect(res.body.order_id).toBe(`ord-${chaveDia}`);
   });
 
-  it('G: pago de manhã, nova reserva à tarde cria pedido novo (chave -2) e manda o Pix', async () => {
-    w.pedidosChave = [linha(chaveDia, { payment_status: 'paid' })];
+  it('G: com sinal pago (studio_payments) de manhã, a reserva da tarde cria pedido novo (chave -2) e manda o Pix', async () => {
+    w.pedidosChave = [linha(chaveDia)];
+    w.sinalPago = 40; // o pedido do balcão segue payment_status pending: o sinal é que prova o pagamento
     const res = await reservarDireto();
     expect(res.status).toBe(200);
     expect(pedidoBalcao.guardarPedido.mock.calls[0][0].chave).toBe(`${chaveDia}-2`);
     expect(graph()[1].text.body).toMatch(/^00020126/);
   });
 
-  it('G: pedido com sinal (pagamento parcial) também não é reaproveitado', async () => {
-    w.pedidosChave = [linha(chaveDia, { payment_status: 'partial' })];
+  it('G: deposit_paid ligado também não é reaproveitado', async () => {
+    w.pedidosChave = [linha(chaveDia, { deposit_paid: 'true' })];
     await reservarDireto();
     expect(pedidoBalcao.guardarPedido.mock.calls[0][0].chave).toBe(`${chaveDia}-2`);
   });
@@ -596,15 +598,34 @@ describe('reserva: G, H, I', () => {
     expect(pedidoBalcao.guardarPedido.mock.calls[0][0].body.items[0].quantity).toBe(2);
   });
 
-  it('H: novo toque com o pedido da mensagem já pago: não reenvia o Pix e marca a sugestão "feita"', async () => {
+  it('H: novo toque com o pedido da mensagem já pago (sinal): não reenvia o Pix e marca a sugestão "feita"', async () => {
+    w.sinalPago = 100;
     w.sugestao = { tipo: 'reservar_e_mandar_pix', product_id: PROD, variant_id: V(1), tamanho: 'M', quantidade: 1, estado: 'enviando' };
-    w.pedidosChave = [linha(`wa-res-${CONV}-${MSG}`, { payment_status: 'paid' })];
+    w.pedidosChave = [linha(`wa-res-${CONV}-${MSG}`)];
     const res = await request(app()).post(`/companies/${COMPANY}/hub/conversations/${CONV}/reservar-pix`).send({ message_id: MSG });
     expect(res.status).toBe(200);
     expect(res.body.ja_pago).toBe(true);
     expect(wa.graphPost).not.toHaveBeenCalled();
     expect(pedidoBalcao.guardarPedido).not.toHaveBeenCalled();
     expect(JSON.parse(w.updates[0][0]).sugestao).toMatchObject({ estado: 'feita', order_id: `ord-wa-res-${CONV}-${MSG}`, quantidade: 1 });
+  });
+
+  it('H: pedido da mensagem entregue (status fora de pendente/confirmado) também fecha sem reenviar', async () => {
+    w.sugestao = { tipo: 'reservar_e_mandar_pix', product_id: PROD, variant_id: V(1), tamanho: 'M', quantidade: 1, estado: 'enviando' };
+    w.pedidosChave = [linha(`wa-res-${CONV}-${MSG}`, { status: 'delivered' })];
+    const res = await request(app()).post(`/companies/${COMPANY}/hub/conversations/${CONV}/reservar-pix`).send({ message_id: MSG });
+    expect(res.body.ja_pago).toBe(true);
+    expect(wa.graphPost).not.toHaveBeenCalled();
+  });
+
+  it('com message_id, pedido aberto da mesma mensagem com outra quantidade → 409, sem segundo pedido', async () => {
+    w.sugestao = { tipo: 'reservar_e_mandar_pix', product_id: PROD, variant_id: V(1), tamanho: 'M', quantidade: 1, estado: 'pendente' };
+    w.pedidosChave = [linha(`wa-res-${CONV}-${MSG}`)]; // 1 peça
+    const res = await request(app()).post(`/companies/${COMPANY}/hub/conversations/${CONV}/reservar-pix`).send({ message_id: MSG, quantity: 2 });
+    expect(res.status).toBe(409);
+    expect(res.body.code).toBe('RESERVA_COM_OUTRA_QUANTIDADE');
+    expect(pedidoBalcao.guardarPedido).not.toHaveBeenCalled();
+    expect(wa.graphPost).not.toHaveBeenCalled();
   });
 
   it('I: a quantidade gravada na mensagem e na sugestão é a do pedido de fato', async () => {

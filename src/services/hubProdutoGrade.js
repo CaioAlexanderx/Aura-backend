@@ -35,6 +35,7 @@ const { validarNome, isMissingSchema, MAX_ETIQUETAS_POR_LOJA, COR_PADRAO } = req
 const { normalizarTelefoneSemRecusar } = require('../utils/telefone');
 const pedidoBalcao = require('./pedidoBalcao');
 const { mesmosItens } = require('./pedidoOnlineIdempotente');
+const sinalDoPedido = require('./sinalDoPedido');
 
 const { erro, reais } = envio;
 
@@ -561,19 +562,40 @@ async function tratarResposta({ companyId, msg, conversationId }) {
 const MAX_TENTATIVAS_CHAVE = 6;
 
 /**
+ * Pedido do balcão já pago? O pedido nasce `pending` e nada no fluxo dele muda payment_status:
+ * o sinal grava studio_payments (kind 'deposit') e liga deposit_paid. Conta como pago:
+ * deposit_paid, sinal pago acima de zero (a mesma conta de sinalDoPedido.comSinal) ou
+ * status já fora de pendente/confirmado.
+ */
+async function pedidoPago(r) {
+  if (r.deposit_paid === true || String(r.deposit_paid) === 'true') return true;
+  if (!['pending', 'confirmed'].includes(String(r.status))) return true;
+  if (String(r.payment_status) !== 'pending') return true;
+  try {
+    const c = await sinalDoPedido.comSinal(db, { id: r.id, total: r.total });
+    return Number(c.sinal_pago) > 0;
+  } catch (e) {
+    if (isMissingSchema(e)) return false;
+    throw e;
+  }
+}
+
+/**
  * O pedido desta reserva pela chave (e as chaves -2, -3... das tentativas seguintes).
- * Só é reaproveitado o pedido NÃO cancelado, com pagamento pendente e os MESMOS itens
- * (produto, variante e quantidade). Cancelado, já pago (ou com sinal) ou de outra
- * quantidade passam para a próxima chave: a cliente nunca paga duas vezes a mesma peça.
- * Exceção (`pagoEncerra`, reserva ligada a uma mensagem): pedido dessa mensagem já pago
- * não é refeito nem reenviado: devolve { pago: true }.
+ * Só é reaproveitado o pedido NÃO cancelado, ainda sem pagamento (ver pedidoPago) e com os
+ * MESMOS itens (produto, variante e quantidade). Cancelado, já pago ou de outra quantidade
+ * passam para a próxima chave: a cliente nunca paga duas vezes a mesma peça.
+ * Reserva ligada a uma mensagem (`pagoEncerra`): pedido pago dessa mensagem não é refeito nem
+ * reenviado ({ pago: true }); pedido aberto com OUTRA quantidade dá 409 (não abre um segundo
+ * pedido que prenderia mais peças).
  * Devolve { existente: {id, order_number, total, quantidade} | null, chave, pago }.
  */
 async function acharPedidoDaChave(companyId, base, itens, { pagoEncerra = false } = {}) {
   const candidatas = [base, ...Array.from({ length: MAX_TENTATIVAS_CHAVE - 1 }, (_, n) => `${base}-${n + 2}`)];
   const { rows } = await db.query(
     `-- hubgrade:pedido-da-chave
-     SELECT o.id, o.order_number, o.total, o.idempotency_key, o.payment_status::text AS payment_status,
+     SELECT o.id, o.order_number, o.total, o.idempotency_key, o.status::text AS status,
+            o.payment_status::text AS payment_status, to_jsonb(o)->>'deposit_paid' AS deposit_paid,
             (o.status::text ILIKE 'cancel%' OR o.cancelled_at IS NOT NULL) AS cancelado,
             COALESCE((SELECT json_agg(json_build_object('product_id', i.product_id, 'variant_id', i.variant_id, 'quantity', i.quantity))
                         FROM digital_order_items i WHERE i.order_id = o.id), '[]'::json) AS itens
@@ -586,12 +608,17 @@ async function acharPedidoDaChave(companyId, base, itens, { pagoEncerra = false 
     if (!r) return { existente: null, chave, pago: false };
     if (r.cancelado) continue;
     const gravados = Array.isArray(r.itens) ? r.itens : [];
-    if (!mesmosItens(itens, gravados)) continue;
+    if (!mesmosItens(itens, gravados)) {
+      if (pagoEncerra) {
+        throw erro('RESERVA_COM_OUTRA_QUANTIDADE', `Já existe o pedido ${r.order_number || ''} dessa mensagem com outra quantidade. Cancele-o antes de reservar de novo.`.replace('  ', ' '), 409);
+      }
+      continue;
+    }
     const existente = {
       id: r.id, order_number: r.order_number, total: Number(r.total),
       quantidade: gravados.reduce((t, x) => t + Number(x.quantity || 0), 0),
     };
-    if (String(r.payment_status) === 'pending') return { existente, chave, pago: false };
+    if (!(await pedidoPago(r))) return { existente, chave, pago: false };
     if (pagoEncerra) return { existente, chave, pago: true };
   }
   throw erro('RESERVA_REPETIDA_DEMAIS', 'Essa reserva já foi refeita várias vezes. Faça um novo pedido pelo Caixa.', 409);
@@ -771,6 +798,6 @@ async function enviarReservaEPix({
 
 module.exports = {
   PAYLOAD_PREFIXO, ROTULO_SUGESTAO,
-  lerGrade, enviarProdutoGrade, tratarResposta, reservarEPix,
+  lerGrade, enviarProdutoGrade, tratarResposta, reservarEPix, acharPedidoDaChave,
   legendaDaGrade, montarPergunta, lerResposta, lerPayload, payloadDoTamanho, compararTamanho,
 };
