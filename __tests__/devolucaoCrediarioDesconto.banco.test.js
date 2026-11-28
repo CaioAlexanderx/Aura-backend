@@ -241,7 +241,7 @@ describe('conferência da Célia (18/11)', () => {
 });
 
 describe('pergunta 3: devolução de venda renegociada', () => {
-  test('hoje a devolução NÃO cancela as parcelas da renegociação (nascem sem sale_id)', async () => {
+  test('a devolução abate as parcelas da renegociação (nascem sem sale_id) pelo carnê que guarda a dívida', async () => {
     const v = await vender({
       items: [{ product_id: ID.conjunto, quantity: 1, unit_price: 279.9 }],
       payment_method: 'crediario', installments: 2, discount_type: 'percent', discount_value: 50,
@@ -260,9 +260,13 @@ describe('pergunta 3: devolução de venda renegociada', () => {
     ]);
     const r = await devolver(v.id, [{ sale_item_id: itemDe(v, ID.conjunto), quantity: 1 }]);
     expect(r.status).toBe(201);
-    // Nada abatido: o passo 8 do refund.js so procura parcelas com sale_id da venda.
-    expect(r.body.abated_installments).toEqual([]);
-    expect(await abertas()).toHaveLength(2);
+    // O passo 8 do refund.js so procura parcelas com sale_id da venda; o que
+    // sobra sai das parcelas abertas do carne renegociado (shrinkMergedCarne),
+    // das ultimas para as primeiras, e nao vira credito gerado.
+    expect(r.body.abated_installments.length).toBeGreaterThan(0);
+    expect(r.body.credit_generated).toBe(0);
+    const restante = (await abertas()).reduce((s, p) => s + Number(p.amount_due), 0);
+    expect(r2(restante)).toBe(r2(159.9 - r.body.refund_value));
   });
 });
 

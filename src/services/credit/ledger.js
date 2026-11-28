@@ -1138,6 +1138,7 @@ async function _shrinkMergedCarnes(client, { companyId, customerId, saleId, debi
   const out = [];
   for (const accountId of Object.keys(porConta)) {
     let amount = porConta[accountId];
+    if (!(amount > 0.005)) continue;
     try {
       const { rows } = await client.query(
         `SELECT
@@ -1149,7 +1150,8 @@ async function _shrinkMergedCarnes(client, { companyId, customerId, saleId, debi
                         AND type = 'refund'), 0) AS devolvido`,
         [companyId, accountId, saleId]
       );
-      amount -= (parseFloat(rows[0].parcelas_da_venda) || 0) + (parseFloat(rows[0].devolvido) || 0);
+      const lin = (rows && rows[0]) || {};
+      amount -= (parseFloat(lin.parcelas_da_venda) || 0) + (parseFloat(lin.devolvido) || 0);
     } catch (e) {
       if (e.code === '42703' || e.code === '42P01') continue;
       throw e;
