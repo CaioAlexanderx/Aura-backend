@@ -391,3 +391,19 @@ describe('livre desconta as pecas para resolver', () => {
       .toBe('"Saia": a unidade que sobrou está em Peças para resolver.');
   });
 });
+
+describe('acrescentar peca recusa peca personalizavel sob encomenda (QA 28/11)', () => {
+  test('a mesma conferencia do guardar: 422 COND_ITEM_NAO_PECA, antes de abrir a transacao', async () => {
+    const PERS = 'dddddddd-0000-0000-0000-000000000001';
+    db.query.mockImplementation(async (sql) => {
+      if (/FROM products p/.test(sql)) {
+        return { rows: [{ id: PERS, name: 'Caneca Personalizada', price: '39.90', stock_qty: 0, unit: 'un', is_active: true, sob_encomenda: true, tem_grade: false }] };
+      }
+      return { rows: [] };
+    });
+    const antes = db.connect.mock.calls.length;
+    await expect(d.acrescentarPecas({ companyId: LOJA, condId: COND, body: { items: [{ product_id: PERS }] }, hoje: HOJE }))
+      .rejects.toMatchObject({ status: 422, code: 'COND_ITEM_NAO_PECA', message: expect.stringMatching(/feita sob encomenda e não sai da loja em condicional/) });
+    expect(db.connect.mock.calls.length).toBe(antes);
+  });
+});
