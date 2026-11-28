@@ -221,10 +221,8 @@ describe('DELETE sale-item — parte do item ja voltou numa troca', () => {
     const res = await removerItem();
 
     expect(res.body.removed_item.refund_amount).toBe(200);
-    // Espelho de devolucao (saida de caixa) segue o mesmo valor.
-    expect(estado.espelhos).toHaveLength(1);
-    expect(estado.espelhos[0].amount).toBe(200);
-    expect(estado.espelhos[0].description).toContain('qty 2');
+    // 28/11/2026: nao ha mais despesa 'devolucao' — a receita reduzida ja e a devolucao.
+    expect(estado.espelhos).toHaveLength(0);
     // Receita cai 200, nao 300: os outros 100 ja sao abatidos no
     // returned_value da venda de troca.
     expect(estado.txAmount).toBe(100);
@@ -343,7 +341,9 @@ describe('DELETE sale-item — sem devolucao anterior nada muda', () => {
 
     expect(estado.saleTotal).toBe(100);
     expect(estado.txAmount).toBe(100);
-    expect(estado.espelhos[0].amount).toBe(300);
+    // Devolucao parcial reduz a receita e NAO cria despesa 'devolucao'.
+    expect(estado.espelhos).toHaveLength(0);
+    expect(estado.saleCancelada).toBe(false);
   });
 
   it('tabela de troca ausente (deploy parcial) cai no comportamento antigo, nao em 500', async () => {

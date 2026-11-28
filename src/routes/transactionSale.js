@@ -430,11 +430,10 @@ router.post('/transactions/:tx_id/sale-items', asyncHandler(async (req, res) => 
 //   1. Devolve quantidade ao stock (product ou variant)
 //   2. Reduz sales.total_amount
 //   3. Reduz transactions.amount (ou DELETE se for o último item)
-//   4. Cria nova transaction tipo 'expense' categoria 'devolucao'
-//      como contrapartida (auditoria) — APENAS quando ainda restam itens.
-//      Se foi o último item, a venda inteira é cancelada e a tx de receita
-//      é removida (mesmo fluxo de POST /sales/:sale_id/cancel) — não precisa
-//      de espelho de devolução porque a receita já some.
+//   4. NAO cria transaction 'expense'/'devolucao' (28/11/2026): a receita
+//      reduzida ja e a devolucao. Se foi o último item, a venda inteira é
+//      cancelada e a tx de receita é removida (mesmo fluxo de
+//      POST /sales/:sale_id/cancel).
 // Tudo numa unica transacao SQL pra atomicidade.
 router.delete('/transactions/:tx_id/sale-items/:item_id', asyncHandler(async (req, res) => {
   const companyId = req.params.id;
@@ -673,31 +672,9 @@ router.delete('/transactions/:tx_id/sale-items/:item_id', asyncHandler(async (re
       );
     }
 
-    // 7. Cria transacao espelho de "devolucao" (categoria devolucao) APENAS
-    //    quando ainda há itens na venda — registra a saída de caixa pra
-    //    auditoria do refund parcial. Quando é o último item, a venda
-    //    inteira foi cancelada e a tx de receita removida; criar mirror aqui
-    //    duplicaria a baixa.
-    if (!isLastItem) {
-      const refundDesc = 'Devolucao: ' + itemName + ' (qty ' + remainingQty + ')';
-      await client.query(
-        `INSERT INTO transactions (
-           company_id, type, status, amount, description, category, due_date,
-           paid_at, idempotency_key, created_at, updated_at, created_by
-         ) VALUES (
-           $1, 'expense', 'confirmed', $2, $3, 'devolucao',
-           (NOW() AT TIME ZONE 'America/Sao_Paulo')::date,
-           NOW(), $4, NOW(), NOW(), $5
-         )`,
-        [
-          companyId,
-          refundValue,
-          refundDesc,
-          'refund-' + saleId + '-' + itemId,
-          req.user?.id || null,
-        ]
-      );
-    }
+    // 7. (28/11/2026) NAO cria mais o espelho expense/'devolucao'. A receita
+    //    reduzida no passo 6 ja registra a devolucao no DRE e no resultado do
+    //    periodo; o espelho tirava o mesmo valor uma segunda vez.
 
     await client.query('COMMIT');
     resposta = {
